@@ -1,0 +1,20 @@
+# Go
+/pokkum
+*.test
+*.out
+/dist/
+
+# Generated supervisor binaries
+internal/adapters/supervisor/bin/pokkum-init-*
+
+# Node/SvelteKit build output in test fixtures
+node_modules/
+.svelte-kit/
+testdata/fixtures/*/dist/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
