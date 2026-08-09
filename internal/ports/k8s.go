@@ -1,1 +1,132 @@
 package ports
+
+import "context"
+
+// Scheme is the URI scheme Pokkum recognises inside Kubernetes manifests. A
+// manifest written for Pokkum names its image as
+//
+//	image: pokkum://./src/app
+//
+// where the part after the scheme is a path to a SvelteKit project, relative to
+// the manifest's base directory. Resolving rewrites it to an immutable digest
+// reference such as
+//
+//	image: ghcr.io/acme/app@sha256:0f1e2d…
+//
+// This is ko's `ko://` convention with a different scheme, and it is deliberate:
+// developers keep one manifest that is valid to read, diff and review, and the
+// build tool is the only thing that ever knows the digest.
+const Scheme = "pokkum://"
+
+// ImageBuilder builds and publishes the project at path and returns the
+// resulting immutable reference, in "repo@sha256:…" form.
+//
+// This callback is the hinge of the whole k8s port. Traversing YAML and
+// building images are unrelated skills, and putting a builder inside the YAML
+// adapter would drag the entire pipeline into it. Instead core supplies a
+// closure over its own Build, and the adapter is left owning nothing but
+// traversal and substitution — which is the part that is worth unit-testing
+// with plain strings.
+//
+// path is the substring following Scheme, exactly as written in the manifest
+// and not cleaned or made absolute; it is core's job to interpret it against
+// the base directory. The returned reference must be a digest reference, never
+// a tag: a tag in a manifest defeats the purpose of resolving at all.
+//
+// Implementations are called concurrently for distinct paths. They must be
+// idempotent per path within one Resolve call — the adapter may encounter the
+// same pokkum:// reference in several documents and will call the builder once
+// per distinct path, relying on core to cache.
+type ImageBuilder func(ctx context.Context, path string) (string, error)
+
+// Document is a single YAML input and its identity. Content is passed as bytes
+// rather than a path so that the adapter never touches the filesystem: reading
+// files, expanding directories and honouring --recursive belong to the command
+// layer, which already has to do it for other flags, and keeping the adapter
+// pure makes multi-document, stdin and templated inputs all the same case.
+type Document struct {
+	// Name identifies the document for error messages and for writing output
+	// back. Conventionally the file path it was read from; "-" or "" for stdin.
+	Name string
+
+	// Content is the raw YAML. Required. It may contain multiple documents
+	// separated by "---"; the adapter must handle that and must preserve the
+	// separators, comments and key order of everything it did not rewrite.
+	Content []byte
+}
+
+// Reference is one occurrence of a pokkum:// image reference found in the
+// input, and what it resolved to.
+type Reference struct {
+	// Document is the Name of the document it was found in.
+	Document string
+
+	// Path is the project path following the scheme, as written.
+	Path string
+
+	// Resolved is the digest reference it was rewritten to, or empty in a
+	// References call, which does not build anything.
+	Resolved string
+}
+
+// ResolveRequest asks the resolver to rewrite every pokkum:// reference.
+type ResolveRequest struct {
+	// Documents are the manifests to process. Required and non-empty. Order is
+	// preserved in the result.
+	Documents []Document
+
+	// Build is called once per distinct project path to produce its digest
+	// reference. Required — a nil Build is a caller bug, not a signal to skip
+	// building.
+	Build ImageBuilder
+
+	// Strict makes an unresolvable reference a hard error. When false, the
+	// resolver still fails the whole call on a build error; Strict additionally
+	// rejects a manifest whose image value merely looks like a scheme typo
+	// ("pokkum:/", "pokkum:"). Defaults to false.
+	Strict bool
+}
+
+// ResolveResult carries the rewritten manifests.
+type ResolveResult struct {
+	// Documents are the rewritten manifests, in the same order and with the
+	// same Names as the input. A document containing no pokkum:// reference is
+	// returned byte-identical to its input — the resolver must not reformat,
+	// reorder or re-quote YAML it did not need to change, because a diff full
+	// of incidental churn is how a team stops trusting a tool that edits their
+	// manifests.
+	Documents []Document
+
+	// References lists every occurrence that was rewritten, with its resolved
+	// digest reference. Used for the build summary and for --dry-run output.
+	// Empty when the input contained none, which is not an error.
+	References []Reference
+}
+
+// Resolver rewrites pokkum:// image references in Kubernetes manifests to
+// immutable digest references. It is implemented by internal/adapters/k8s.
+//
+// It knows nothing about Kubernetes API types and must not import any: it
+// operates on YAML, looking for string values under an "image" key at any
+// depth, so that it works on Deployments, CronJobs, Argo Rollouts, Helm output
+// and any CRD that happens to name a container image.
+//
+// Error expectations: core.ErrManifestUnresolved when a reference cannot be
+// built or when Strict rejects a malformed scheme, core.ErrManifestInvalid when
+// a document is not parseable YAML. Both must name the offending document and
+// the offending value.
+//
+// Implementations must be safe for concurrent use.
+type Resolver interface {
+	// Resolve rewrites every reference, calling req.Build for each distinct
+	// project path. It returns an error if any build fails; a partially
+	// rewritten result is never returned, because applying half-resolved
+	// manifests to a cluster is worse than applying none.
+	Resolve(ctx context.Context, req ResolveRequest) (ResolveResult, error)
+
+	// References reports every pokkum:// occurrence in the documents without
+	// building anything. The Resolved field of each Reference is empty. It
+	// backs --dry-run and lets core plan and de-duplicate its builds before
+	// committing to any of them.
+	References(ctx context.Context, docs []Document) ([]Reference, error)
+}

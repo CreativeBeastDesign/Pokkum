@@ -1,1 +1,377 @@
+// Package ports defines the driven-side contract of Pokkum: the interfaces that
+// the application core calls out through, together with every value type that
+// crosses that boundary.
+//
+// # Type-placement convention
+//
+// ports is the LEAF package of the internal tree. It imports the standard
+// library and github.com/google/go-containerregistry/pkg/v1 and nothing else —
+// in particular it never imports internal/core or any adapter. internal/core
+// imports ports; adapters import ports (and internal/core for the sentinel
+// errors). The dependency graph is therefore acyclic in exactly one direction:
+//
+//	cmd ──▶ core ──▶ ports ◀── adapters
+//	         └────────────────────┘  (adapters also import core for errors)
+//
+// The consequence is that shared boundary vocabulary (Platform, Artifact,
+// SBOMFormat, BaseImagePreset, the per-port request/response structs and the
+// runtime contract constants) is declared HERE, not in core. core re-exports the
+// four shared value types as type aliases so that core-facing code may spell
+// them core.Platform, core.Artifact, and so on; an alias is the same type, so
+// there is never a conversion and never an ambiguity about which one to use.
+//
+// The split of responsibility is:
+//
+//   - ports holds pure vocabulary and behaviour that cannot fail: String, ToV1,
+//     BunTarget, Valid. It declares no sentinel errors.
+//   - core holds policy: parsing (ParsePlatform, ParseSBOMFormat, ...),
+//     validation (BuildRequest.Validate) and every sentinel error.
+//
+// This inverts the naive "structs in core" arrangement, and deliberately so: the
+// application service core.Build is the sole consumer of these interfaces, so
+// core must be able to import ports. Had ports imported core for its request
+// structs, core could not have imported ports back and the pipeline would have
+// been forced to redeclare all seven interfaces locally. One import direction,
+// one declaration of every type.
+//
+// # Contract rules that apply to every interface in this package
+//
+//   - Every method takes context.Context as its first parameter and must honour
+//     cancellation. Long-running work (subprocesses, network I/O) must abort and
+//     return a wrapped ctx.Err() when the context is done.
+//   - Implementations must be safe for concurrent use by multiple goroutines
+//     unless the interface's doc comment says otherwise. core fans out across
+//     platforms and will call the same Compiler/Packager value in parallel.
+//   - Implementations must be deterministic: given identical requests, including
+//     an identical SourceDateEpoch, they must produce byte-identical output.
+//     Never read the wall clock, a random source, the environment or the working
+//     directory inside an adapter; take it from the request.
+//   - Errors must wrap a sentinel from internal/core with %w. See core/errors.go
+//     for the wrapping convention.
+//   - A returned pointer or slice belongs to the caller; implementations must
+//     not retain or mutate it after returning.
 package ports
+
+import (
+	"context"
+	"time"
+
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+)
+
+// Platform identifies a build target. It is the fan-out key of the whole
+// pipeline: one Platform yields one compiled Artifact, one supervisor binary,
+// one base image and one entry in the final image index.
+//
+// Platform is comparable and is intended to be used as a map key
+// (map[Platform]v1.Image is the canonical per-platform collection type).
+//
+// The zero Platform is invalid; use ParsePlatform in internal/core to build one
+// from user input, or one of the LinuxAMD64 / LinuxARM64 package variables.
+type Platform struct {
+	// OS is the GOOS-style operating system name. Only "linux" is supported in
+	// v0.1 — the produced image runs a distroless container.
+	OS string
+
+	// Arch is the GOARCH-style architecture name: "amd64" or "arm64".
+	Arch string
+
+	// Variant is the optional OCI platform variant ("v8" for arm64, "v7" for
+	// arm). Empty for every platform supported in v0.1. It is carried so that
+	// the type does not have to change when 32-bit arm is added; adapters that
+	// do not understand a non-empty Variant must reject the platform rather
+	// than silently ignore it.
+	Variant string
+}
+
+// Supported build targets for v0.1. Bun publishes no other Linux compile
+// targets that are useful here, and the distroless/Chainguard bases are only
+// published for these two architectures.
+var (
+	LinuxAMD64 = Platform{OS: "linux", Arch: "amd64"}
+	LinuxARM64 = Platform{OS: "linux", Arch: "arm64"}
+)
+
+// SupportedPlatforms is the default platform set: every target Pokkum v0.1 can
+// build. A BuildRequest with no explicit platforms builds all of these.
+//
+// The slice is package-level mutable state only in the sense that Go cannot
+// express an immutable slice; callers must not modify it. Use
+// slices.Clone(SupportedPlatforms) if you need to sort or append.
+var SupportedPlatforms = []Platform{LinuxAMD64, LinuxARM64}
+
+// String renders the platform in OCI notation: "linux/amd64", or
+// "linux/arm/v7" when a variant is set. It is the canonical human- and
+// config-facing spelling and round-trips through core.ParsePlatform.
+func (p Platform) String() string {
+	if p.OS == "" && p.Arch == "" {
+		return ""
+	}
+	s := p.OS + "/" + p.Arch
+	if p.Variant != "" {
+		s += "/" + p.Variant
+	}
+	return s
+}
+
+// IsZero reports whether p is the zero value, i.e. carries no target at all.
+func (p Platform) IsZero() bool { return p == Platform{} }
+
+// Supported reports whether p is one of SupportedPlatforms. Adapters should
+// check this at the top of any per-platform method and return a wrapped
+// core.ErrUnsupportedPlatform when it is false, rather than attempting a build
+// that will fail obscurely later.
+func (p Platform) Supported() bool {
+	for _, s := range SupportedPlatforms {
+		if p == s {
+			return true
+		}
+	}
+	return false
+}
+
+// ToV1 converts to the go-containerregistry platform descriptor used in image
+// indexes and config files. It never returns nil.
+func (p Platform) ToV1() *v1.Platform {
+	return &v1.Platform{OS: p.OS, Architecture: p.Arch, Variant: p.Variant}
+}
+
+// PlatformFromV1 converts a go-containerregistry platform descriptor back into
+// a Platform. It reports false for a nil descriptor or one missing an OS or
+// architecture; it does NOT check that the result is Supported, since callers
+// commonly need to enumerate the platforms present in a base image index before
+// filtering them.
+//
+// OSVersion, OSFeatures and Features are intentionally dropped: they are
+// Windows-image concepts with no meaning for a Linux distroless target, and
+// preserving them would make Platform non-comparable.
+func PlatformFromV1(p *v1.Platform) (Platform, bool) {
+	if p == nil || p.OS == "" || p.Architecture == "" {
+		return Platform{}, false
+	}
+	return Platform{OS: p.OS, Arch: p.Architecture, Variant: p.Variant}, true
+}
+
+// BunTarget returns the value for `bun build --compile --target=…` for this
+// platform, and reports whether a mapping exists. Bun spells the architectures
+// differently from Go, which is the entire reason this method exists:
+//
+//	linux/amd64 → bun-linux-x64
+//	linux/arm64 → bun-linux-arm64
+//
+// Bun also publishes -musl and -baseline suffixed targets. Pokkum deliberately
+// uses neither: the base image is a glibc distroless variant, and the baseline
+// targets trade performance for pre-2013 CPU support that a container host does
+// not need.
+func (p Platform) BunTarget() (string, bool) {
+	if p.OS != "linux" || p.Variant != "" {
+		return "", false
+	}
+	switch p.Arch {
+	case "amd64":
+		return "bun-linux-x64", true
+	case "arm64":
+		return "bun-linux-arm64", true
+	default:
+		return "", false
+	}
+}
+
+// GoEnv returns the GOOS and GOARCH values used to cross-compile the
+// pokkum-init supervisor for this platform, and reports whether a mapping
+// exists. Go's naming matches Platform's, so this is close to the identity
+// function; it exists so that the supervisor builder never has to reach into
+// Platform's fields directly and so that a future non-identity mapping has one
+// place to live.
+func (p Platform) GoEnv() (goos, goarch string, ok bool) {
+	if !p.Supported() {
+		return "", "", false
+	}
+	return p.OS, p.Arch, true
+}
+
+// Artifact is the output of compiling the SvelteKit app for one platform.
+//
+// It is a SINGLE FILE, not a directory tree. The @jesterkit/exe-sveltekit
+// adapter is run with embedStatic enabled, so the client bundle, prerendered
+// pages and every other static asset are baked into the executable as embedded
+// files. The resulting container therefore has exactly one application layer
+// containing exactly one path. Downstream packages must not assume there is a
+// sibling static/ directory to copy — there is not.
+type Artifact struct {
+	// Platform is the target this binary was compiled for. Required.
+	Platform Platform
+
+	// Path is the absolute host path of the compiled executable. Required.
+	// The file is owned by the caller of Compile, which chose the location via
+	// CompileRequest.OutputPath; the Compiler must not delete it.
+	Path string
+
+	// Size is the size of the executable in bytes. Informational: used for
+	// progress reporting and for the build summary. Zero means "not measured".
+	Size int64
+
+	// SHA256 is the lowercase hex digest of the executable's contents, with no
+	// "sha256:" prefix. It is what makes the build verifiable: two runs with the
+	// same SOURCE_DATE_EPOCH and the same sources must produce the same value.
+	//
+	// This is deliberately a plain string and not a v1.Hash: the compiled binary
+	// is not an OCI object at this stage, and the exception in the architecture
+	// rules that admits v1 types covers the packager, the base-image resolver
+	// and the registry only.
+	//
+	// Empty means the Compiler did not compute it; core may then compute it
+	// itself, but a Compiler that can cheaply produce it should.
+	SHA256 string
+}
+
+// PreflightRequest asks the Compiler to verify that the host toolchain and the
+// project can actually be built, before any expensive work starts.
+type PreflightRequest struct {
+	// ProjectDir is the absolute path of the SvelteKit project root — the
+	// directory holding package.json and svelte.config.js. Required.
+	ProjectDir string
+
+	// MinBunVersion is the lowest acceptable Bun version, as a bare semver
+	// string ("1.2.0", no leading "v"). Empty means the adapter's own built-in
+	// minimum applies. Downstream: prefer leaving this empty so that the
+	// requirement lives in one place.
+	MinBunVersion string
+
+	// Env is additional environment for any probe subprocess, as KEY=VALUE
+	// entries appended to the inherited environment. Nil means inherit only.
+	Env []string
+}
+
+// PreflightResult reports what the Compiler found. Every field is
+// informational — it exists for the build summary, for image labels and for
+// error messages — and a successful Preflight is the only contract that matters.
+type PreflightResult struct {
+	// BunPath is the absolute path of the bun executable that will be used.
+	BunPath string
+
+	// BunVersion is the detected Bun version, without a leading "v".
+	BunVersion string
+
+	// AdapterVersion is the resolved version of @jesterkit/exe-sveltekit found
+	// in the project. Empty if it could not be determined (which is not by
+	// itself an error — the adapter may be linked or vendored).
+	AdapterVersion string
+
+	// SvelteKitVersion is the detected @sveltejs/kit version, or empty.
+	SvelteKitVersion string
+}
+
+// PrepareRequest drives stage one of the two-stage compile: running the
+// SvelteKit build so that the @jesterkit/exe-sveltekit adapter emits a single
+// TypeScript entrypoint that Bun can then compile.
+type PrepareRequest struct {
+	// ProjectDir is the absolute SvelteKit project root. Required.
+	ProjectDir string
+
+	// SourceDateEpoch is the deterministic build timestamp. Required (must be
+	// non-zero). It is exported into the child process environment as
+	// SOURCE_DATE_EPOCH so that any tooling that stamps timestamps observes it.
+	// Adapters must never call time.Now.
+	SourceDateEpoch time.Time
+
+	// Env is additional environment for the build subprocess, as KEY=VALUE
+	// entries appended to the inherited environment. Nil means inherit only.
+	Env []string
+
+	// Platforms is the set of targets the subsequent Compile calls will use. It
+	// is passed so the adapter can fail fast on an unsupported target before
+	// spending a full SvelteKit build. May be nil, meaning SupportedPlatforms.
+	Platforms []Platform
+}
+
+// PrepareResult locates the artefacts the SvelteKit adapter emitted. The paths
+// are absolute and live inside ProjectDir; they are inputs to Compile, not
+// deliverables, and core does not copy or archive them.
+type PrepareResult struct {
+	// EntrypointPath is the absolute path of the generated TypeScript server
+	// entrypoint, conventionally
+	// <ProjectDir>/.svelte-kit/jesterkit-sveltekit/temp-server/index.ts.
+	// Required in a successful result; Compile compiles exactly this file.
+	EntrypointPath string
+
+	// OutputDir is the absolute path of the adapter's output directory,
+	// conventionally <ProjectDir>/.svelte-kit/jesterkit-sveltekit. It also
+	// contains manifest.js, server/ and the generated assets.generated.ts that
+	// embeds the static files. Informational; provided for diagnostics and for
+	// cleanup decisions made by core.
+	OutputDir string
+}
+
+// CompileRequest drives stage two: `bun build --compile --target=…` against the
+// prepared entrypoint, producing one self-contained executable.
+type CompileRequest struct {
+	// ProjectDir is the absolute SvelteKit project root, used as the working
+	// directory of the compile subprocess so that relative imports resolve.
+	// Required.
+	ProjectDir string
+
+	// EntrypointPath is PrepareResult.EntrypointPath. Required.
+	EntrypointPath string
+
+	// Platform is the single target to compile for. Required and must be
+	// Supported; one CompileRequest yields one binary.
+	Platform Platform
+
+	// OutputPath is the absolute path to write the executable to. Required —
+	// the Compiler must not invent a location, because core owns the build
+	// scratch directory and its lifetime. Parent directories are created by the
+	// Compiler if missing. An existing file at this path is overwritten.
+	OutputPath string
+
+	// SourceDateEpoch is the deterministic build timestamp. Required.
+	SourceDateEpoch time.Time
+
+	// Env is additional environment for the compile subprocess, as KEY=VALUE
+	// entries appended to the inherited environment. Nil means inherit only.
+	Env []string
+
+	// Minify enables Bun's minifier. Defaults to false at the zero value;
+	// core's default is true for release builds and is set explicitly.
+	Minify bool
+
+	// Sourcemap embeds a source map in the executable. Increases binary size
+	// substantially; false by default.
+	Sourcemap bool
+}
+
+// Compiler turns a SvelteKit project into one self-contained executable per
+// platform. It is implemented by internal/adapters/bunexec.
+//
+// The three methods form a strict sequence per build: Preflight once, Prepare
+// once, then Compile once per platform. core may call Compile concurrently for
+// different platforms against the same PrepareResult, so implementations must
+// not keep mutable per-build state on the receiver.
+//
+// Error expectations:
+//   - Preflight returns core.ErrBunNotFound when no bun executable is on PATH,
+//     core.ErrBunTooOld when the version is below the minimum, and
+//     core.ErrAdapterMissing when @jesterkit/exe-sveltekit is not a dependency
+//     of the project.
+//   - Prepare returns core.ErrPrepareFailed when `bun run build` exits non-zero
+//     or the expected entrypoint is absent afterwards. The wrapped error must
+//     carry the captured subprocess output — a bare exit status is useless to a
+//     user debugging their own app.
+//   - Compile returns core.ErrUnsupportedPlatform for a target with no Bun
+//     mapping and core.ErrCompileFailed for a non-zero exit.
+type Compiler interface {
+	// Preflight verifies the host toolchain and the project layout. It must
+	// have no side effects on the project directory.
+	Preflight(ctx context.Context, req PreflightRequest) (PreflightResult, error)
+
+	// Prepare runs the SvelteKit build once, producing the shared entrypoint
+	// that every per-platform Compile call consumes. It writes into
+	// ProjectDir/.svelte-kit and is therefore NOT safe to call concurrently for
+	// the same ProjectDir.
+	Prepare(ctx context.Context, req PrepareRequest) (PrepareResult, error)
+
+	// Compile produces exactly one executable, at req.OutputPath, for exactly
+	// one platform. Safe for concurrent use across distinct platforms and
+	// distinct OutputPaths.
+	Compile(ctx context.Context, req CompileRequest) (Artifact, error)
+}
