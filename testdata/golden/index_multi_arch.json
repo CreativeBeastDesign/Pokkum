@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "size": 1174,
+      "digest": "sha256:6ca0995dbce503891453dd1aeb12cdb55cf6aed617e5e349b22ccc70aa19e389",
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      },
+      "artifactType": "application/vnd.oci.image.config.v1+json"
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "size": 1174,
+      "digest": "sha256:5bea4a6d05a585ce13b2f9787f88ac1924b0931cb63fe7488754b4b2d7a0ab34",
+      "platform": {
+        "architecture": "arm64",
+        "os": "linux"
+      },
+      "artifactType": "application/vnd.oci.image.config.v1+json"
+    }
+  ],
+  "annotations": {
+    "org.opencontainers.image.created": "2023-11-14T22:13:20Z",
+    "org.opencontainers.image.source": "https://github.com/example/test-app"
+  }
+}

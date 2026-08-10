@@ -1,0 +1,54 @@
+{
+  "architecture": "amd64",
+  "created": "2023-11-14T22:13:20Z",
+  "history": [
+    {
+      "created": "0001-01-01T00:00:00Z"
+    },
+    {
+      "created": "2023-11-14T22:13:20Z",
+      "created_by": "pokkum: add /pokkum/init"
+    },
+    {
+      "created": "2023-11-14T22:13:20Z",
+      "created_by": "pokkum: add /app/server"
+    }
+  ],
+  "os": "linux",
+  "rootfs": {
+    "type": "layers",
+    "diff_ids": [
+      "sha256:ae5484c2bc51f6df3308329e9d6dda42d393bdc0a31e2bf81939f1880acea693",
+      "sha256:4a968719fc3e76a17344623049d0422046ef972a96e09ef85d54a17317fb3f90",
+      "sha256:478df2447975212c8df2886acdf3392ef327e929ee25f3b257a8f9da80740c0a"
+    ]
+  },
+  "config": {
+    "Entrypoint": [
+      "/pokkum/init",
+      "--",
+      "/app/server"
+    ],
+    "Env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+      "PORT=3000",
+      "POKKUM_PROBE_PORT=8081",
+      "POKKUM_SHUTDOWN_TIMEOUT=30s"
+    ],
+    "Labels": {
+      "org.opencontainers.image.base.digest": "sha256:3df3024788c6143f7d324570e8ffd63f0b084c6ae9cba2f5d32044a691505408",
+      "org.opencontainers.image.base.name": "gcr.io/distroless/cc-debian12:nonroot",
+      "org.opencontainers.image.created": "2023-11-14T22:13:20Z",
+      "org.opencontainers.image.revision": "1234567890abcdef1234567890abcdef12345678",
+      "org.opencontainers.image.source": "https://github.com/example/test-app",
+      "org.opencontainers.image.version": "1.0.0"
+    },
+    "User": "65532:65532",
+    "WorkingDir": "/app",
+    "ExposedPorts": {
+      "3000/tcp": {},
+      "8081/tcp": {}
+    }
+  }
+}

@@ -41,12 +41,14 @@
 //
 // # Concurrency
 //
-// Preflight and Compile are safe for concurrent use. Prepare is NOT safe to
-// call concurrently for the same ProjectDir: it runs `bun run build`, which
-// writes into <ProjectDir>/.svelte-kit, and two concurrent SvelteKit builds
-// against the same output directory race on every file the adapter writes.
-// Callers (core) must call Prepare exactly once per build and only start
-// concurrent Compile calls after it returns.
+// Preflight is safe for concurrent use. Compile is safe to call concurrently
+// but does not run concurrently: it serializes internally on the receiver (see
+// compileMu). Prepare is NOT safe to call concurrently for the same
+// ProjectDir: it runs `bun run build`, which writes into
+// <ProjectDir>/.svelte-kit, and two concurrent SvelteKit builds against the
+// same output directory race on every file the adapter writes. Callers (core)
+// must call Prepare exactly once per build and only start Compile calls after
+// it returns.
 //
 // # A gap between this package's brief and the ports.CompileRequest contract
 //
@@ -101,16 +103,22 @@ const (
 type Compiler struct {
 	logger *slog.Logger
 
-	// compileMu serializes Compile. Two `bun build --compile` processes run
-	// concurrently against the same project do not reliably produce identical
-	// output: measured over repeated two-platform builds, most runs agreed but
-	// a minority produced a different binary for the same inputs, while three
-	// consecutive single-platform builds were byte-identical every time. Bun
-	// evidently shares state between concurrent compiles in the same project.
+	// compileMu serializes Compile.
 	//
-	// Serializing costs almost nothing — the compile step itself is ~150ms
-	// against a multi-second SvelteKit build — and reproducible digests are the
-	// entire point of the tool, so correctness wins by a wide margin here.
+	// This was added on a hypothesis that has since been disproved. Repeated
+	// two-platform builds were intermittently non-reproducible while three
+	// consecutive single-platform builds were byte-identical, which looked like
+	// concurrent bun processes sharing state. The actual cause was upstream and
+	// per-build, not per-platform: the adapter emitted assets.generated.ts in
+	// filesystem order, so each `bun run build` produced a different bundle
+	// while both platforms within a single run saw the same one. Sorting that
+	// file (see assets.go) fixed it; the single-platform runs had simply been
+	// lucky.
+	//
+	// The lock is kept anyway. bun's behaviour under concurrent compiles in one
+	// project is undocumented, serializing costs ~150ms of a multi-second build,
+	// and reproducible digests are the whole point of the tool. It is cheap
+	// insurance, not a fix — do not cite it as one.
 	compileMu sync.Mutex
 }
 
@@ -243,6 +251,19 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 			"bunexec: prepare %s: expected entrypoint %s not found after build (was @jesterkit/exe-sveltekit configured as the adapter?): %w: %w",
 			req.ProjectDir, entrypoint, err, core.ErrPrepareFailed,
 		)
+	}
+
+	// @jesterkit/exe-sveltekit's discoverClientAssets walks the filesystem
+	// without sorting, so assets.generated.ts (which temp-server/index.ts
+	// imports and Compile bundles) can list the same set of assets in a
+	// different order between two otherwise-identical builds. That reordering
+	// alone changes the compiled binary's bytes. Normalize it here, once, right
+	// after the SvelteKit build that generated it and before any Compile call
+	// reads it, so every platform compiles against an identically-ordered
+	// entrypoint.
+	assetsPath := filepath.Join(filepath.Dir(entrypoint), assetsGeneratedFilename)
+	if err := normalizeGeneratedAssetsFile(assetsPath); err != nil {
+		return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, err)
 	}
 
 	log.Info("bunexec: prepare complete", "entrypoint", entrypoint)

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "size": 1321,
+    "digest": "sha256:5057a3cd6ed0a84fbf6aed5b206615e66650635cc42248f2de71b2c7081c2009"
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+      "size": 130,
+      "digest": "sha256:03e8323a08fcab9ca4ebc456303ae274c9ab51e9b995b2e3c360280658c95588"
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "size": 169,
+      "digest": "sha256:de96874aa506e42b0430d8068d3c873d5eb723aed0b9392944d9bad212a398d2"
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "size": 183,
+      "digest": "sha256:d492cc934beb80d7ff12ac2e0bd11777906cd3f39bf9410feef08721a732dfb3"
+    }
+  ],
+  "annotations": {
+    "org.opencontainers.image.base.digest": "sha256:3df3024788c6143f7d324570e8ffd63f0b084c6ae9cba2f5d32044a691505408",
+    "org.opencontainers.image.base.name": "gcr.io/distroless/cc-debian12:nonroot",
+    "org.opencontainers.image.created": "2023-11-14T22:13:20Z",
+    "org.opencontainers.image.revision": "1234567890abcdef1234567890abcdef12345678",
+    "org.opencontainers.image.source": "https://github.com/example/test-app",
+    "org.opencontainers.image.version": "1.0.0"
+  }
+}

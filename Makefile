@@ -1,4 +1,8 @@
-.PHONY: help build supervisor test test-short lint fmt clean
+.PHONY: help build supervisor test test-short test-integration lint fmt clean
+
+test-integration:  ##  Run integration tests (go test ./tests/integration)
+	@echo "Running integration tests..."
+	@go test -v ./tests/integration
 
 help:  ##  Show this help message
 	@echo "Pokkum build targets:"
