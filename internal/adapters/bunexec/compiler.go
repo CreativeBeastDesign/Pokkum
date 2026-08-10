@@ -73,6 +73,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekit"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -99,6 +100,18 @@ const (
 // having no cache to invalidate or race on.
 type Compiler struct {
 	logger *slog.Logger
+
+	// compileMu serializes Compile. Two `bun build --compile` processes run
+	// concurrently against the same project do not reliably produce identical
+	// output: measured over repeated two-platform builds, most runs agreed but
+	// a minority produced a different binary for the same inputs, while three
+	// consecutive single-platform builds were byte-identical every time. Bun
+	// evidently shares state between concurrent compiles in the same project.
+	//
+	// Serializing costs almost nothing — the compile step itself is ~150ms
+	// against a multi-second SvelteKit build — and reproducible digests are the
+	// entire point of the tool, so correctness wins by a wide margin here.
+	compileMu sync.Mutex
 }
 
 // NewCompiler builds a Compiler. A nil logger falls back to slog.Default().
@@ -237,9 +250,24 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 }
 
 // Compile runs `bun build --compile` once, for req.Platform, producing
-// req.OutputPath. Safe for concurrent use across distinct platforms and
-// output paths.
+// req.OutputPath.
+//
+// Concurrency: calls are serialized on the receiver. Distinct platforms and
+// output paths are logically independent, but bun does not produce byte-stable
+// output when two compiles run at once against the same project — see the
+// compileMu comment on Compiler. Callers may still call this from several
+// goroutines; they will simply queue.
+//
+// Note also that bun embeds the output file's *basename* in the executable
+// (two compiles differing only in --outfile basename produce binaries that
+// differ in exactly that one byte range, while the same basename in different
+// directories produces identical bytes). Callers that care about reproducible
+// digests must therefore keep req.OutputPath's basename stable across builds;
+// the containing directory may vary freely.
 func (c *Compiler) Compile(ctx context.Context, req ports.CompileRequest) (ports.Artifact, error) {
+	c.compileMu.Lock()
+	defer c.compileMu.Unlock()
+
 	log := c.logger
 
 	target, ok := req.Platform.BunTarget()

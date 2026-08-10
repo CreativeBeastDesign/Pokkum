@@ -20,8 +20,8 @@ import (
 //
 // Two different causes, distinguishable by which constants moved:
 //
-//   - goldenAppLayerDiffID or goldenConfigDigest changed. These depend only on
-//     the uncompressed tar bytes and the config JSON, both of which are fully
+//   - a *DiffID or goldenConfigDigest changed. These depend only on the
+//     uncompressed tar bytes and the config JSON, both of which are fully
 //     determined by this package's own code. Something in the layer layout, the
 //     header pinning, the runtime config or the label/annotation assembly
 //     changed. If that was intentional, re-record; if not, it is a bug.
@@ -34,11 +34,13 @@ import (
 //     because it means images rebuilt after the upgrade get new digests even
 //     though their contents are identical.
 const (
-	goldenAppLayerDiffID = "sha256:bada7ac9442add50ffa24d014918bfcfa17f2534178dc57c20c97e84f550293f"
-	goldenAppLayerDigest = "sha256:4fc0309a591641b850d8f24e71be2c757e92ff634d8b09b0c3b1f8459de45eec"
-	goldenConfigDigest   = "sha256:0a84fb5784dc266549456d255bf33a1b3c024694e2c8f3fda85bf0a7e21332bc"
-	goldenManifestDigest = "sha256:12552cc8e3b6cdc4df80cf83033c29f266f2cc1d3bfb78acb71fec3f6aeeb41b"
-	goldenIndexDigest    = "sha256:f6e63da88a8ec636e29a64d96a3e84043da668bf06a839765c3ff4b75d749902"
+	goldenSupervisorLayerDiffID = "sha256:dfbcaa2cb264f3acee10b7b6aeced293c3283460e07c0f63bca2d05177a60d4e"
+	goldenSupervisorLayerDigest = "sha256:39064dcb430d05629cfc39ac324657459f412d0424f9d0ad9d5a8da5d712cfba"
+	goldenAppLayerDiffID        = "sha256:444f537f1513ae1971fb23beaec92dd1fb046f8c533d411518d421ad94707602"
+	goldenAppLayerDigest        = "sha256:363520a76df60ab6a9ce193a54076c20d19a5c18d96678d84c1bc4d433b19701"
+	goldenConfigDigest          = "sha256:50c44d23216338fcb78bf3b0f111f9c351d726642ee17e75b7c42d4ee27e549b"
+	goldenManifestDigest        = "sha256:3ea634df883efc60ea2cae0c70acf3b96ee17341c1028850332283264cc7d29a"
+	goldenIndexDigest           = "sha256:a1afd0511491d24a163abdbc1ebf43247a9a7e120708922d1cfab44eb6ea8266"
 )
 
 func TestGoldenImageDigests(t *testing.T) {
@@ -48,11 +50,16 @@ func TestGoldenImageDigests(t *testing.T) {
 	}
 	fp := fingerprint(t, img)
 
+	// fp.LayerDiffIDs/LayerDigests are ordered [base, supervisor, app]: the base
+	// layer comes from the synthetic fixture and is not pinned here, the two
+	// pokkum-added layers are the last two, in the order they are appended.
 	checks := []struct {
 		name string
 		got  string
 		want string
 	}{
+		{"supervisor layer diffID", fp.LayerDiffIDs[len(fp.LayerDiffIDs)-2], goldenSupervisorLayerDiffID},
+		{"supervisor layer digest", fp.LayerDigests[len(fp.LayerDigests)-2], goldenSupervisorLayerDigest},
 		{"application layer diffID", fp.LayerDiffIDs[len(fp.LayerDiffIDs)-1], goldenAppLayerDiffID},
 		{"application layer digest", fp.LayerDigests[len(fp.LayerDigests)-1], goldenAppLayerDigest},
 		{"config digest", fp.Config, goldenConfigDigest},

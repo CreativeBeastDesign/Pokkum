@@ -56,17 +56,23 @@
 // reproducibility; it is noted here only so that the extra field in an index
 // manifest is not mistaken for a bug.
 //
-// # One layer, not two
+// # Two layers, ordered by volatility
 //
-// The supervisor and the application share a single layer. ports.PackageRequest
-// documents them as two layers, on the reasoning that the supervisor changes
-// only when pokkum itself is upgraded and so an app rebuild would re-push one
-// layer instead of two. In practice the split saves 2.2 MB out of ~92 MB on a
-// rebuild — under 3% — while costing a second layer descriptor, a second
-// history entry and a second gzip pass on every build. W10 specifies the
-// combined layer; this comment exists so the divergence from the port's prose
-// is a recorded decision rather than an oversight. Splitting it again is a
-// contained change: add a second layerFile set and a second mutate.Addendum.
+// The supervisor and the application are two separate layers, per
+// ports.PackageRequest's field docs on App and Supervisor. The supervisor
+// layer is appended below the application layer — added first, so it sits
+// lower in the image — because it changes only when pokkum itself is
+// upgraded, while the application layer changes on every build; the stable
+// layer belongs underneath the one that churns.
+//
+// An earlier version of this package combined them into one layer, reasoning
+// that the split only saved a few percent of rebuild bandwidth. That measured
+// the wrong thing: the real benefit is cross-image deduplication, not
+// per-rebuild savings. Every image Pokkum builds at a given pokkum version
+// shares the identical supervisor layer, so a registry hosting many
+// Pokkum-built apps stores that layer once, and a node pulling several of them
+// downloads it once — regardless of how often any single app rebuilds. Two
+// layers is therefore the right shape even though the supervisor is small.
 //
 // # Concurrency
 //
@@ -92,11 +98,16 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
-// historyCreatedBy is the CreatedBy string of the single history entry this
-// package appends. It is a fixed string rather than anything derived from the
-// running process — a version, a command line, a hostname — because the history
-// is serialized into the image config and therefore into the config digest.
-const historyCreatedBy = "pokkum: add " + ports.SupervisorPath + " and " + ports.AppBinaryPath
+// historySupervisorCreatedBy and historyAppCreatedBy are the CreatedBy strings
+// of the two history entries this package appends, one per layer, in the same
+// order the layers are appended (supervisor, then application). Each is a
+// fixed string rather than anything derived from the running process — a
+// version, a command line, a hostname — because history is serialized into the
+// image config and therefore into the config digest.
+const (
+	historySupervisorCreatedBy = "pokkum: add " + ports.SupervisorPath
+	historyAppCreatedBy        = "pokkum: add " + ports.AppBinaryPath
+)
 
 // Packager implements ports.Packager. The zero value is usable but logs to
 // slog.Default(); prefer NewPackager.
@@ -117,8 +128,9 @@ func NewPackager(log *slog.Logger) *Packager {
 
 // Build implements ports.Packager.
 //
-// It appends exactly one layer to req.Base — the application binary and the
-// supervisor together — applies the runtime configuration, stamps the OCI
+// It appends two layers to req.Base — the supervisor, then the application
+// binary, in that order (see the package doc's "Two layers, ordered by
+// volatility" section) — applies the runtime configuration, stamps the OCI
 // annotations, and returns the resulting single-platform image. req.Base is
 // never mutated: go-containerregistry's mutate package wraps rather than
 // modifies, so the caller's base image is still usable for another platform or
@@ -146,10 +158,17 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		return nil, fmt.Errorf("packager: build %s: read base config: %w: %w", req.Platform, err, core.ErrPackageFailed)
 	}
 
-	// Building the layer computes both the diffID and the compressed digest,
-	// which means gzipping ~90 MB. It is the expensive step, so the context is
-	// checked either side of it.
-	layer, err := buildAppLayer(ctx, req, ts)
+	// The supervisor layer is small (kilobytes) and built first, so it can be
+	// appended below the application layer per the ordering rationale above.
+	supervisorLayer, err := buildSupervisorLayer(ctx, req, ts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Building the application layer computes both the diffID and the
+	// compressed digest, which means gzipping ~90 MB. It is the expensive step,
+	// so the context is checked either side of it.
+	appLayer, err := buildAppLayer(ctx, req, ts)
 	if err != nil {
 		return nil, err
 	}
@@ -164,17 +183,31 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		return nil, fmt.Errorf("packager: build %s: apply config: %w: %w", req.Platform, err, core.ErrPackageFailed)
 	}
 
-	img, err = mutate.Append(img, mutate.Addendum{
-		Layer:     layer,
-		MediaType: types.OCILayer,
-		History: v1.History{
-			Created:   v1.Time{Time: ts},
-			CreatedBy: historyCreatedBy,
-			Comment:   "",
+	// Addenda are appended in call order, and the supervisor addendum comes
+	// first so that its layer sits below the application layer in the final
+	// image — appended earlier means lower, in go-containerregistry's model.
+	img, err = mutate.Append(img,
+		mutate.Addendum{
+			Layer:     supervisorLayer,
+			MediaType: types.OCILayer,
+			History: v1.History{
+				Created:   v1.Time{Time: ts},
+				CreatedBy: historySupervisorCreatedBy,
+				Comment:   "",
+			},
 		},
-	})
+		mutate.Addendum{
+			Layer:     appLayer,
+			MediaType: types.OCILayer,
+			History: v1.History{
+				Created:   v1.Time{Time: ts},
+				CreatedBy: historyAppCreatedBy,
+				Comment:   "",
+			},
+		},
+	)
 	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: append layer: %w: %w", req.Platform, err, core.ErrPackageFailed)
+		return nil, fmt.Errorf("packager: build %s: append layers: %w: %w", req.Platform, err, core.ErrPackageFailed)
 	}
 
 	// Redundant with cfg.Created, which applyRuntime already set, but it is the
@@ -188,7 +221,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 	img = mutate.MediaType(img, types.OCIManifestSchema1)
 	img = mutate.ConfigMediaType(img, types.OCIConfigJSON)
 
-	if anns := imageAnnotations(cfg.Config.Labels, req.Annotations); len(anns) > 0 {
+	if anns := imageAnnotations(cfg.Config.Labels, req.BaseRef, req.Annotations); len(anns) > 0 {
 		annotated, ok := mutate.Annotations(img, anns).(v1.Image)
 		if !ok {
 			return nil, fmt.Errorf("packager: build %s: annotate: result is not an image: %w", req.Platform, core.ErrPackageFailed)
@@ -204,15 +237,20 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 	if err != nil {
 		return nil, fmt.Errorf("packager: build %s: compute digest: %w: %w", req.Platform, err, core.ErrPackageFailed)
 	}
-	layerDigest, err := layer.Digest()
+	appLayerDigest, err := appLayer.Digest()
 	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: compute layer digest: %w: %w", req.Platform, err, core.ErrPackageFailed)
+		return nil, fmt.Errorf("packager: build %s: compute app layer digest: %w: %w", req.Platform, err, core.ErrPackageFailed)
+	}
+	supervisorLayerDigest, err := supervisorLayer.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("packager: build %s: compute supervisor layer digest: %w: %w", req.Platform, err, core.ErrPackageFailed)
 	}
 
 	p.logger().Info("packaged image",
 		"platform", req.Platform.String(),
 		"digest", digest.String(),
-		"layer", layerDigest.String(),
+		"app_layer", appLayerDigest.String(),
+		"supervisor_layer", supervisorLayerDigest.String(),
 		"base_digest", baseDigest.String(),
 		"created", ts.Format(time.RFC3339))
 

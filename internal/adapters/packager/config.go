@@ -15,13 +15,21 @@ import (
 // ociAnnotationKeys are the org.opencontainers.image.* keys that are mirrored
 // from the image config's labels onto the manifest's annotations.
 //
-// The mirror exists because ports.PackageRequest carries the provenance values
-// — revision, source, version, base image name — only as Labels, while generic
-// OCI tooling (cosign, oras, registry UIs, `docker buildx imagetools inspect`)
-// reads annotations. Rather than invent a second request field, the packager
-// treats a label in the standard namespace as authoritative for the annotation
-// of the same name. PackageRequest.Annotations still wins over the mirror, so a
-// caller that wants them to differ can say so.
+// The mirror exists because ports.PackageRequest carries most of the
+// provenance values — revision, source, version — only as Labels, while
+// generic OCI tooling (cosign, oras, registry UIs, `docker buildx imagetools
+// inspect`) reads annotations. Rather than invent a second request field for
+// each of them, the packager treats a label in the standard namespace as
+// authoritative for the annotation of the same name.
+//
+// org.opencontainers.image.base.name is the one exception: it also has a
+// dedicated field, PackageRequest.BaseRef, because relying on the mirror alone
+// would mean a standard OCI annotation only gets populated if the caller
+// happens to know to stuff it into Labels under this exact key — a magic
+// string with nothing in the port's types pointing at it. BaseRef gives that
+// value a discoverable home; an explicit ports.LabelBaseName entry in Labels
+// still wins if the caller sets both — see imageAnnotations.
+// PackageRequest.Annotations, as ever, wins over both.
 //
 // The order is fixed only so the list reads sensibly; the destination is a map
 // and encoding/json sorts map keys, so iteration order here cannot reach the
@@ -180,14 +188,25 @@ func mergeLabels(base, caller map[string]string, baseDigest v1.Hash, ts time.Tim
 }
 
 // imageAnnotations returns the manifest annotations for a built image: the
-// standard OCI keys mirrored from the finished labels, then the caller's
+// standard OCI keys mirrored from the finished labels, then base.name falling
+// back to baseRef if the mirror did not already supply it, then the caller's
 // explicit annotations.
-func imageAnnotations(labels, caller map[string]string) map[string]string {
+//
+// The fallback sits between the label mirror and the caller's annotations so
+// that the precedence is, from lowest to highest: PackageRequest.BaseRef, an
+// explicit ports.LabelBaseName entry in PackageRequest.Labels, an explicit
+// org.opencontainers.image.base.name entry in PackageRequest.Annotations. See
+// the field docs on PackageRequest.BaseRef for why the label wins over the
+// field.
+func imageAnnotations(labels map[string]string, baseRef string, caller map[string]string) map[string]string {
 	out := make(map[string]string, len(ociAnnotationKeys)+len(caller))
 	for _, k := range ociAnnotationKeys {
 		if v, ok := labels[k]; ok && v != "" {
 			out[k] = v
 		}
+	}
+	if _, ok := out[ports.LabelBaseName]; !ok && baseRef != "" {
+		out[ports.LabelBaseName] = baseRef
 	}
 	maps.Copy(out, caller)
 	return out

@@ -8,7 +8,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/baseimage"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunexec"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sbom"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 )
 
@@ -135,10 +141,16 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		req.Output.Mode = core.OutputPush
 	}
 
-	// Dry-run and print-manifest flags
-	// Thread them into the request for W13 to honour
-	_ = flags.dryRun // TODO: store in request when W13 wires them
-	_ = flags.printManifest
+	// Execution-mode switches. They are not part of the request — both
+	// describe how far to get, not what to build — so they travel alongside it
+	// as core.BuildOptions.
+	if flags.dryRun && flags.printManifest {
+		return fmt.Errorf("cannot specify both --dry-run and --print-manifest")
+	}
+	opts := core.BuildOptions{
+		DryRun:        flags.dryRun,
+		PrintManifest: flags.printManifest,
+	}
 
 	// Resolve SOURCE_DATE_EPOCH
 	timestamp, err := cfg.ResolveBuildTimestamp()
@@ -147,19 +159,59 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	}
 	req.SourceDateEpoch = timestamp
 
-	// Normalize and validate
+	// Normalize and validate here as well as inside core.Build, so that a bad
+	// flag combination is reported before the composition root builds
+	// anything. core.Build repeats both; they are idempotent.
 	req.Normalize()
 	if err := req.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Report what we would do
-	logger.Info("build request constructed",
-		"project_dir", req.ProjectDir,
-		"platforms", core.PlatformList(req.Platforms),
-		"output_mode", req.Output.Mode,
-		"repo", req.Repo)
+	// The result carries the full summary, but the reference has already gone
+	// to stdout by the time Build returns; everything here is a log line.
+	res, err := core.Build(ctx, buildDeps(logger), req, opts)
+	if err != nil {
+		return err
+	}
 
-	// Return "not yet wired" error as per spec
-	return fmt.Errorf("build pipeline not yet implemented: %w", core.ErrInvalidRequest)
+	logger.Info("build finished",
+		"ref", res.Image.Ref,
+		"digest", res.Image.Digest.String(),
+		"platforms", core.PlatformList(res.Image.Platforms),
+		"base", res.BaseImage.PinnedRef,
+		"duration", res.Duration.String())
+	return nil
+}
+
+// buildDeps is the composition root: the one place in the program where the
+// concrete adapters are named. core.Build sees only the ports, which is what
+// keeps internal/core free of any adapter import.
+//
+// Every adapter is constructed unconditionally. They are all trivial value
+// types holding a logger — the registry adapter does not open a connection and
+// the supervisor provider does not touch its embedded binaries until asked —
+// so there is nothing to gain from building them lazily per output mode, and
+// something to lose in a branch that could get the mapping wrong.
+func buildDeps(logger *slog.Logger) core.Deps {
+	reg := registry.NewAdapter(logger)
+	return core.Deps{
+		Compiler:   bunexec.NewCompiler(logger),
+		BaseImages: baseimage.NewResolver(logger),
+		Supervisor: supervisor.New(logger),
+		Packager:   packager.NewPackager(logger),
+
+		// One adapter satisfies all three publishing ports: pushing, loading
+		// into the daemon and writing a tarball are the same
+		// go-containerregistry machinery pointed at different sinks.
+		Registry: reg,
+		Daemon:   reg,
+		Tarballs: reg,
+
+		SBOM: sbom.NewGenerator(logger),
+
+		Logger:    logger,
+		Stdout:    os.Stdout,
+		Version:   version,
+		UserAgent: "pokkum/" + version,
+	}
 }

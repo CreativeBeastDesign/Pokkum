@@ -215,7 +215,7 @@ func TestImageAnnotationsSkipsEmptyLabels(t *testing.T) {
 		ports.LabelCreated:  "2023-11-14T22:13:20Z",
 		ports.LabelRevision: "",
 		"unrelated.label":   "ignored",
-	}, nil)
+	}, "", nil)
 
 	if _, ok := got[ports.LabelRevision]; ok {
 		t.Errorf("empty label became an annotation: %v", got)
@@ -226,4 +226,40 @@ func TestImageAnnotationsSkipsEmptyLabels(t *testing.T) {
 	if got[ports.LabelCreated] != "2023-11-14T22:13:20Z" {
 		t.Errorf("annotations = %v", got)
 	}
+}
+
+// TestImageAnnotationsBaseRefFallback checks the three-way precedence for
+// org.opencontainers.image.base.name: BaseRef is the default, an explicit
+// label in Labels overrides it, and an explicit annotation overrides both.
+func TestImageAnnotationsBaseRefFallback(t *testing.T) {
+	t.Run("baseRef used when no label is set", func(t *testing.T) {
+		got := imageAnnotations(nil, "gcr.io/distroless/cc-debian12:nonroot", nil)
+		if got[ports.LabelBaseName] != "gcr.io/distroless/cc-debian12:nonroot" {
+			t.Errorf("base.name = %q, want the baseRef value", got[ports.LabelBaseName])
+		}
+	})
+
+	t.Run("explicit label wins over baseRef", func(t *testing.T) {
+		labels := map[string]string{ports.LabelBaseName: "from-label:latest"}
+		got := imageAnnotations(labels, "from-baseref:latest", nil)
+		if got[ports.LabelBaseName] != "from-label:latest" {
+			t.Errorf("base.name = %q, want the label value", got[ports.LabelBaseName])
+		}
+	})
+
+	t.Run("explicit annotation wins over both", func(t *testing.T) {
+		labels := map[string]string{ports.LabelBaseName: "from-label:latest"}
+		caller := map[string]string{ports.LabelBaseName: "from-annotation:latest"}
+		got := imageAnnotations(labels, "from-baseref:latest", caller)
+		if got[ports.LabelBaseName] != "from-annotation:latest" {
+			t.Errorf("base.name = %q, want the caller annotation value", got[ports.LabelBaseName])
+		}
+	})
+
+	t.Run("empty baseRef leaves base.name unset", func(t *testing.T) {
+		got := imageAnnotations(nil, "", nil)
+		if _, ok := got[ports.LabelBaseName]; ok {
+			t.Errorf("base.name = %q, want unset", got[ports.LabelBaseName])
+		}
+	})
 }

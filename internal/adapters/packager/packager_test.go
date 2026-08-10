@@ -186,62 +186,109 @@ func TestImageConfigLabels(t *testing.T) {
 	}
 }
 
-// TestImageConfigHistory checks that the appended history entry is pinned to the
-// build timestamp and carries no per-run text, and that the base's own history
-// is preserved ahead of it.
+// TestImageConfigHistory checks that the two appended history entries are
+// pinned to the build timestamp, carry no per-run text, are in the order the
+// layers themselves are appended (supervisor, then application), and that the
+// base's own history is preserved ahead of both.
 func TestImageConfigHistory(t *testing.T) {
 	cfg := configOf(t, buildOne(t, nil))
 
-	if len(cfg.History) != 2 {
-		t.Fatalf("history = %+v, want base entry plus one pokkum entry", cfg.History)
+	if len(cfg.History) != 3 {
+		t.Fatalf("history = %+v, want base entry plus two pokkum entries", cfg.History)
 	}
 	if cfg.History[0].CreatedBy != "synthetic base" {
 		t.Errorf("base history entry lost: %+v", cfg.History[0])
 	}
-	got := cfg.History[1]
-	if !got.Created.Time.UTC().Equal(buildEpoch) {
-		t.Errorf("history created = %s, want %s", got.Created.Time, buildEpoch)
+
+	wantCreatedBy := []string{historySupervisorCreatedBy, historyAppCreatedBy}
+	for i, want := range wantCreatedBy {
+		got := cfg.History[i+1]
+		if !got.Created.Time.UTC().Equal(buildEpoch) {
+			t.Errorf("history[%d] created = %s, want %s", i+1, got.Created.Time, buildEpoch)
+		}
+		if got.CreatedBy != want {
+			t.Errorf("history[%d] createdBy = %q, want %q", i+1, got.CreatedBy, want)
+		}
+		if got.EmptyLayer {
+			t.Errorf("history[%d] marked as an empty layer, but it has a layer", i+1)
+		}
 	}
-	if got.CreatedBy != historyCreatedBy {
-		t.Errorf("history createdBy = %q, want %q", got.CreatedBy, historyCreatedBy)
-	}
-	if got.EmptyLayer {
-		t.Error("history entry marked as an empty layer, but it has a layer")
-	}
-	if len(cfg.RootFS.DiffIDs) != 2 {
-		t.Errorf("diffIDs = %v, want base layer plus app layer", cfg.RootFS.DiffIDs)
+	if len(cfg.RootFS.DiffIDs) != 3 {
+		t.Errorf("diffIDs = %v, want base layer plus supervisor layer plus app layer", cfg.RootFS.DiffIDs)
 	}
 }
 
-// TestLayerContents asserts the exact shape of the layer this package adds:
-// four entries, two directories and two files, with every varying header field
-// pinned and no PAX extended records anywhere.
-func TestLayerContents(t *testing.T) {
+// TestPokkumLayersOrderAndContents asserts the exact shape of the two layers
+// this package adds — one for the supervisor, one for the application — their
+// order (supervisor below, application above, i.e. supervisor appended first),
+// and their exact tar contents: one directory and one file each, with every
+// varying header field pinned to mode 0555 and no PAX extended records
+// anywhere. It exists so that a future refactor cannot silently recombine the
+// two layers or swap their order without a test failing.
+func TestPokkumLayersOrderAndContents(t *testing.T) {
 	img := buildOne(t, nil)
 	layers, err := img.Layers()
 	if err != nil {
 		t.Fatalf("layers: %v", err)
 	}
-	if len(layers) != 2 {
-		t.Fatalf("got %d layers, want base layer plus exactly one pokkum layer", len(layers))
+	if len(layers) != 3 {
+		t.Fatalf("got %d layers, want base layer plus exactly two pokkum layers", len(layers))
 	}
-	got := readLayer(t, layers[1])
 
-	want := []tarMember{
-		{Name: "app/", Typeflag: tar.TypeDir, Mode: 0o755, UID: 65532, GID: 65532, ModTime: buildEpoch, Size: 0, Format: tar.FormatUSTAR},
-		{Name: "app/server", Typeflag: tar.TypeReg, Mode: 0o755, UID: 65532, GID: 65532, ModTime: buildEpoch, Size: int64(len(fakeAppBytes)), Format: tar.FormatUSTAR},
-		{Name: "pokkum/", Typeflag: tar.TypeDir, Mode: 0o755, UID: 65532, GID: 65532, ModTime: buildEpoch, Size: 0, Format: tar.FormatUSTAR},
-		{Name: "pokkum/init", Typeflag: tar.TypeReg, Mode: 0o755, UID: 65532, GID: 65532, ModTime: buildEpoch, Size: int64(len(fakeSupervisorBytes)), Format: tar.FormatUSTAR},
+	// layers[0] is the synthetic base's own layer; the two pokkum layers follow
+	// in append order.
+	supervisorLayer, appLayer := layers[1], layers[2]
+
+	supervisorMT, err := supervisorLayer.MediaType()
+	if err != nil {
+		t.Fatalf("supervisor layer media type: %v", err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("layer members:\n got: %+v\nwant: %+v", got, want)
+	appMT, err := appLayer.MediaType()
+	if err != nil {
+		t.Fatalf("app layer media type: %v", err)
+	}
+	if supervisorMT != types.OCILayer {
+		t.Errorf("supervisor layer media type = %s, want %s", supervisorMT, types.OCILayer)
+	}
+	if appMT != types.OCILayer {
+		t.Errorf("app layer media type = %s, want %s", appMT, types.OCILayer)
+	}
+
+	supervisorDigest, err := supervisorLayer.Digest()
+	if err != nil {
+		t.Fatalf("supervisor layer digest: %v", err)
+	}
+	appDigest, err := appLayer.Digest()
+	if err != nil {
+		t.Fatalf("app layer digest: %v", err)
+	}
+	if supervisorDigest == appDigest {
+		t.Errorf("supervisor and app layers share a digest %s; they should be distinct", supervisorDigest)
+	}
+
+	gotSupervisor := readLayer(t, supervisorLayer)
+	wantSupervisor := []tarMember{
+		{Name: "pokkum/", Typeflag: tar.TypeDir, Mode: 0o555, UID: 65532, GID: 65532, ModTime: buildEpoch, Size: 0, Format: tar.FormatUSTAR},
+		{Name: "pokkum/init", Typeflag: tar.TypeReg, Mode: 0o555, UID: 65532, GID: 65532, ModTime: buildEpoch, Size: int64(len(fakeSupervisorBytes)), Format: tar.FormatUSTAR},
+	}
+	if !reflect.DeepEqual(gotSupervisor, wantSupervisor) {
+		t.Errorf("supervisor layer members:\n got: %+v\nwant: %+v", gotSupervisor, wantSupervisor)
+	}
+
+	gotApp := readLayer(t, appLayer)
+	wantApp := []tarMember{
+		{Name: "app/", Typeflag: tar.TypeDir, Mode: 0o555, UID: 65532, GID: 65532, ModTime: buildEpoch, Size: 0, Format: tar.FormatUSTAR},
+		{Name: "app/server", Typeflag: tar.TypeReg, Mode: 0o555, UID: 65532, GID: 65532, ModTime: buildEpoch, Size: int64(len(fakeAppBytes)), Format: tar.FormatUSTAR},
+	}
+	if !reflect.DeepEqual(gotApp, wantApp) {
+		t.Errorf("app layer members:\n got: %+v\nwant: %+v", gotApp, wantApp)
 	}
 
 	// Uname/Gname empty and no extended records are asserted above via
 	// DeepEqual on the zero values, but they are the two fields most likely to
 	// be reintroduced accidentally by someone reaching for
 	// tar.FileInfoHeader, so they get their own message.
-	for _, m := range got {
+	for _, m := range append(gotSupervisor, gotApp...) {
 		if m.Uname != "" || m.Gname != "" {
 			t.Errorf("entry %q carries uname=%q gname=%q; a build-host user database is leaking into the layer", m.Name, m.Uname, m.Gname)
 		}
@@ -262,12 +309,17 @@ func TestLayerModTimeIsTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("layers: %v", err)
 	}
-	for _, m := range readLayer(t, layers[1]) {
-		if !m.ModTime.Equal(buildEpoch) {
-			t.Errorf("entry %q modTime = %s, want %s", m.Name, m.ModTime, buildEpoch)
-		}
-		if m.Format != tar.FormatUSTAR || m.PAXCount != 0 {
-			t.Errorf("entry %q became %v with %d PAX records", m.Name, m.Format, m.PAXCount)
+	if len(layers) != 3 {
+		t.Fatalf("got %d layers, want base layer plus exactly two pokkum layers", len(layers))
+	}
+	for _, l := range layers[1:] {
+		for _, m := range readLayer(t, l) {
+			if !m.ModTime.Equal(buildEpoch) {
+				t.Errorf("entry %q modTime = %s, want %s", m.Name, m.ModTime, buildEpoch)
+			}
+			if m.Format != tar.FormatUSTAR || m.PAXCount != 0 {
+				t.Errorf("entry %q became %v with %d PAX records", m.Name, m.Format, m.PAXCount)
+			}
 		}
 	}
 }
@@ -331,6 +383,37 @@ func TestImageAnnotations(t *testing.T) {
 		if anns[k] != v {
 			t.Errorf("annotation %q = %q, want %q", k, anns[k], v)
 		}
+	}
+}
+
+// TestImageAnnotationsBaseRefIntegration checks PackageRequest.BaseRef reaches
+// the base.name annotation end to end when the caller does not also pass an
+// explicit ports.LabelBaseName label, and that the label wins when both are
+// present.
+func TestImageAnnotationsBaseRefIntegration(t *testing.T) {
+	img := buildOne(t, func(r *ports.PackageRequest) {
+		delete(r.Labels, ports.LabelBaseName)
+		r.BaseRef = "cgr.dev/chainguard/glibc-dynamic:latest"
+	})
+	m, err := img.Manifest()
+	if err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	if got := m.Annotations[ports.LabelBaseName]; got != "cgr.dev/chainguard/glibc-dynamic:latest" {
+		t.Errorf("base.name annotation = %q, want the BaseRef value", got)
+	}
+
+	imgBothSet := buildOne(t, func(r *ports.PackageRequest) {
+		// newRequest already sets Labels[ports.LabelBaseName]; also set BaseRef
+		// to a different value and confirm the label still wins.
+		r.BaseRef = "cgr.dev/chainguard/glibc-dynamic:latest"
+	})
+	mBothSet, err := imgBothSet.Manifest()
+	if err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	if got := mBothSet.Annotations[ports.LabelBaseName]; got != "gcr.io/distroless/cc-debian12:nonroot" {
+		t.Errorf("base.name annotation = %q, want the explicit label to win over BaseRef", got)
 	}
 }
 

@@ -71,13 +71,20 @@ func TestBuildIsReproducibleAcrossPlatforms(t *testing.T) {
 	if fingerprint(t, amd).Manifest == fingerprint(t, arm).Manifest {
 		t.Error("amd64 and arm64 images share a digest; the base image is being ignored")
 	}
-	// The application layer is platform-independent in this fixture, so it must
-	// be shared: that is what makes a multi-arch push cheap when only the base
-	// differs.
+	// Both pokkum-added layers are platform-independent in this fixture, so
+	// both must be shared: that is what makes a multi-arch push cheap when only
+	// the base differs, and it is also the cross-image deduplication property
+	// that motivates keeping the supervisor in its own layer at all.
 	amdLayers := fingerprint(t, amd).LayerDigests
 	armLayers := fingerprint(t, arm).LayerDigests
+	if len(amdLayers) != 3 || len(armLayers) != 3 {
+		t.Fatalf("got %d/%d layers, want base layer plus exactly two pokkum layers", len(amdLayers), len(armLayers))
+	}
 	if amdLayers[len(amdLayers)-1] != armLayers[len(armLayers)-1] {
 		t.Error("application layer digest differs between platforms for identical inputs")
+	}
+	if amdLayers[len(amdLayers)-2] != armLayers[len(armLayers)-2] {
+		t.Error("supervisor layer digest differs between platforms for identical inputs")
 	}
 }
 

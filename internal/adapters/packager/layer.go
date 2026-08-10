@@ -32,20 +32,21 @@ const (
 	nonrootUID = 65532
 	nonrootGID = 65532
 
-	// fileMode is the mode of both binaries: readable and executable by
-	// everyone, writable by the owner. Nothing in the image writes to them, but
-	// a mode that depends on the build host's umask would not be reproducible,
-	// so the value is stated rather than inherited.
-	//
-	// ports.PackageRequest's field docs say 0555. W10 specifies 0755, which is
-	// what is implemented; the difference is the owner write bit on a file
-	// owned by a user the container does not run as by default, so it changes
-	// nothing at runtime. Noted so the divergence is deliberate and greppable.
-	fileMode = 0o755
+	// fileMode is the mode of both binaries: readable and executable, with no
+	// write bit at all, matching ports.PackageRequest's App and Supervisor field
+	// docs (0555). Nothing in the image writes to them — they are owned by
+	// nonrootUID/nonrootGID but the container does not run as that user by
+	// default (see ports.DefaultUser) — and dropping the write bit also suits
+	// readOnlyRootFilesystem, which is on the project roadmap. A mode that
+	// depended on the build host's umask would not be reproducible, so the
+	// value is stated rather than inherited.
+	fileMode = 0o555
 
-	// dirMode is the mode of the explicit directory entries. Directories need
-	// the execute bit to be traversable.
-	dirMode = 0o755
+	// dirMode is the mode of the explicit directory entries: the same 0555 as
+	// fileMode. Directories need the execute bit to be traversable but nothing
+	// ever writes into /app or /pokkum after the layer is built, so there is no
+	// more reason for a write bit here than there is on the files inside them.
+	dirMode = 0o555
 
 	// tarFormat is set on every header explicitly rather than left as
 	// FormatUnknown. With FormatUnknown, archive/tar picks a format per entry
@@ -81,28 +82,12 @@ type tarEntry struct {
 	open     func() (io.ReadCloser, error)
 }
 
-// buildAppLayer produces the single deterministic layer Pokkum adds to the base
-// image: the supervisor and the compiled application, nothing else.
+// buildAppLayer produces the deterministic layer Pokkum adds for the compiled
+// application: a single file at ports.AppBinaryPath, nothing else.
 //
-// # Why the opener does not capture ctx
-//
-// tarball.LayerFromOpener calls the opener at least three times before it
-// returns — once to sniff whether the stream is already compressed, once to
-// compute the compressed digest, once to compute the diffID — and
-// go-containerregistry calls it again later, from whatever goroutine and
-// whatever context is pushing or writing the image. Binding the opener to the
-// build's context would therefore make a perfectly good layer unreadable the
-// moment the build context was cancelled, which for a caller that builds and
-// then pushes is a use-after-free in slow motion. ctx is instead honoured at
-// the step boundaries in Build, and only checked here up front.
-//
-// # Why the tar is streamed rather than buffered
-//
-// The application binary is around 90 MB. Buffering the finished tar in memory
-// so that the opener could hand out a bytes.Reader would cost that much
-// resident memory per platform for the whole build. Regenerating the tar from
-// the same source file on each call costs nothing but a re-read, and produces
-// identical bytes because every field in every header is pinned.
+// It is kept in its own layer, below nothing (see buildSupervisorLayer and the
+// package doc's "Two layers, ordered by volatility" section), because it is
+// the layer that changes on every build.
 func buildAppLayer(ctx context.Context, req ports.PackageRequest, modTime time.Time) (v1.Layer, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("packager: build %s: %w", req.Platform, err)
@@ -121,22 +106,67 @@ func buildAppLayer(ctx context.Context, req ports.PackageRequest, modTime time.T
 			req.Platform, req.App.Path, core.ErrPackageFailed)
 	}
 
-	files := []layerFile{
-		{
-			path: ports.AppBinaryPath,
-			size: info.Size(),
-			open: fileOpener(req.App.Path),
-		},
-		{
-			path: ports.SupervisorPath,
-			size: int64(len(req.Supervisor)),
-			open: bytesOpener(req.Supervisor),
-		},
+	file := layerFile{
+		path: ports.AppBinaryPath,
+		size: info.Size(),
+		open: fileOpener(req.App.Path),
+	}
+	return buildLayer(ctx, req.Platform, file, modTime)
+}
+
+// buildSupervisorLayer produces the deterministic layer Pokkum adds for
+// pokkum-init: a single file at ports.SupervisorPath, nothing else.
+//
+// It is a separate layer from buildAppLayer's, and appended below it, because
+// it changes only when pokkum itself is upgraded while the application layer
+// changes on every build — see the package doc's "Two layers, ordered by
+// volatility" section for the full rationale.
+func buildSupervisorLayer(ctx context.Context, req ports.PackageRequest, modTime time.Time) (v1.Layer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("packager: build %s: %w", req.Platform, err)
 	}
 
-	entries, err := tarEntries(files)
+	file := layerFile{
+		path: ports.SupervisorPath,
+		size: int64(len(req.Supervisor)),
+		open: bytesOpener(req.Supervisor),
+	}
+	return buildLayer(ctx, req.Platform, file, modTime)
+}
+
+// buildLayer wraps a single file (plus its parent directory entries) into one
+// deterministic OCI layer. It is shared by buildAppLayer and
+// buildSupervisorLayer so the tar-header pinning and streaming behaviour below
+// is written, and reasoned about, once.
+//
+// # Why the opener does not capture ctx
+//
+// tarball.LayerFromOpener calls the opener at least three times before it
+// returns — once to sniff whether the stream is already compressed, once to
+// compute the compressed digest, once to compute the diffID — and
+// go-containerregistry calls it again later, from whatever goroutine and
+// whatever context is pushing or writing the image. Binding the opener to the
+// build's context would therefore make a perfectly good layer unreadable the
+// moment the build context was cancelled, which for a caller that builds and
+// then pushes is a use-after-free in slow motion. ctx is instead honoured at
+// the step boundaries in Build, and only checked here up front.
+//
+// # Why the tar is streamed rather than buffered
+//
+// The application binary is around 90 MB. Buffering the finished tar in memory
+// so that the opener could hand out a bytes.Reader would cost that much
+// resident memory per platform for the whole build. Regenerating the tar from
+// the same source file (or the same in-memory buffer, for the supervisor) on
+// each call costs nothing but a re-read, and produces identical bytes because
+// every field in every header is pinned.
+func buildLayer(ctx context.Context, platform ports.Platform, file layerFile, modTime time.Time) (v1.Layer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
+	}
+
+	entries, err := tarEntries([]layerFile{file})
 	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: %w: %w", req.Platform, err, core.ErrPackageFailed)
+		return nil, fmt.Errorf("packager: build %s: %w: %w", platform, err, core.ErrPackageFailed)
 	}
 
 	layer, err := tarball.LayerFromOpener(
@@ -144,8 +174,8 @@ func buildAppLayer(ctx context.Context, req ports.PackageRequest, modTime time.T
 		tarball.WithMediaType(types.OCILayer),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: build application layer: %w: %w",
-			req.Platform, err, core.ErrPackageFailed)
+		return nil, fmt.Errorf("packager: build %s: build layer: %w: %w",
+			platform, err, core.ErrPackageFailed)
 	}
 	return layer, nil
 }

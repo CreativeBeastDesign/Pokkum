@@ -186,6 +186,24 @@ type PackageRequest struct {
 	// layers to it and must not mutate it.
 	Base v1.Image
 
+	// BaseRef is the human-readable reference the base image was resolved from
+	// (for example "gcr.io/distroless/cc-debian12:nonroot"), used to populate
+	// the org.opencontainers.image.base.name annotation. Optional.
+	//
+	// org.opencontainers.image.base.digest is always derived from Base.Digest()
+	// regardless of this field, because the digest of the object the layers were
+	// actually appended to cannot be wrong the way a caller-supplied string can.
+	// base.name has no such authoritative source — a v1.Image does not know the
+	// reference it was pulled from — so the caller states it here.
+	//
+	// If the caller also sets ports.LabelBaseName explicitly in Labels, the
+	// label wins over this field: an explicit label is a deliberate override,
+	// while BaseRef is just the packager's best-effort default, consistent with
+	// every other overlay in this port (RuntimeConfig.Env, PackageRequest.Labels,
+	// PackageRequest.Annotations) where the more specific, explicit value always
+	// wins over the derived one.
+	BaseRef string
+
 	// App is the compiled application binary for Platform. Required. It becomes
 	// a single-file layer at AppBinaryPath with mode 0555.
 	App Artifact

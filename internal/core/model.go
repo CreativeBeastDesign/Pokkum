@@ -4,7 +4,8 @@
 //
 // core imports internal/ports and the standard library, plus
 // github.com/google/go-containerregistry/pkg/v1 for the OCI value types that
-// are genuinely part of this tool's domain. It must never import an adapter.
+// are genuinely part of this tool's domain and golang.org/x/sync/errgroup for
+// the platform fan-out in pipeline.go. It must never import an adapter.
 //
 // # Where types live
 //
