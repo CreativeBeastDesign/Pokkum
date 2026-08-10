@@ -48,33 +48,19 @@ func main() {
 
 	sup := New(cfg, log)
 
-	// ---------------------------------------------------------------------
-	// Seam for W8, the probe server.
+	// The probe server (W8) is started here, before Run blocks, and stopped
+	// after Run returns. It depends on ProcessState, not *Supervisor, and
+	// takes its ports from sup rather than re-reading cfg so it can never
+	// disagree with the configuration the supervisor itself resolved. See the
+	// seam documented on the State and ProcessState types in supervisor.go,
+	// and TestStateSeamForProbeServer in supervisor_test.go, which pins the
+	// contract probe.go builds against.
 	//
-	// Start it here, before Run blocks, and stop it after Run returns:
-	//
-	//	srv := probe.New(sup, cfg.ProbePort, log)   // takes a ProcessState
-	//	go srv.Serve(ctx)
-	//	defer srv.Shutdown()
-	//
-	// Everything the probe server needs is already resolved and reachable
-	// without touching this package's internals:
-	//
-	//   - sup.State() returns an immutable State snapshot, lock-free and safe
-	//     from the HTTP handler goroutines. /healthz answers from Running;
-	//     /readyz answers from Running && !ShuttingDown, so a pod leaves the
-	//     load balancer the instant SIGTERM lands rather than when the child
-	//     finally closes its listener.
-	//   - sup.ProbePort() is the resolved listen port and sup.AppPort() is
-	//     where the application was told to bind, for a readiness check that
-	//     wants to dial the app rather than trust that it is alive.
-	//   - The ProcessState interface in supervisor.go is what the probe server
-	//     should depend on, so its handlers can be tested against a State
-	//     literal with no processes involved.
-	//
-	// The probe server must not exit the process or wait on the child; the
-	// supervise loop owns both. Nothing below this comment needs to change.
-	// ---------------------------------------------------------------------
+	// A probe server that fails to bind its port logs and returns rather than
+	// exiting the process; it must never be able to take the application down.
+	probeSrv := NewProbeServer(sup, sup.ProbePort(), sup.AppPort(), log)
+	go probeSrv.Serve(context.Background())
+	defer probeSrv.Shutdown()
 
 	// context.Background, not signal.NotifyContext: signals are the
 	// supervisor's subject matter, not its plumbing, and they are handled
