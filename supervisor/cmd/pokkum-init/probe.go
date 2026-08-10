@@ -161,7 +161,7 @@ func (p *ProbeServer) Shutdown() {
 //
 // This mirrors the seam contract documented on State in supervisor.go: a
 // liveness handler answers from Started && Running.
-func (p *ProbeServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
+func (p *ProbeServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	st := p.state.State()
 	if !st.Started || !st.Running {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -175,7 +175,7 @@ func (p *ProbeServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // every request rather than folded into the cached ready flag so that a pod
 // leaves the load balancer the instant a termination signal lands, without
 // waiting for the next dial tick.
-func (p *ProbeServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
+func (p *ProbeServer) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	st := p.state.State()
 	if st.ShuttingDown || !st.Running || !p.ready.Load() {
 		w.WriteHeader(http.StatusServiceUnavailable)

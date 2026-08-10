@@ -68,7 +68,8 @@ func helperMain(mode string) int {
 		ch := make(chan os.Signal, 8)
 		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT)
 		go func() {
-			for range ch {
+			for sig := range ch {
+				_ = sig
 			}
 		}()
 		ready()
