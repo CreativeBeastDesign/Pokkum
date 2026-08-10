@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.26.5'
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v4
+        # Note: digest pinning of actions is a v1.0 roadmap item
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.26.5'
+          cache: true
+      - uses: oven-sh/setup-bun@v1
+        # Note: digest pinning of actions is a v1.0 roadmap item
+      - name: Build supervisor binaries
+        run: make supervisor
+      - name: Run tests
+        run: make test
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git describe
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.26.5'
+          cache: true
+      - uses: oven-sh/setup-bun@v1
+        # Note: digest pinning of actions is a v1.0 roadmap item
+      - name: Build pokkum CLI
+        run: make build
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pokkum
+          path: ./pokkum

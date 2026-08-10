@@ -1,0 +1,41 @@
+# golangci-lint configuration for Pokkum
+# Assumes golangci-lint >= 1.64.0
+# See https://golangci-lint.run/usage/configuration/
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck      # Check for unchecked errors
+    - govet         # Vet examines Go source code and reports suspicious constructs
+    - staticcheck   # State of the art static analysis
+    - ineffassign   # Detects when assignments to existing variables are not used
+    - unused        # Checks Go code for unused constants, variables, functions and types
+    - misspell      # Finds commonly misspelled English words
+    - revive        # Fast, configurable, extensible, flexible, and beautiful linter for Go
+    - gosec         # Inspects source code for security problems
+
+issues:
+  exclude-dirs:
+    - testdata
+  # Exclude gosec G204 (CWE-78: Improper Neutralization of Special Elements used in an OS Command)
+  # for packages that legitimately shell out to bun and kubectl
+  exclude-rules:
+    # Allow subprocess execution in the Bun compiler adapter
+    - path: internal/adapters/bunexec/.*
+      linters:
+        - gosec
+      text: G204
+
+    # Allow subprocess execution in packages that need to invoke external tools
+    - path: internal/adapters/(supervisor|packager)/.*
+      linters:
+        - gosec
+      text: G204
+
+    # Exclude test files from some linters
+    - path: _test\.go$
+      linters:
+        - gosec
+        - staticcheck

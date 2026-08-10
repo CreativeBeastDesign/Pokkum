@@ -1,5 +1,6 @@
 # Go
 /pokkum
+/pokkum-init
 *.test
 *.out
 /dist/
