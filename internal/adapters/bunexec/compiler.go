@@ -231,7 +231,12 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
-	cmd.Stdout = os.Stdout
+	// Bun and vite progress chatter is diagnostic output, not data, so it goes
+	// to stderr. Sending it to os.Stdout would interleave it with the one thing
+	// stdout is reserved for — the resulting image reference — and would corrupt
+	// `pokkum resolve -f k8s/ | kubectl apply -f -`, where stdout carries the
+	// rewritten manifests.
+	cmd.Stdout = os.Stderr
 
 	log.Debug("bunexec: exec", "argv", cmd.Args, "dir", cmd.Dir)
 	runErr := cmd.Run()
@@ -308,7 +313,12 @@ func (c *Compiler) Compile(ctx context.Context, req ports.CompileRequest) (ports
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
-	cmd.Stdout = os.Stdout
+	// Bun and vite progress chatter is diagnostic output, not data, so it goes
+	// to stderr. Sending it to os.Stdout would interleave it with the one thing
+	// stdout is reserved for — the resulting image reference — and would corrupt
+	// `pokkum resolve -f k8s/ | kubectl apply -f -`, where stdout carries the
+	// rewritten manifests.
+	cmd.Stdout = os.Stderr
 
 	log.Debug("bunexec: exec", "argv", cmd.Args, "dir", cmd.Dir)
 	log.Info("bunexec: compiling", "platform", req.Platform, "target", target, "output", req.OutputPath)

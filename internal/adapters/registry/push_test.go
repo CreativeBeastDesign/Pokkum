@@ -218,7 +218,7 @@ func TestDigestExists_NotFound(t *testing.T) {
 }
 
 func TestDigestExists_Unauthorized(t *testing.T) {
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	t.Cleanup(s.Close)
@@ -237,7 +237,7 @@ func TestDigestExists_Unauthorized(t *testing.T) {
 }
 
 func TestDigestExists_Forbidden(t *testing.T) {
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 	}))
 	t.Cleanup(s.Close)

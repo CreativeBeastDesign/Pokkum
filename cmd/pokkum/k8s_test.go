@@ -1,0 +1,237 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/CreativeBeastDesign/pokkum/internal/core"
+	"github.com/CreativeBeastDesign/pokkum/internal/ports"
+)
+
+// discardLogger returns a logger that writes nowhere, for tests that only
+// care about return values.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1}))
+}
+
+func TestCollectManifestFiles_DirectoryNonRecursive(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.yaml"), "a: 1")
+	writeFile(t, filepath.Join(dir, "b.yml"), "b: 1")
+	writeFile(t, filepath.Join(dir, "notes.txt"), "ignore me")
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "sub", "c.yaml"), "c: 1")
+
+	files, err := collectManifestFiles(dir, false)
+	if err != nil {
+		t.Fatalf("collectManifestFiles: %v", err)
+	}
+
+	want := []string{filepath.Join(dir, "a.yaml"), filepath.Join(dir, "b.yml")}
+	assertStringSliceEqual(t, files, want)
+}
+
+func TestCollectManifestFiles_DirectoryRecursive(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.yaml"), "a: 1")
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "sub", "c.yaml"), "c: 1")
+	writeFile(t, filepath.Join(dir, "sub", "readme.md"), "ignore me")
+
+	files, err := collectManifestFiles(dir, true)
+	if err != nil {
+		t.Fatalf("collectManifestFiles: %v", err)
+	}
+
+	want := []string{filepath.Join(dir, "a.yaml"), filepath.Join(dir, "sub", "c.yaml")}
+	assertStringSliceEqual(t, files, want)
+}
+
+func TestCollectManifestFiles_SingleFile(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "only.yaml")
+	writeFile(t, f, "a: 1")
+
+	files, err := collectManifestFiles(f, false)
+	if err != nil {
+		t.Fatalf("collectManifestFiles: %v", err)
+	}
+	assertStringSliceEqual(t, files, []string{f})
+}
+
+func TestLoadDocuments_MissingPathFails(t *testing.T) {
+	_, err := loadDocuments(filepath.Join(t.TempDir(), "does-not-exist.yaml"), false)
+	if !errors.Is(err, core.ErrInvalidRequest) {
+		t.Errorf("expected ErrInvalidRequest for missing path, got %v", err)
+	}
+}
+
+func TestLoadDocuments_EmptyDirectoryFails(t *testing.T) {
+	_, err := loadDocuments(t.TempDir(), false)
+	if !errors.Is(err, core.ErrInvalidRequest) {
+		t.Errorf("expected ErrInvalidRequest for a directory with no manifests, got %v", err)
+	}
+}
+
+func TestLoadDocuments_Stdin(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	origStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = origStdin }()
+
+	const content = "apiVersion: v1\nkind: Pod\n"
+	go func() {
+		_, _ = w.WriteString(content)
+		_ = w.Close()
+	}()
+
+	docs, err := loadDocuments("-", false)
+	if err != nil {
+		t.Fatalf("loadDocuments: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected 1 document from stdin, got %d", len(docs))
+	}
+	if docs[0].Name != "-" {
+		t.Errorf("expected document name %q, got %q", "-", docs[0].Name)
+	}
+	if string(docs[0].Content) != content {
+		t.Errorf("expected content %q, got %q", content, string(docs[0].Content))
+	}
+}
+
+func TestIsYAMLFile(t *testing.T) {
+	cases := map[string]bool{
+		"a.yaml":  true,
+		"a.yml":   true,
+		"A.YAML":  true,
+		"a.txt":   false,
+		"a.yaml~": false,
+		"yaml":    false,
+	}
+	for name, want := range cases {
+		if got := isYAMLFile(name); got != want {
+			t.Errorf("isYAMLFile(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestJoinDocuments(t *testing.T) {
+	docs := []documentFixture{
+		{name: "a.yaml", content: "a: 1\n"},
+		{name: "b.yaml", content: "b: 1\n"},
+	}
+	got := string(joinDocuments(toPortsDocuments(docs)))
+	want := "a: 1\n---\nb: 1\n"
+	if got != want {
+		t.Errorf("joinDocuments: got %q, want %q", got, want)
+	}
+
+	single := toPortsDocuments(docs[:1])
+	if got := string(joinDocuments(single)); got != "a: 1\n" {
+		t.Errorf("joinDocuments single doc: got %q, want %q", got, "a: 1\n")
+	}
+}
+
+func TestDeriveRepo(t *testing.T) {
+	const repo = "ghcr.io/acme/app"
+	cases := []struct {
+		path string
+		want string
+	}{
+		{".", repo},
+		{"./", repo},
+		{"./src/app", repo + "/src-app"},
+		{"src/app", repo + "/src-app"},
+		{"./Frontend", repo + "/frontend"},
+	}
+	for _, tc := range cases {
+		if got := deriveRepo(repo, tc.path); got != tc.want {
+			t.Errorf("deriveRepo(%q, %q) = %q, want %q", repo, tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestManifestBaseDir_File(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "deploy.yaml")
+	writeFile(t, f, "a: 1")
+
+	got, err := manifestBaseDir(f)
+	if err != nil {
+		t.Fatalf("manifestBaseDir: %v", err)
+	}
+	if got != dir {
+		t.Errorf("manifestBaseDir(%q) = %q, want %q", f, got, dir)
+	}
+}
+
+func TestManifestBaseDir_Directory(t *testing.T) {
+	dir := t.TempDir()
+	got, err := manifestBaseDir(dir)
+	if err != nil {
+		t.Fatalf("manifestBaseDir: %v", err)
+	}
+	if got != dir {
+		t.Errorf("manifestBaseDir(%q) = %q, want %q", dir, got, dir)
+	}
+}
+
+func TestResolveManifests_MissingDockerRepoFailsFast(t *testing.T) {
+	t.Setenv("POKKUM_DOCKER_REPO", "")
+
+	// A path that does not exist: if resolveManifests reads it before
+	// checking POKKUM_DOCKER_REPO, this test would instead observe a
+	// file-not-found error, which is the behaviour being guarded against.
+	missing := filepath.Join(t.TempDir(), "does-not-exist.yaml")
+
+	_, err := resolveManifests(context.Background(), discardLogger(), missing, false, true)
+	if !errors.Is(err, core.ErrNoDockerRepo) {
+		t.Fatalf("expected ErrNoDockerRepo before any file is touched, got %v", err)
+	}
+}
+
+// --- test helpers ---
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func assertStringSliceEqual(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("length mismatch: got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("index %d: got %q, want %q (full: got=%v want=%v)", i, got[i], want[i], got, want)
+		}
+	}
+}
+
+type documentFixture struct {
+	name    string
+	content string
+}
+
+func toPortsDocuments(fixtures []documentFixture) []ports.Document {
+	docs := make([]ports.Document, len(fixtures))
+	for i, f := range fixtures {
+		docs[i] = ports.Document{Name: f.name, Content: []byte(f.content)}
+	}
+	return docs
+}

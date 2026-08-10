@@ -34,7 +34,7 @@ func New(logger *slog.Logger) *Provider {
 // Binary returns the complete contents of the pokkum-init executable for the
 // given platform. It returns a defensive copy so that the caller may mutate
 // the returned slice without affecting subsequent calls.
-func (p *Provider) Binary(ctx context.Context, plat ports.Platform) ([]byte, error) {
+func (p *Provider) Binary(_ context.Context, plat ports.Platform) ([]byte, error) {
 	// Validate that the platform is supported
 	if !plat.Supported() {
 		return nil, fmt.Errorf("supervisor: unsupported platform %q: %w", plat, core.ErrUnsupportedPlatform)
@@ -67,7 +67,7 @@ func (p *Provider) Binary(ctx context.Context, plat ports.Platform) ([]byte, err
 // Version returns the SHA256 digest of the embedded amd64 binary as the
 // supervisor version. This provides a reproducible version string that changes
 // exactly when the binary contents change.
-func (p *Provider) Version(ctx context.Context) (string, error) {
+func (p *Provider) Version(_ context.Context) (string, error) {
 	data, err := binaries.ReadFile("bin/pokkum-init-linux-amd64")
 	if err != nil {
 		// Version is optional; return empty string as documented

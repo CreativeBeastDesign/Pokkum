@@ -109,10 +109,6 @@ func (o BuildOptions) validate() error {
 	return nil
 }
 
-// stopsBeforePublish reports whether the pipeline returns before handing the
-// payload to a publishing port.
-func (o BuildOptions) stopsBeforePublish() bool { return o.DryRun || o.PrintManifest }
-
 func (d Deps) logger() *slog.Logger {
 	if d.Logger == nil {
 		return slog.Default()

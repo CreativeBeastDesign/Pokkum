@@ -1,0 +1,275 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
+	"os"
+	pathpkg "path"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/k8s"
+	"github.com/CreativeBeastDesign/pokkum/internal/core"
+	"github.com/CreativeBeastDesign/pokkum/internal/ports"
+)
+
+// securityContextEnabled merges the --security-context default and the
+// --no-security-context override into the single boolean the resolver
+// wants. --no-security-context always wins, mirroring --hardened's
+// precedence over --base in the build command.
+func securityContextEnabled(securityContext, noSecurityContext bool) bool {
+	return securityContext && !noSecurityContext
+}
+
+// resolveManifests is the shared engine behind `pokkum resolve` and
+// `pokkum apply`: it loads the manifests named by file, resolves every
+// pokkum:// reference by building and pushing the referenced project, and
+// returns the rewritten YAML stream ready to write to stdout or pipe into
+// `kubectl apply -f -`. All progress is logged to logger (stderr); the
+// returned bytes are the only thing that belongs on stdout.
+func resolveManifests(ctx context.Context, logger *slog.Logger, file string, recursive, securityContext bool) ([]byte, error) {
+	// Both commands push, exactly like `pokkum build`, so they need the same
+	// destination repository — and since resolving means building, failing
+	// fast here (before reading any file or touching the network) mirrors
+	// build's own contract around POKKUM_DOCKER_REPO.
+	dockerRepo := strings.TrimSpace(os.Getenv("POKKUM_DOCKER_REPO"))
+	if dockerRepo == "" {
+		return nil, fmt.Errorf("POKKUM_DOCKER_REPO must be set: resolving pokkum:// references builds and pushes images: %w", core.ErrNoDockerRepo)
+	}
+
+	docs, err := loadDocuments(file, recursive)
+	if err != nil {
+		return nil, err
+	}
+
+	baseDir, err := manifestBaseDir(file)
+	if err != nil {
+		return nil, err
+	}
+
+	resolver := k8s.NewResolver()
+	res, err := resolver.Resolve(ctx, ports.ResolveRequest{
+		Documents:        docs,
+		Build:            newImageBuilder(logger, baseDir, dockerRepo),
+		Strict:           true,
+		SecurityDefaults: securityContext,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Info("manifests resolved", "documents", len(res.Documents), "references", len(res.References))
+	for _, ref := range res.References {
+		logger.Info("resolved image reference", "document", ref.Document, "path", ref.Path, "resolved", ref.Resolved)
+	}
+
+	return joinDocuments(res.Documents), nil
+}
+
+// newImageBuilder returns the ports.ImageBuilder that turns a pokkum://<path>
+// reference into a built, pushed, digest-pinned image.
+//
+// The port's Build signature is func(ctx, path) (string, error) — it carries
+// no document identity, because the resolver deduplicates purely by path
+// string across every document in one Resolve call (see the ImageBuilder and
+// ResolveRequest.Build doc comments in internal/ports/k8s.go). That means a
+// single Resolve call can only have one base directory for relative paths,
+// not one per manifest file. We take that base directory to be the -f
+// argument itself: the file's own directory for a single file, or the
+// directory passed to -f when it names a directory (recursive or not) — so
+// `pokkum resolve -f manifests/ --recursive` resolves every pokkum://./x
+// path against manifests/, regardless of which nested file it was found in.
+// This is the natural generalisation of "relative to the manifest" once a
+// single invocation can span more than one manifest file, and it matches
+// ko's single-module-root convention for ko://.
+func newImageBuilder(logger *slog.Logger, baseDir, dockerRepo string) ports.ImageBuilder {
+	return func(ctx context.Context, path string) (string, error) {
+		projectDir := filepath.Join(baseDir, path)
+		repo := deriveRepo(dockerRepo, path)
+		logger.Info("building pokkum:// reference", "path", path, "projectDir", projectDir, "repo", repo)
+
+		req, err := buildRequestForPath(projectDir, repo, logger)
+		if err != nil {
+			return "", fmt.Errorf("pokkum://%s: %w", path, err)
+		}
+
+		// Stdout is nil (discarded): the build's own "repo@sha256:…" line
+		// must not land on the same stream as the rewritten manifest.
+		res, err := core.Build(ctx, buildDeps(logger, nil), req, core.BuildOptions{})
+		if err != nil {
+			return "", fmt.Errorf("build pokkum://%s: %w", path, err)
+		}
+		return res.Image.Ref, nil
+	}
+}
+
+// deriveRepo derives a per-project destination repository from the
+// configured POKKUM_DOCKER_REPO and the pokkum:// path being built.
+//
+// A single manifest set may reference several distinct projects (e.g.
+// pokkum://./frontend and pokkum://./backend); pushing every one of them
+// under the exact same repository name would still be valid — registries
+// distinguish images by digest, not name — but it makes `docker inspect` and
+// registry browsing indistinguishable between unrelated projects. Instead
+// each distinct path gets its own sub-repository, named after its cleaned,
+// slash-to-hyphen path (e.g. "./frontend" -> "<repo>/frontend",
+// "./services/api" -> "<repo>/services-api"). The root reference
+// (pokkum://. or pokkum://./ ) uses the repo as-is, unchanged, since there is
+// nothing to disambiguate. This naming is not specified by the ports
+// contract; it is this command's own policy, documented here so it can be
+// revisited.
+func deriveRepo(dockerRepo, path string) string {
+	clean := pathpkg.Clean(filepath.ToSlash(path))
+	clean = strings.TrimPrefix(clean, "/")
+
+	segs := strings.Split(clean, "/")
+	kept := make([]string, 0, len(segs))
+	for _, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			continue
+		}
+		kept = append(kept, strings.ToLower(s))
+	}
+	if len(kept) == 0 {
+		return dockerRepo
+	}
+	return strings.TrimSuffix(dockerRepo, "/") + "/" + strings.Join(kept, "-")
+}
+
+// manifestBaseDir determines the directory that pokkum:// paths in the
+// resolved manifests are resolved against. See newImageBuilder for why this
+// is a single directory per invocation rather than per document.
+func manifestBaseDir(file string) (string, error) {
+	if file == "-" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("determine working directory for stdin input: %w: %w", err, core.ErrInvalidRequest)
+		}
+		return wd, nil
+	}
+
+	info, err := os.Stat(file)
+	if err != nil {
+		return "", fmt.Errorf("stat %s: %w: %w", file, err, core.ErrInvalidRequest)
+	}
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s to an absolute path: %w: %w", file, err, core.ErrInvalidRequest)
+	}
+	if info.IsDir() {
+		return abs, nil
+	}
+	return filepath.Dir(abs), nil
+}
+
+// loadDocuments reads the manifests named by file into ports.Document values,
+// entirely in the command layer per the k8s adapter's design: file and
+// directory walking never happens inside the resolver. "-" reads a single
+// document from stdin. A plain file is read as-is. A directory is expanded to
+// its *.yaml/*.yml files, non-recursively unless recursive is set.
+func loadDocuments(file string, recursive bool) ([]ports.Document, error) {
+	if file == "-" {
+		content, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return nil, fmt.Errorf("read stdin: %w: %w", err, core.ErrInvalidRequest)
+		}
+		return []ports.Document{{Name: "-", Content: content}}, nil
+	}
+
+	files, err := collectManifestFiles(file, recursive)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no *.yaml/*.yml manifests found in %s: %w", file, core.ErrInvalidRequest)
+	}
+
+	docs := make([]ports.Document, 0, len(files))
+	for _, f := range files {
+		content, err := os.ReadFile(f)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w: %w", f, err, core.ErrInvalidRequest)
+		}
+		docs = append(docs, ports.Document{Name: f, Content: content})
+	}
+	return docs, nil
+}
+
+// collectManifestFiles resolves file to the list of manifest paths it names:
+// itself, if it is a regular file, or its *.yaml/*.yml children if it is a
+// directory (recursing into subdirectories only when recursive is true).
+// Results are sorted for deterministic output.
+func collectManifestFiles(file string, recursive bool) ([]string, error) {
+	info, err := os.Stat(file)
+	if err != nil {
+		return nil, fmt.Errorf("stat %s: %w: %w", file, err, core.ErrInvalidRequest)
+	}
+	if !info.IsDir() {
+		return []string{file}, nil
+	}
+
+	var files []string
+	if recursive {
+		err = filepath.WalkDir(file, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if isYAMLFile(d.Name()) {
+				files = append(files, p)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("walk %s: %w: %w", file, err, core.ErrInvalidRequest)
+		}
+	} else {
+		entries, err := os.ReadDir(file)
+		if err != nil {
+			return nil, fmt.Errorf("read directory %s: %w: %w", file, err, core.ErrInvalidRequest)
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			if isYAMLFile(e.Name()) {
+				files = append(files, filepath.Join(file, e.Name()))
+			}
+		}
+	}
+
+	sort.Strings(files)
+	return files, nil
+}
+
+// isYAMLFile reports whether name has a .yaml or .yml extension, matched
+// case-insensitively.
+func isYAMLFile(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".yaml", ".yml":
+		return true
+	default:
+		return false
+	}
+}
+
+// joinDocuments concatenates rewritten documents into a single YAML stream
+// suitable for stdout or `kubectl apply -f -`, separating multiple documents
+// with "---" the way a multi-document manifest file would.
+func joinDocuments(docs []ports.Document) []byte {
+	var buf bytes.Buffer
+	for i, d := range docs {
+		if i > 0 {
+			buf.WriteString("---\n")
+		}
+		buf.Write(d.Content)
+	}
+	return buf.Bytes()
+}

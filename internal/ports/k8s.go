@@ -85,6 +85,26 @@ type ResolveRequest struct {
 	// rejects a manifest whose image value merely looks like a scheme typo
 	// ("pokkum:/", "pokkum:"). Defaults to false.
 	Strict bool
+
+	// SecurityDefaults, when true, injects hardened securityContext defaults
+	// into every Pod spec and container that a pokkum:// reference was
+	// resolved in:
+	//
+	//   - pod-level: securityContext.runAsNonRoot: true,
+	//     securityContext.seccompProfile.type: RuntimeDefault
+	//   - container-level (pokkum-built containers only):
+	//     securityContext.allowPrivilegeEscalation: false,
+	//     securityContext.capabilities.drop: [ALL]
+	//
+	// A field the manifest already sets — at any nesting level, including a
+	// sibling field under an existing securityContext — is never overwritten;
+	// only fields that are entirely absent are filled in. Container-level
+	// defaults apply only to the container whose image was a pokkum:// ref,
+	// never to sidecars the resolver knows nothing about; pod-level defaults
+	// necessarily apply to the whole Pod spec, since Kubernetes has no
+	// per-container pod securityContext. Defaults to false; the command layer
+	// is expected to default this to true and expose the opt-out.
+	SecurityDefaults bool
 }
 
 // ResolveResult carries the rewritten manifests.

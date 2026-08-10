@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
@@ -44,7 +45,7 @@ and multiple output modes (push to registry, load into Docker daemon, or export 
 
 The project directory defaults to the current working directory.`,
 		Args: cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			return runBuild(ctx, logger, flags, args)
 		},
 	}
@@ -169,7 +170,7 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 
 	// The result carries the full summary, but the reference has already gone
 	// to stdout by the time Build returns; everything here is a log line.
-	res, err := core.Build(ctx, buildDeps(logger), req, opts)
+	res, err := core.Build(ctx, buildDeps(logger, os.Stdout), req, opts)
 	if err != nil {
 		return err
 	}
@@ -192,7 +193,14 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 // the supervisor provider does not touch its embedded binaries until asked —
 // so there is nothing to gain from building them lazily per output mode, and
 // something to lose in a branch that could get the mapping wrong.
-func buildDeps(logger *slog.Logger) core.Deps {
+//
+// stdout is threaded through explicitly rather than hard-coded to os.Stdout:
+// `pokkum build` wants the published reference on the real stdout, but
+// resolve/apply reserve stdout for the rewritten manifest (piped into
+// `kubectl apply -f -`) and must not let a nested build's own "repo@sha256:…"
+// line leak onto it. Passing nil is deliberate there — Deps.Stdout documents
+// nil as io.Discard.
+func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 	reg := registry.NewAdapter(logger)
 	return core.Deps{
 		Compiler:   bunexec.NewCompiler(logger),
@@ -210,8 +218,41 @@ func buildDeps(logger *slog.Logger) core.Deps {
 		SBOM: sbom.NewGenerator(logger),
 
 		Logger:    logger,
-		Stdout:    os.Stdout,
+		Stdout:    stdout,
 		Version:   version,
 		UserAgent: "pokkum/" + version,
 	}
+}
+
+// buildRequestForPath constructs a push-mode BuildRequest for a SvelteKit
+// project referenced by a pokkum:// manifest entry. Unlike runBuild, it has
+// no CLI flags to layer on top — resolve and apply expose no per-project
+// build flags, only --security-context — so every optional field is left at
+// its documented Normalize default: multi-platform, distroless base,
+// SPDX-JSON SBOM. The only inputs that vary per reference are the project
+// directory (resolved from the pokkum:// path against the manifest's base
+// directory) and the destination repository (derived from
+// POKKUM_DOCKER_REPO; see deriveRepo in k8s.go).
+func buildRequestForPath(projectDir, repo string, logger *slog.Logger) (core.BuildRequest, error) {
+	cfg, err := config.New(projectDir, logger)
+	if err != nil {
+		return core.BuildRequest{}, fmt.Errorf("config loader for %s: %w", projectDir, err)
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: projectDir,
+		Repo:       repo,
+	}
+
+	timestamp, err := cfg.ResolveBuildTimestamp()
+	if err != nil {
+		return core.BuildRequest{}, fmt.Errorf("source date epoch for %s: %w", projectDir, err)
+	}
+	req.SourceDateEpoch = timestamp
+
+	req.Normalize()
+	if err := req.Validate(); err != nil {
+		return core.BuildRequest{}, fmt.Errorf("validation failed for %s: %w", projectDir, err)
+	}
+	return req, nil
 }
