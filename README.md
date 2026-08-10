@@ -155,7 +155,37 @@ spec:
 5. **SBOM generation**: Generate a Software Bill of Materials (SPDX JSON or CycloneDX) from the base image and app dependencies.
 6. **Push or export**: Write to registry, Docker daemon (`--local`), or tarball (`--tarball`).
 
-All layer timestamps and hashes are derived from the last git commit (`SOURCE_DATE_EPOCH`), ensuring reproducible builds: the same source tree produces the same digest.
+All layer timestamps and hashes are derived from the last git commit (`SOURCE_DATE_EPOCH`), so the same source tree produces the same digest.
+
+### Reproducibility requires one line in your `svelte.config.js`
+
+SvelteKit's `kit.version.name` **defaults to `Date.now()`**. That value is written to `client/_app/version.json`, which the exe adapter embeds into the compiled binary — so with the default, every build produces a different binary and a different image digest, whatever Pokkum does. Pin it:
+
+```javascript
+export default {
+  kit: {
+    adapter: adapter({ /* ... */ }),
+    version: {
+      name: process.env.SOURCE_DATE_EPOCH ?? 'dev'
+    }
+  }
+};
+```
+
+Pokkum exports `SOURCE_DATE_EPOCH` into the build environment for exactly this purpose. Without this, builds are **not** reproducible, and nothing will warn you — the images simply differ.
+
+Verify with:
+
+```bash
+pokkum build ./my-app --tarball /tmp/a.tar && pokkum build ./my-app --tarball /tmp/b.tar
+```
+
+Both runs must print the same `@sha256:` digest.
+
+### Known limits
+
+- **Two sources of variance are handled for you.** Bun embeds the `--outfile` basename in the executable (Pokkum keeps it stable), and `@jesterkit/exe-sveltekit` emits `assets.generated.ts` in filesystem order (Pokkum sorts it between the SvelteKit build and the compile). The latter is a workaround for an upstream bug; if the adapter changes that file's format, Pokkum fails loudly rather than silently skipping the fix.
+- **Go version affects digests.** Layer diffIDs and image configs are stable, but compressed layer digests depend on `compress/flate` at `gzip.BestSpeed`, which Go does not guarantee across releases. A Go upgrade can legitimately change the final digest for identical content.
 
 ## Architecture Support
 
