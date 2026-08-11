@@ -7,11 +7,15 @@
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
 - **Shared Utility Package Naming (`utils`)**:
-  - Non-adapter utility packages residing under `internal/adapters/` (such as `internal/adapters/lockfileutils`, `internal/adapters/sveltekitutils`, `internal/adapters/ignoreutils`, `internal/adapters/jsonutils`, and `internal/adapters/diagnosticsutils`) must be appended with `utils` to distinguish them from concrete port adapters.
+  - Non-adapter utility packages residing under `internal/adapters/` (such as `internal/adapters/lockfileutils`, `internal/adapters/sveltekitutils`, `internal/adapters/ignoreutils`, `internal/adapters/jsonutils`, `internal/adapters/diagnosticsutils`, and `internal/adapters/layerdiffutils`) must be appended with `utils` to distinguish them from concrete port adapters.
   - Reusable utility packages should declare `const IsUtilityPackage = true` as an explicit package marker.
 - **Structured JSON Schema Standard (`--output=json`)**:
   - Global `--output=text|json` flag standardizes CLI stdout into versioned `ports.JSONEnvelope` payloads (`schema_version: "1.0"`).
-  - Diagnostic, inspection, and wizard subcommands (`pokkum doctor`, `pokkum init`, `pokkum explain`, `pokkum why`, `pokkum diff`, `pokkum metrics`) emit structured JSON natively when `--output=json` is provided.
+  - Diagnostic, inspection, and verification subcommands (`pokkum doctor`, `pokkum init`, `pokkum explain`, `pokkum why`, `pokkum diff`, `pokkum metrics`, `pokkum verify`, `pokkum repro doctor`) emit structured JSON natively when `--output=json` is provided.
+- **Rebuild Verification & Diagnosis (`v0.5`)**:
+  - `pokkum verify` performs SLSA attestation checks (`--no-rebuild`) and bit-for-bit rebuild verification (`--rebuild`) using `PinnedBuildInputs` in clean temporary git worktrees (`git worktree add`).
+  - Rebuild verdicts evaluate L1 (exact OCI index match), L2 (uncompressed `diffIDs` match), and L3 (file-level `layerdiffutils` mismatch report).
+  - Exit codes: 0 = verified (L1/L2), 1 = mismatch (L3 report), 2 = cannot verify (untrusted/missing toolchain).
 - **Base Image Lockfile (`pokkum.lock`)**:
   - `pokkum.lock` stores pinned SHA256 digests of base images (`distroless`, `chainguard`).
   - Base image resolver reads `pokkum.lock` by default; updates are forced via `--update-base` or `pokkum base update`. Offline builds are enforced via `--offline`.

@@ -233,10 +233,10 @@ checklist entry, which now cross-references this table inline.
 
 | Roadmap item | Proposed flag(s) | Notes |
 |---|---|---|
-| M0: Provenance completeness | *(none)* | Recorded automatically in the SLSA statement; no CLI surface. |
-| M1/M2: Stage recorder, bisection, attestation-check | `pokkum verify --no-rebuild` | Already named inline in `Roadmap.md`; per `pokkum-verify-concept.md` M1. |
-| M3: `layerdiff`, L3 explanation, `repro doctor` | `pokkum repro doctor [dir]`, `--fast` | Per `pokkum-repro-doctor-concept.md` §"Phase 0" / its own M3; static checks only, no build. |
-| M4: `pokkum verify --rebuild`, `--perturb`, CI ergonomics | `--perturb`, `--against <path>`, `--expect-source <repo>@<ref>`, `--all-platforms` | `--perturb` already named inline. `--against` and `--all-platforms` are `repro doctor`'s own M4 flags (comparison mode, cross-platform paranoia); `--expect-source` is `verify`'s CI-ergonomics flag — both concept docs' "M4" collapse into this one Roadmap milestone. |
+| M0: Provenance completeness | *(none)* | **Implemented**. Recorded automatically in the SLSA statement. |
+| M1/M2: Stage recorder, bisection, attestation-check | `pokkum verify --no-rebuild` | **Implemented**. Attestation summary, signature check, toolchain prediction. |
+| M3: `layerdiff`, L3 explanation, `repro doctor` | `pokkum repro doctor [dir]`, `--fast` | **Implemented**. Static reproducibility checks and non-determinism bisection. |
+| M4: `pokkum verify --rebuild`, `--perturb`, CI ergonomics | `--perturb`, `--against <path>`, `--expect-source <repo>@<ref>` | **Implemented**. Full rebuild comparison engine (L1 exact, L2 diffIDs, L3 layerdiff report). |
 
 ### v1.0: MVP Launch
 

@@ -45,6 +45,8 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `init.go`: Implements `pokkum init [dir]` subcommand to bootstrap project configuration and `.pokkumignore`.
    - `explain.go`: Implements `pokkum explain`, `pokkum why`, and `pokkum diff` subcommands for layer composition breakdown, file origin tracing, and image diffing.
    - `metrics.go`: Implements `pokkum metrics` subcommand to manage and monitor the OpenTelemetry metrics collector endpoint.
+   - `verify.go`: Implements `pokkum verify <ref>` subcommand for rebuild verification and SLSA provenance attestation validation (`--no-rebuild`, `--expect-source`, `--against`).
+   - `repro_doctor.go`: Implements `pokkum repro doctor [dir]` for stage-level non-determinism bisection (`--fast`, `--perturb`).
    - `base.go`: Implements `pokkum base update` and `pokkum base check` subcommands to query remote base image digests and manage `pokkum.lock`.
    - `resolve.go`: Scans Kubernetes YAML manifests for `pokkum://` image URIs, triggers automated builds, and resolves them to immutable image digests (`repo@sha256:...`).
    - `apply.go`: Resolves `pokkum://` manifests and pipes the output directly into `kubectl apply -f -`.
@@ -52,12 +54,12 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `version.go`: Displays git version, commit, and build timestamp metadata.
 
 2. **Domain Core (`internal/core/`)**:
-   - `pipeline.go`: Orchestrates the execution flow across compilers, base image resolvers, packagers, and registries.
+   - `pipeline.go`: Orchestrates the execution flow across compilers, base image resolvers, packagers, and registries, supporting `PinnedBuildInputs` override parameters.
    - `model.go`: Defines domain models (`BuildRequest`, `Platform`, `RuntimeConfig`, `ImageRef`, `BunRuntimeOptions`, etc.).
    - `errors.go`: Defines standardized domain error types (`ErrPackageFailed`, `ErrUnsupportedPlatform`, `ErrBunResolutionFailed`, etc.).
 
 3. **Abstraction Ports (`internal/ports/`)**:
-   - Interfaces decoupling core logic from external adapters: `Compiler`, `Packager`, `Registry`, `BaseImageResolver`, `BunRuntimeResolver`, `SBOMGenerator`, `SupervisorProvider`, `K8sResolver`, `Signer`, `Attestor`, `BinaryInspector`, and structured output envelopes (`JSONEnvelope`, `OutputFormat`).
+   - Interfaces decoupling core logic from external adapters: `Compiler`, `Packager`, `Registry`, `BaseImageResolver`, `BunRuntimeResolver`, `SBOMGenerator`, `SupervisorProvider`, `K8sResolver`, `Signer`, `Attestor`, `BinaryInspector`, `ProvenanceResolver`, `ImageComparator`, and structured output envelopes (`JSONEnvelope`, `OutputFormat`).
 
 4. **Adapter Implementations (`internal/adapters/`)**:
    - `bunexec`: Wraps host `bun build --compile` for cross-compiling single executables.
@@ -67,6 +69,9 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `lockfileutils`: Utility package for loading, parsing, and saving `pokkum.lock` base image lockfiles.
    - `jsonutils`: Utility package for structured, versioned JSON response formatting (`--output=json`).
    - `diagnosticsutils`: Utility package for container exit failure analysis and log tracing.
+   - `layerdiffutils`: Utility package for entry-by-entry tar merge-walking and header/content diff heuristics.
+   - `provenance`: Adapter resolving remote SLSA provenance statements and Cosign attestations.
+   - `comparator`: Adapter performing L1/L2/L3 multi-level image digest and file diff comparisons.
    - `registry`: Handles OCI registry authentication, blob uploads, and index pushes.
    - `sbom`: Generates SPDX or CycloneDX SBOMs using `github.com/anchore/syft`.
    - `supervisor`: Embedded supervisor binary assets (`/pokkum/init`).
@@ -261,6 +266,18 @@ Pokkum provides a machine-readable developer experience tailored for CI/CD autom
 * **Project Initializer (`pokkum init`)**: Bootstraps workspace configuration and `.pokkumignore` defaults.
 * **Layer Composition & Origin Tracing (`pokkum explain`, `pokkum why`, `pokkum diff`)**: Inspects container layer hierarchies, traces file origins to specific build outputs, and computes size diffs between images.
 * **Interactive Container Failure Diagnostics (`internal/adapters/diagnosticsutils`)**: Automatically analyzes container crash exit codes (127 loader failures, 137 OOMKilled, port conflicts) and provides actionable remediation suggestions.
+
+---
+
+## 10. Rebuild Verification & Non-Determinism Diagnosis (`v0.5`)
+
+Pokkum provides bit-for-bit rebuild verification and stage-level non-determinism bisection:
+
+* **Attestation & Provenance Validation (`pokkum verify --no-rebuild`)**: Validates SLSA v1.0 attestations and Cosign signatures via `internal/adapters/provenance`, inspecting `PinnedBuildInputs` to predict toolchain compatibility.
+* **Shared `layerdiff` Tar Engine (`internal/adapters/layerdiffutils`)**: Performs entry-by-entry merge-walking over uncompressed layer tarballs, diffing headers (mtime, mode, size) and SHA256 content hashes to report root cause heuristics (timestamp drift, host path embedding, unsorted maps).
+* **Pipeline Stage Bisection (`pokkum repro doctor`)**: Runs static non-determinism checks (`--fast`) and dual pipeline builds in perturbed environments (`--perturb`) to pinpoint non-deterministic build steps.
+* **Multi-Level Rebuild Verification (`pokkum verify --rebuild`)**: Rebuilds the image from source in a clean temporary git worktree (`git worktree add`), compares remote vs local tarball across L1 (exact OCI index match), L2 (uncompressed `diffIDs` match), and L3 (file-level `layerdiff` report).
+
 
 
 

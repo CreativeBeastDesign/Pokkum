@@ -121,6 +121,8 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 	rootCmd.AddCommand(newInitCommand(ctx, logger))
 	rootCmd.AddCommand(newExplainCommand(ctx, logger))
 	rootCmd.AddCommand(newMetricsCommand(ctx, logger))
+	rootCmd.AddCommand(newVerifyCommand(ctx, logger))
+	rootCmd.AddCommand(newReproDoctorCommand(ctx, logger))
 	rootCmd.AddCommand(newVersionCommand(ctx, logger))
 
 	return rootCmd
