@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -471,3 +472,62 @@ func TestEffectiveRef(t *testing.T) {
 		})
 	}
 }
+
+func TestResolve_LockfileResolutionAndSave(t *testing.T) {
+	s, _ := newTestRegistry(t)
+	ref := pushIndex(t, s, "app/locktest:v1", []ports.Platform{ports.LinuxAMD64})
+
+	tmpDir := t.TempDir()
+	lockPath := strings.Replace(ref, "/", "_", -1) + ".lock"
+	lockPath = strings.Replace(lockPath, ":", "_", -1)
+	lockPath = strings.Replace(lockPath, ".", "_", -1)
+	lockPath = filepath.Join(tmpDir, lockPath)
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+	req := ports.BaseImageRequest{
+		Preset:       ports.BaseImageCustom,
+		Ref:          ref,
+		Platforms:    []ports.Platform{ports.LinuxAMD64},
+		LockfilePath: lockPath,
+	}
+
+	res, err := r.Resolve(ctx, req)
+	if err != nil {
+		t.Fatalf("first Resolve with lockfile: %v", err)
+	}
+
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		t.Fatalf("expected lockfile to be saved at %s", lockPath)
+	}
+
+	// Resolve again using lockfile
+	res2, err := r.Resolve(ctx, req)
+	if err != nil {
+		t.Fatalf("second Resolve using lockfile: %v", err)
+	}
+
+	if res2.Digest != res.Digest {
+		t.Errorf("expected digest %s, got %s", res.Digest, res2.Digest)
+	}
+}
+
+func TestResolve_OfflineMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "empty.lock")
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+	req := ports.BaseImageRequest{
+		Preset:       ports.BaseImageDistroless,
+		Platforms:    []ports.Platform{ports.LinuxAMD64},
+		LockfilePath: lockPath,
+		Offline:      true,
+	}
+
+	_, err := r.Resolve(ctx, req)
+	if !errors.Is(err, core.ErrInvalidBaseImage) {
+		t.Fatalf("offline mode without lock entry: expected core.ErrInvalidBaseImage, got %v", err)
+	}
+}
+

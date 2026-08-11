@@ -82,18 +82,35 @@ func (g *Generator) Generate(ctx context.Context, req ports.SLSAGeneratorRequest
 	} else {
 		deps = append(deps, lockfileDeps...)
 	}
+	for lockName, lockHash := range req.LockfileHashes {
+		deps = append(deps, ports.ResourceDescriptor{
+			Name:   lockName,
+			URI:    "file://" + lockName,
+			Digest: map[string]string{"sha256": lockHash},
+		})
+	}
 
 	// 2d. Toolchain dependencies
 	if req.Toolchain.BunVersion != "" {
-		deps = append(deps, ports.ResourceDescriptor{
+		bunDep := ports.ResourceDescriptor{
 			Name: "bun",
 			URI:  "pkg:generic/bun@" + req.Toolchain.BunVersion,
-		})
+		}
+		if req.Toolchain.BunBinaryHash != "" {
+			bunDep.Digest = map[string]string{"sha256": req.Toolchain.BunBinaryHash}
+		}
+		deps = append(deps, bunDep)
 	}
 	if req.Toolchain.SupervisorVersion != "" {
 		deps = append(deps, ports.ResourceDescriptor{
 			Name: "pokkum-init",
 			URI:  "pkg:generic/pokkum-init@" + req.Toolchain.SupervisorVersion,
+		})
+	}
+	if req.Toolchain.GoVersion != "" {
+		deps = append(deps, ports.ResourceDescriptor{
+			Name: "go",
+			URI:  "pkg:generic/go@" + req.Toolchain.GoVersion,
 		})
 	}
 
@@ -119,6 +136,12 @@ func (g *Generator) Generate(ctx context.Context, req ports.SLSAGeneratorRequest
 	}
 	if req.Toolchain.PokkumVersion != "" {
 		intParams["pokkumVersion"] = req.Toolchain.PokkumVersion
+	}
+	if req.Toolchain.PokkumCommit != "" {
+		intParams["pokkumCommit"] = req.Toolchain.PokkumCommit
+	}
+	if req.Toolchain.BuilderOSArch != "" {
+		intParams["builderOSArch"] = req.Toolchain.BuilderOSArch
 	}
 
 	// 5. Construct Statement

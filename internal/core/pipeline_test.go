@@ -209,19 +209,70 @@ func (m *mockSBOMGenerator) Generate(ctx context.Context, req ports.SBOMRequest)
 	}, nil
 }
 
+// Mock implementation of ports.NativeInspector
+type mockNativeInspector struct {
+	inspectFn func(ctx context.Context, projectDir string, platform core.Platform) (ports.NativeInspectionResult, error)
+}
+
+func (m *mockNativeInspector) Inspect(ctx context.Context, projectDir string, platform core.Platform) (ports.NativeInspectionResult, error) {
+	if m.inspectFn != nil {
+		return m.inspectFn(ctx, projectDir, platform)
+	}
+	return ports.NativeInspectionResult{}, nil
+}
+
+// Mock implementation of signing ports
+type mockSLSAGenerator struct{}
+
+func (m *mockSLSAGenerator) Generate(ctx context.Context, req ports.SLSAGeneratorRequest) (ports.SLSAStatement, error) {
+	return ports.SLSAStatement{}, nil
+}
+
+type mockCosignSigner struct{}
+
+func (m *mockCosignSigner) CreatePayload(req ports.CosignSignRequest) ([]byte, error) {
+	return []byte{}, nil
+}
+
+func (m *mockCosignSigner) Sign(ctx context.Context, req ports.CosignSignRequest) (ports.CosignSignatureBundle, error) {
+	return ports.CosignSignatureBundle{}, nil
+}
+
+func (m *mockCosignSigner) Verify(ctx context.Context, bundle ports.CosignSignatureBundle, pubKeyPEM []byte, expectedRepo string, expectedDigest v1.Hash) error {
+	return nil
+}
+
+type mockDSSESigner struct{}
+
+func (m *mockDSSESigner) CreatePAE(payloadType string, payload []byte) []byte {
+	return []byte{}
+}
+
+func (m *mockDSSESigner) Sign(ctx context.Context, req ports.DSSESignRequest) (ports.DSSEEnvelope, error) {
+	return ports.DSSEEnvelope{}, nil
+}
+
+func (m *mockDSSESigner) Verify(ctx context.Context, envelope ports.DSSEEnvelope, pubKeyPEM []byte) ([]byte, error) {
+	return []byte{}, nil
+}
+
 func newFullDeps(stdout io.Writer) core.Deps {
 	return core.Deps{
-		Compiler:   &mockCompiler{},
-		BaseImages: &mockBaseImageResolver{},
-		Supervisor: &mockSupervisorProvider{},
-		Packager:   &mockPackager{},
-		Registry:   &mockRegistry{},
-		Daemon:     &mockLocalLoader{},
-		Tarballs:   &mockTarballWriter{},
-		SBOM:       &mockSBOMGenerator{},
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Stdout:     stdout,
-		Version:    "v0.1.0-test",
+		Compiler:        &mockCompiler{},
+		BaseImages:      &mockBaseImageResolver{},
+		Supervisor:      &mockSupervisorProvider{},
+		Packager:        &mockPackager{},
+		Registry:        &mockRegistry{},
+		Daemon:          &mockLocalLoader{},
+		Tarballs:        &mockTarballWriter{},
+		SBOM:            &mockSBOMGenerator{},
+		NativeInspector: &mockNativeInspector{},
+		SLSAGenerator:   &mockSLSAGenerator{},
+		CosignSigner:    &mockCosignSigner{},
+		DSSESigner:      &mockDSSESigner{},
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Stdout:          stdout,
+		Version:         "v0.1.0-test",
 	}
 }
 

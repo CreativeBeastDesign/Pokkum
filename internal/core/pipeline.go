@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -59,6 +60,22 @@ type Deps struct {
 	// SBOM generates the bill of materials. Required when the request's SBOM
 	// format is enabled and the build is not a dry run.
 	SBOM ports.SBOMGenerator
+
+	// NativeInspector checks for unsupported native modules or dynamic imports.
+	// Always required.
+	NativeInspector ports.NativeInspector
+
+	// SLSAGenerator produces in-toto SLSA provenance statements.
+	// Required when signing is enabled and the build is not a dry run.
+	SLSAGenerator ports.SLSAGenerator
+
+	// CosignSigner signs image digests and produces Simple Signing payloads.
+	// Required when signing is enabled and the build is not a dry run.
+	CosignSigner ports.CosignSigner
+
+	// DSSESigner wraps and signs payloads in DSSE envelopes.
+	// Required when signing is enabled and the build is not a dry run.
+	DSSESigner ports.DSSESigner
 
 	// Logger receives every progress and diagnostic line. Nil means
 	// slog.Default(). Everything the pipeline logs is a log line, never
@@ -140,6 +157,9 @@ func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 	if d.Supervisor == nil {
 		return missing("supervisor provider")
 	}
+	if d.NativeInspector == nil {
+		return missing("native inspector")
+	}
 	if opts.DryRun {
 		return nil
 	}
@@ -148,6 +168,17 @@ func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 	}
 	if req.SBOM.Format.Enabled() && d.SBOM == nil {
 		return missing("sbom generator")
+	}
+	if req.Sign {
+		if d.SLSAGenerator == nil {
+			return missing("slsa generator")
+		}
+		if d.CosignSigner == nil {
+			return missing("cosign signer")
+		}
+		if d.DSSESigner == nil {
+			return missing("dsse signer")
+		}
 	}
 	if opts.PrintManifest {
 		return nil
@@ -236,6 +267,12 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 	log.Info("preflight ok", "bun", pf.BunVersion, "bunPath", pf.BunPath, "adapter", pf.AdapterVersion, "sveltekit", pf.SvelteKitVersion)
 
+	// Preflight Native Inspection
+	if _, err := deps.NativeInspector.Inspect(ctx, req.ProjectDir, req.Platforms[0]); err != nil {
+		return BuildResult{}, err
+	}
+	log.Info("native inspector ok")
+
 	toolchain := Toolchain{
 		PokkumVersion:    deps.Version,
 		BunVersion:       pf.BunVersion,
@@ -259,10 +296,13 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	// is deliberately outside the per-platform fan-out — which is also what
 	// makes it reachable from --dry-run.
 	base, err := deps.BaseImages.Resolve(ctx, ports.BaseImageRequest{
-		Preset:    req.BaseImage.Preset,
-		Ref:       req.BaseImage.Ref,
-		Platforms: req.Platforms,
-		Insecure:  req.Insecure,
+		Preset:       req.BaseImage.Preset,
+		Ref:          req.BaseImage.Ref,
+		Platforms:    req.Platforms,
+		Insecure:     req.Insecure,
+		LockfilePath: filepath.Join(req.ProjectDir, ports.PokkumLockfileName),
+		UpdateBase:   req.BaseImage.UpdateBase,
+		Offline:      req.BaseImage.Offline,
 	})
 	if err != nil {
 		return BuildResult{}, err
@@ -319,6 +359,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		SourceDateEpoch: req.SourceDateEpoch,
 		Env:             req.Compile.Env,
 		Platforms:       slices.Clone(req.Platforms),
+		NoInject:        req.Compile.NoInject,
 	})
 	if err != nil {
 		return BuildResult{}, err
@@ -432,6 +473,40 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		log.Info("sbom attached", "ref", att.Ref, "format", doc.Format, "packages", doc.PackageCount)
 	} else if doc != nil {
 		log.Info("sbom generated but not attached", "mode", req.Output.Mode, "noAttach", req.SBOM.NoAttach)
+	}
+
+	if req.Sign && req.Output.Mode == OutputPush {
+		if err := checkCtx(ctx, "signing"); err != nil {
+			return result, err
+		}
+		log.Info("generating SLSA provenance attestation", "ref", pub.Ref)
+		slsaStmt, serr := deps.SLSAGenerator.Generate(ctx, ports.SLSAGeneratorRequest{
+			ProjectDir:      req.ProjectDir,
+			Repo:            req.Repo,
+			Tags:            req.Tags,
+			Platforms:       req.Platforms,
+			OutputMode:      req.Output.Mode.String(),
+			BaseImage: ports.SLSABaseImage{
+				Preset:    req.BaseImage.Preset,
+				Ref:       base.Ref,
+				PinnedRef: base.PinnedRef,
+				Digest:    base.Digest,
+			},
+			OutputDigest: pub.Digest,
+			Toolchain: ports.SLSAToolchain{
+				PokkumVersion:     deps.Version,
+				GoVersion:         runtime.Version(),
+				BuilderOSArch:     runtime.GOOS + "/" + runtime.GOARCH,
+				BunVersion:        toolchain.BunVersion,
+				SupervisorVersion: toolchain.SupervisorVersion,
+			},
+			SourceDateEpoch: req.SourceDateEpoch,
+		})
+		if serr != nil {
+			log.Warn("failed to generate SLSA provenance statement", "err", serr)
+		} else {
+			log.Info("generated SLSA provenance statement", "subject", slsaStmt.Subject[0].Name)
+		}
 	}
 
 	result.Duration = time.Since(started)

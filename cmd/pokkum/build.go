@@ -12,9 +12,13 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/baseimage"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunexec"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/dsse"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sbom"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/slsa"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 )
@@ -31,6 +35,8 @@ type buildFlags struct {
 	printManifest bool
 	logLevel      string
 	logFormat     string
+	updateBase    bool
+	offline       bool
 
 	// Telemetry flags
 	telemetry       bool
@@ -40,6 +46,14 @@ type buildFlags struct {
 	traceSampleRate float64
 	metricsOnly     bool
 	withOtelSidecar bool
+
+	// Signing flags
+	sign   bool
+	noSign bool
+
+	// Injection flags
+	inject   bool
+	noInject bool
 }
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -97,6 +111,23 @@ The project directory defaults to the current working directory.`,
 	cmd.Flags().BoolVar(&flags.withOtelSidecar, "with-otel-sidecar", false,
 		"Inject OTEL Collector sidecar spec into Kubernetes manifests")
 
+	// Signing flags
+	cmd.Flags().BoolVar(&flags.sign, "sign", true,
+		"Enable SLSA, Cosign, and DSSE signing (default true)")
+	cmd.Flags().BoolVar(&flags.noSign, "no-sign", false,
+		"Explicitly disable signing")
+
+	cmd.Flags().BoolVar(&flags.updateBase, "update-base", false,
+		"Force re-resolving base image tags against remote registry and update pokkum.lock")
+	cmd.Flags().BoolVar(&flags.offline, "offline", false,
+		"Strictly enforce using pokkum.lock and local cache without remote registry calls")
+
+	// Injection flags
+	cmd.Flags().BoolVar(&flags.inject, "inject", true,
+		"Enable zero-config auto-injection for svelte.config.js (default true)")
+	cmd.Flags().BoolVar(&flags.noInject, "no-inject", false,
+		"Explicitly disable auto-injection")
+
 	return cmd
 }
 
@@ -134,7 +165,7 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	}
 	req.Platforms = platforms
 
-	// Base image: handle --hardened shorthand and --base
+	// Base image options
 	basePreset := flags.base
 	if flags.hardened {
 		basePreset = "chainguard"
@@ -146,6 +177,8 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		}
 		req.BaseImage.Preset = parsed
 	}
+	req.BaseImage.UpdateBase = flags.updateBase
+	req.BaseImage.Offline = flags.offline
 
 	// SBOM format
 	sbomFmt, err := core.ParseSBOMFormat(flags.sbom)
@@ -167,6 +200,12 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		req.Output.Mode = core.OutputPush
 	}
 
+	// Compile options
+	// Default to no-sourcemap and minification enabled (NoMinify=false).
+	req.Compile = core.CompileOptions{
+		NoInject: flags.noInject || !flags.inject,
+	}
+
 	// Telemetry options
 	req.Telemetry = core.TelemetryOptions{
 		Enabled:         flags.telemetry && !flags.noTelemetry,
@@ -177,6 +216,9 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		Environment:     flags.telemetryEnv,
 		WithSidecar:     flags.withOtelSidecar,
 	}
+
+	// Signing options
+	req.Sign = flags.sign && !flags.noSign
 
 	// Execution-mode switches. They are not part of the request — both
 	// describe how far to get, not what to build — so they travel alongside it
@@ -244,14 +286,15 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		Supervisor: supervisor.New(logger),
 		Packager:   packager.NewPackager(logger),
 
-		// One adapter satisfies all three publishing ports: pushing, loading
-		// into the daemon and writing a tarball are the same
-		// go-containerregistry machinery pointed at different sinks.
 		Registry: reg,
 		Daemon:   reg,
 		Tarballs: reg,
 
-		SBOM: sbom.NewGenerator(logger),
+		SBOM:            sbom.NewGenerator(logger),
+		NativeInspector: nativeinspect.NewStrictAdapter(),
+		SLSAGenerator:   slsa.NewGenerator(logger),
+		CosignSigner:    cosign.NewSigner(logger),
+		DSSESigner:      dsse.NewSigner(logger),
 
 		Logger:    logger,
 		Stdout:    stdout,

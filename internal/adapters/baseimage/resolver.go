@@ -49,8 +49,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -58,6 +60,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -140,6 +143,33 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		return nil, err
 	}
 
+	// Handle pokkum.lock lookup
+	var (
+		lf         *ports.PokkumLockfile
+		lockedFound bool
+		lockKey     = string(req.Preset)
+	)
+
+	if req.LockfilePath != "" {
+		loaded, lerr := lockfileutils.LoadLockfile(req.LockfilePath)
+		if lerr == nil {
+			lf = loaded
+			if entry, ok := lockfileutils.GetLockedBase(lf, lockKey); ok && !req.UpdateBase {
+				lockedFound = true
+				if entry.PinnedRef != "" {
+					ref = entry.PinnedRef
+				}
+				r.logger().Info("using locked base image from lockfile", "lockfile", req.LockfilePath, "key", lockKey, "ref", ref)
+			}
+		} else if !os.IsNotExist(lerr) {
+			r.logger().Warn("failed to load base image lockfile", "path", req.LockfilePath, "err", lerr)
+		}
+	}
+
+	if req.Offline && !lockedFound {
+		return nil, fmt.Errorf("baseimage: offline mode enabled but base %q is not locked in %s: %w", req.Preset, req.LockfilePath, core.ErrInvalidBaseImage)
+	}
+
 	if reason, bad := staticBaseReason(ref); bad {
 		return nil, fmt.Errorf("baseimage: %s: %s: %w", ref, reason, core.ErrBaseImageIncompatible)
 	}
@@ -178,6 +208,33 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		r.logger().Warn("base image reference is a tag; build reproducibility relies on PinnedRef being recorded",
 			"ref", ref, "pinned_ref", out.PinnedRef)
 	}
+
+	// Update pokkum.lock if requested or if lockfile path specified and base was unpinned/newly resolved
+	if req.LockfilePath != "" && (!lockedFound || req.UpdateBase) {
+		if lf == nil {
+			lf = &ports.PokkumLockfile{
+				Version:   lockfileutils.LockfileSchemaVersion,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+				Bases:     make(map[string]ports.BaseLockEntry),
+			}
+		}
+		origRef, _ := req.Preset.DefaultRef()
+		if req.Ref != "" {
+			origRef = req.Ref
+		}
+		lockfileutils.SetLockedBase(lf, lockKey, ports.BaseLockEntry{
+			Ref:       origRef,
+			Digest:    pull.digest.String(),
+			PinnedRef: out.PinnedRef,
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		})
+		if serr := lockfileutils.SaveLockfile(req.LockfilePath, lf); serr != nil {
+			r.logger().Warn("failed to save updated base image lockfile", "path", req.LockfilePath, "err", serr)
+		} else {
+			r.logger().Info("updated base image lockfile", "path", req.LockfilePath, "preset", req.Preset, "pinned_ref", out.PinnedRef)
+		}
+	}
+
 	r.logger().Info("resolved base image",
 		"ref", ref, "pinned_ref", out.PinnedRef, "digest", pull.digest.String(),
 		"is_index", pull.isIndex, "platforms", platformList(req.Platforms))

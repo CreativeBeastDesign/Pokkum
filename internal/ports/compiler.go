@@ -286,6 +286,9 @@ type PrepareRequest struct {
 
 	// Telemetry contains options for OpenTelemetry auto-instrumentation injection.
 	Telemetry TelemetryOptions
+
+	// NoInject suppresses the zero-config auto-injection for svelte.config.js.
+	NoInject bool
 }
 
 // TelemetryOptions configures OpenTelemetry auto-instrumentation and metrics collection.

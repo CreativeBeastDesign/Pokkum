@@ -11,8 +11,9 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
-// Known lockfile filenames in order of preference for Bun / JS projects.
+// Known lockfile filenames in order of preference for Bun / JS / Pokkum projects.
 var lockfileNames = []string{
+	"pokkum.lock",
 	"bun.lock",
 	"bun.lockb",
 	"package-lock.json",

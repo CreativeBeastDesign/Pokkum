@@ -250,6 +250,12 @@ type BaseImageOptions struct {
 	// BaseImageCustom. Pinning it to a digest ("…@sha256:…") is what makes a
 	// build reproducible across time as well as across machines.
 	Ref string
+
+	// UpdateBase forces re-resolving base image tags against remote registry and updating pokkum.lock.
+	UpdateBase bool
+
+	// Offline strictly enforces using pokkum.lock and local cache without remote registry calls.
+	Offline bool
 }
 
 // SBOMOptions controls bill-of-materials generation and attachment.
@@ -301,6 +307,9 @@ type CompileOptions struct {
 	// inherit only. SOURCE_DATE_EPOCH is set by the adapter from the request's
 	// timestamp and must not be set here.
 	Env []string
+
+	// NoInject suppresses the zero-config auto-injection for svelte.config.js.
+	NoInject bool
 }
 
 // BuildRequest is the complete description of one `pokkum build`. It is
@@ -368,6 +377,9 @@ type BuildRequest struct {
 
 	// Telemetry controls OpenTelemetry auto-instrumentation injection.
 	Telemetry TelemetryOptions
+
+	// Sign enables SLSA, Cosign, and DSSE signing.
+	Sign bool
 
 	// Labels are merged into the image config labels, overriding Pokkum's own.
 	// Nil means none.

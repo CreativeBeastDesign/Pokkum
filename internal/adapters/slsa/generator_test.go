@@ -57,7 +57,11 @@ func TestSLSAGenerator_Generate(t *testing.T) {
 		},
 		Toolchain: ports.SLSAToolchain{
 			PokkumVersion:     "0.1.1",
+			PokkumCommit:      "c0mm1t123",
+			GoVersion:         "1.24.0",
+			BuilderOSArch:     "darwin/arm64",
 			BunVersion:        "1.3.14",
+			BunBinaryHash:     "3333333333333333333333333333333333333333333333333333333333333333",
 			SupervisorVersion: "0.1.0",
 		},
 	}
@@ -99,16 +103,23 @@ func TestSLSAGenerator_Generate(t *testing.T) {
 	if bd.InternalParameters["sourceDateEpoch"] != int64(1700000000) {
 		t.Errorf("InternalParameters[sourceDateEpoch] = %v, want 1700000000", bd.InternalParameters["sourceDateEpoch"])
 	}
+	if bd.InternalParameters["builderOSArch"] != "darwin/arm64" {
+		t.Errorf("InternalParameters[builderOSArch] = %v, want darwin/arm64", bd.InternalParameters["builderOSArch"])
+	}
+	if bd.InternalParameters["pokkumCommit"] != "c0mm1t123" {
+		t.Errorf("InternalParameters[pokkumCommit] = %v, want c0mm1t123", bd.InternalParameters["pokkumCommit"])
+	}
 
 	// 4. Check ResolvedDependencies
-	if len(bd.ResolvedDependencies) < 4 {
-		t.Fatalf("ResolvedDependencies count = %d, want >= 4", len(bd.ResolvedDependencies))
+	if len(bd.ResolvedDependencies) < 5 {
+		t.Fatalf("ResolvedDependencies count = %d, want >= 5", len(bd.ResolvedDependencies))
 	}
 
 	// Verify base image dependency exists
 	foundBase := false
 	foundSource := false
 	foundLock := false
+	foundGo := false
 	for _, dep := range bd.ResolvedDependencies {
 		if dep.Name == "base-image" && dep.Digest["sha256"] == "2222222222222222222222222222222222222222222222222222222222222222" {
 			foundBase = true
@@ -118,6 +129,9 @@ func TestSLSAGenerator_Generate(t *testing.T) {
 		}
 		if dep.Name == "bun.lock" && dep.Digest["sha256"] != "" {
 			foundLock = true
+		}
+		if dep.Name == "go" && dep.URI == "pkg:generic/go@1.24.0" {
+			foundGo = true
 		}
 	}
 
@@ -129,6 +143,9 @@ func TestSLSAGenerator_Generate(t *testing.T) {
 	}
 	if !foundLock {
 		t.Error("Lockfile dependency (bun.lock) not found in ResolvedDependencies")
+	}
+	if !foundGo {
+		t.Error("Go toolchain dependency not found in ResolvedDependencies")
 	}
 }
 

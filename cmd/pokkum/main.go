@@ -112,6 +112,7 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 
 	// Add subcommands
 	rootCmd.AddCommand(newBuildCommand(ctx, logger))
+	rootCmd.AddCommand(newBaseCommand(ctx, logger))
 	rootCmd.AddCommand(newResolveCommand(ctx, logger))
 	rootCmd.AddCommand(newApplyCommand(ctx, logger))
 	rootCmd.AddCommand(newVersionCommand(ctx, logger))

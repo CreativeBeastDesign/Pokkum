@@ -6,10 +6,15 @@
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
 - **Shared Utility Package Naming (`utils`)**:
-  - Non-adapter utility packages residing under `internal/adapters/` (such as `internal/adapters/sveltekitutils` and `internal/adapters/ignoreutils`) must be appended with `utils` to distinguish them from concrete port adapters.
+  - Non-adapter utility packages residing under `internal/adapters/` (such as `internal/adapters/lockfileutils`, `internal/adapters/sveltekitutils`, and `internal/adapters/ignoreutils`) must be appended with `utils` to distinguish them from concrete port adapters.
   - Reusable utility packages should declare `const IsUtilityPackage = true` as an explicit package marker.
+- **Base Image Lockfile (`pokkum.lock`)**:
+  - `pokkum.lock` stores pinned SHA256 digests of base images (`distroless`, `chainguard`).
+  - Base image resolver reads `pokkum.lock` by default; updates are forced via `--update-base` or `pokkum base update`. Offline builds are enforced via `--offline`.
 - **Determinism**:
   - Adapters must never call `time.Now()` or read system clocks. All timestamps derive from `req.SourceDateEpoch`.
   - Directory iteration and map keys must be explicitly sorted before archiving.
 - **Precedence & Zero Mutation**:
   - Auto-injections happen in `.pokkum/` virtual scratch space during builds and never overwrite user-authored repository files.
+- **SLSA M0 Provenance Completeness**:
+  - SLSA predicate statements automatically record Go runtime version, builder OS/Arch (`runtime.GOOS/GOARCH`), Bun binary digest, Pokkum commit ID, and `pokkum.lock` SHA256 hashes in `resolvedDependencies`.

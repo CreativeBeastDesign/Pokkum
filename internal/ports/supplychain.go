@@ -70,7 +70,11 @@ type SLSAStatement struct {
 // SLSAToolchain records the tool versions involved in the build for SLSA provenance.
 type SLSAToolchain struct {
 	PokkumVersion     string
+	PokkumCommit      string
+	GoVersion         string
+	BuilderOSArch     string
 	BunVersion        string
+	BunBinaryHash     string
 	SupervisorVersion string
 }
 
@@ -116,6 +120,9 @@ type SLSAGeneratorRequest struct {
 
 	// GitCommit is the source commit SHA (optional/discovered).
 	GitCommit string
+
+	// LockfileHashes maps lockfile names to SHA256 hashes (optional).
+	LockfileHashes map[string]string
 
 	// Hermetic reports whether the compile step ran with network isolation.
 	Hermetic bool

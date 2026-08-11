@@ -39,7 +39,8 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
 ### Core Layers
 
 1. **CLI Layer (`cmd/pokkum/`)**:
-   - `build.go`: Parses flags (`--platform`, `--base`, `--sbom`, `--local`, `--tarball`) and invokes the core build pipeline.
+   - `build.go`: Parses flags (`--platform`, `--base`, `--sbom`, `--local`, `--tarball`, `--update-base`, `--offline`) and invokes the core build pipeline.
+   - `base.go`: Implements `pokkum base update` and `pokkum base check` subcommands to query remote base image digests and manage `pokkum.lock`.
    - `resolve.go`: Scans Kubernetes YAML manifests for `pokkum://` image URIs, triggers automated builds, and resolves them to immutable image digests (`repo@sha256:...`).
    - `apply.go`: Resolves `pokkum://` manifests and pipes the output directly into `kubectl apply -f -`.
    - `k8s.go`: Shared manifest parsing and URI replacement engine.
@@ -56,7 +57,8 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
 4. **Adapter Implementations (`internal/adapters/`)**:
    - `bunexec`: Wraps host `bun build --compile` for cross-compiling single executables.
    - `packager`: Constructs reproducible OCI tarballs and multi-arch index manifests using `github.com/google/go-containerregistry`.
-   - `baseimage`: Resolves base image layers (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard `glibc-dynamic`).
+   - `baseimage`: Resolves base image layers (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard `glibc-dynamic`) and maintains `pokkum.lock` digest locks.
+   - `lockfileutils`: Utility package for loading, parsing, and saving `pokkum.lock` base image lockfiles.
    - `registry`: Handles OCI registry authentication, blob uploads, and index pushes.
    - `sbom`: Generates SPDX or CycloneDX SBOMs using `github.com/anchore/syft`.
    - `supervisor`: Embedded supervisor binary assets (`/pokkum/init`).
@@ -159,6 +161,7 @@ To achieve this without a Docker daemon:
 | **Directory Iteration Order** | Go map keys and file listings are explicitly sorted before generating archive entries or config annotations. |
 | **Gzip Compression Header** | `tarball.LayerFromOpener` uses gzip with zeroed headers (no filename, zero mtime) so compressed layer digests are 100% stable. |
 | **SvelteKit Versioning** | SvelteKit defaults `kit.version.name` to `Date.now()`. Pokkum passes `SOURCE_DATE_EPOCH` to the build environment so `version.json` inside the app binary remains constant. |
+| **Base Image Upstream Drift** | `pokkum.lock` records exact SHA256 digests of base images (`distroless`, `chainguard`). Subsequent builds reuse locked digests without registry queries unless `--update-base` or `pokkum base update` is run. |
 
 ---
 
@@ -203,7 +206,7 @@ Pokkum includes a native Kubernetes resolver (`pokkum resolve` / `pokkum apply`)
 Pokkum embeds supply chain security directly into the image publishing lifecycle:
 
 * **Cosign Image Signing (`internal/adapters/cosign`)**: Signs image manifests using Cosign key pairs or keyless OIDC identity signatures, pushing signature artifacts directly to the target registry.
-* **SLSA Provenance Attestations (`internal/adapters/slsa`)**: Produces SLSA v1.0 predicate attestations linking the built image hash back to source git repositories and build commit digests.
+* **SLSA Provenance Attestations (`internal/adapters/slsa`)**: Produces SLSA v1.0 predicate attestations linking the built image hash back to source git repositories and build commit digests. Includes complete M0 toolchain metadata: Go version, builder OS/architecture (`GOOS/GOARCH`), Bun binary digest, Pokkum commit ID, and `pokkum.lock` SHA256 hashes in `resolvedDependencies`.
 * **DSSE Envelope Formatting (`internal/adapters/dsse`)**: Wraps attestations in Dead Simple Signing Envelopes (DSSE) before payload attachment.
 * **SBOM Attachments (`internal/adapters/sbom`)**: Generates SPDX or CycloneDX vulnerability bill of materials attached directly as OCI artifacts.
 

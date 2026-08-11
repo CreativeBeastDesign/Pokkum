@@ -102,6 +102,33 @@ type BaseImageRequest struct {
 	// Insecure permits plain HTTP and skips TLS verification when pulling the
 	// base image. False by default; intended for local test registries only.
 	Insecure bool
+
+	// LockfilePath is the path to pokkum.lock (optional).
+	LockfilePath string
+
+	// UpdateBase forces re-resolving base image tags against remote registry and updating pokkum.lock.
+	UpdateBase bool
+
+	// Offline strictly enforces using pokkum.lock and local cache without remote registry calls.
+	Offline bool
+}
+
+// PokkumLockfileName is the canonical lockfile name.
+const PokkumLockfileName = "pokkum.lock"
+
+// BaseLockEntry records a locked base image digest in pokkum.lock.
+type BaseLockEntry struct {
+	Ref       string `json:"ref"`
+	Digest    string `json:"digest"`
+	PinnedRef string `json:"pinned_ref"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// PokkumLockfile represents the structure of pokkum.lock files.
+type PokkumLockfile struct {
+	Version   int                      `json:"version"`
+	UpdatedAt string                   `json:"updated_at"`
+	Bases     map[string]BaseLockEntry `json:"bases"`
 }
 
 // BaseImage is a resolved, digest-pinned base image, decomposed into the

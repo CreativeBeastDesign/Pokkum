@@ -224,9 +224,30 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	entrypoint := filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit", "temp-server", "index.ts")
 	outputDir := filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit")
 
+	// Inject virtual svelte.config.js telemetry/adapter configuration
+	baseEnv := buildEnvWithEpoch(req.Env, req.SourceDateEpoch)
+
+	if !req.NoInject {
+		opts := sveltekitutils.DefaultInjectorOptions()
+		opts.SourceEpoch = req.SourceDateEpoch.Format("20060102150405")
+		if req.SourceDateEpoch.IsZero() {
+			opts.SourceEpoch = "pokkum-reproducible-build"
+		}
+		// TODO: Wire opts.EnableTelemetry from req once CompileRequest includes it,
+		// or assume it's pre-configured if present.
+
+		vcRes, err := sveltekitutils.PrepareVirtualConfig(req.ProjectDir, opts)
+		if err != nil {
+			log.Warn("bunexec: failed to prepare virtual config; falling back to original", "err", err)
+		} else {
+			log.Info("bunexec: virtual config injected", "path", vcRes.VirtualConfigPath, "adapter", vcRes.InjectedAdapter, "telemetry", vcRes.InjectedTelemetry)
+		}
+		baseEnv = sveltekitutils.BuildEnv(baseEnv, opts.SourceEpoch)
+	}
+
 	cmd := exec.CommandContext(ctx, "bun", "run", "build")
 	cmd.Dir = req.ProjectDir
-	cmd.Env = buildEnvWithEpoch(req.Env, req.SourceDateEpoch)
+	cmd.Env = baseEnv
 	setNewProcessGroup(cmd)
 
 	var stderrBuf bytes.Buffer
