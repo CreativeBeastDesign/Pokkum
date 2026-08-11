@@ -74,6 +74,7 @@ rather than invent a new one.
 |---|---|---|---|
 | `--log-level` | — | `INFO` | Log level: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `--log-format` | — | `text` | Log format: `text` or `json`. |
+| `--output` | — | `text` | Output serialization format: `text` or `json`. |
 
 ## 3. `pokkum build [dir]`
 
@@ -140,19 +141,47 @@ means building and pushing).
 | `--watch` | — | `true` | Watch source directory and auto-rebuild container on file changes. |
 | `--env-file` | — | (none) | Path to an environment file for container execution. |
 
-## 6. `pokkum base update` / `pokkum base check`
+## 6. `pokkum doctor`
+
+`pokkum doctor [dir]` runs environment preflight diagnostics (Bun version, registry credentials, SvelteKit project sanity, `.pokkumignore` presence).
+
+| Flag | Shorthand | Default | Description |
+|---|---|---|---|
+| `--dir` | `-d` | `.` | Path to SvelteKit project directory. |
+| `--fix` | — | `false` | Automatically repair mechanical issues (e.g. create default `.pokkumignore`). |
+
+## 7. `pokkum init`
+
+`pokkum init [dir]` bootstraps project configuration and generates default `.pokkumignore`.
+
+| Flag | Shorthand | Default | Description |
+|---|---|---|---|
+| `--dir` | `-d` | `.` | Path to SvelteKit project directory. |
+| `--defaults` | — | `false` | Accept default initialization settings without interactive prompts. |
+
+## 8. `pokkum explain` / `pokkum why` / `pokkum diff`
+
+Layer composition analysis, file origin tracing, and image size diffing.
 
 | Command / Flag | Default | Description |
 |---|---|---|
-| `pokkum base update [dir]` | — | Queries remote registry for latest base image digests, updates `pokkum.lock`, and prints diff. |
-| `--preset` | (all) | Base image preset to update (`distroless`, `chainguard`). |
-| `pokkum base check [dir]` | — | Compares `pokkum.lock` against remote registry without modifying `pokkum.lock`. |
+| `pokkum explain [image]` | — | Inspects layer hierarchy, sizes, and functions for an image or local build. |
+| `pokkum why <file-path>` | — | Traces which layer and input source embedded a specific file. |
+| `pokkum diff <img1> <img2>` | — | Compares layer size and structure differences between two images. |
 
-## 6. `pokkum version`
+## 9. `pokkum metrics`
+
+`pokkum metrics` manages and monitors the OpenTelemetry metrics collector pipeline.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--metrics-port` | `8889` | Port exposed for application metrics scraping. |
+
+## 10. `pokkum version`
 
 No flags.
 
-## 6. Environment variables (runtime, read by the supervisor)
+## 11. Environment variables (runtime, read by the supervisor)
 
 These configure the image's *runtime* behavior, not the CLI — they are read
 inside the container by `/pokkum/init`, not by the `pokkum` binary.
@@ -163,7 +192,7 @@ inside the container by `/pokkum/init`, not by the `pokkum` binary.
 | `POKKUM_PROBE_PORT` | `8081` | Port the supervisor serves `/healthz` and `/readyz` on. |
 | `POKKUM_SHUTDOWN_TIMEOUT` | `30s` | Grace period after `SIGTERM` before `SIGKILL`. |
 
-## 7. Planned flags by Roadmap item
+## 12. Planned flags by Roadmap item
 
 Speculative — names are proposed here to keep the eventual implementation
 consistent with §1, not committed API. Each row cites the concept doc it was
@@ -193,12 +222,12 @@ checklist entry, which now cross-references this table inline.
 
 | Roadmap item | Proposed flag(s) | Notes |
 |---|---|---|
-| Unified Metrics & Telemetry (`pokkum metrics`) | `pokkum metrics`, `--metrics-port` | Standalone `/metrics` exposure; reuses the existing `--telemetry`/`--otel-export` family for the build-time half — no new `build` flags. |
-| `pokkum init` | `--defaults` | Already named inline in `Roadmap.md`. |
-| `pokkum doctor` | `pokkum doctor`, `--fix` | Per `AdditionalFeatures.md`; `--fix` performs mechanical repairs (version pin, `.pokkumignore`). |
-| Interactive Failure Diagnostics | `--no-diagnostics` on `build --local` | Opt-out for CI logs where the extra dump is noise, following Convention 3. |
-| `--output=json` | `--output=json` on `build` | Already named inline in `Roadmap.md`. |
-| Diff & Explain | `pokkum diff`, `pokkum explain`, `pokkum why`, `--output=json` | New subcommands; reuse the `--output=json` schema family rather than inventing a second one. |
+| Unified Metrics & Telemetry (`pokkum metrics`) | `pokkum metrics`, `--metrics-port` | **Implemented**. Standalone `/metrics` exposure and OTEL server status endpoint. |
+| `pokkum init` | `pokkum init`, `--defaults` | **Implemented**. Bootstraps `.pokkumignore` and checks workspace setup. |
+| `pokkum doctor` | `pokkum doctor`, `--fix` | **Implemented**. Preflight environment checks and mechanical repairs. |
+| Interactive Failure Diagnostics | `--no-diagnostics` on `build --local` | **Implemented**. Exit code analysis and log tail diagnostics on container launch failure. |
+| `--output=json` | `--output=text\|json` global flag | **Implemented**. Structured versioned JSON envelope (`schema_version: 1.0`). |
+| Diff & Explain | `pokkum diff`, `pokkum explain`, `pokkum why` | **Implemented**. Layer composition, file origins, and size diffs. |
 
 ### v0.5: Reproducibility & Diagnosis
 

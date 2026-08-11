@@ -109,6 +109,7 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 	// Add global flags
 	rootCmd.PersistentFlags().String("log-level", "INFO", "Log level (DEBUG, INFO, WARN, ERROR)")
 	rootCmd.PersistentFlags().String("log-format", "text", "Log format (text or json)")
+	rootCmd.PersistentFlags().String("output", "text", "Output serialization format (text or json)")
 
 	// Add subcommands
 	rootCmd.AddCommand(newBuildCommand(ctx, logger))
@@ -116,6 +117,10 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 	rootCmd.AddCommand(newBaseCommand(ctx, logger))
 	rootCmd.AddCommand(newResolveCommand(ctx, logger))
 	rootCmd.AddCommand(newApplyCommand(ctx, logger))
+	rootCmd.AddCommand(newDoctorCommand(ctx, logger))
+	rootCmd.AddCommand(newInitCommand(ctx, logger))
+	rootCmd.AddCommand(newExplainCommand(ctx, logger))
+	rootCmd.AddCommand(newMetricsCommand(ctx, logger))
 	rootCmd.AddCommand(newVersionCommand(ctx, logger))
 
 	return rootCmd

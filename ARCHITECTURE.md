@@ -41,6 +41,10 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
 1. **CLI Layer (`cmd/pokkum/`)**:
    - `build.go`: Parses flags (`--platform`, `--base`, `--sbom`, `--sbom-attach`, `--local`, `--tarball`, `--update-base`, `--offline`, `--bun-binary`, `--bun-variant`) and invokes the core build pipeline.
    - `dev.go`: Implements `pokkum dev [dir]` subcommand for local container development, supporting `--debug` interactive shell debugging, local Docker daemon loading, and hot-reload source watching.
+   - `doctor.go`: Implements `pokkum doctor [dir]` for environment preflight checks (Bun runtime, registry credentials, SvelteKit version compatibility, `.pokkumignore` sanity) and mechanical repairs (`--fix`).
+   - `init.go`: Implements `pokkum init [dir]` subcommand to bootstrap project configuration and `.pokkumignore`.
+   - `explain.go`: Implements `pokkum explain`, `pokkum why`, and `pokkum diff` subcommands for layer composition breakdown, file origin tracing, and image diffing.
+   - `metrics.go`: Implements `pokkum metrics` subcommand to manage and monitor the OpenTelemetry metrics collector endpoint.
    - `base.go`: Implements `pokkum base update` and `pokkum base check` subcommands to query remote base image digests and manage `pokkum.lock`.
    - `resolve.go`: Scans Kubernetes YAML manifests for `pokkum://` image URIs, triggers automated builds, and resolves them to immutable image digests (`repo@sha256:...`).
    - `apply.go`: Resolves `pokkum://` manifests and pipes the output directly into `kubectl apply -f -`.
@@ -53,7 +57,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `errors.go`: Defines standardized domain error types (`ErrPackageFailed`, `ErrUnsupportedPlatform`, `ErrBunResolutionFailed`, etc.).
 
 3. **Abstraction Ports (`internal/ports/`)**:
-   - Interfaces decoupling core logic from external adapters: `Compiler`, `Packager`, `Registry`, `BaseImageResolver`, `BunRuntimeResolver`, `SBOMGenerator`, `SupervisorProvider`, `K8sResolver`, `Signer`, `Attestor`, `BinaryInspector`.
+   - Interfaces decoupling core logic from external adapters: `Compiler`, `Packager`, `Registry`, `BaseImageResolver`, `BunRuntimeResolver`, `SBOMGenerator`, `SupervisorProvider`, `K8sResolver`, `Signer`, `Attestor`, `BinaryInspector`, and structured output envelopes (`JSONEnvelope`, `OutputFormat`).
 
 4. **Adapter Implementations (`internal/adapters/`)**:
    - `bunexec`: Wraps host `bun build --compile` for cross-compiling single executables.
@@ -61,6 +65,8 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `packager`: Constructs reproducible OCI tarballs, custom single-binary layers (`BuildCustomFileLayer`), directory tree layers (`BuildDirectoryTreeLayer`), and multi-arch index manifests using `github.com/google/go-containerregistry`.
    - `baseimage`: Resolves base image layers (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard `glibc-dynamic`) and maintains `pokkum.lock` digest locks.
    - `lockfileutils`: Utility package for loading, parsing, and saving `pokkum.lock` base image lockfiles.
+   - `jsonutils`: Utility package for structured, versioned JSON response formatting (`--output=json`).
+   - `diagnosticsutils`: Utility package for container exit failure analysis and log tracing.
    - `registry`: Handles OCI registry authentication, blob uploads, and index pushes.
    - `sbom`: Generates SPDX or CycloneDX SBOMs using `github.com/anchore/syft`.
    - `supervisor`: Embedded supervisor binary assets (`/pokkum/init`).
@@ -243,6 +249,19 @@ Pokkum supports two image compilation strategies controlled via `--strategy=laye
 
 ### Single Executable Strategy (`--strategy=exe`)
 Combines supervisor and standalone compiled Bun binary into a 2-layer image (`/pokkum/init` and `/app/server`).
+
+---
+
+## 9. Diagnostic Wizards, Structured JSON Schemas & Machine-Readable DX (`v0.4`)
+
+Pokkum provides a machine-readable developer experience tailored for CI/CD automation and developer diagnostics:
+
+* **Structured JSON Schema Standard (`--output=json`)**: Standardizes CLI stdout responses across commands using a versioned JSON envelope (`ports.JSONEnvelope`, `schema_version: "1.0"`). Formatted by `internal/adapters/jsonutils`. Non-JSON logs are consistently routed to `stderr`.
+* **Environment Preflight Diagnostics (`pokkum doctor`)**: Performs automated environment checks (`bun` binary, registry auth credentials, SvelteKit version compatibility, `.pokkumignore` sanity) with optional mechanical auto-repairs (`--fix`).
+* **Project Initializer (`pokkum init`)**: Bootstraps workspace configuration and `.pokkumignore` defaults.
+* **Layer Composition & Origin Tracing (`pokkum explain`, `pokkum why`, `pokkum diff`)**: Inspects container layer hierarchies, traces file origins to specific build outputs, and computes size diffs between images.
+* **Interactive Container Failure Diagnostics (`internal/adapters/diagnosticsutils`)**: Automatically analyzes container crash exit codes (127 loader failures, 137 OOMKilled, port conflicts) and provides actionable remediation suggestions.
+
 
 
 

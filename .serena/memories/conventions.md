@@ -7,8 +7,11 @@
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
 - **Shared Utility Package Naming (`utils`)**:
-  - Non-adapter utility packages residing under `internal/adapters/` (such as `internal/adapters/lockfileutils`, `internal/adapters/sveltekitutils`, and `internal/adapters/ignoreutils`) must be appended with `utils` to distinguish them from concrete port adapters.
+  - Non-adapter utility packages residing under `internal/adapters/` (such as `internal/adapters/lockfileutils`, `internal/adapters/sveltekitutils`, `internal/adapters/ignoreutils`, `internal/adapters/jsonutils`, and `internal/adapters/diagnosticsutils`) must be appended with `utils` to distinguish them from concrete port adapters.
   - Reusable utility packages should declare `const IsUtilityPackage = true` as an explicit package marker.
+- **Structured JSON Schema Standard (`--output=json`)**:
+  - Global `--output=text|json` flag standardizes CLI stdout into versioned `ports.JSONEnvelope` payloads (`schema_version: "1.0"`).
+  - Diagnostic, inspection, and wizard subcommands (`pokkum doctor`, `pokkum init`, `pokkum explain`, `pokkum why`, `pokkum diff`, `pokkum metrics`) emit structured JSON natively when `--output=json` is provided.
 - **Base Image Lockfile (`pokkum.lock`)**:
   - `pokkum.lock` stores pinned SHA256 digests of base images (`distroless`, `chainguard`).
   - Base image resolver reads `pokkum.lock` by default; updates are forced via `--update-base` or `pokkum base update`. Offline builds are enforced via `--offline`.
