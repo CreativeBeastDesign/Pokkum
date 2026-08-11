@@ -69,6 +69,9 @@ type (
 	// BunVariant specifies CPU/build variants of the Bun runtime binary.
 	BunVariant = ports.BunVariant
 
+	// CompressionAlgorithm names the layer compression format.
+	CompressionAlgorithm = ports.CompressionAlgorithm
+
 	// BunResolverRequest specifies criteria for resolving a Bun runtime binary.
 	BunResolverRequest = ports.BunResolverRequest
 
@@ -98,12 +101,22 @@ const (
 	DefaultTag = ports.DefaultTag
 
 	DefaultBunVersion  = ports.DefaultBunVersion
+	// BunVariantStandard targets standard AVX2 x86-64 / arm64 CPUs.
 	BunVariantStandard = ports.BunVariantStandard
+	// BunVariantBaseline targets pre-AVX2 x86-64 CPUs.
 	BunVariantBaseline = ports.BunVariantBaseline
 
-	StrategyLayered      = ports.StrategyLayered
-	StrategyExe          = ports.StrategyExe
+	// StrategyLayered emits the 5-layer arch-independent layout (default).
+	StrategyLayered = ports.StrategyLayered
+	// StrategyExe emits the single executable layout (legacy).
+	StrategyExe = ports.StrategyExe
+	// DefaultBuildStrategy is StrategyLayered.
 	DefaultBuildStrategy = ports.DefaultBuildStrategy
+
+	// CompressionGzip applies gzip compression (default).
+	CompressionGzip = ports.CompressionGzip
+	// CompressionZstd applies zstd compression.
+	CompressionZstd = ports.CompressionZstd
 )
 
 
@@ -335,6 +348,9 @@ type CompileOptions struct {
 
 	// Strategy selects the packaging strategy (StrategyLayered or StrategyExe).
 	Strategy BuildStrategy
+
+	// Compression selects the layer compression algorithm (CompressionGzip or CompressionZstd).
+	Compression CompressionAlgorithm
 
 	// NoInject suppresses the zero-config auto-injection for svelte.config.js.
 	NoInject bool

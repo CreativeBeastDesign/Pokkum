@@ -22,7 +22,7 @@ func TestBuildCustomFileLayer(t *testing.T) {
 	}
 
 	modTime := time.Unix(1700000000, 0)
-	layer, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/usr/local/bin/bun", sourceFile, modTime)
+	layer, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/usr/local/bin/bun", sourceFile, modTime, ports.CompressionGzip)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestBuildDirectoryTreeLayer(t *testing.T) {
 	}
 
 	modTime := time.Unix(1700000000, 0)
-	layer, err := BuildDirectoryTreeLayer(ctx, ports.LinuxAMD64, tmpDir, "/app/client", modTime)
+	layer, err := BuildDirectoryTreeLayer(ctx, ports.LinuxAMD64, tmpDir, "/app/client", modTime, ports.CompressionGzip)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

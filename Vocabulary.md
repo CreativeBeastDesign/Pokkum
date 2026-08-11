@@ -175,7 +175,7 @@ checklist entry, which now cross-references this table inline.
 | M2: Hand-rolled adapter + Phase-1 layering | `--strategy=layered\|exe` on `build` | **Implemented**. Emits 5-layer arch-independent layout (`layered` is default). |
 | M3: Vendor splitting + native closure | *(none — internal to `--strategy=layered`)* | **Implemented**. Enables `ClosuredNativeAdapter` for ELF `.node` addons, `/app/native` layer, and vendor chunking. |
 | M4: Hardening & cutover | *(none — folds into `--security-context`)* | **Implemented**. Injects `readOnlyRootFilesystem: true` in container securityContext, deprecates `exe` strategy with CLI warning. |
-| Image Optimization (dedup, zstd) | `--compression=gzip\|zstd` on `build` | Per the concept doc §"zstd layer compression"; `gzip` stays default for registry/runtime compatibility. |
+| Image Optimization (dedup, zstd) | `--compression=gzip\|zstd` on `build` | **Implemented**. Configurable zstd/gzip layer compression (`--compression=gzip|zstd`, default `gzip`). |
 
 ### v0.4: Unified Telemetry & Developer Experience
 

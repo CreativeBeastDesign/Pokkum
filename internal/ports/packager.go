@@ -239,6 +239,8 @@ type PackageRequest struct {
 	// AppNativeDir is the host directory containing native .node modules and dynamic .so libraries to package at /app/native (StrategyLayered).
 	AppNativeDir string
 
+	// Compression specifies the layer compression algorithm (CompressionGzip or CompressionZstd).
+	Compression CompressionAlgorithm
 
 	// Supervisor is the pokkum-init binary for Platform, from
 	// SupervisorProvider.Binary. Required and non-empty. It becomes a
@@ -316,4 +318,25 @@ type Packager interface {
 	// with a single platform may still call Index; whether to push an index or
 	// a bare manifest in that case is core's decision, not the packager's.
 	Index(ctx context.Context, req IndexRequest) (v1.ImageIndex, error)
+}
+
+// CompressionAlgorithm names the layer compression format.
+type CompressionAlgorithm string
+
+const (
+	CompressionGzip CompressionAlgorithm = "gzip"
+	CompressionZstd CompressionAlgorithm = "zstd"
+)
+
+// Valid reports whether c is a supported compression algorithm.
+func (c CompressionAlgorithm) Valid() bool {
+	return c == CompressionGzip || c == CompressionZstd || c == ""
+}
+
+// Normalize defaults empty compression to CompressionGzip.
+func (c CompressionAlgorithm) Normalize() CompressionAlgorithm {
+	if c == CompressionZstd {
+		return CompressionZstd
+	}
+	return CompressionGzip
 }

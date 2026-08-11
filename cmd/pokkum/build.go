@@ -57,9 +57,10 @@ type buildFlags struct {
 	noInject bool
 
 	// Bun runtime & strategy flags
-	bunBinary  string
-	bunVariant string
-	strategy   string
+	bunBinary   string
+	bunVariant  string
+	strategy    string
+	compression string
 }
 
 
@@ -143,6 +144,8 @@ The project directory defaults to the current working directory.`,
 		"Bun CPU variant (standard [AVX2 required on x86-64] or baseline)")
 	cmd.Flags().StringVar(&flags.strategy, "strategy", "layered",
 		"Packaging strategy: layered (5-layer arch-independent layout [default]) or exe (single executable)")
+	cmd.Flags().StringVar(&flags.compression, "compression", "gzip",
+		"Layer compression algorithm: gzip (default) or zstd")
 
 	return cmd
 }
@@ -221,8 +224,9 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		logger.Warn("packaging strategy 'exe' is deprecated and will be removed in a future release; migrate to '--strategy=layered' (default)")
 	}
 	req.Compile = core.CompileOptions{
-		Strategy: core.BuildStrategy(flags.strategy),
-		NoInject: flags.noInject || !flags.inject,
+		Strategy:    core.BuildStrategy(flags.strategy),
+		Compression: core.CompressionAlgorithm(flags.compression),
+		NoInject:    flags.noInject || !flags.inject,
 	}
 
 	// Telemetry options

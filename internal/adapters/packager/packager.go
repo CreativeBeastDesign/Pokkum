@@ -173,8 +173,13 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 
 	var addenda []mutate.Addendum
 
+	layerMediaType := types.OCILayer
+	if req.Compression.Normalize() == ports.CompressionZstd {
+		layerMediaType = types.OCILayerZStd
+	}
+
 	if req.Strategy == ports.StrategyLayered {
-		bunLayer, err := BuildCustomFileLayer(ctx, req.Platform, ports.BunBinaryPath, req.BunRuntime.BinaryPath, ts)
+		bunLayer, err := BuildCustomFileLayer(ctx, req.Platform, ports.BunBinaryPath, req.BunRuntime.BinaryPath, ts, req.Compression)
 		if err != nil {
 			return nil, fmt.Errorf("packager: build %s: bun layer: %w", req.Platform, err)
 		}
@@ -182,26 +187,26 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		if err != nil {
 			return nil, err
 		}
-		serverLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppServerDir, "/app/server", ts)
+		serverLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppServerDir, "/app/server", ts, req.Compression)
 		if err != nil {
 			return nil, fmt.Errorf("packager: build %s: server layer: %w", req.Platform, err)
 		}
 
 		addenda = append(addenda,
-			mutate.Addendum{Layer: bunLayer, MediaType: types.OCILayer, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.BunBinaryPath}},
-			mutate.Addendum{Layer: supervisorLayer, MediaType: types.OCILayer, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: historySupervisorCreatedBy}},
-			mutate.Addendum{Layer: serverLayer, MediaType: types.OCILayer, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add /app/server"}},
+			mutate.Addendum{Layer: bunLayer, MediaType: layerMediaType, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.BunBinaryPath}},
+			mutate.Addendum{Layer: supervisorLayer, MediaType: layerMediaType, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: historySupervisorCreatedBy}},
+			mutate.Addendum{Layer: serverLayer, MediaType: layerMediaType, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add /app/server"}},
 		)
 
 		if req.AppClientDir != "" {
 			if info, err := os.Stat(req.AppClientDir); err == nil && info.IsDir() {
-				clientLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppClientDir, ports.AppClientDirPrefix, ts)
+				clientLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppClientDir, ports.AppClientDirPrefix, ts, req.Compression)
 				if err != nil {
 					return nil, fmt.Errorf("packager: build %s: client layer: %w", req.Platform, err)
 				}
 				addenda = append(addenda, mutate.Addendum{
 					Layer:     clientLayer,
-					MediaType: types.OCILayer,
+					MediaType: layerMediaType,
 					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppClientDirPrefix},
 				})
 			}
@@ -209,13 +214,13 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 
 		if req.AppVendorDir != "" {
 			if info, err := os.Stat(req.AppVendorDir); err == nil && info.IsDir() {
-				vendorLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppVendorDir, ports.AppVendorDirPrefix, ts)
+				vendorLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppVendorDir, ports.AppVendorDirPrefix, ts, req.Compression)
 				if err != nil {
 					return nil, fmt.Errorf("packager: build %s: vendor layer: %w", req.Platform, err)
 				}
 				addenda = append(addenda, mutate.Addendum{
 					Layer:     vendorLayer,
-					MediaType: types.OCILayer,
+					MediaType: layerMediaType,
 					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppVendorDirPrefix},
 				})
 			}
@@ -223,13 +228,13 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 
 		if req.AppNativeDir != "" {
 			if info, err := os.Stat(req.AppNativeDir); err == nil && info.IsDir() {
-				nativeLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppNativeDir, ports.AppNativeDirPrefix, ts)
+				nativeLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppNativeDir, ports.AppNativeDirPrefix, ts, req.Compression)
 				if err != nil {
 					return nil, fmt.Errorf("packager: build %s: native layer: %w", req.Platform, err)
 				}
 				addenda = append(addenda, mutate.Addendum{
 					Layer:     nativeLayer,
-					MediaType: types.OCILayer,
+					MediaType: layerMediaType,
 					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppNativeDirPrefix},
 				})
 			}
@@ -244,8 +249,8 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 			return nil, err
 		}
 		addenda = append(addenda,
-			mutate.Addendum{Layer: supervisorLayer, MediaType: types.OCILayer, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: historySupervisorCreatedBy}},
-			mutate.Addendum{Layer: appLayer, MediaType: types.OCILayer, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: historyAppCreatedBy}},
+			mutate.Addendum{Layer: supervisorLayer, MediaType: layerMediaType, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: historySupervisorCreatedBy}},
+			mutate.Addendum{Layer: appLayer, MediaType: layerMediaType, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: historyAppCreatedBy}},
 		)
 	}
 

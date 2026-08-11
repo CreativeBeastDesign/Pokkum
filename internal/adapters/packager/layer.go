@@ -112,7 +112,7 @@ func buildAppLayer(ctx context.Context, req ports.PackageRequest, modTime time.T
 		size: info.Size(),
 		open: fileOpener(req.App.Path),
 	}
-	return buildLayer(ctx, req.Platform, file, modTime)
+	return buildLayer(ctx, req.Platform, file, modTime, req.Compression)
 }
 
 // buildSupervisorLayer produces the deterministic layer Pokkum adds for
@@ -132,7 +132,7 @@ func buildSupervisorLayer(ctx context.Context, req ports.PackageRequest, modTime
 		size: int64(len(req.Supervisor)),
 		open: bytesOpener(req.Supervisor),
 	}
-	return buildLayer(ctx, req.Platform, file, modTime)
+	return buildLayer(ctx, req.Platform, file, modTime, req.Compression)
 }
 
 // buildLayer wraps a single file (plus its parent directory entries) into one
@@ -160,7 +160,7 @@ func buildSupervisorLayer(ctx context.Context, req ports.PackageRequest, modTime
 // the same source file (or the same in-memory buffer, for the supervisor) on
 // each call costs nothing but a re-read, and produces identical bytes because
 // every field in every header is pinned.
-func buildLayer(ctx context.Context, platform ports.Platform, file layerFile, modTime time.Time) (v1.Layer, error) {
+func buildLayer(ctx context.Context, platform ports.Platform, file layerFile, modTime time.Time, compression ports.CompressionAlgorithm) (v1.Layer, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
 	}
@@ -170,15 +170,27 @@ func buildLayer(ctx context.Context, platform ports.Platform, file layerFile, mo
 		return nil, fmt.Errorf("packager: build %s: %w: %w", platform, err, core.ErrPackageFailed)
 	}
 
+	opts := layerOpenerOptions(compression)
 	layer, err := tarball.LayerFromOpener(
 		tarOpener(entries, modTime),
-		tarball.WithMediaType(types.OCILayer),
+		opts...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("packager: build %s: build layer: %w: %w",
 			platform, err, core.ErrPackageFailed)
 	}
 	return layer, nil
+}
+
+func layerOpenerOptions(compression ports.CompressionAlgorithm) []tarball.LayerOption {
+	if compression.Normalize() == ports.CompressionZstd {
+		return []tarball.LayerOption{
+			tarball.WithMediaType(types.OCILayerZStd),
+		}
+	}
+	return []tarball.LayerOption{
+		tarball.WithMediaType(types.OCILayer),
+	}
 }
 
 // tarEntries turns a set of in-image file paths into the complete, ordered list
@@ -344,7 +356,7 @@ func bytesOpener(b []byte) func() (io.ReadCloser, error) {
 
 // BuildCustomFileLayer builds a single-file layer at targetPath (e.g. "/usr/local/bin/bun")
 // from sourcePath on host disk, pinned to modTime and nonroot ownership.
-func BuildCustomFileLayer(ctx context.Context, platform ports.Platform, targetPath string, sourcePath string, modTime time.Time) (v1.Layer, error) {
+func BuildCustomFileLayer(ctx context.Context, platform ports.Platform, targetPath string, sourcePath string, modTime time.Time, compression ports.CompressionAlgorithm) (v1.Layer, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
 	}
@@ -362,13 +374,13 @@ func BuildCustomFileLayer(ctx context.Context, platform ports.Platform, targetPa
 		size: info.Size(),
 		open: fileOpener(sourcePath),
 	}
-	return buildLayer(ctx, platform, file, modTime)
+	return buildLayer(ctx, platform, file, modTime, compression)
 }
 
 // BuildDirectoryTreeLayer builds an OCI layer from a directory tree on host disk,
 // mounting it under targetPrefix in the image (e.g., hostDir="build/client", targetPrefix="/app/client").
 // All entries are explicitly sorted and pinned to modTime and nonroot ownership.
-func BuildDirectoryTreeLayer(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time) (v1.Layer, error) {
+func BuildDirectoryTreeLayer(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time, compression ports.CompressionAlgorithm) (v1.Layer, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
 	}
@@ -416,9 +428,10 @@ func BuildDirectoryTreeLayer(ctx context.Context, platform ports.Platform, hostD
 		return nil, fmt.Errorf("packager: build %s: %w: %w", platform, err, core.ErrPackageFailed)
 	}
 
+	opts := layerOpenerOptions(compression)
 	layer, err := tarball.LayerFromOpener(
 		tarOpener(entries, modTime),
-		tarball.WithMediaType(types.OCILayer),
+		opts...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("packager: build %s: build tree layer: %w: %w", platform, err, core.ErrPackageFailed)

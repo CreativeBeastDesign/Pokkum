@@ -4,6 +4,7 @@
 - **Application Framework**: SvelteKit 2.31+ (`@sveltejs/kit`)
 - **Runtime Compiler & Resolver**: Bun ≥ 1.2.0 (`internal/adapters/bunruntime` resolver, `--bun-binary`, `--bun-variant=standard|baseline`)
 - **Packaging Strategy & Adapter**: `--strategy=layered` (default, arch-independent layout via `@sveltejs/adapter-node`) / `--strategy=exe` (deprecated 2-layer single executable)
+- **Layer Compression**: `--compression=gzip|zstd` (default: `gzip`, `application/vnd.oci.image.layer.v1.tar+zstd` when `zstd`)
 - **Native Addon Closure & Splitting**: `ClosuredNativeAdapter` (`internal/adapters/nativeinspect/closured.go`), ELF `.node` addon inspection, `/app/native` layer, and vendor chunking (`/app/vendor`).
 - **Security & Hardening**: Container `securityContext` defaults inject `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`.
 - **OCI Container Engine**: `github.com/google/go-containerregistry` (no Docker daemon required)

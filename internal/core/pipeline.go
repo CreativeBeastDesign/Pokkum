@@ -630,6 +630,7 @@ func fanOut(
 				Platform:    p,
 				Base:        baseImg,
 				Strategy:    req.Compile.Strategy,
+				Compression: req.Compile.Compression,
 				App:         art,
 				BunRuntime:  bunResult,
 				Supervisor:  sup,
