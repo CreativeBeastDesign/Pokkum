@@ -23,6 +23,7 @@ package sveltekit
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -133,3 +134,39 @@ func ResolveVersion(projectDir, pkgName string, pkg PackageJSON) string {
 	}
 	return ""
 }
+
+// IsVersionAtLeast checks if a semver string (or range like "^2.31.0") is at least minMajor.minMinor.
+func IsVersionAtLeast(versionStr string, minMajor, minMinor int) bool {
+	clean := strings.TrimLeft(versionStr, "^~>=<v ")
+	parts := strings.Split(clean, ".")
+	if len(parts) == 0 {
+		return false
+	}
+	var major, minor int
+	_, _ = fmt.Sscanf(parts[0], "%d", &major)
+	if len(parts) > 1 {
+		_, _ = fmt.Sscanf(parts[1], "%d", &minor)
+	}
+	if major > minMajor {
+		return true
+	}
+	if major == minMajor && minor >= minMinor {
+		return true
+	}
+	return false
+}
+
+// CheckTelemetrySupported inspects the project's @sveltejs/kit version and reports
+// whether it is >= 2.31.0 (the minimum version for native OpenTelemetry support).
+func CheckTelemetrySupported(projectDir string) (bool, string, error) {
+	pkg, err := ReadPackageJSON(projectDir)
+	if err != nil {
+		return false, "", err
+	}
+	ver := ResolveVersion(projectDir, "@sveltejs/kit", pkg)
+	if ver == "" {
+		return false, "", nil
+	}
+	return IsVersionAtLeast(ver, 2, 31), ver, nil
+}
+

@@ -195,10 +195,58 @@ Pokkum v0.1 supports:
 
 **Why arm64 works:** Pokkum runs `bun build --compile` itself on the build machine, cross-compiling per target. The exe adapter's own `target` list can be incomplete or platform-specific; Pokkum doesn't rely on it. If Bun publishes a new compile target in the future, Pokkum will support it with a minor update.
 
+## Kubernetes Manifest Integration
+
+Pokkum natively supports resolving `pokkum://` image URIs in Kubernetes manifests:
+
+```yaml
+# deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  template:
+    spec:
+      containers:
+      - name: web
+        image: pokkum://./my-app
+```
+
+- **`pokkum resolve -f deployment.yaml`**: Builds `./my-app`, pushes the multi-arch image, and outputs resolved YAML with concrete digests (`repo@sha256:...`).
+- **`pokkum apply -f deployment.yaml`**: Resolves manifests and applies them directly to your cluster via `kubectl apply`.
+
+## Unified OpenTelemetry & Metrics Auto-Instrumentation
+
+Pokkum includes zero-config OpenTelemetry auto-instrumentation and metrics collection powered by SvelteKit 2.31+ native observability (`kit.experimental.tracing.server` and `kit.experimental.instrumentation.server`).
+
+```bash
+# Enable OpenTelemetry tracing and metrics
+pokkum build ./my-app --telemetry --otel-export=http://collector:4318
+
+# Enable metrics-only mode (disables trace spans, keeps Prometheus metrics)
+pokkum build ./my-app --telemetry --metrics-only
+
+# Control trace sampling probability (0.0 to 1.0)
+pokkum build ./my-app --telemetry --trace-sample-rate=0.1
+
+# Inject OTEL Collector sidecar into resolved Kubernetes manifests
+pokkum resolve -f deployment.yaml --with-otel-sidecar
+```
+
+- **Zero Config**: Automatically injects `kit.experimental` tracing flags and virtual `src/instrumentation.server.ts` at build time without mutating user files.
+- **Strict Precedence**: Preserves user's existing `src/instrumentation.server.ts|js|mjs` if present.
+- **SvelteKit Version Protection**: Inspects `package.json` and skips injection if `@sveltejs/kit` is < 2.31.0.
+
+## Architecture & Technical Deep-Dive
+
+For a detailed explanation of how Pokkum achieves zero-daemon reproducible builds, hexagonal architecture, PID-1 supervisor signals, and deterministic layer hashing, see [ARCHITECTURE.md](file:///Users/andrebarlocher/Documents/Go/Pokkum/ARCHITECTURE.md).
+
 ## Development
 
-See `Roadmap.md` for v0.2 and v1.0 planned features, including Cosign signing, SLSA provenance, vulnerability scanning, and Kubernetes manifest generation.
+See `Roadmap.md` for planned features, including Cosign signing, SLSA provenance, and vulnerability scanning.
 
 ## License
 
 TBD
+

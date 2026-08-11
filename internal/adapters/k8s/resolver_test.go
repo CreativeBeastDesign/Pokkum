@@ -725,4 +725,39 @@ func TestResolver_Errors(t *testing.T) {
 			t.Errorf("expected ErrManifestUnresolved for tag return, got %v", err)
 		}
 	})
+
+	t.Run("with otel sidecar", func(t *testing.T) {
+		doc := ports.Document{
+			Name: "deploy.yaml",
+			Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+      - name: main
+        image: pokkum://./src/app
+`),
+		}
+		res, err := r.Resolve(ctx, ports.ResolveRequest{
+			Documents:       []ports.Document{doc},
+			WithOTELSidecar: true,
+			Build: func(_ context.Context, _ string) (string, error) {
+				return "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		output := string(res.Documents[0].Content)
+		if !strings.Contains(output, "otel-collector") {
+			t.Errorf("expected otel-collector sidecar container in output:\n%s", output)
+		}
+		if !strings.Contains(output, "4318") {
+			t.Errorf("expected OTLP HTTP port 4318 in output:\n%s", output)
+		}
+	})
 }
+

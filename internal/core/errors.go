@@ -114,6 +114,10 @@ var (
 	// ErrTarballFailed reports a failure writing the OCI archive.
 	ErrTarballFailed = errors.New("tarball write failed")
 
+	// ErrNativeModulesUnsupported reports that native Node C++ addons or untraceable
+	// dynamic import expressions were detected in a project configured for strict preflight.
+	ErrNativeModulesUnsupported = errors.New("unsupported native Node modules or untraceable dynamic imports detected")
+
 	// ErrInvalidSBOMFormat reports an unknown SBOM format, or a request to
 	// generate one while the format is "none".
 	ErrInvalidSBOMFormat = errors.New("invalid sbom format")

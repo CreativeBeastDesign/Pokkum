@@ -434,6 +434,10 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 					injectPodSecurityDefaults(t.podSpecNode)
 				}
 			}
+
+			if req.WithOTELSidecar && t.podSpecNode != nil {
+				injectOTELCollectorSidecar(t.podSpecNode)
+			}
 		}
 
 		rewrittenContent, err := encodeYAMLNodes(pd.nodes)
@@ -451,3 +455,39 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 		References: references,
 	}, nil
 }
+
+func injectOTELCollectorSidecar(podSpec *yaml.Node) {
+	if podSpec == nil || podSpec.Kind != yaml.MappingNode {
+		return
+	}
+	containersNode, ok := mapGet(podSpec, "containers")
+	if !ok || containersNode.Kind != yaml.SequenceNode {
+		return
+	}
+
+	for _, c := range containersNode.Content {
+		if c.Kind == yaml.MappingNode {
+			if nameVal, found := mapGet(c, "name"); found && nameVal.Value == "otel-collector" {
+				return
+			}
+		}
+	}
+
+	sidecarYAML := `
+name: otel-collector
+image: otel/opentelemetry-collector-contrib:latest
+args: ["--config=/etc/otelcol/config.yaml"]
+ports:
+  - containerPort: 4317
+    name: otlp-grpc
+  - containerPort: 4318
+    name: otlp-http
+  - containerPort: 8889
+    name: metrics
+`
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(sidecarYAML), &node); err == nil && len(node.Content) > 0 {
+		containersNode.Content = append(containersNode.Content, node.Content[0])
+	}
+}
+

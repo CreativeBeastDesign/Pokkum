@@ -62,6 +62,9 @@ type (
 
 	// SBOMDocument is a generated bill of materials.
 	SBOMDocument = ports.SBOMDocument
+
+	// TelemetryOptions configures OpenTelemetry auto-instrumentation and metrics collection.
+	TelemetryOptions = ports.TelemetryOptions
 )
 
 // Re-exported enum values, so that the command layer can build a BuildRequest
@@ -362,6 +365,9 @@ type BuildRequest struct {
 	// means the documented defaults: port 3000, probe port 8081, user
 	// 65532:65532, 30s shutdown timeout.
 	Runtime RuntimeConfig
+
+	// Telemetry controls OpenTelemetry auto-instrumentation injection.
+	Telemetry TelemetryOptions
 
 	// Labels are merged into the image config labels, overriding Pokkum's own.
 	// Nil means none.

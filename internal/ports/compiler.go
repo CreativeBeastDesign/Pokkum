@@ -283,6 +283,33 @@ type PrepareRequest struct {
 	// is passed so the adapter can fail fast on an unsupported target before
 	// spending a full SvelteKit build. May be nil, meaning SupportedPlatforms.
 	Platforms []Platform
+
+	// Telemetry contains options for OpenTelemetry auto-instrumentation injection.
+	Telemetry TelemetryOptions
+}
+
+// TelemetryOptions configures OpenTelemetry auto-instrumentation and metrics collection.
+type TelemetryOptions struct {
+	// Enabled indicates whether telemetry (traces and metrics) is enabled.
+	Enabled bool
+
+	// TracesEndpoint is the OTLP exporter endpoint URL for spans (traces).
+	TracesEndpoint string
+
+	// MetricsEndpoint is the OTLP exporter endpoint URL for metrics.
+	MetricsEndpoint string
+
+	// SampleRate is the trace sampling ratio between 0.0 and 1.0 (default: 1.0).
+	SampleRate float64
+
+	// MetricsOnly disables trace span generation while keeping OTEL metrics active.
+	MetricsOnly bool
+
+	// Environment is the deployment target environment ("dev", "preview", "production").
+	Environment string
+
+	// WithSidecar indicates whether to inject an OTEL Collector sidecar spec into K8s manifests.
+	WithSidecar bool
 }
 
 // PrepareResult locates the artefacts the SvelteKit adapter emitted. The paths

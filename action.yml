@@ -1,0 +1,146 @@
+name: 'Pokkum Build & Publish'
+description: 'Fast, reproducible, hardened container builds for SvelteKit and Bun applications'
+author: 'Pokkum Authors'
+branding:
+  icon: 'package'
+  color: 'orange'
+
+inputs:
+  version:
+    description: 'Pokkum CLI version to install (e.g. v0.1.1, latest)'
+    required: false
+    default: 'v0.1.1'
+
+  project-dir:
+    description: 'Path to the SvelteKit project directory'
+    required: false
+    default: '.'
+
+  repo:
+    description: 'Destination container repository (e.g. ghcr.io/acme/app)'
+    required: false
+
+  tags:
+    description: 'Comma-separated list of image tags (e.g. latest,v1.0.0)'
+    required: false
+    default: 'latest'
+
+  platforms:
+    description: 'Comma-separated target platforms (e.g. linux/amd64,linux/arm64)'
+    required: false
+    default: 'linux/amd64'
+
+  output:
+    description: 'Output mode: push, local, or tarball'
+    required: false
+    default: 'push'
+
+  dry-run:
+    description: 'Dry run mode (show what would be built/pushed without side effects)'
+    required: false
+    default: 'false'
+
+  print-manifest:
+    description: 'Print generated Kubernetes manifest after build'
+    required: false
+    default: 'false'
+
+  log-level:
+    description: 'Logging level: debug, info, warn, error'
+    required: false
+    default: 'info'
+
+outputs:
+  digest:
+    description: 'The output image manifest digest (sha256:...)'
+    value: ${{ steps.build.outputs.digest }}
+  ref:
+    description: 'The immutable image reference (repo@sha256:...)'
+    value: ${{ steps.build.outputs.ref }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Bun Environment
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: latest
+
+    - name: Install Pokkum CLI
+      shell: bash
+      run: |
+        if command -v pokkum &> /dev/null; then
+          echo "pokkum CLI already installed: $(pokkum version 2>/dev/null || true)"
+          exit 0
+        fi
+
+        VERSION="${{ inputs.version }}"
+        OS=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
+        ARCH="${{ runner.arch }}"
+        if [ "$ARCH" = "X64" ]; then ARCH="amd64"; fi
+        if [ "$ARCH" = "ARM64" ]; then ARCH="arm64"; fi
+
+        INSTALL_DIR="$HOME/.pokkum/bin"
+        mkdir -p "$INSTALL_DIR"
+
+        ASSET_URL="https://github.com/CreativeBeastDesign/pokkum/releases/download/${VERSION}/pokkum_${OS}_${ARCH}.tar.gz"
+        echo "Attempting to download prebuilt binary from ${ASSET_URL}..."
+
+        if curl -sSL -f "$ASSET_URL" | tar -xz -C "$INSTALL_DIR" pokkum 2>/dev/null; then
+          echo "Prebuilt binary installed successfully."
+        else
+          echo "Prebuilt binary download failed or unreleased version requested. Falling back to 'go install'..."
+          go install "github.com/CreativeBeastDesign/pokkum/cmd/pokkum@${VERSION}"
+          GO_BIN=$(go env GOPATH)/bin
+          cp "${GO_BIN}/pokkum" "$INSTALL_DIR/pokkum" || true
+        fi
+
+        echo "$INSTALL_DIR" >> $GITHUB_PATH
+        chmod +x "$INSTALL_DIR/pokkum"
+
+    - name: Execute Pokkum Build
+      id: build
+      shell: bash
+      run: |
+        ARGS=()
+
+        if [ -n "${{ inputs.repo }}" ]; then
+          ARGS+=("--repo" "${{ inputs.repo }}")
+        fi
+
+        if [ -n "${{ inputs.tags }}" ]; then
+          ARGS+=("--tag" "${{ inputs.tags }}")
+        fi
+
+        if [ -n "${{ inputs.platforms }}" ]; then
+          ARGS+=("--platform" "${{ inputs.platforms }}")
+        fi
+
+        if [ -n "${{ inputs.output }}" ]; then
+          ARGS+=("--output" "${{ inputs.output }}")
+        fi
+
+        if [ "${{ inputs.dry-run }}" = "true" ]; then
+          ARGS+=("--dry-run")
+        fi
+
+        if [ "${{ inputs.print-manifest }}" = "true" ]; then
+          ARGS+=("--print-manifest")
+        fi
+
+        if [ -n "${{ inputs.log-level }}" ]; then
+          ARGS+=("--log-level" "${{ inputs.log-level }}")
+        fi
+
+        echo "Running: pokkum build ${ARGS[*]} ${{ inputs.project-dir }}"
+        
+        # Capture build execution JSON output
+        BUILD_OUT=$(pokkum build "${ARGS[@]}" "${{ inputs.project-dir }}" --log-format json 2>&1)
+        echo "$BUILD_OUT"
+
+        # Parse digest and ref outputs
+        DIGEST=$(echo "$BUILD_OUT" | grep -o '"digest":"[^"]*' | head -n 1 | cut -d'"' -f4 || true)
+        REF=$(echo "$BUILD_OUT" | grep -o '"ref":"[^"]*' | head -n 1 | cut -d'"' -f4 || true)
+
+        echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+        echo "ref=$REF" >> $GITHUB_OUTPUT

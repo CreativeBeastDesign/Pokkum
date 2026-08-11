@@ -111,3 +111,41 @@ func TestResolveVersion_EmptyWhenUnknown(t *testing.T) {
 		t.Errorf("ResolveVersion() = %q, want empty string", got)
 	}
 }
+
+func TestIsVersionAtLeast(t *testing.T) {
+	tests := []struct {
+		ver  string
+		want bool
+	}{
+		{"2.31.0", true},
+		{"2.32.1", true},
+		{"3.0.0", true},
+		{"^2.31.0", true},
+		{"~2.31.5", true},
+		{"2.30.9", false},
+		{"^2.10.0", false},
+		{"1.99.0", false},
+	}
+	for _, tt := range tests {
+		if got := IsVersionAtLeast(tt.ver, 2, 31); got != tt.want {
+			t.Errorf("IsVersionAtLeast(%q, 2, 31) = %v, want %v", tt.ver, got, tt.want)
+		}
+	}
+}
+
+func TestCheckTelemetrySupported(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"name": "app", "dependencies": {"@sveltejs/kit": "^2.31.0"}}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	supported, ver, err := CheckTelemetrySupported(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !supported {
+		t.Errorf("expected supported=true for @sveltejs/kit %s", ver)
+	}
+}
+

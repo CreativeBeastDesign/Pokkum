@@ -1,19 +1,19 @@
 ## v0.1
 
-- Reproducible layer timestamps: set every layer/config timestamp to `SOURCE_DATE_EPOCH` derived from the last git commit (`git log -1 --pretty=%ct`), not build time
-- Minimal `securityContext` in generated manifests: Default to `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`.
-- `.pokkumignore`: Explicit exclude list so `.env.local`, test fixtures, and source maps don't end up embedded
-- Dry-run mode (`--dry-run` / `--print-manifest`): show what would be built/pushed/applied without doing it - added to `pipeline.go`
-- Structured, leveled logging so CI logs are parseable
-- Idempotent registry pushes: skip push if the computed digest already exists remotely (`remote.Head` before `remote.Write`)
-- Basic config validation surfaced as clear CLI errors before any network call — fail fast, not mid-push
+[x] Reproducible layer timestamps: set every layer/config timestamp to `SOURCE_DATE_EPOCH` derived from the last git commit (`git log -1 --pretty=%ct`), not build time
+[x] Minimal `securityContext` in generated manifests: Default to `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`.
+[x] `.pokkumignore`: Explicit exclude list so `.env.local`, test fixtures, and source maps don't end up embedded
+[x] Dry-run mode (`--dry-run` / `--print-manifest`): show what would be built/pushed/applied without doing it - added to `pipeline.go`
+[x] Structured, leveled logging so CI logs are parseable
+[x] Idempotent registry pushes: skip push if the computed digest already exists remotely (`remote.Head` before `remote.Write`)
+[x] Basic config validation surfaced as clear CLI errors before any network call — fail fast, not mid-push
 
 ## v0.2
 
-- Cosign signing
-- SLSA provenance attestation
-- SBOM as OCI 1.1 referrer instead of `.sbom` tag convention
-- `pokkum dev` — build + `--local` + run in one command
+[x] Cosign signing
+[x] SLSA provenance attestation
+[ ] SBOM as OCI 1.1 referrer instead of `.sbom` tag convention
+[ ] `pokkum dev` — build + `--local` + run in one command
 
 ## v1.0
 

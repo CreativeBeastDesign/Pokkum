@@ -31,6 +31,15 @@ type buildFlags struct {
 	printManifest bool
 	logLevel      string
 	logFormat     string
+
+	// Telemetry flags
+	telemetry       bool
+	noTelemetry     bool
+	otelExport      string
+	telemetryEnv    string
+	traceSampleRate float64
+	metricsOnly     bool
+	withOtelSidecar bool
 }
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -71,6 +80,22 @@ The project directory defaults to the current working directory.`,
 		"Log level (DEBUG, INFO, WARN, ERROR)")
 	cmd.Flags().StringVar(&flags.logFormat, "log-format", "text",
 		"Log format (text or json)")
+
+	// Telemetry flags
+	cmd.Flags().BoolVar(&flags.telemetry, "telemetry", false,
+		"Enable OpenTelemetry auto-instrumentation and metrics export")
+	cmd.Flags().BoolVar(&flags.noTelemetry, "no-telemetry", false,
+		"Explicitly disable OpenTelemetry auto-instrumentation and metrics export")
+	cmd.Flags().StringVar(&flags.otelExport, "otel-export", "",
+		"Override OTLP exporter endpoint URL (e.g. http://collector:4318)")
+	cmd.Flags().StringVar(&flags.telemetryEnv, "telemetry-env", "",
+		"Target environment for telemetry (dev, preview, production)")
+	cmd.Flags().Float64Var(&flags.traceSampleRate, "trace-sample-rate", 1.0,
+		"Sampling ratio for trace spans (0.0 to 1.0)")
+	cmd.Flags().BoolVar(&flags.metricsOnly, "metrics-only", false,
+		"Disable trace span generation while keeping OTEL metrics active")
+	cmd.Flags().BoolVar(&flags.withOtelSidecar, "with-otel-sidecar", false,
+		"Inject OTEL Collector sidecar spec into Kubernetes manifests")
 
 	return cmd
 }
@@ -140,6 +165,17 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		req.Output.TarballPath = flags.tarball
 	} else {
 		req.Output.Mode = core.OutputPush
+	}
+
+	// Telemetry options
+	req.Telemetry = core.TelemetryOptions{
+		Enabled:         flags.telemetry && !flags.noTelemetry,
+		TracesEndpoint:  flags.otelExport,
+		MetricsEndpoint: flags.otelExport,
+		SampleRate:      flags.traceSampleRate,
+		MetricsOnly:     flags.metricsOnly,
+		Environment:     flags.telemetryEnv,
+		WithSidecar:     flags.withOtelSidecar,
 	}
 
 	// Execution-mode switches. They are not part of the request — both
