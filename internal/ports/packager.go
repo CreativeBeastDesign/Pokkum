@@ -24,6 +24,15 @@ const (
 	// are embedded in the executable.
 	AppBinaryPath = "/app/server"
 
+	// BunBinaryPath is where the resolved Bun executable is placed in the image for StrategyLayered.
+	BunBinaryPath = "/usr/local/bin/bun"
+
+	// AppServerIndexPath is the entrypoint JS file for StrategyLayered.
+	AppServerIndexPath = "/app/server/index.js"
+
+	// AppClientDirPrefix is the in-image mount point for static client assets.
+	AppClientDirPrefix = "/app/client"
+
 	// WorkingDir is the image's working directory.
 	WorkingDir = "/app"
 
@@ -86,15 +95,14 @@ const (
 	LabelBunVersion    = "dev.pokkum.bun.version"
 )
 
-// DefaultEntrypoint returns the image entrypoint: the supervisor, a bare "--"
-// separator, then the application binary. The separator exists so that
-// pokkum-init can distinguish its own flags from the child's argv without
-// ambiguity, and so that a user-supplied argument that happens to look like a
-// supervisor flag cannot be misinterpreted.
-//
-// It returns a fresh slice on every call because v1 image configs are mutated
-// in place by go-containerregistry helpers and a shared package-level slice
-// would be an aliasing hazard.
+// DefaultLayeredEntrypoint returns the image entrypoint for StrategyLayered:
+// the supervisor, "--", the Bun runtime executable, then the application server index.js.
+func DefaultLayeredEntrypoint() []string {
+	return []string{SupervisorPath, "--", BunBinaryPath, AppServerIndexPath}
+}
+
+// DefaultEntrypoint returns the image entrypoint for StrategyExe: the supervisor, a bare "--"
+// separator, then the application binary.
 func DefaultEntrypoint() []string {
 	return []string{SupervisorPath, "--", AppBinaryPath}
 }
@@ -204,9 +212,21 @@ type PackageRequest struct {
 	// wins over the derived one.
 	BaseRef string
 
-	// App is the compiled application binary for Platform. Required. It becomes
-	// a single-file layer at AppBinaryPath with mode 0555.
+	// Strategy selects the packaging strategy (StrategyLayered or StrategyExe).
+	Strategy BuildStrategy
+
+	// App is the compiled application binary for Platform (used when Strategy == StrategyExe).
 	App Artifact
+
+	// BunRuntime is the resolved Bun runtime binary (used when Strategy == StrategyLayered).
+	BunRuntime BunResolverResult
+
+	// AppServerDir is the host directory containing server JS files to package at /app/server (StrategyLayered).
+	AppServerDir string
+
+	// AppClientDir is the host directory containing static client files to package at /app/client (StrategyLayered).
+	AppClientDir string
+
 
 	// Supervisor is the pokkum-init binary for Platform, from
 	// SupervisorProvider.Binary. Required and non-empty. It becomes a

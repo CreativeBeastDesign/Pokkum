@@ -65,6 +65,21 @@ type (
 
 	// TelemetryOptions configures OpenTelemetry auto-instrumentation and metrics collection.
 	TelemetryOptions = ports.TelemetryOptions
+
+	// BunVariant specifies CPU/build variants of the Bun runtime binary.
+	BunVariant = ports.BunVariant
+
+	// BunResolverRequest specifies criteria for resolving a Bun runtime binary.
+	BunResolverRequest = ports.BunResolverRequest
+
+	// BunResolverResult reports resolved Bun runtime binary artifact details.
+	BunResolverResult = ports.BunResolverResult
+
+	// BunRuntimeResolver provides pinned Bun runtime binaries for layer packaging.
+	BunRuntimeResolver = ports.BunRuntimeResolver
+
+	// BuildStrategy specifies the packaging strategy (StrategyLayered or StrategyExe).
+	BuildStrategy = ports.BuildStrategy
 )
 
 // Re-exported enum values, so that the command layer can build a BuildRequest
@@ -81,7 +96,17 @@ const (
 	DefaultBaseImagePreset = ports.DefaultBaseImagePreset
 
 	DefaultTag = ports.DefaultTag
+
+	DefaultBunVersion  = ports.DefaultBunVersion
+	BunVariantStandard = ports.BunVariantStandard
+	BunVariantBaseline = ports.BunVariantBaseline
+
+	StrategyLayered      = ports.StrategyLayered
+	StrategyExe          = ports.StrategyExe
+	DefaultBuildStrategy = ports.DefaultBuildStrategy
 )
+
+
 
 // Re-exported platform values.
 var (
@@ -308,9 +333,25 @@ type CompileOptions struct {
 	// timestamp and must not be set here.
 	Env []string
 
+	// Strategy selects the packaging strategy (StrategyLayered or StrategyExe).
+	Strategy BuildStrategy
+
 	// NoInject suppresses the zero-config auto-injection for svelte.config.js.
 	NoInject bool
 }
+
+// BunRuntimeOptions configures Bun runtime resolution and caching for layer assembly.
+type BunRuntimeOptions struct {
+	// Version is the requested Bun version (e.g. "1.2.2"). Empty means DefaultBunVersion.
+	Version string
+
+	// Variant is the CPU variant ("standard" or "baseline"). Empty means BunVariantStandard.
+	Variant BunVariant
+
+	// CustomBinaryPath is an optional local path to a bun executable (--bun-binary).
+	CustomBinaryPath string
+}
+
 
 // BuildRequest is the complete description of one `pokkum build`. It is
 // assembled by the command layer from flags, config and environment, then
@@ -401,6 +442,9 @@ type BuildRequest struct {
 	// Insecure permits plain HTTP and skips TLS verification for both the base
 	// image pull and the push. Intended for local test registries only.
 	Insecure bool
+
+	// BunRuntime configures Bun runtime binary resolution and caching.
+	BunRuntime BunRuntimeOptions
 }
 
 // Normalize fills in defaults in place. It is idempotent, it never fails, and
@@ -411,6 +455,15 @@ type BuildRequest struct {
 // Build calls Normalize then Validate itself, so callers that go through Build
 // need not do either.
 func (r *BuildRequest) Normalize() {
+	if r.Compile.Strategy == "" {
+		r.Compile.Strategy = DefaultBuildStrategy
+	}
+	if r.BunRuntime.Version == "" {
+		r.BunRuntime.Version = DefaultBunVersion
+	}
+	if r.BunRuntime.Variant == "" {
+		r.BunRuntime.Variant = BunVariantStandard
+	}
 	if r.ProjectDir != "" {
 		if abs, err := filepath.Abs(r.ProjectDir); err == nil {
 			r.ProjectDir = abs

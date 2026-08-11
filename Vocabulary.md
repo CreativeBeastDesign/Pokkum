@@ -102,6 +102,10 @@ rather than invent a new one.
 | `--no-inject` | — | — | `false` | Explicitly disable auto-injection; wins over `--inject` if both are set. |
 | `--update-base` | — | — | `false` | Force re-resolving base image tags against remote registry and update `pokkum.lock`. |
 | `--offline` | — | — | `false` | Strictly enforce using `pokkum.lock` and local cache without remote registry calls. |
+| `--bun-binary` | — | — | (none) | Local filesystem path escape hatch to a `bun` executable (skips resolution/download). |
+| `--bun-variant` | — | — | `standard` | Bun CPU variant (`standard` [AVX2 required on x86-64] or `baseline`). |
+| `--strategy` | — | — | `layered` | Packaging strategy (`layered` [5-layer arch-independent layout, default] or `exe` [single executable]). |
+
 
 Positional: `[dir]` — project directory, defaults to `.`.
 
@@ -167,8 +171,8 @@ checklist entry, which now cross-references this table inline.
 
 | Roadmap item | Proposed flag(s) | Notes |
 |---|---|---|
-| M1: Packager + runtime plumbing | `--bun-binary=<path>`; `--bun-variant=baseline` | Per `pokkum-layer-caching-concept.md` §"Bun download supply chain" and the AVX2 note; offline escape hatch and older-CPU fallback. |
-| M2: Hand-rolled adapter + Phase-1 layering | `--strategy=exe\|layered` on `build` | Per the concept doc's migration note; `exe` stays default until parity, then flips. |
+| M1: Packager + runtime plumbing | `--bun-binary=<path>`; `--bun-variant=standard\|baseline` | **Implemented**. Per `pokkum-layer-caching-concept.md`; offline escape hatch and older-CPU fallback. |
+| M2: Hand-rolled adapter + Phase-1 layering | `--strategy=layered\|exe` on `build` | **Implemented**. Emits 5-layer arch-independent layout (`layered` is default). |
 | M3: Vendor splitting + native closure | *(none — internal to `--strategy=layered`)* | Vendor-chunk stability is a CI/digest-guard concern, not a new user-facing flag. |
 | M4: Hardening & cutover | *(none — folds into `--security-context`)* | `readOnlyRootFilesystem` joins the existing hardened-defaults bundle; see the matching v1.0 cluster-hardening row below for the same flag. |
 | Image Optimization (dedup, zstd) | `--compression=gzip\|zstd` on `build` | Per the concept doc §"zstd layer compression"; `gzip` stays default for registry/runtime compatibility. |

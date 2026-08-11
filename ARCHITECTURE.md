@@ -39,7 +39,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
 ### Core Layers
 
 1. **CLI Layer (`cmd/pokkum/`)**:
-   - `build.go`: Parses flags (`--platform`, `--base`, `--sbom`, `--local`, `--tarball`, `--update-base`, `--offline`) and invokes the core build pipeline.
+   - `build.go`: Parses flags (`--platform`, `--base`, `--sbom`, `--local`, `--tarball`, `--update-base`, `--offline`, `--bun-binary`, `--bun-variant`) and invokes the core build pipeline.
    - `base.go`: Implements `pokkum base update` and `pokkum base check` subcommands to query remote base image digests and manage `pokkum.lock`.
    - `resolve.go`: Scans Kubernetes YAML manifests for `pokkum://` image URIs, triggers automated builds, and resolves them to immutable image digests (`repo@sha256:...`).
    - `apply.go`: Resolves `pokkum://` manifests and pipes the output directly into `kubectl apply -f -`.
@@ -48,15 +48,16 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
 
 2. **Domain Core (`internal/core/`)**:
    - `pipeline.go`: Orchestrates the execution flow across compilers, base image resolvers, packagers, and registries.
-   - `model.go`: Defines domain models (`BuildRequest`, `Platform`, `RuntimeConfig`, `ImageRef`, etc.).
-   - `errors.go`: Defines standardized domain error types (`ErrPackageFailed`, `ErrUnsupportedPlatform`, etc.).
+   - `model.go`: Defines domain models (`BuildRequest`, `Platform`, `RuntimeConfig`, `ImageRef`, `BunRuntimeOptions`, etc.).
+   - `errors.go`: Defines standardized domain error types (`ErrPackageFailed`, `ErrUnsupportedPlatform`, `ErrBunResolutionFailed`, etc.).
 
 3. **Abstraction Ports (`internal/ports/`)**:
-   - Interfaces decoupling core logic from external adapters: `Compiler`, `Packager`, `Registry`, `BaseImageResolver`, `SBOMGenerator`, `SupervisorProvider`, `K8sResolver`, `Signer`, `Attestor`, `BinaryInspector`.
+   - Interfaces decoupling core logic from external adapters: `Compiler`, `Packager`, `Registry`, `BaseImageResolver`, `BunRuntimeResolver`, `SBOMGenerator`, `SupervisorProvider`, `K8sResolver`, `Signer`, `Attestor`, `BinaryInspector`.
 
 4. **Adapter Implementations (`internal/adapters/`)**:
    - `bunexec`: Wraps host `bun build --compile` for cross-compiling single executables.
-   - `packager`: Constructs reproducible OCI tarballs and multi-arch index manifests using `github.com/google/go-containerregistry`.
+   - `bunruntime`: Resolves, downloads, SHA256-verifies, and caches official Bun runtime binaries (`~/.cache/pokkum/bun`) for runtime layer assembly (`ports.BunRuntimeResolver`).
+   - `packager`: Constructs reproducible OCI tarballs, custom single-binary layers (`BuildCustomFileLayer`), directory tree layers (`BuildDirectoryTreeLayer`), and multi-arch index manifests using `github.com/google/go-containerregistry`.
    - `baseimage`: Resolves base image layers (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard `glibc-dynamic`) and maintains `pokkum.lock` digest locks.
    - `lockfileutils`: Utility package for loading, parsing, and saving `pokkum.lock` base image lockfiles.
    - `registry`: Handles OCI registry authentication, blob uploads, and index pushes.
@@ -70,6 +71,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `config`: Environment variable and CLI flag parsing/validation.
    - `ignore`: Reads `.pokkumignore` patterns to exclude unwanted files (`.env.local`, source maps, fixtures).
    - `nativeinspect`: Inspects compiled binaries (`DT_NEEDED`, glibc symbols) to ensure base image compatibility.
+
 
 5. **PID-1 Supervisor Subproject (`supervisor/cmd/pokkum-init`)**:
    - A standalone Go program cross-compiled to `linux/amd64` and `linux/arm64` and embedded in Pokkum.
@@ -162,6 +164,8 @@ To achieve this without a Docker daemon:
 | **Gzip Compression Header** | `tarball.LayerFromOpener` uses gzip with zeroed headers (no filename, zero mtime) so compressed layer digests are 100% stable. |
 | **SvelteKit Versioning** | SvelteKit defaults `kit.version.name` to `Date.now()`. Pokkum passes `SOURCE_DATE_EPOCH` to the build environment so `version.json` inside the app binary remains constant. |
 | **Base Image Upstream Drift** | `pokkum.lock` records exact SHA256 digests of base images (`distroless`, `chainguard`). Subsequent builds reuse locked digests without registry queries unless `--update-base` or `pokkum base update` is run. |
+| **Bun Runtime Toolchain Drift** | `bunruntime` resolver pins version, CPU variant (`standard`/`baseline`), and SHA256 checksums of release binaries. Cached executables (`~/.cache/pokkum/bun`) ensure bit-identical runtime layers. |
+
 
 ---
 
@@ -220,5 +224,22 @@ Pokkum unifies trace spans and metrics into a native, zero-config OpenTelemetry 
 * **Single-Pass Virtual Config Transformer (`internal/adapters/sveltekit/injector.go`)**: Patches `svelte.config.js` in a single virtual pass to enable adapter swapping, version pinning, and experimental tracing/instrumentation flags without mutating source files on disk.
 * **Strict Precedence & Virtual Instrumentation (`internal/adapters/sveltekit/telemetry.go`)**: Checks for existing `src/instrumentation.server.ts|js|mjs`. If present, user setup is preserved. If missing, Pokkum generates a virtual instrumentation file configured with OTLP trace & metric exporters, probability sampling (`--trace-sample-rate`), lazy SDK initialization, and metrics-only mode (`--metrics-only`).
 * **OTEL Collector Sidecar Injection (`internal/adapters/k8s`)**: When `--with-otel-sidecar` is set, `pokkum resolve` and `pokkum apply` automatically attach an OpenTelemetry Collector sidecar container specification exposing OTLP ports (`4317` gRPC, `4318` HTTP) and Prometheus scraping endpoints (`8889`/`9090`) to the generated Pod specs.
+
+---
+
+## 8. Layer Caching & Packaging Strategies
+
+Pokkum supports two image compilation strategies controlled via `--strategy=layered|exe` (default: `layered`):
+
+### 5-Layer Arch-Independent Layout (`--strategy=layered`)
+1. **Base Image Layer (Layer 0)**: Distroless Linux runtime (`distroless/cc-debian12:nonroot`).
+2. **Bun Runtime Layer (Layer 1)**: Pinned Bun executable (`/usr/local/bin/bun`, per platform) fetched and cached deterministically by `bunruntime.Resolver`.
+3. **Supervisor Layer (Layer 2)**: Pokkum supervisor binary (`/pokkum/init`, per platform).
+4. **App Server Layer (Layer 3)**: Application JavaScript server bundle (`/app/server/**`, architecture-independent).
+5. **App Client Layer (Layer 4)**: Static client assets (`/app/client/**`, architecture-independent).
+
+### Single Executable Strategy (`--strategy=exe`)
+Combines supervisor and standalone compiled Bun binary into a 2-layer image (`/pokkum/init` and `/app/server`).
+
 
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/baseimage"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunexec"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunruntime"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/dsse"
@@ -54,7 +55,14 @@ type buildFlags struct {
 	// Injection flags
 	inject   bool
 	noInject bool
+
+	// Bun runtime & strategy flags
+	bunBinary  string
+	bunVariant string
+	strategy   string
 }
+
+
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
 	flags := &buildFlags{}
@@ -127,6 +135,14 @@ The project directory defaults to the current working directory.`,
 		"Enable zero-config auto-injection for svelte.config.js (default true)")
 	cmd.Flags().BoolVar(&flags.noInject, "no-inject", false,
 		"Explicitly disable auto-injection")
+
+	// Bun runtime & strategy flags
+	cmd.Flags().StringVar(&flags.bunBinary, "bun-binary", "",
+		"Local path to a bun executable escape hatch (skips download/resolution)")
+	cmd.Flags().StringVar(&flags.bunVariant, "bun-variant", "standard",
+		"Bun CPU variant (standard [AVX2 required on x86-64] or baseline)")
+	cmd.Flags().StringVar(&flags.strategy, "strategy", "layered",
+		"Packaging strategy: layered (5-layer arch-independent layout [default]) or exe (single executable)")
 
 	return cmd
 }
@@ -203,6 +219,7 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	// Compile options
 	// Default to no-sourcemap and minification enabled (NoMinify=false).
 	req.Compile = core.CompileOptions{
+		Strategy: core.BuildStrategy(flags.strategy),
 		NoInject: flags.noInject || !flags.inject,
 	}
 
@@ -219,6 +236,13 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 
 	// Signing options
 	req.Sign = flags.sign && !flags.noSign
+
+	// Bun runtime options
+	req.BunRuntime = core.BunRuntimeOptions{
+		CustomBinaryPath: flags.bunBinary,
+		Variant:          core.BunVariant(flags.bunVariant),
+	}
+
 
 	// Execution-mode switches. They are not part of the request — both
 	// describe how far to get, not what to build — so they travel alongside it
@@ -285,6 +309,7 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		BaseImages: baseimage.NewResolver(logger),
 		Supervisor: supervisor.New(logger),
 		Packager:   packager.NewPackager(logger),
+		BunRuntime: bunruntime.NewResolver("", nil),
 
 		Registry: reg,
 		Daemon:   reg,

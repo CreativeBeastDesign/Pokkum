@@ -47,6 +47,9 @@ type Deps struct {
 	// dry run.
 	Packager ports.Packager
 
+	// BunRuntime resolves pinned Bun runtime binaries. Required for StrategyLayered.
+	BunRuntime ports.BunRuntimeResolver
+
 	// Registry publishes to a remote registry and attaches SBOMs. Required for
 	// OutputPush.
 	Registry ports.Registry
@@ -355,6 +358,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 
 	// Stage 5: the SvelteKit build. Once, serially, before any fan-out.
 	prep, err := deps.Compiler.Prepare(ctx, ports.PrepareRequest{
+		Strategy:        req.Compile.Strategy,
 		ProjectDir:      req.ProjectDir,
 		SourceDateEpoch: req.SourceDateEpoch,
 		Env:             req.Compile.Env,
@@ -578,42 +582,73 @@ func fanOut(
 				return fmt.Errorf("core: base image %q has no image for %s: %w", base.Ref, p, ErrBaseImageIncompatible)
 			}
 
-			outPath := filepath.Join(workDir, "app-"+platformSlug(p))
-			log.Info("compiling", "platform", p.String(), "output", outPath)
-			art, err := deps.Compiler.Compile(gctx, ports.CompileRequest{
-				ProjectDir:      req.ProjectDir,
-				EntrypointPath:  prep.EntrypointPath,
-				Platform:        p,
-				OutputPath:      outPath,
-				SourceDateEpoch: req.SourceDateEpoch,
-				Env:             req.Compile.Env,
-				Minify:          !req.Compile.NoMinify,
-				Sourcemap:       req.Compile.Sourcemap,
-			})
-			if err != nil {
-				return err
+			var art ports.Artifact
+			var bunResult ports.BunResolverResult
+
+			if req.Compile.Strategy == StrategyLayered {
+				if deps.BunRuntime == nil {
+					return fmt.Errorf("core: bun runtime resolver unavailable for layered strategy: %w", ErrPackageFailed)
+				}
+				res, err := deps.BunRuntime.Resolve(gctx, ports.BunResolverRequest{
+					Platform:         p,
+					Version:          req.BunRuntime.Version,
+					Variant:          req.BunRuntime.Variant,
+					CustomBinaryPath: req.BunRuntime.CustomBinaryPath,
+					SourceDateEpoch:  req.SourceDateEpoch,
+				})
+				if err != nil {
+					return fmt.Errorf("core: resolve bun runtime for %s: %w", p, err)
+				}
+				bunResult = res
+				log.Info("resolved bun runtime", "platform", p.String(), "version", bunResult.Version, "sha256", bunResult.SHA256)
+			} else {
+				outPath := filepath.Join(workDir, "app-"+platformSlug(p))
+				log.Info("compiling", "platform", p.String(), "output", outPath)
+				compiledArt, err := deps.Compiler.Compile(gctx, ports.CompileRequest{
+					ProjectDir:      req.ProjectDir,
+					EntrypointPath:  prep.EntrypointPath,
+					Platform:        p,
+					OutputPath:      outPath,
+					SourceDateEpoch: req.SourceDateEpoch,
+					Env:             req.Compile.Env,
+					Minify:          !req.Compile.NoMinify,
+					Sourcemap:       req.Compile.Sourcemap,
+				})
+				if err != nil {
+					return err
+				}
+				art = compiledArt
+				log.Info("compiled", "platform", p.String(), "size", art.Size, "sha256", art.SHA256)
 			}
-			log.Info("compiled", "platform", p.String(), "size", art.Size, "sha256", art.SHA256)
 
 			sup, err := deps.Supervisor.Binary(gctx, p)
 			if err != nil {
 				return err
 			}
 
-			img, err := deps.Packager.Build(gctx, ports.PackageRequest{
+			pkgReq := ports.PackageRequest{
 				Platform:    p,
 				Base:        baseImg,
+				Strategy:    req.Compile.Strategy,
 				App:         art,
+				BunRuntime:  bunResult,
 				Supervisor:  sup,
 				Runtime:     req.Runtime,
 				CreatedAt:   req.SourceDateEpoch,
 				Labels:      labels,
 				Annotations: req.Annotations,
-			})
+			}
+
+			if req.Compile.Strategy == StrategyLayered {
+				pkgReq.AppServerDir = filepath.Join(prep.OutputDir, "server")
+				pkgReq.AppClientDir = filepath.Join(prep.OutputDir, "client")
+			}
+
+			img, err := deps.Packager.Build(gctx, pkgReq)
 			if err != nil {
 				return err
 			}
-			log.Info("packaged", "platform", p.String())
+			log.Info("packaged", "platform", p.String(), "strategy", req.Compile.Strategy)
 
 			built[i] = platformBuild{artifact: art, image: img}
 			return nil

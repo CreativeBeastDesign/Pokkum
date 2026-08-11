@@ -141,4 +141,18 @@ var (
 	// produce a working container, such as a probe port colliding with the
 	// application port.
 	ErrInvalidRuntimeConfig = errors.New("invalid runtime configuration")
+
+	// ErrBunResolutionFailed reports that Bun runtime resolution failed.
+	ErrBunResolutionFailed = errors.New("bun runtime resolution failed")
+
+	// ErrBunChecksumMismatch reports that a downloaded Bun binary failed SHA256 checksum verification.
+	ErrBunChecksumMismatch = errors.New("bun binary checksum mismatch")
+
+	// ErrBunDownloadFailed reports a network or IO failure downloading a Bun release archive.
+	ErrBunDownloadFailed = errors.New("bun binary download failed")
+
+	// ErrInvalidStrategy reports an unrecognized packaging strategy (must be layered or exe).
+	ErrInvalidStrategy = errors.New("invalid build strategy")
 )
+
+

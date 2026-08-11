@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -340,3 +341,88 @@ func bytesOpener(b []byte) func() (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(b)), nil
 	}
 }
+
+// BuildCustomFileLayer builds a single-file layer at targetPath (e.g. "/usr/local/bin/bun")
+// from sourcePath on host disk, pinned to modTime and nonroot ownership.
+func BuildCustomFileLayer(ctx context.Context, platform ports.Platform, targetPath string, sourcePath string, modTime time.Time) (v1.Layer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
+	}
+
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return nil, fmt.Errorf("packager: build %s: stat file %q: %w: %w", platform, sourcePath, err, core.ErrPackageFailed)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("packager: build %s: source path %q is a directory: %w", platform, sourcePath, core.ErrPackageFailed)
+	}
+
+	file := layerFile{
+		path: targetPath,
+		size: info.Size(),
+		open: fileOpener(sourcePath),
+	}
+	return buildLayer(ctx, platform, file, modTime)
+}
+
+// BuildDirectoryTreeLayer builds an OCI layer from a directory tree on host disk,
+// mounting it under targetPrefix in the image (e.g., hostDir="build/client", targetPrefix="/app/client").
+// All entries are explicitly sorted and pinned to modTime and nonroot ownership.
+func BuildDirectoryTreeLayer(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time) (v1.Layer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
+	}
+
+	info, err := os.Stat(hostDir)
+	if err != nil {
+		return nil, fmt.Errorf("packager: build %s: stat directory %q: %w: %w", platform, hostDir, err, core.ErrPackageFailed)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("packager: build %s: source path %q is not a directory: %w", platform, hostDir, core.ErrPackageFailed)
+	}
+
+	var files []layerFile
+	err = filepath.WalkDir(hostDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(hostDir, p)
+		if err != nil {
+			return err
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		inImagePath := path.Join(targetPrefix, filepath.ToSlash(rel))
+		files = append(files, layerFile{
+			path: inImagePath,
+			size: fi.Size(),
+			open: fileOpener(p),
+		})
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("packager: build %s: walk directory %q: %w: %w", platform, hostDir, err, core.ErrPackageFailed)
+	}
+
+	entries, err := tarEntries(files)
+	if err != nil {
+		return nil, fmt.Errorf("packager: build %s: %w: %w", platform, err, core.ErrPackageFailed)
+	}
+
+	layer, err := tarball.LayerFromOpener(
+		tarOpener(entries, modTime),
+		tarball.WithMediaType(types.OCILayer),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("packager: build %s: build tree layer: %w: %w", platform, err, core.ErrPackageFailed)
+	}
+	return layer, nil
+}
+

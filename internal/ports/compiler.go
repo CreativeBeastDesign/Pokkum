@@ -262,10 +262,26 @@ type PreflightResult struct {
 	SvelteKitVersion string
 }
 
+// BuildStrategy specifies the packaging strategy for container image assembly.
+type BuildStrategy string
+
+const (
+	// StrategyLayered builds a 5-layer arch-independent image layout with Bun runtime.
+	StrategyLayered BuildStrategy = "layered"
+
+	// StrategyExe builds a single compiled executable per architecture (legacy).
+	StrategyExe BuildStrategy = "exe"
+
+	// DefaultBuildStrategy is the default strategy for Pokkum builds.
+	DefaultBuildStrategy = StrategyLayered
+)
+
 // PrepareRequest drives stage one of the two-stage compile: running the
-// SvelteKit build so that the @jesterkit/exe-sveltekit adapter emits a single
-// TypeScript entrypoint that Bun can then compile.
+// SvelteKit build so that the adapter emits entrypoint files.
 type PrepareRequest struct {
+	// Strategy selects the build packaging strategy (layered vs exe).
+	Strategy BuildStrategy
+
 	// ProjectDir is the absolute SvelteKit project root. Required.
 	ProjectDir string
 

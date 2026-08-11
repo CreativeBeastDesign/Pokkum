@@ -256,12 +256,31 @@ func (m *mockDSSESigner) Verify(ctx context.Context, envelope ports.DSSEEnvelope
 	return []byte{}, nil
 }
 
+type mockBunRuntimeResolver struct {
+	resolveFn func(ctx context.Context, req ports.BunResolverRequest) (ports.BunResolverResult, error)
+}
+
+func (m *mockBunRuntimeResolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (ports.BunResolverResult, error) {
+	if m.resolveFn != nil {
+		return m.resolveFn(ctx, req)
+	}
+	return ports.BunResolverResult{
+		BinaryPath: "/mock/bun",
+		Version:    "1.2.2",
+		Variant:    ports.BunVariantStandard,
+		Platform:   req.Platform,
+		SHA256:     "mockbunsha256",
+		Size:       1000,
+	}, nil
+}
+
 func newFullDeps(stdout io.Writer) core.Deps {
 	return core.Deps{
 		Compiler:        &mockCompiler{},
 		BaseImages:      &mockBaseImageResolver{},
 		Supervisor:      &mockSupervisorProvider{},
 		Packager:        &mockPackager{},
+		BunRuntime:      &mockBunRuntimeResolver{},
 		Registry:        &mockRegistry{},
 		Daemon:          &mockLocalLoader{},
 		Tarballs:        &mockTarballWriter{},
@@ -574,9 +593,24 @@ func TestBuildErrorPropagation(t *testing.T) {
 				return ports.Artifact{}, core.ErrCompileFailed
 			},
 		}
-		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+		reqExe := req
+		reqExe.Compile.Strategy = core.StrategyExe
+		_, err := core.Build(context.Background(), deps, reqExe, core.BuildOptions{})
 		if !errors.Is(err, core.ErrCompileFailed) {
 			t.Errorf("expected ErrCompileFailed, got %v", err)
+		}
+	})
+
+	t.Run("bun runtime resolution error", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		deps.BunRuntime = &mockBunRuntimeResolver{
+			resolveFn: func(_ context.Context, _ ports.BunResolverRequest) (ports.BunResolverResult, error) {
+				return ports.BunResolverResult{}, core.ErrBunResolutionFailed
+			},
+		}
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+		if !errors.Is(err, core.ErrBunResolutionFailed) {
+			t.Errorf("expected ErrBunResolutionFailed, got %v", err)
 		}
 	})
 }

@@ -85,6 +85,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -143,6 +144,11 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		return nil, fmt.Errorf("packager: build %s: %w", req.Platform, err)
 	}
 
+	if req.Strategy == ports.StrategyLayered {
+		if req.Runtime.Entrypoint == nil {
+			req.Runtime.Entrypoint = ports.DefaultLayeredEntrypoint()
+		}
+	}
 	rc := req.Runtime.WithDefaults()
 	ts := pinnedTime(req.CreatedAt)
 
@@ -158,24 +164,6 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		return nil, fmt.Errorf("packager: build %s: read base config: %w: %w", req.Platform, err, core.ErrPackageFailed)
 	}
 
-	// The supervisor layer is small (kilobytes) and built first, so it can be
-	// appended below the application layer per the ordering rationale above.
-	supervisorLayer, err := buildSupervisorLayer(ctx, req, ts)
-	if err != nil {
-		return nil, err
-	}
-
-	// Building the application layer computes both the diffID and the
-	// compressed digest, which means gzipping ~90 MB. It is the expensive step,
-	// so the context is checked either side of it.
-	appLayer, err := buildAppLayer(ctx, req, ts)
-	if err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("packager: build %s: %w", req.Platform, err)
-	}
-
 	cfg := applyRuntime(baseCfg, rc, req, baseDigest, ts)
 
 	img, err := mutate.ConfigFile(req.Base, cfg)
@@ -183,29 +171,57 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		return nil, fmt.Errorf("packager: build %s: apply config: %w: %w", req.Platform, err, core.ErrPackageFailed)
 	}
 
-	// Addenda are appended in call order, and the supervisor addendum comes
-	// first so that its layer sits below the application layer in the final
-	// image — appended earlier means lower, in go-containerregistry's model.
-	img, err = mutate.Append(img,
-		mutate.Addendum{
-			Layer:     supervisorLayer,
-			MediaType: types.OCILayer,
-			History: v1.History{
-				Created:   v1.Time{Time: ts},
-				CreatedBy: historySupervisorCreatedBy,
-				Comment:   "",
-			},
-		},
-		mutate.Addendum{
-			Layer:     appLayer,
-			MediaType: types.OCILayer,
-			History: v1.History{
-				Created:   v1.Time{Time: ts},
-				CreatedBy: historyAppCreatedBy,
-				Comment:   "",
-			},
-		},
-	)
+	var addenda []mutate.Addendum
+
+	if req.Strategy == ports.StrategyLayered {
+		bunLayer, err := BuildCustomFileLayer(ctx, req.Platform, ports.BunBinaryPath, req.BunRuntime.BinaryPath, ts)
+		if err != nil {
+			return nil, fmt.Errorf("packager: build %s: bun layer: %w", req.Platform, err)
+		}
+		supervisorLayer, err := buildSupervisorLayer(ctx, req, ts)
+		if err != nil {
+			return nil, err
+		}
+		serverLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppServerDir, "/app/server", ts)
+		if err != nil {
+			return nil, fmt.Errorf("packager: build %s: server layer: %w", req.Platform, err)
+		}
+
+		addenda = append(addenda,
+			mutate.Addendum{Layer: bunLayer, MediaType: types.OCILayer, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.BunBinaryPath}},
+			mutate.Addendum{Layer: supervisorLayer, MediaType: types.OCILayer, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: historySupervisorCreatedBy}},
+			mutate.Addendum{Layer: serverLayer, MediaType: types.OCILayer, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add /app/server"}},
+		)
+
+		if req.AppClientDir != "" {
+			if info, err := os.Stat(req.AppClientDir); err == nil && info.IsDir() {
+				clientLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppClientDir, ports.AppClientDirPrefix, ts)
+				if err != nil {
+					return nil, fmt.Errorf("packager: build %s: client layer: %w", req.Platform, err)
+				}
+				addenda = append(addenda, mutate.Addendum{
+					Layer:     clientLayer,
+					MediaType: types.OCILayer,
+					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppClientDirPrefix},
+				})
+			}
+		}
+	} else {
+		supervisorLayer, err := buildSupervisorLayer(ctx, req, ts)
+		if err != nil {
+			return nil, err
+		}
+		appLayer, err := buildAppLayer(ctx, req, ts)
+		if err != nil {
+			return nil, err
+		}
+		addenda = append(addenda,
+			mutate.Addendum{Layer: supervisorLayer, MediaType: types.OCILayer, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: historySupervisorCreatedBy}},
+			mutate.Addendum{Layer: appLayer, MediaType: types.OCILayer, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: historyAppCreatedBy}},
+		)
+	}
+
+	img, err = mutate.Append(img, addenda...)
 	if err != nil {
 		return nil, fmt.Errorf("packager: build %s: append layers: %w: %w", req.Platform, err, core.ErrPackageFailed)
 	}
@@ -237,20 +253,11 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 	if err != nil {
 		return nil, fmt.Errorf("packager: build %s: compute digest: %w: %w", req.Platform, err, core.ErrPackageFailed)
 	}
-	appLayerDigest, err := appLayer.Digest()
-	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: compute app layer digest: %w: %w", req.Platform, err, core.ErrPackageFailed)
-	}
-	supervisorLayerDigest, err := supervisorLayer.Digest()
-	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: compute supervisor layer digest: %w: %w", req.Platform, err, core.ErrPackageFailed)
-	}
 
 	p.logger().Info("packaged image",
 		"platform", req.Platform.String(),
 		"digest", digest.String(),
-		"app_layer", appLayerDigest.String(),
-		"supervisor_layer", supervisorLayerDigest.String(),
+		"strategy", string(req.Strategy),
 		"base_digest", baseDigest.String(),
 		"created", ts.Format(time.RFC3339))
 
@@ -332,12 +339,21 @@ func validatePackageRequest(req ports.PackageRequest) error {
 	if req.Base == nil {
 		return fmt.Errorf("packager: build %s: base image is required: %w", req.Platform, core.ErrPackageFailed)
 	}
-	if req.App.Path == "" {
-		return fmt.Errorf("packager: build %s: application binary path is required: %w", req.Platform, core.ErrPackageFailed)
-	}
-	if !req.App.Platform.IsZero() && req.App.Platform != req.Platform {
-		return fmt.Errorf("packager: build %s: application binary is for %s: %w",
-			req.Platform, req.App.Platform, core.ErrPackageFailed)
+	if req.Strategy == ports.StrategyLayered {
+		if req.BunRuntime.BinaryPath == "" {
+			return fmt.Errorf("packager: build %s: bun runtime binary path is required for layered strategy: %w", req.Platform, core.ErrPackageFailed)
+		}
+		if req.AppServerDir == "" {
+			return fmt.Errorf("packager: build %s: application server directory is required for layered strategy: %w", req.Platform, core.ErrPackageFailed)
+		}
+	} else {
+		if req.App.Path == "" {
+			return fmt.Errorf("packager: build %s: application binary path is required: %w", req.Platform, core.ErrPackageFailed)
+		}
+		if !req.App.Platform.IsZero() && req.App.Platform != req.Platform {
+			return fmt.Errorf("packager: build %s: application binary is for %s: %w",
+				req.Platform, req.App.Platform, core.ErrPackageFailed)
+		}
 	}
 	if len(req.Supervisor) == 0 {
 		return fmt.Errorf("packager: build %s: supervisor binary is empty: %w", req.Platform, core.ErrSupervisorUnavailable)

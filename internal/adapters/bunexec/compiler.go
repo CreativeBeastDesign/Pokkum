@@ -162,9 +162,9 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 	}
 	cfgSource := string(cfgData)
 
-	if !sveltekitutils.AdapterConfigured(cfgSource, adapterPackage) && !pkg.HasDependency(adapterPackage) {
+	if !sveltekitutils.AdapterConfigured(cfgSource, adapterPackage) && !pkg.HasDependency(adapterPackage) && !pkg.HasDependency("@sveltejs/adapter-node") {
 		return ports.PreflightResult{}, fmt.Errorf(
-			"bunexec: preflight %s: %s is not configured in svelte.config.js or listed in package.json; install it with `bun add -D %s` and set it as the adapter: %w",
+			"bunexec: preflight %s: %s or @sveltejs/adapter-node is not configured in svelte.config.js or listed in package.json; install it with `bun add -D %s`: %w",
 			req.ProjectDir, adapterPackage, adapterPackage, core.ErrAdapterMissing,
 		)
 	}
@@ -219,22 +219,30 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 // the same req.ProjectDir — see the package doc.
 func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports.PrepareResult, error) {
 	log := c.logger
-	log.Info("bunexec: prepare: running sveltekit build", "projectDir", req.ProjectDir)
+	log.Info("bunexec: prepare: running sveltekit build", "projectDir", req.ProjectDir, "strategy", req.Strategy)
 
-	entrypoint := filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit", "temp-server", "index.ts")
-	outputDir := filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit")
+	targetAdapter := "@sveltejs/adapter-node"
+	if req.Strategy == ports.StrategyExe {
+		targetAdapter = "@jesterkit/exe-sveltekit"
+	}
+
+	entrypoint := filepath.Join(req.ProjectDir, "build", "index.js")
+	outputDir := filepath.Join(req.ProjectDir, "build")
+	if req.Strategy == ports.StrategyExe {
+		entrypoint = filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit", "temp-server", "index.ts")
+		outputDir = filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit")
+	}
 
 	// Inject virtual svelte.config.js telemetry/adapter configuration
 	baseEnv := buildEnvWithEpoch(req.Env, req.SourceDateEpoch)
 
 	if !req.NoInject {
 		opts := sveltekitutils.DefaultInjectorOptions()
+		opts.TargetAdapter = targetAdapter
 		opts.SourceEpoch = req.SourceDateEpoch.Format("20060102150405")
 		if req.SourceDateEpoch.IsZero() {
 			opts.SourceEpoch = "pokkum-reproducible-build"
 		}
-		// TODO: Wire opts.EnableTelemetry from req once CompileRequest includes it,
-		// or assume it's pre-configured if present.
 
 		vcRes, err := sveltekitutils.PrepareVirtualConfig(req.ProjectDir, opts)
 		if err != nil {
