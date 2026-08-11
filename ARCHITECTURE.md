@@ -39,7 +39,8 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
 ### Core Layers
 
 1. **CLI Layer (`cmd/pokkum/`)**:
-   - `build.go`: Parses flags (`--platform`, `--base`, `--sbom`, `--local`, `--tarball`, `--update-base`, `--offline`, `--bun-binary`, `--bun-variant`) and invokes the core build pipeline.
+   - `build.go`: Parses flags (`--platform`, `--base`, `--sbom`, `--sbom-attach`, `--local`, `--tarball`, `--update-base`, `--offline`, `--bun-binary`, `--bun-variant`) and invokes the core build pipeline.
+   - `dev.go`: Implements `pokkum dev [dir]` subcommand for local container development, supporting `--debug` interactive shell debugging, local Docker daemon loading, and hot-reload source watching.
    - `base.go`: Implements `pokkum base update` and `pokkum base check` subcommands to query remote base image digests and manage `pokkum.lock`.
    - `resolve.go`: Scans Kubernetes YAML manifests for `pokkum://` image URIs, triggers automated builds, and resolves them to immutable image digests (`repo@sha256:...`).
    - `apply.go`: Resolves `pokkum://` manifests and pipes the output directly into `kubectl apply -f -`.
@@ -212,7 +213,7 @@ Pokkum embeds supply chain security directly into the image publishing lifecycle
 * **Cosign Image Signing (`internal/adapters/cosign`)**: Signs image manifests using Cosign key pairs or keyless OIDC identity signatures, pushing signature artifacts directly to the target registry.
 * **SLSA Provenance Attestations (`internal/adapters/slsa`)**: Produces SLSA v1.0 predicate attestations linking the built image hash back to source git repositories and build commit digests. Includes complete M0 toolchain metadata: Go version, builder OS/architecture (`GOOS/GOARCH`), Bun binary digest, Pokkum commit ID, and `pokkum.lock` SHA256 hashes in `resolvedDependencies`.
 * **DSSE Envelope Formatting (`internal/adapters/dsse`)**: Wraps attestations in Dead Simple Signing Envelopes (DSSE) before payload attachment.
-* **SBOM Attachments (`internal/adapters/sbom`)**: Generates SPDX or CycloneDX vulnerability bill of materials attached directly as OCI artifacts.
+* **SBOM Attachments (`internal/adapters/sbom`)**: Generates SPDX or CycloneDX vulnerability bill of materials attached directly as OCI 1.1 referrers by default (`--sbom-attach=referrer`), or under legacy tag conventions (`--sbom-attach=tag`).
 
 ---
 

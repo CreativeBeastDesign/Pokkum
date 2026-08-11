@@ -396,6 +396,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	if doc != nil {
 		result.SBOM = &SBOMResult{
 			Format:       doc.Format,
+			AttachMode:   req.SBOM.AttachMode,
 			SHA256:       doc.SHA256,
 			PackageCount: doc.PackageCount,
 			Size:         int64(len(doc.Content)),
@@ -465,10 +466,11 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			return result, err
 		}
 		att, err := deps.Registry.AttachSBOM(ctx, ports.AttachSBOMRequest{
-			Repo:     req.Repo,
-			Subject:  pub.Digest,
-			Document: *doc,
-			Insecure: req.Insecure,
+			Repo:       req.Repo,
+			Subject:    pub.Digest,
+			Document:   *doc,
+			AttachMode: req.SBOM.AttachMode,
+			Insecure:   req.Insecure,
 		})
 		if err != nil {
 			return result, fmt.Errorf("core: attach sbom to %s (the image itself was pushed; set SBOM.NoAttach to skip this step): %w", pub.Ref, err)

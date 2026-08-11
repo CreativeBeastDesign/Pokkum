@@ -2,6 +2,7 @@
 
 - **Hexagonal Architecture Rules**:
   - `internal/ports` is the leaf node of the internal dependency graph. It imports standard library + `go-containerregistry/pkg/v1` only. It must NEVER import `internal/core` or any adapter.
+  - Automated purity verification is implemented in `internal/architecture_test.go` and enforced via `go test ./internal/...` or `make check-arch`.
   - `internal/core` imports `internal/ports` and standard library. It re-exports boundary vocabulary as type aliases (`core.Platform = ports.Platform`).
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.

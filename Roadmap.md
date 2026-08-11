@@ -62,12 +62,12 @@ Open roadmap items are organized into **4 cohesive implementation bundles**, str
 - [x] Idempotent registry pushes: skip push if the computed digest already exists remotely (`remote.Head` before `remote.Write`)
 - [x] Basic config validation surfaced as clear CLI errors before any network call — fail fast, not mid-push
 
-## v0.2 (In Progress)
+## v0.2 (Completed)
 
 - [x] Cosign signing
 - [x] SLSA provenance attestation
-- [ ] SBOM as OCI 1.1 referrer instead of `.sbom` tag convention (new flag: `--sbom-attach=referrer|tag`, default `referrer`)
-- [ ] `pokkum dev` — Hot-Reload Container Development (build + `--local` + run in one command; new flag: `--debug` to drop into a shell inside the container)
+- [x] SBOM as OCI 1.1 referrer instead of `.sbom` tag convention (new flag: `--sbom-attach=referrer|tag`, default `referrer`)
+- [x] `pokkum dev` — Hot-Reload Container Development (build + `--local` + run in one command; new flag: `--debug` to drop into a shell inside the container)
 - [x] Zero-Config Auto-Injection: Auto-injecting the adapter and `SOURCE_DATE_EPOCH` pinning without manual `svelte.config.js` edits. (Note: `--no-inject` escape hatch flag still pending) (see [pokkum-injection-concept.md](pokkum-injection-concept.md))
 - [x] Base Image Lockfile (`pokkum.lock`): Enable reproducible base image resolving (distroless/chainguard) to prevent drift. (new flags: `--update-base`, `--offline`; new subcommand `pokkum base update --preset <name>`) (see [pokkum-lock-concept.md](pokkum-lock-concept.md))
 

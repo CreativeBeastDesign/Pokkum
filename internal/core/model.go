@@ -54,6 +54,9 @@ type (
 	// SBOMFormat selects the bill-of-materials serialisation.
 	SBOMFormat = ports.SBOMFormat
 
+	// SBOMAttachMode selects how the SBOM artifact is attached.
+	SBOMAttachMode = ports.SBOMAttachMode
+
 	// BaseImagePreset names a supported base-image tier.
 	BaseImagePreset = ports.BaseImagePreset
 
@@ -92,6 +95,10 @@ const (
 	SBOMFormatCycloneDXJSON = ports.SBOMFormatCycloneDXJSON
 	SBOMFormatNone          = ports.SBOMFormatNone
 	DefaultSBOMFormat       = ports.DefaultSBOMFormat
+
+	SBOMAttachReferrer    = ports.SBOMAttachReferrer
+	SBOMAttachTag         = ports.SBOMAttachTag
+	DefaultSBOMAttachMode = ports.DefaultSBOMAttachMode
 
 	BaseImageDistroless    = ports.BaseImageDistroless
 	BaseImageChainguard    = ports.BaseImageChainguard
@@ -243,6 +250,19 @@ func ParseSBOMFormat(s string) (SBOMFormat, error) {
 	}
 }
 
+// ParseSBOMAttachMode converts user input to an SBOMAttachMode, accepting any case
+// and surrounding whitespace.
+func ParseSBOMAttachMode(s string) (SBOMAttachMode, error) {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case "referrer", "referrers", "oci1.1":
+		return SBOMAttachReferrer, nil
+	case "tag", "tags":
+		return SBOMAttachTag, nil
+	default:
+		return "", fmt.Errorf("sbom attach mode %q: %w", s, ErrInvalidSBOMAttachMode)
+	}
+}
+
 // ParseBaseImagePreset converts user input to a BaseImagePreset, accepting any
 // case and surrounding whitespace.
 func ParseBaseImagePreset(s string) (BaseImagePreset, error) {
@@ -301,6 +321,9 @@ type SBOMOptions struct {
 	// Format selects the serialisation. Empty means DefaultSBOMFormat; set it
 	// to SBOMFormatNone to disable generation entirely.
 	Format SBOMFormat
+
+	// AttachMode selects between OCI 1.1 referrer attachment (default) or tag convention.
+	AttachMode SBOMAttachMode
 
 	// NoAttach suppresses publishing the SBOM alongside the image. The field is
 	// negative so that the zero value means "attach", which is the behaviour
@@ -513,6 +536,9 @@ func (r *BuildRequest) Normalize() {
 	if r.SBOM.Format == "" {
 		r.SBOM.Format = DefaultSBOMFormat
 	}
+	if r.SBOM.AttachMode == "" {
+		r.SBOM.AttachMode = DefaultSBOMAttachMode
+	}
 	if r.Output.Mode == "" {
 		r.Output.Mode = DefaultOutputMode
 	}
@@ -588,6 +614,9 @@ func (r BuildRequest) Validate() error {
 
 	if !r.SBOM.Format.Valid() {
 		return fmt.Errorf("sbom format %q: %w", r.SBOM.Format, ErrInvalidSBOMFormat)
+	}
+	if !r.SBOM.AttachMode.Valid() {
+		return fmt.Errorf("sbom attach mode %q: %w", r.SBOM.AttachMode, ErrInvalidSBOMAttachMode)
 	}
 
 	if r.SourceDateEpoch.IsZero() {
@@ -689,6 +718,9 @@ func NewImageResult(mode OutputMode, pr ports.PublishResult, platforms []Platfor
 type SBOMResult struct {
 	// Format is the serialisation that was produced.
 	Format SBOMFormat
+
+	// AttachMode is the attachment strategy used (referrer or tag).
+	AttachMode SBOMAttachMode
 
 	// SHA256 is the lowercase hex digest of the document contents.
 	SHA256 string

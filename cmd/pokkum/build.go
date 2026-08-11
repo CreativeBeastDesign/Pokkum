@@ -30,6 +30,7 @@ type buildFlags struct {
 	base          string
 	hardened      bool
 	sbom          string
+	sbomAttach    string
 	local         bool
 	tarball       string
 	dryRun        bool
@@ -91,6 +92,8 @@ The project directory defaults to the current working directory.`,
 		"Select the Chainguard base preset (shorthand for --base chainguard)")
 	cmd.Flags().StringVar(&flags.sbom, "sbom", "spdx-json",
 		"SBOM format (spdx-json [default], cyclonedx-json, or none)")
+	cmd.Flags().StringVar(&flags.sbomAttach, "sbom-attach", "referrer",
+		"SBOM attachment mode (referrer [default, OCI 1.1] or tag)")
 	cmd.Flags().BoolVar(&flags.local, "local", false,
 		"Load the image into the local Docker daemon instead of pushing to a registry")
 	cmd.Flags().StringVar(&flags.tarball, "tarball", "",
@@ -199,12 +202,18 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	req.BaseImage.UpdateBase = flags.updateBase
 	req.BaseImage.Offline = flags.offline
 
-	// SBOM format
+	// SBOM format and attachment mode
 	sbomFmt, err := core.ParseSBOMFormat(flags.sbom)
 	if err != nil {
 		return fmt.Errorf("invalid sbom format: %w", err)
 	}
 	req.SBOM.Format = sbomFmt
+
+	sbomAttachMode, err := core.ParseSBOMAttachMode(flags.sbomAttach)
+	if err != nil {
+		return fmt.Errorf("invalid sbom attach mode: %w", err)
+	}
+	req.SBOM.AttachMode = sbomAttachMode
 
 	// Output mode
 	if flags.local && flags.tarball != "" {

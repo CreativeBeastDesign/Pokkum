@@ -199,6 +199,36 @@ func TestParseSBOMFormat(t *testing.T) {
 	}
 }
 
+func TestParseSBOMAttachMode(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    core.SBOMAttachMode
+		wantErr bool
+	}{
+		{"referrer", core.SBOMAttachReferrer, false},
+		{"referrers", core.SBOMAttachReferrer, false},
+		{"oci1.1", core.SBOMAttachReferrer, false},
+		{"tag", core.SBOMAttachTag, false},
+		{"tags", core.SBOMAttachTag, false},
+		{"invalid", "", true},
+	}
+
+	for _, tt := range tests {
+		got, err := core.ParseSBOMAttachMode(tt.input)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("ParseSBOMAttachMode(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			continue
+		}
+		if tt.wantErr {
+			if !errors.Is(err, core.ErrInvalidSBOMAttachMode) {
+				t.Errorf("ParseSBOMAttachMode(%q) error = %v, expected ErrInvalidSBOMAttachMode", tt.input, err)
+			}
+		} else if got != tt.want {
+			t.Errorf("ParseSBOMAttachMode(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestParseBaseImagePreset(t *testing.T) {
 	tests := []struct {
 		input   string

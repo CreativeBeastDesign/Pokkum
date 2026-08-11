@@ -83,6 +83,7 @@ rather than invent a new one.
 | `--base` | — | — | (unset → distroless) | Base image preset (`distroless`, `chainguard`) or a custom image reference. |
 | `--hardened` | — | — | `false` | Shorthand for `--base chainguard`. |
 | `--sbom` | — | — | `spdx-json` | SBOM format: `spdx-json`, `cyclonedx-json`, or `none`. |
+| `--sbom-attach` | — | — | `referrer` | SBOM attachment mode: `referrer` (OCI 1.1) or `tag` (legacy `.sbom` tag). |
 | `--local` | — | — | `false` | Load into the local Docker daemon instead of pushing. Mutually exclusive with `--tarball`. |
 | `--tarball` | — | — | (none) | Export as an OCI archive to the given path. Mutually exclusive with `--local`. |
 | `--dry-run` | — | — | `false` | Resolve and report; perform no writes. Mutually exclusive with `--print-manifest`. |
@@ -128,7 +129,18 @@ structurally identical).
 Also reads: `POKKUM_DOCKER_REPO` (required — resolving `pokkum://` refs
 means building and pushing).
 
-## 5. `pokkum base update` / `pokkum base check`
+## 5. `pokkum dev`
+
+`pokkum dev [dir]` compiles the SvelteKit application, loads the image into the local Docker daemon, and starts container execution locally with hot-reloading file watching.
+
+| Flag | Shorthand | Default | Description |
+|---|---|---|---|
+| `--debug` | — | `false` | Drop into an interactive shell inside the container environment. |
+| `--port` | `-p` | `3000:3000` | Port mapping for local container execution. |
+| `--watch` | — | `true` | Watch source directory and auto-rebuild container on file changes. |
+| `--env-file` | — | (none) | Path to an environment file for container execution. |
+
+## 6. `pokkum base update` / `pokkum base check`
 
 | Command / Flag | Default | Description |
 |---|---|---|

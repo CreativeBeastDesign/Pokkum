@@ -28,6 +28,34 @@ const (
 // zero value.
 const DefaultSBOMFormat = SBOMFormatSPDXJSON
 
+// SBOMAttachMode selects how the SBOM artifact is attached to the OCI image.
+type SBOMAttachMode string
+
+const (
+	// SBOMAttachReferrer attaches the SBOM as an OCI 1.1 referrer artifact (default).
+	SBOMAttachReferrer SBOMAttachMode = "referrer"
+
+	// SBOMAttachTag attaches the SBOM using the legacy .sbom tag convention.
+	SBOMAttachTag SBOMAttachMode = "tag"
+)
+
+// DefaultSBOMAttachMode is used when a BuildRequest leaves the SBOM attach mode at its
+// zero value.
+const DefaultSBOMAttachMode = SBOMAttachReferrer
+
+// Valid reports whether m is a known attach mode.
+func (m SBOMAttachMode) Valid() bool {
+	switch m {
+	case SBOMAttachReferrer, SBOMAttachTag:
+		return true
+	default:
+		return false
+	}
+}
+
+// String implements fmt.Stringer.
+func (m SBOMAttachMode) String() string { return string(m) }
+
 // Media types for the attached SBOM layer, matching the cosign convention.
 const (
 	MediaTypeSPDXJSON      = "application/spdx+json"

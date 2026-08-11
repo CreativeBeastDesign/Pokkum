@@ -96,21 +96,23 @@ type PushRequest struct {
 }
 
 // AttachSBOMRequest publishes an SBOM alongside an already-pushed image, under
-// the cosign/ko tag convention.
+// the OCI 1.1 referrers API or cosign/ko tag convention.
 type AttachSBOMRequest struct {
 	// Repo is the repository holding the subject image. Required, and must be
-	// the same repository the subject was pushed to — the tag convention is
+	// the same repository the subject was pushed to — the attachment is
 	// repository-local and an SBOM in a different repository is invisible to
 	// every tool that looks for it.
 	Repo string
 
 	// Subject is the digest of the image or index the SBOM describes. Required.
-	// The attachment is published at Repo:SBOMTag(Subject).
 	Subject v1.Hash
 
 	// Document is the SBOM to attach. Required. Its MediaType determines the
 	// layer media type of the attachment.
 	Document SBOMDocument
+
+	// AttachMode selects between OCI 1.1 referrer attachment (default) or tag convention.
+	AttachMode SBOMAttachMode
 
 	// Insecure permits plain HTTP and skips TLS verification.
 	Insecure bool

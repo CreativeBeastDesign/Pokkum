@@ -35,6 +35,8 @@ Use Serena's `write_memory` or `edit_memory` tools to keep memories concise, inv
 ### Hexagonal Architecture Boundaries
 - **`internal/ports`**: Leaf node of the internal dependency graph. It imports stdlib + `go-containerregistry/pkg/v1` only. It must **NEVER** import `internal/core` or any concrete adapter (`internal/adapters/*`).
 - **`internal/core`**: Domain logic layer. Imports `internal/ports` and standard library. Re-exports port vocabulary as type aliases (e.g. `core.Platform = ports.Platform`).
+- **Automated Purity Verification**: `internal/architecture_test.go` enforces boundary rules via AST analysis and executes automatically during `go test ./internal/...` (or via `make check-arch`).
+
 ### Shared Utility Package Convention (`utils`)
 - **Non-Adapter Utilities**: Any shared or internal helper module that does not implement a concrete Hexagonal port interface MUST be appended with a `utils` suffix (e.g., `internal/adapters/sveltekitutils`, `internal/adapters/ignoreutils`).
 - **Utility Package Sentinel**: Utility packages SHOULD declare `const IsUtilityPackage = true` to explicitly distinguish them from port adapter implementations.
@@ -82,7 +84,7 @@ When code changes have occurred, agents **MUST** execute the following 3-step ve
    ```bash
    go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test
    ```
-3. **Full Internal Test Suite**:
+3. **Full Internal Test Suite (includes Architecture Purity Verification `internal/architecture_test.go`)**:
    ```bash
    go test ./internal/...
    ```

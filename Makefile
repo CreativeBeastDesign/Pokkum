@@ -1,4 +1,8 @@
-.PHONY: help build supervisor test test-short test-integration lint fmt clean
+.PHONY: help build supervisor test test-short test-integration check-arch lint fmt clean
+
+check-arch:  ##  Run hexagonal architecture purity test suite
+	@echo "Checking hexagonal architecture purity..."
+	@go test -v ./internal/architecture_test.go
 
 test-integration:  ##  Run integration tests (go test ./tests/integration)
 	@echo "Running integration tests..."

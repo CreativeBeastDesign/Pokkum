@@ -48,29 +48,64 @@ func (a *Adapter) AttachSBOM(ctx context.Context, req ports.AttachSBOMRequest) (
 		return ports.PublishResult{}, fmt.Errorf("registry: attach sbom %s: build sbom image: %w: %w", req.Repo, err, core.ErrPushFailed)
 	}
 
-	tagStr := ports.SBOMTag(req.Subject)
-	tagRef := repo.Tag(tagStr)
 	opts := remoteOptions(ctx, req.Insecure, "")
 
-	if err := remote.Write(tagRef, img, opts...); err != nil {
-		return ports.PublishResult{}, classifyPushErr(req.Repo, err)
+	attachMode := req.AttachMode
+	if attachMode == "" {
+		attachMode = ports.DefaultSBOMAttachMode
 	}
+
+	if attachMode == ports.SBOMAttachTag {
+		tagStr := ports.SBOMTag(req.Subject)
+		tagRef := repo.Tag(tagStr)
+
+		if err := remote.Write(tagRef, img, opts...); err != nil {
+			return ports.PublishResult{}, classifyPushErr(req.Repo, err)
+		}
+
+		digest, err := img.Digest()
+		if err != nil {
+			return ports.PublishResult{}, fmt.Errorf("registry: attach sbom %s: read pushed digest: %w: %w", req.Repo, err, core.ErrPushFailed)
+		}
+		size, err := manifestSize(img)
+		if err != nil {
+			a.logger().Debug("attach sbom: could not compute transferred size", "repo", req.Repo, "err", err)
+		}
+
+		a.logger().Info("attached sbom (tag mode)", "repo", req.Repo, "subject", req.Subject.String(), "tag", tagStr, "digest", digest.String())
+
+		return ports.PublishResult{
+			Ref:    repo.Name() + ":" + tagStr,
+			Digest: digest,
+			Tags:   []string{tagStr},
+			Size:   size,
+		}, nil
+	}
+
+	// Referrer mode (OCI 1.1)
+	img = mutate.Subject(img, v1.Descriptor{Digest: req.Subject}).(v1.Image)
 
 	digest, err := img.Digest()
 	if err != nil {
-		return ports.PublishResult{}, fmt.Errorf("registry: attach sbom %s: read pushed digest: %w: %w", req.Repo, err, core.ErrPushFailed)
+		return ports.PublishResult{}, fmt.Errorf("registry: attach sbom %s: read image digest: %w: %w", req.Repo, err, core.ErrPushFailed)
 	}
+
+	digestRef := repo.Digest(digest.String())
+	if err := remote.Write(digestRef, img, opts...); err != nil {
+		return ports.PublishResult{}, classifyPushErr(req.Repo, err)
+	}
+
 	size, err := manifestSize(img)
 	if err != nil {
 		a.logger().Debug("attach sbom: could not compute transferred size", "repo", req.Repo, "err", err)
 	}
 
-	a.logger().Info("attached sbom", "repo", req.Repo, "subject", req.Subject.String(), "tag", tagStr, "digest", digest.String())
+	a.logger().Info("attached sbom (referrer mode)", "repo", req.Repo, "subject", req.Subject.String(), "digest", digest.String())
 
 	return ports.PublishResult{
-		Ref:    repo.Name() + ":" + tagStr,
+		Ref:    digestRef.Name(),
 		Digest: digest,
-		Tags:   []string{tagStr},
+		Tags:   nil,
 		Size:   size,
 	}, nil
 }

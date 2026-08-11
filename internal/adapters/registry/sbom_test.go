@@ -53,7 +53,7 @@ func TestAttachSBOM_EmptyDocument(t *testing.T) {
 	}
 }
 
-func TestAttachSBOM_RoundTrip(t *testing.T) {
+func TestAttachSBOM_RoundTripTag(t *testing.T) {
 	s, _ := newTestRegistry(t)
 	repo := registryRepo(t, s, "app/sbom")
 	subject := v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("b", 64)}
@@ -61,8 +61,9 @@ func TestAttachSBOM_RoundTrip(t *testing.T) {
 
 	a := NewAdapter(nil)
 	res, err := a.AttachSBOM(context.Background(), ports.AttachSBOMRequest{
-		Repo:    repo,
-		Subject: subject,
+		Repo:       repo,
+		Subject:    subject,
+		AttachMode: ports.SBOMAttachTag,
 		Document: ports.SBOMDocument{
 			Format:    ports.SBOMFormatSPDXJSON,
 			MediaType: ports.MediaTypeSPDXJSON,
@@ -121,5 +122,54 @@ func TestAttachSBOM_RoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(got, content) {
 		t.Errorf("layer content = %q, want %q", got, content)
+	}
+}
+
+func TestAttachSBOM_RoundTripReferrer(t *testing.T) {
+	s, _ := newTestRegistry(t)
+	repo := registryRepo(t, s, "app/sbom-ref")
+	subject := v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("c", 64)}
+	content := []byte(`{"spdxVersion":"SPDX-2.3","name":"pokkum-test-ref"}`)
+
+	a := NewAdapter(nil)
+	res, err := a.AttachSBOM(context.Background(), ports.AttachSBOMRequest{
+		Repo:       repo,
+		Subject:    subject,
+		AttachMode: ports.SBOMAttachReferrer,
+		Document: ports.SBOMDocument{
+			Format:    ports.SBOMFormatSPDXJSON,
+			MediaType: ports.MediaTypeSPDXJSON,
+			Content:   content,
+		},
+	})
+	if err != nil {
+		t.Fatalf("AttachSBOM: %v", err)
+	}
+
+	if len(res.Tags) != 0 {
+		t.Fatalf("Referrer mode Tags = %v, want empty", res.Tags)
+	}
+	if !strings.Contains(res.Ref, "@sha256:") {
+		t.Errorf("Ref = %q, expected digest reference with @sha256:", res.Ref)
+	}
+
+	ref, err := name.ParseReference(res.Ref)
+	if err != nil {
+		t.Fatalf("ParseReference(%q): %v", res.Ref, err)
+	}
+	desc, err := remote.Get(ref)
+	if err != nil {
+		t.Fatalf("remote.Get: %v", err)
+	}
+	pulled, err := desc.Image()
+	if err != nil {
+		t.Fatalf("Image: %v", err)
+	}
+	layers, err := pulled.Layers()
+	if err != nil {
+		t.Fatalf("Layers: %v", err)
+	}
+	if len(layers) != 1 {
+		t.Fatalf("len(layers) = %d, want 1", len(layers))
 	}
 }

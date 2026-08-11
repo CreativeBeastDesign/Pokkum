@@ -122,6 +122,9 @@ var (
 	// generate one while the format is "none".
 	ErrInvalidSBOMFormat = errors.New("invalid sbom format")
 
+	// ErrInvalidSBOMAttachMode reports an unknown SBOM attach mode (must be referrer or tag).
+	ErrInvalidSBOMAttachMode = errors.New("invalid sbom attach mode")
+
 	// ErrSBOMFailed reports a failure scanning the project or serialising the
 	// bill of materials.
 	ErrSBOMFailed = errors.New("sbom generation failed")
