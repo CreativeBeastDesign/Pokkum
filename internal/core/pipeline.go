@@ -642,6 +642,8 @@ func fanOut(
 			if req.Compile.Strategy == StrategyLayered {
 				pkgReq.AppServerDir = filepath.Join(prep.OutputDir, "server")
 				pkgReq.AppClientDir = filepath.Join(prep.OutputDir, "client")
+				pkgReq.AppVendorDir = filepath.Join(prep.OutputDir, "vendor")
+				pkgReq.AppNativeDir = filepath.Join(prep.OutputDir, "native")
 			}
 
 			img, err := deps.Packager.Build(gctx, pkgReq)

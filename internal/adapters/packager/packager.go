@@ -206,6 +206,34 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 				})
 			}
 		}
+
+		if req.AppVendorDir != "" {
+			if info, err := os.Stat(req.AppVendorDir); err == nil && info.IsDir() {
+				vendorLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppVendorDir, ports.AppVendorDirPrefix, ts)
+				if err != nil {
+					return nil, fmt.Errorf("packager: build %s: vendor layer: %w", req.Platform, err)
+				}
+				addenda = append(addenda, mutate.Addendum{
+					Layer:     vendorLayer,
+					MediaType: types.OCILayer,
+					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppVendorDirPrefix},
+				})
+			}
+		}
+
+		if req.AppNativeDir != "" {
+			if info, err := os.Stat(req.AppNativeDir); err == nil && info.IsDir() {
+				nativeLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppNativeDir, ports.AppNativeDirPrefix, ts)
+				if err != nil {
+					return nil, fmt.Errorf("packager: build %s: native layer: %w", req.Platform, err)
+				}
+				addenda = append(addenda, mutate.Addendum{
+					Layer:     nativeLayer,
+					MediaType: types.OCILayer,
+					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppNativeDirPrefix},
+				})
+			}
+		}
 	} else {
 		supervisorLayer, err := buildSupervisorLayer(ctx, req, ts)
 		if err != nil {

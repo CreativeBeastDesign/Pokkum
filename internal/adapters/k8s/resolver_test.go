@@ -324,6 +324,7 @@ spec:
 	// Container-level defaults.
 	for _, want := range []string{
 		"allowPrivilegeEscalation: false",
+		"readOnlyRootFilesystem: true",
 		"capabilities:",
 		"drop:",
 		"- ALL",

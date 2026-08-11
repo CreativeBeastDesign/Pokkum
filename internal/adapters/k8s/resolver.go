@@ -273,6 +273,7 @@ func injectContainerSecurityDefaults(container *yaml.Node) {
 		return
 	}
 	ensureBoolDefault(sc, "allowPrivilegeEscalation", false)
+	ensureBoolDefault(sc, "readOnlyRootFilesystem", true)
 	if caps := ensureChildMapping(sc, "capabilities"); caps != nil {
 		ensureStringListDefault(caps, "drop", "ALL")
 	}

@@ -33,6 +33,12 @@ const (
 	// AppClientDirPrefix is the in-image mount point for static client assets.
 	AppClientDirPrefix = "/app/client"
 
+	// AppVendorDirPrefix is the in-image mount point for split vendor JS modules.
+	AppVendorDirPrefix = "/app/vendor"
+
+	// AppNativeDirPrefix is the in-image mount point for native .node binaries and dynamic .so libraries.
+	AppNativeDirPrefix = "/app/native"
+
 	// WorkingDir is the image's working directory.
 	WorkingDir = "/app"
 
@@ -226,6 +232,12 @@ type PackageRequest struct {
 
 	// AppClientDir is the host directory containing static client files to package at /app/client (StrategyLayered).
 	AppClientDir string
+
+	// AppVendorDir is the host directory containing vendor JS dependency modules to package at /app/vendor (StrategyLayered).
+	AppVendorDir string
+
+	// AppNativeDir is the host directory containing native .node modules and dynamic .so libraries to package at /app/native (StrategyLayered).
+	AppNativeDir string
 
 
 	// Supervisor is the pokkum-init binary for Platform, from

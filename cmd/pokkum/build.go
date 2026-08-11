@@ -217,7 +217,9 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	}
 
 	// Compile options
-	// Default to no-sourcemap and minification enabled (NoMinify=false).
+	if flags.strategy == "exe" {
+		logger.Warn("packaging strategy 'exe' is deprecated and will be removed in a future release; migrate to '--strategy=layered' (default)")
+	}
 	req.Compile = core.CompileOptions{
 		Strategy: core.BuildStrategy(flags.strategy),
 		NoInject: flags.noInject || !flags.inject,
@@ -316,7 +318,7 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		Tarballs: reg,
 
 		SBOM:            sbom.NewGenerator(logger),
-		NativeInspector: nativeinspect.NewStrictAdapter(),
+		NativeInspector: nativeinspect.NewClosuredAdapter(),
 		SLSAGenerator:   slsa.NewGenerator(logger),
 		CosignSigner:    cosign.NewSigner(logger),
 		DSSESigner:      dsse.NewSigner(logger),

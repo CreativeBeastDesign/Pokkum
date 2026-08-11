@@ -231,12 +231,14 @@ Pokkum unifies trace spans and metrics into a native, zero-config OpenTelemetry 
 
 Pokkum supports two image compilation strategies controlled via `--strategy=layered|exe` (default: `layered`):
 
-### 5-Layer Arch-Independent Layout (`--strategy=layered`)
+### N-Layer Arch-Independent Layout (`--strategy=layered`)
 1. **Base Image Layer (Layer 0)**: Distroless Linux runtime (`distroless/cc-debian12:nonroot`).
 2. **Bun Runtime Layer (Layer 1)**: Pinned Bun executable (`/usr/local/bin/bun`, per platform) fetched and cached deterministically by `bunruntime.Resolver`.
 3. **Supervisor Layer (Layer 2)**: Pokkum supervisor binary (`/pokkum/init`, per platform).
 4. **App Server Layer (Layer 3)**: Application JavaScript server bundle (`/app/server/**`, architecture-independent).
 5. **App Client Layer (Layer 4)**: Static client assets (`/app/client/**`, architecture-independent).
+6. **App Vendor Layer (Layer 5)**: Split dependency JS vendor chunks (`/app/vendor/**`, architecture-independent).
+7. **Native Addon Layer (Layer 6)**: Native `.node` binaries and dynamic `.so` closure (`/app/native/**`, platform-specific), inspected and verified by `ClosuredNativeAdapter`.
 
 ### Single Executable Strategy (`--strategy=exe`)
 Combines supervisor and standalone compiled Bun binary into a 2-layer image (`/pokkum/init` and `/app/server`).
