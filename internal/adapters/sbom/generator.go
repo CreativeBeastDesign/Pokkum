@@ -94,7 +94,7 @@ import (
 	"github.com/anchore/syft/syft/source"
 	"github.com/anchore/syft/syft/source/directorysource"
 
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/ignore"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/ignoreutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -306,9 +306,9 @@ func createSBOMConfig() *syft.CreateSBOMConfig {
 // is empty, this package's own defaultScanExcludes, then finally the
 // project's own .pokkumignore file — applied last so a project's own rules
 // (including a negation) always have the final say over everything before
-// it, matching ignore.Matcher's documented last-match-wins precedence.
-func (g *Generator) buildMatcher(req ports.SBOMRequest) (*ignore.Matcher, error) {
-	patterns := ignore.DefaultPatterns()
+// it, matching ignoreutils.Matcher's documented last-match-wins precedence.
+func (g *Generator) buildMatcher(req ports.SBOMRequest) (*ignoreutils.Matcher, error) {
+	patterns := ignoreutils.DefaultPatterns()
 
 	extra := req.ExcludePaths
 	if len(extra) == 0 {
@@ -316,25 +316,19 @@ func (g *Generator) buildMatcher(req ports.SBOMRequest) (*ignore.Matcher, error)
 	}
 	patterns = append(patterns, extra...)
 
-	filePatterns, err := ignore.ReadPatterns(req.ProjectDir)
+	filePatterns, err := ignoreutils.ReadPatterns(req.ProjectDir)
 	if err != nil {
 		return nil, err
 	}
 	patterns = append(patterns, filePatterns...)
 
-	return ignore.New(patterns)
+	return ignoreutils.New(patterns)
 }
 
-// buildExcludePatterns walks root and returns the set of project-relative,
-// "./"-prefixed exclusion paths syft's directorysource.Config.Exclude
+// buildExcludePatterns builds a flat list of exclusion patterns that Syft
 // understands, by resolving every entry's ignore decision through m first.
-//
-// Once a directory matches, its entire subtree is skipped — both in this
-// walk (so an excluded node_modules is never even stat'd file by file) and,
-// by construction, in syft's own scan, since only the directory's own path
-// is added to the returned list and syft prunes a directory match the same
 // way (see directorysource.GetDirectoryExclusionFunctions).
-func buildExcludePatterns(ctx context.Context, root string, m *ignore.Matcher) ([]string, error) {
+func buildExcludePatterns(ctx context.Context, root string, m *ignoreutils.Matcher) ([]string, error) {
 	var patterns []string
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {

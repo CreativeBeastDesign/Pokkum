@@ -1,29 +1,54 @@
 # Additional Features
 
-## Decision Matrix
+## Decision Matrix (re-evaluated 2026-08)
 
-| Feature                                   | Benefit (DX; 1-10) | Cost (performance, size; 1-10) | Expected cost (explicit)                                                   | External Dependencies             | Priority |
-| ----------------------------------------- | ------------------ | ------------------------------ | -------------------------------------------------------------------------- | --------------------------------- | -------- |
-| Built-in Metrics Endpoint                 | 8                  | 4                              | +1-2MB container size (Prometheus client); Negligible runtime cost         | None                              | High     |
-| Kubernetes (extended manifests/GitOps)    | 8                  | 6                              | Negligible cost (YAML templating)                                          | None                              | High     |
-| `pokkum dev` (Hot-Reload)                 | 9                  | 8                              | +5MB CLI size; High maintenance for cross-OS mounts & restarts             | Docker / Podman                   | High     |
-| Image Optimization (zstd, deduplication)  | 7                  | 5                              | Noticeable build-time CPU overhead (compression); Smaller final images     | None                              | High     |
-| `pokkum init` (Config Wizard)             | 8                  | 3                              | Negligible CLI size (<1MB); Low maintenance                                | None                              | High     |
-| CVE Scanning Integration (`pokkum scan`)  | 9                  | 5                              | +20-30MB CLI size (if embedding engine) or assumes local install           | Trivy / Grype                     | High     |
-| Interactive Failure Diagnostics           | 8                  | 4                              | Negligible CLI size (<1MB); Low maintenance                                | None                              | Medium   |
-| Env Var Injection & Validation            | 7                  | 4                              | Negligible CLI size; Slight build-time CPU usage                           | None                              | Medium   |
-| Multi-Environment Management              | 7                  | 5                              | Negligible cost (YAML/Config templating)                                   | Vault / AWS Secrets               | Medium   |
-| Static/Prerendered Page Optimization      | 8                  | 7                              | +10-15MB container size (needs static file server); Complex build pipeline | Nginx (for pure static)           | Medium   |
-| OpenTelemetry Auto-Instrumentation        | 9                  | 7                              | Noticeable runtime memory/latency overhead in deployed app                 | OTEL SDK                          | Medium   |
-| Diff & Explain (`diff`, `explain`, `why`) | 9                  | 6                              | Moderate CLI disk/network usage (pulling layers to diff)                   | None                              | Medium   |
-| Image Provenance Timeline                 | 6                  | 5                              | Minor CLI size increase; Relies on external registry APIs                  | Registry (SLSA lookup)            | Low      |
-| Progressive Deployment Strategies         | 8                  | 9                              | Massive maintenance burden (requires complex K8s state management)         | Kubernetes (Argo/Flux)            | Low      |
-| Service Mesh Integration                  | 6                  | 6                              | Moderate maintenance (keeping up with Istio/Linkerd API changes)           | Istio / Linkerd                   | Low      |
-| Policy as Code                            | 5                  | 7                              | +15MB CLI size (embedding OPA/Rego); High policy maintenance               | OPA / Rego                        | Low      |
-| Log Aggregation (JSON/Pretty)             | 7                  | 3                              | Negligible cost                                                            | None                              | High     |
-| Plugin System                             | 8                  | 9                              | Extreme architectural complexity; High security & maintenance burden       | npm                               | Low      |
-| Hooks System                              | 6                  | 5                              | Small CLI size; High maintenance (cross-platform shell execution)          | Shell / Bun                       | Low      |
-| Asset Optimization Pipeline               | 8                  | 8                              | Massive build time increase; Heavy CLI/Container dependencies (`libvips`)  | `sharp`, `@sveltejs/enhanced-img` | Low      |
+Changes vs. the previous matrix:
+
+- **Added a Security column (1-10)** — DX alone hid the fact that several cheap features are primarily security wins (base-image signature verification scored poorly on DX but is a top-tier item).
+- **Moved shipped features out** — OpenTelemetry Auto-Instrumentation and CLI structured logging shipped with the v0.2 OTel work (see `Meantime.md`); keeping them in a decision matrix distorts prioritization.
+- **Re-scored against the layered-image concept** (`pokkum-layer-caching-concept.md`): Static/Prerendered optimization and Diff & Explain got dramatically cheaper (separate layers + reproducible digests do most of the work); zstd was already adopted there.
+- **Re-scored against Roadmap v1.0** — items the roadmap already commits to (vuln gating, base pinning) keep their rows only where the feature exceeds the roadmap scope.
+- **Demotions:** `pokkum dev` full hot-reload (the roadmap's build+`--local`+run lite variant captures most value for a fraction of the cost); Progressive Deployment (Argo/Flux own that space; DX 8→6).
+- **Promotions:** Diff & Explain (cost 6→4, unique fit with reproducible layered images); Hooks (cheap way to defuse Plugin System demand).
+
+| Feature                                     | DX (1-10) | Security (1-10) | Cost (1-10) | Expected cost (explicit)                                                        | External Dependencies             | Priority |
+| ------------------------------------------- | --------- | --------------- | ----------- | -------------------------------------------------------------------------------- | --------------------------------- | -------- |
+| Secret-Inlining Guard                       | 6         | 9               | 2           | Slight build-time CPU (layer scan); forces `--env=disable` in bundling           | None                              | High     |
+| `pokkum verify --rebuild`                   | 6         | 10              | 5           | One full rebuild per verification; requires pinned toolchain                     | None (git + registry)             | High     |
+| CVE Scanning Integration (`pokkum scan`)    | 9         | 8               | 4           | Shell out to local Trivy/Grype (do NOT embed → no +20-30MB CLI); CI scan time    | Trivy / Grype                     | High     |
+| Base Image Signature Verification           | 4         | 8               | 2           | +1 registry roundtrip per build; sigstore libs already vendored (cosign adapter) | None                              | High     |
+| `pokkum repro doctor`                       | 9         | 6               | 4           | Double build + per-layer diff, on demand only                                    | None                              | High     |
+| `pokkum doctor` (preflight)                 | 9         | 3               | 2           | <1MB CLI; low maintenance                                                        | None                              | High     |
+| Readiness Drain on SIGTERM                  | 7         | 3               | 1           | ~20 LOC in supervisor                                                            | None                              | High     |
+| `--output=json` Build Results               | 8         | 2               | 1           | Negligible                                                                       | None                              | High     |
+| Standard OCI Annotations                    | 6         | 4               | 1           | Negligible (git metadata already read for SOURCE_DATE_EPOCH)                     | None                              | High     |
+| Diff & Explain (`diff`, `explain`, `why`)   | 9         | 4               | 4           | Layer pulls for remote diffs; near-free for own reproducible layered images      | None                              | High     |
+| Kubernetes (extended manifests/GitOps)      | 8         | 5               | 5           | YAML/Helm/Kustomize templating; moderate maintenance                             | None                              | High     |
+| Image Optimization (zstd, deduplication)    | 7         | 1               | 4           | Build-time CPU (compression); largely covered by layer-caching concept §10       | None                              | High     |
+| `pokkum init` (Config Wizard)               | 8         | 2               | 3           | Negligible CLI size (<1MB); low maintenance                                      | None                              | High     |
+| `pokkum adopt` (Migration Codemod)          | 8         | 2               | 5           | Codemod maintenance across adapter ecosystems (Node/Vercel/Dockerfile)           | None                              | Medium   |
+| `pokkum dev` (Hot-Reload, full)             | 9         | 1               | 8           | +5MB CLI size; high cross-OS maintenance; lite variant already on Roadmap v0.2   | Docker / Podman                   | Medium   |
+| Interactive Failure Diagnostics             | 8         | 1               | 4           | Negligible CLI size (<1MB); low maintenance                                      | None                              | Medium   |
+| Runtime Env Contract (validation)           | 7         | 5               | 2           | Image annotation + supervisor startup check; drop build-time injection half     | None                              | Medium   |
+| Toolchain CVE Awareness                     | 5         | 7               | 3           | OSV.dev advisory lookups keyed on embedded Bun version                           | OSV.dev API                       | Medium   |
+| Signed Self-Distribution (`pokkum upgrade`) | 5         | 7               | 3           | Release signing infra; verify-on-update logic                                    | cosign / minisign                 | Medium   |
+| Monorepo Affected-Detection                 | 7         | 1               | 4           | Git-diff input tracking per `pokkum://` app                                      | None                              | Medium   |
+| Static/Prerendered Page Optimization        | 8         | 1               | 4           | Mostly free under layered design; `--static` nginx mode is separate & costlier   | Nginx (only for `--static`)       | Medium   |
+| Log Aggregation (app-side, trace context)   | 7         | 2               | 3           | Trace-context JSON logging in adapter/runtime; CLI half already shipped          | None                              | Medium   |
+| Multi-Environment Management                | 7         | 3               | 5           | Config templating; secret-manager integrations                                   | Vault / AWS Secrets               | Medium   |
+| Built-in Metrics Endpoint (supervisor)      | 7         | 2               | 3           | Supervisor-level `/metrics` only; app metrics already shipped via OTel           | None                              | Medium   |
+| Hooks System                                | 6         | 2               | 5           | Small CLI size; cross-platform shell exec; defuses Plugin System demand          | Shell / Bun                       | Medium   |
+| Image Provenance Timeline                   | 6         | 5               | 5           | Registry API reliance; partially subsumed by `verify` + OCI annotations          | Registry (SLSA lookup)            | Low      |
+| Policy as Code                              | 5         | 6               | 7           | +15MB CLI size (embedding OPA/Rego); high policy maintenance                     | OPA / Rego                        | Low      |
+| Service Mesh Integration                    | 5         | 4               | 6           | Moderate maintenance (Istio/Linkerd API churn)                                   | Istio / Linkerd                   | Low      |
+| Progressive Deployment Strategies           | 6         | 2               | 9           | Massive maintenance burden; Argo/Flux own this space                             | Kubernetes (Argo/Flux)            | Low      |
+| Asset Optimization Pipeline                 | 8         | 1               | 8           | Massive build time increase; heavy deps (`libvips`)                              | `sharp`, `@sveltejs/enhanced-img` | Low      |
+| Plugin System                               | 8         | 1               | 9           | Extreme complexity; npm supply-chain risk undercuts Pokkum's own hardening story | npm                               | Low      |
+
+### Shipped (removed from matrix)
+
+- **OpenTelemetry Auto-Instrumentation** — shipped with the unified OTel/metrics work (`--telemetry`, `--metrics-only`, `--with-otel-sidecar`; see `Meantime.md`).
+- **Log Aggregation, CLI half** — `--log-format=json|text` and leveled logging shipped in v0.1; only app-side trace-context logging remains (row above).
 
 ## Feature list
 
@@ -167,3 +192,78 @@ When the container exits with a non-zero status during local testing, automatica
 - `pokkum compare` – Compare two images (e.g., previous vs new) for size and dependencies diff.
 - `pokkum serve` – Standalone "container runtime" that executes the image directly on the host (like podman), useful for testing without a daemon.
 - `pokkum export sbom` – Export SBOM separately without building, useful for compliance pipelines.
+
+### `pokkum verify --rebuild` — Reproducible Rebuild Verification
+
+- Independently rebuild from a given git ref and confirm the digest matches what is in the registry or running in the cluster
+- Turns reproducibility from an implementation detail into a verifiable security claim: "the deployed image provably came from this commit"
+- Complements (does not replace) Cosign/SLSA: signatures prove *who* built it, rebuild proves *what* it was built from
+- Requires pinned toolchain versions (Bun, Go/gzip caveat per README known limits) to rebuild faithfully
+
+### Secret-Inlining Guard
+
+- Bun's bundler can inline build-machine environment variables into output — a CI runner with cloud credentials exported can silently bake them into the image
+- Force `--env=disable` during bundling, then run an entropy/pattern scan (gitleaks-style) over final layer contents before push
+- `.pokkumignore` protects files; this protects against the bundler and build environment themselves
+- Fail the build on findings, with `--allow-secret-pattern` escape hatch for false positives
+
+### `pokkum repro doctor` — Non-Determinism Bisection
+
+- README known-limit: an unpinned `kit.version.name` silently breaks reproducibility with no warning
+- Build twice, compare digests; on mismatch, diff layer-by-layer and file-by-file, and explain the likely cause (version.json timestamp, unsorted output, embedded dates)
+- One command turns the worst silent footgun into an actionable diagnosis
+
+### Base Image Signature Verification
+
+- Verify upstream Cosign signatures on distroless (Google) and Chainguard base images at pull time; fail on mismatch
+- Pokkum signs its outputs but currently trusts its inputs — this completes the chain of custody
+- Sigstore libraries are already vendored for the cosign adapter, so the cost is small
+
+### Toolchain CVE Awareness
+
+- Pokkum records which Bun version is embedded in every image it builds (SLSA resolvedDependencies)
+- Query OSV.dev for advisories against that version: "images built with Bun ≤ X.Y are affected by CVE-Z" — without pulling or scanning any image
+- Natural extension of `pokkum scan` diff mode
+
+### Signed Self-Distribution
+
+- `pokkum upgrade` with signature verification (cosign/minisign) of release artifacts
+- Publish SLSA provenance for Pokkum's own releases — a build tool is itself a supply-chain target
+- The GitHub Action should pin and verify the CLI it downloads
+
+### `pokkum doctor` — Environment Preflight
+
+- Proactive counterpart to Interactive Failure Diagnostics: check everything that currently fails mid-build or silently
+- Bun version ≥ required, adapter installed, `svelte.config.js` sanity (version pin present!), registry auth works, target platform availability
+- `--fix` mode for mechanical repairs (add version pin, generate `.pokkumignore`)
+
+### `pokkum adopt` — Migration Codemod
+
+- Detect adapter-node/Vercel/Cloudflare/Dockerfile projects and convert: rewrite `svelte.config.js`, generate `.pokkumignore`, optionally remove the Dockerfile
+- Optimizes the first-five-minutes experience — where ko-alike tools win or lose adoption
+
+### `--output=json` Build Results
+
+- Machine-readable build *results* (digest, per-layer sizes, SBOM path, attestation refs) as distinct from JSON *logs*
+- CI pipelines currently must parse stdout for the digest; this removes that fragility
+- Stable schema, versioned
+
+### Standard OCI Annotations
+
+- Auto-populate `org.opencontainers.image.{source,revision,created,licenses,version}` from git metadata already read for `SOURCE_DATE_EPOCH`
+- Makes registry UIs, scanners, and Renovate-style tooling work correctly with Pokkum images for near-zero cost
+
+### Readiness Drain on SIGTERM
+
+- Supervisor flips `/readyz` to 503 immediately on SIGTERM and holds while the app drains, so Kubernetes removes the pod from endpoints before in-flight connections are killed
+- Highest-value ~20 lines in the supervisor if not already implemented
+
+### Runtime Env Contract
+
+- Declare required env vars in an image annotation at build time; supervisor validates presence at startup and fails fast with the named missing list
+- Replaces the build-time injection half of the old "Env Var Injection & Validation" item, which is a secret-baking footgun and should be dropped
+
+### Monorepo Affected-Detection
+
+- `pokkum resolve` on a manifest with several `pokkum://` refs git-diffs each app's input tree and skips unchanged apps entirely
+- Stronger than digest-HEAD skipping: no build at all, not just no push

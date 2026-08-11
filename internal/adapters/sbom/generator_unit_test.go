@@ -12,7 +12,7 @@ import (
 
 	"github.com/anchore/syft/syft/pkg"
 
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/ignore"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/ignoreutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -122,7 +122,7 @@ func TestBuildExcludePatterns_DirectoryIsPrunedNotEnumerated(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, "src", "app.ts"), "x")
 	mustWriteFile(t, filepath.Join(dir, "app.js.map"), "x")
 
-	m, err := ignore.New(ignore.DefaultPatterns())
+	m, err := ignoreutils.New(ignoreutils.DefaultPatterns())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestBuildExcludePatterns_NegationInProjectFile(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, "debug.log"), "x")
 	mustWriteFile(t, filepath.Join(dir, "important.log"), "x")
 
-	m, err := ignore.New([]string{"*.log", "!important.log"})
+	m, err := ignoreutils.New([]string{"*.log", "!important.log"})
 	if err != nil {
 		t.Fatal(err)
 	}

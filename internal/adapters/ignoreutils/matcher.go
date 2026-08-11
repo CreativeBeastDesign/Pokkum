@@ -41,7 +41,7 @@
 // the same limitation ("It is not possible to re-include a file if a
 // parent directory of that file is excluded") — Matcher does not attempt
 // to be more capable than the syntax it implements.
-package ignore
+package ignoreutils
 
 import (
 	"bufio"
@@ -53,6 +53,9 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 )
+
+// IsUtilityPackage marks this as a reusable utility, not a port adapter.
+const IsUtilityPackage = true
 
 // FileName is the exclude file Load reads from a project root.
 const FileName = ".pokkumignore"

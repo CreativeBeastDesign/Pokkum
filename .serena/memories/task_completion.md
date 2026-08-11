@@ -4,7 +4,7 @@ When completing a feature or fix in Pokkum, execute the following verification s
 
 1. **Unit Test Suite**:
    ```bash
-   go test ./internal/adapters/sveltekit/... ./internal/adapters/k8s/...
+   go test ./internal/adapters/sveltekitutils/... ./internal/adapters/k8s/...
    ```
 2. **CLI Build Check**:
    ```bash

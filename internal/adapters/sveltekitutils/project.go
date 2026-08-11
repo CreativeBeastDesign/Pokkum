@@ -1,25 +1,9 @@
-// Package sveltekit holds small, dependency-free helpers for detecting how a
+// Package sveltekitutils holds small, dependency-free helpers for detecting how a
 // SvelteKit project is wired, so that internal/adapters/bunexec does not have
 // to embed a JavaScript parser to answer questions like "is
 // @jesterkit/exe-sveltekit configured as the adapter" or "what version of
 // @sveltejs/kit is installed".
-//
-// Every function here is read-only and side-effect free: none of them touch
-// the project directory, none of them shell out, and none of them return an
-// error for "could not determine" — that is expected for a project that has
-// not run `bun install` yet, and every caller treats it as informational
-// rather than fatal. This matches ports.PreflightResult's contract, where
-// AdapterVersion and SvelteKitVersion are documented as "empty if it could
-// not be determined (which is not by itself an error)".
-//
-// svelte.config.js is arbitrary JavaScript. Rather than embed a JS parser to
-// answer a yes/no question, AdapterConfigured and TargetsLinuxX64 use textual
-// heuristics against the file's source. That trades perfect precision for
-// zero dependencies; false negatives are possible for unusual configs (for
-// example importing the adapter under a re-exported name from a shared
-// module), which is why bunexec.Preflight also consults package.json's
-// declared dependencies before giving up.
-package sveltekit
+package sveltekitutils
 
 import (
 	"encoding/json"
@@ -29,6 +13,9 @@ import (
 	"regexp"
 	"strings"
 )
+
+// IsUtilityPackage marks this as a reusable utility, not a port adapter.
+const IsUtilityPackage = true
 
 // PackageJSON is the subset of a package.json this package cares about.
 type PackageJSON struct {

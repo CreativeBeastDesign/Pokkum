@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekit"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekitutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -23,13 +23,13 @@ func NewStrictAdapter() *StrictNativeAdapter {
 
 // Inspect checks projectDir for native Node dependencies and computed dynamic imports.
 func (a *StrictNativeAdapter) Inspect(ctx context.Context, projectDir string, targetPlatform ports.Platform) (ports.NativeInspectionResult, error) {
-	pkg, err := sveltekit.ReadPackageJSON(projectDir)
+	pkg, err := sveltekitutils.ReadPackageJSON(projectDir)
 	if err != nil {
-		pkg = sveltekit.PackageJSON{}
+		pkg = sveltekitutils.PackageJSON{}
 	}
 
-	nativeRes := sveltekit.CheckNativeModules(projectDir, pkg)
-	dynamicRes := sveltekit.CheckDynamicImports(projectDir)
+	nativeRes := sveltekitutils.CheckNativeModules(projectDir, pkg)
+	dynamicRes := sveltekitutils.CheckDynamicImports(projectDir)
 
 	result := ports.NativeInspectionResult{
 		HasNativeModules:             nativeRes.HasNativeModules,

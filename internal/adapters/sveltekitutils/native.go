@@ -1,4 +1,4 @@
-package sveltekit
+package sveltekitutils
 
 import (
 	"encoding/json"

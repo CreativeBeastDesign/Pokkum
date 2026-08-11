@@ -77,7 +77,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekit"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekitutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -144,7 +144,7 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 		return ports.PreflightResult{}, fmt.Errorf("bunexec: preflight %s: %w", req.ProjectDir, err)
 	}
 
-	pkg, err := sveltekit.ReadPackageJSON(req.ProjectDir)
+	pkg, err := sveltekitutils.ReadPackageJSON(req.ProjectDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ports.PreflightResult{}, fmt.Errorf("bunexec: preflight %s: package.json not found: %w", req.ProjectDir, core.ErrProjectNotFound)
@@ -162,14 +162,14 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 	}
 	cfgSource := string(cfgData)
 
-	if !sveltekit.AdapterConfigured(cfgSource, adapterPackage) && !pkg.HasDependency(adapterPackage) {
+	if !sveltekitutils.AdapterConfigured(cfgSource, adapterPackage) && !pkg.HasDependency(adapterPackage) {
 		return ports.PreflightResult{}, fmt.Errorf(
 			"bunexec: preflight %s: %s is not configured in svelte.config.js or listed in package.json; install it with `bun add -D %s` and set it as the adapter: %w",
 			req.ProjectDir, adapterPackage, adapterPackage, core.ErrAdapterMissing,
 		)
 	}
 
-	if !sveltekit.TargetsLinuxX64(cfgSource) {
+	if !sveltekitutils.TargetsLinuxX64(cfgSource) {
 		log.Warn(
 			"bunexec: svelte.config.js does not appear to set the adapter's target to \"linux-x64\"; the adapter's own mandatory internal `bun build --compile` pass (there is no opt-out) will emit a host-architecture binary that pokkum discards, wasting build time and disk space — set target: \"linux-x64\" in the adapter options",
 			"projectDir", req.ProjectDir,
@@ -208,8 +208,8 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 	result := ports.PreflightResult{
 		BunPath:          bunPath,
 		BunVersion:       bunVer.String(),
-		AdapterVersion:   sveltekit.ResolveVersion(req.ProjectDir, adapterPackage, pkg),
-		SvelteKitVersion: sveltekit.ResolveVersion(req.ProjectDir, kitPackage, pkg),
+		AdapterVersion:   sveltekitutils.ResolveVersion(req.ProjectDir, adapterPackage, pkg),
+		SvelteKitVersion: sveltekitutils.ResolveVersion(req.ProjectDir, kitPackage, pkg),
 	}
 	log.Info("bunexec: preflight ok", "bunPath", result.BunPath, "bunVersion", result.BunVersion, "adapterVersion", result.AdapterVersion)
 	return result, nil
