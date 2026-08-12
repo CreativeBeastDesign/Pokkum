@@ -804,3 +804,58 @@ spec:
 		}
 	})
 }
+
+func TestResolve_NetworkPolicyDynamicPortsAndRestrictedEgress(t *testing.T) {
+	r := k8s.NewResolver()
+	ctx := context.Background()
+
+	doc := ports.Document{
+		Name: "deployment.yaml",
+		Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+spec:
+  template:
+    spec:
+      containers:
+      - name: main
+        image: pokkum://.
+        ports:
+        - containerPort: 8080
+        - containerPort: 9090
+`),
+	}
+
+	res, err := r.Resolve(ctx, ports.ResolveRequest{
+		Documents:     []ports.Document{doc},
+		NetworkPolicy: true,
+		Build: func(_ context.Context, _ string) (string, error) {
+			return "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(res.Documents) != 2 {
+		t.Fatalf("expected 2 documents (deployment + netpol), got %d", len(res.Documents))
+	}
+
+	netPolDoc := string(res.Documents[1].Content)
+
+	// Check dynamic ingress ports 8080 and 9090
+	if !strings.Contains(netPolDoc, "port: 8080") || !strings.Contains(netPolDoc, "port: 9090") {
+		t.Errorf("expected NetworkPolicy ingress to contain dynamic container ports 8080 and 9090:\n%s", netPolDoc)
+	}
+
+	// Check restricted egress (DNS 53, HTTPS 443, OTLP 4317, 4318)
+	if !strings.Contains(netPolDoc, "port: 53") || !strings.Contains(netPolDoc, "port: 443") || !strings.Contains(netPolDoc, "port: 4317") {
+		t.Errorf("expected NetworkPolicy egress to contain restricted ports 53, 443, 4317:\n%s", netPolDoc)
+	}
+
+	// Verify absence of unrestricted wildcard egress "- {}"
+	if strings.Contains(netPolDoc, "- {}") {
+		t.Errorf("NetworkPolicy must NOT contain unrestricted wildcard egress:\n%s", netPolDoc)
+	}
+}

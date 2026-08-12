@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -414,7 +415,11 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 			continue
 		}
 
+		var containerNodes []*yaml.Node
 		for _, t := range pd.targets {
+			if t.containerNode != nil {
+				containerNodes = append(containerNodes, t.containerNode)
+			}
 			val := t.valNode.Value
 			path, _, _ := parsePokkumRef(val, false)
 			resolved := resolvedMap[path]
@@ -455,7 +460,8 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 		}
 
 		if req.NetworkPolicy {
-			resultDocs = append(resultDocs, generateNetworkPolicyDocument(pd.doc.Name))
+			portsList := extractWorkloadContainerPorts(containerNodes)
+			resultDocs = append(resultDocs, generateNetworkPolicyDocument(pd.doc.Name, portsList, req.WithOTELSidecar))
 		}
 		if req.ResourceDefaults {
 			resultDocs = append(resultDocs, generatePodDisruptionBudgetDocument(pd.doc.Name))
@@ -523,28 +529,76 @@ limits:
 	}
 }
 
-func generateNetworkPolicyDocument(docName string) ports.Document {
-	netPolYAML := `apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: pokkum-network-policy
-spec:
-  podSelector: {}
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress:
-    - ports:
-        - protocol: TCP
-          port: 3000
-        - protocol: TCP
-          port: 8081
-  egress:
-    - {}
-`
+func extractWorkloadContainerPorts(containerNodes []*yaml.Node) []int {
+	seen := make(map[int]bool)
+	var portsList []int
+
+	for _, container := range containerNodes {
+		if container == nil || container.Kind != yaml.MappingNode {
+			continue
+		}
+		portsNode, ok := mapGet(container, "ports")
+		if !ok || portsNode.Kind != yaml.SequenceNode {
+			continue
+		}
+		for _, pNode := range portsNode.Content {
+			if pNode.Kind != yaml.MappingNode {
+				continue
+			}
+			if cPortNode, ok := mapGet(pNode, "containerPort"); ok && cPortNode.Kind == yaml.ScalarNode {
+				if portVal, err := strconv.Atoi(cPortNode.Value); err == nil && portVal > 0 {
+					if !seen[portVal] {
+						seen[portVal] = true
+						portsList = append(portsList, portVal)
+					}
+				}
+			}
+		}
+	}
+
+	if len(portsList) == 0 {
+		return []int{3000, 8081}
+	}
+
+	sort.Ints(portsList)
+	return portsList
+}
+
+func generateNetworkPolicyDocument(docName string, portsList []int, withOTEL bool) ports.Document {
+	if len(portsList) == 0 {
+		portsList = []int{3000, 8081}
+	}
+	sort.Ints(portsList)
+
+	var sb strings.Builder
+	sb.WriteString("apiVersion: networking.k8s.io/v1\n")
+	sb.WriteString("kind: NetworkPolicy\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString("  name: pokkum-network-policy\n")
+	sb.WriteString("spec:\n")
+	sb.WriteString("  podSelector: {}\n")
+	sb.WriteString("  policyTypes:\n")
+	sb.WriteString("    - Ingress\n")
+	sb.WriteString("    - Egress\n")
+	sb.WriteString("  ingress:\n")
+	sb.WriteString("    - ports:\n")
+	for _, p := range portsList {
+		sb.WriteString(fmt.Sprintf("        - protocol: TCP\n          port: %d\n", p))
+	}
+	sb.WriteString("  egress:\n")
+	sb.WriteString("    - ports:\n")
+	sb.WriteString("        - protocol: UDP\n          port: 53\n")
+	sb.WriteString("        - protocol: TCP\n          port: 53\n")
+	sb.WriteString("        - protocol: TCP\n          port: 443\n")
+	sb.WriteString("        - protocol: TCP\n          port: 4317\n")
+	sb.WriteString("        - protocol: TCP\n          port: 4318\n")
+	if withOTEL {
+		sb.WriteString("        - protocol: TCP\n          port: 8889\n")
+	}
+
 	return ports.Document{
 		Name:    docName + "#network-policy",
-		Content: []byte(strings.TrimSpace(netPolYAML) + "\n"),
+		Content: []byte(sb.String()),
 	}
 }
 

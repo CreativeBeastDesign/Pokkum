@@ -21,7 +21,7 @@
 - **Structured JSON Schema Standard (`--output=json`)**:
   - Global `--output=text|json` flag standardizes CLI stdout into versioned `ports.JSONEnvelope` payloads (`schema_version: "1.0"`).
 - **Cluster Hardening & Manifest Defaults (`v1.0 MVP`)**:
-  - `pokkum resolve` and `pokkum apply` inject hardened `securityContext` defaults (`runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`), container resource limits/requests (`requests: cpu 50m, memory 64Mi`; `limits: memory 256Mi`), and append `NetworkPolicy` and `PodDisruptionBudget` documents by default.
+  - `pokkum resolve` and `pokkum apply` inject hardened `securityContext` defaults (`runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`), container resource limits/requests (`requests: cpu 50m, memory 64Mi`; `limits: memory 256Mi`), and append `NetworkPolicy` (with dynamic containerPort ingress rules and egress restricted to DNS 53, HTTPS 443, and OTLP 4317/4318) and `PodDisruptionBudget` documents by default.
 - **Custom & Standard OCI Image Annotations**:
   - `pokkum build` supports `--image-label key=value` (repeatable) to inject custom user labels, auto-populating OCI annotations (`org.opencontainers.image.*`).
 - **Rebuild Verification & Diagnosis (`v0.5`)**:
