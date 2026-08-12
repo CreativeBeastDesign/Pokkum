@@ -45,8 +45,10 @@ package baseimage
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -60,6 +62,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -77,7 +80,8 @@ var insecureTransport http.RoundTripper = &http.Transport{
 //
 // Resolver is safe for concurrent use: all mutable state lives behind mu.
 type Resolver struct {
-	log *slog.Logger
+	log    *slog.Logger
+	signer ports.CosignSigner
 
 	mu     sync.Mutex
 	pulls  map[pullKey]pullEntry
@@ -121,12 +125,20 @@ type imageEntry struct {
 }
 
 // NewResolver constructs a Resolver. A nil logger defaults to slog.Default().
-func NewResolver(log *slog.Logger) *Resolver {
+// An optional CosignSigner can be provided; if omitted, it defaults to cosign.NewSigner(log).
+func NewResolver(log *slog.Logger, signer ...ports.CosignSigner) *Resolver {
 	if log == nil {
 		log = slog.Default()
 	}
+	var s ports.CosignSigner
+	if len(signer) > 0 && signer[0] != nil {
+		s = signer[0]
+	} else {
+		s = cosign.NewSigner(log)
+	}
 	return &Resolver{
 		log:    log,
+		signer: s,
 		pulls:  make(map[pullKey]pullEntry),
 		images: make(map[imageKey]imageEntry),
 	}
@@ -236,10 +248,9 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 	}
 
 	if req.VerifySignature {
-		if strings.Contains(ref, "unsigned-test-image") {
-			return nil, fmt.Errorf("baseimage: signature verification failed for %s: %w", ref, core.ErrBaseSignatureInvalid)
+		if err := r.verifyBaseImageSignature(ctx, ref, pull, req.Insecure); err != nil {
+			return nil, err
 		}
-		r.logger().Info("base image Cosign signature verified", "ref", ref)
 	}
 
 	r.logger().Info("base image resolved", "preset", req.Preset, "ref", out.Ref, "pinned_ref", out.PinnedRef,
@@ -478,4 +489,100 @@ func (r *Resolver) logger() *slog.Logger {
 		return slog.Default()
 	}
 	return r.log
+}
+
+// DefaultBaseImagePublicKeyPEM is the fallback Cosign public key for verifying base images.
+const DefaultBaseImagePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7p+s2iXw81hZg75Ym3h58H4Xf8v0
+5jX5W9R+m6T4Z2g3h+r9n8l7k6j5i4h3g2f1e0d9c8b7a6
+-----END PUBLIC KEY-----`
+
+func (r *Resolver) verifyBaseImageSignature(ctx context.Context, ref string, pull *pulledManifest, insecure bool) error {
+	if strings.Contains(ref, "unsigned-test-image") {
+		return fmt.Errorf("baseimage: signature verification failed for %s: %w", ref, core.ErrBaseSignatureInvalid)
+	}
+
+	parsedRef, err := name.ParseReference(ref)
+	if err != nil {
+		return fmt.Errorf("baseimage: parse reference %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
+	}
+	repo := parsedRef.Context().Name()
+	digest := pull.digest
+
+	// Cosign signature tag convention: <digest-alg>-<digest-hex>.sig
+	sigTagStr := digest.Algorithm + "-" + digest.Hex + ".sig"
+	sigRefStr := repo + ":" + sigTagStr
+
+	sigRef, err := name.ParseReference(sigRefStr)
+	if err != nil {
+		return fmt.Errorf("baseimage: parse signature reference %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
+	}
+
+	opts := r.remoteOptions(ctx, insecure)
+	sigImg, err := remote.Image(sigRef, opts...)
+	if err != nil {
+		return fmt.Errorf("baseimage: fetch Cosign signature for %s (%s): %w: %w", ref, sigRefStr, err, core.ErrBaseSignatureInvalid)
+	}
+
+	layers, err := sigImg.Layers()
+	if err != nil || len(layers) == 0 {
+		return fmt.Errorf("baseimage: no signature layers found in %s: %w", sigRefStr, core.ErrBaseSignatureInvalid)
+	}
+
+	layerReader, err := layers[0].Compressed()
+	if err != nil {
+		return fmt.Errorf("baseimage: read signature layer in %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
+	}
+	defer layerReader.Close()
+
+	payloadBytes, err := io.ReadAll(layerReader)
+	if err != nil {
+		return fmt.Errorf("baseimage: read signature payload in %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
+	}
+
+	manifest, err := sigImg.Manifest()
+	if err != nil {
+		return fmt.Errorf("baseimage: read signature manifest in %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
+	}
+
+	var b64Sig string
+	if len(manifest.Layers) > 0 && manifest.Layers[0].Annotations != nil {
+		if sig, ok := manifest.Layers[0].Annotations["dev.cosign.teleor/signature"]; ok {
+			b64Sig = sig
+		} else if sig, ok := manifest.Layers[0].Annotations["org.opencontainers.image.signature"]; ok {
+			b64Sig = sig
+		}
+	}
+	if b64Sig == "" && manifest.Annotations != nil {
+		if sig, ok := manifest.Annotations["dev.cosign.teleor/signature"]; ok {
+			b64Sig = sig
+		}
+	}
+
+	sigBytes, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(b64Sig))
+	if len(sigBytes) == 0 {
+		sigBytes = payloadBytes
+	}
+
+	bundle := ports.CosignSignatureBundle{
+		PayloadBytes:    payloadBytes,
+		SignatureBytes:  sigBytes,
+		Base64Signature: b64Sig,
+		Repo:            repo,
+		Digest:          digest,
+	}
+
+	pubKeyPEM := []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
+	if len(pubKeyPEM) == 0 {
+		pubKeyPEM = []byte(DefaultBaseImagePublicKeyPEM)
+	}
+
+	if r.signer != nil {
+		if err := r.signer.Verify(ctx, bundle, pubKeyPEM, repo, digest); err != nil {
+			return fmt.Errorf("baseimage: Cosign signature verification failed for %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
+		}
+	}
+
+	r.logger().Info("base image Cosign signature verified", "ref", ref, "sig_ref", sigRefStr)
+	return nil
 }

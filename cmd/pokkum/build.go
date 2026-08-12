@@ -21,7 +21,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sbom"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scanner"
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/secretguardutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/secretguard"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/slsa"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -372,7 +372,7 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		CosignSigner:    cosign.NewSigner(logger),
 		DSSESigner:      dsse.NewSigner(logger),
 		Scanner:         scanner.NewAdapter(logger),
-		SecretGuard:     secretguardutils.NewAdapter(),
+		SecretGuard:     secretguard.NewAdapter(),
 
 		Logger:    logger,
 		Stdout:    stdout,

@@ -1,4 +1,4 @@
-package secretguardutils
+package secretguard
 
 import (
 	"context"

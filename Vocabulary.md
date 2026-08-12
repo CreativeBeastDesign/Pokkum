@@ -168,9 +168,11 @@ Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode) and `
 | `--check` | `false` | Check for available CLI updates without installing. |
 | `--version` | (latest) | Target version to upgrade to. |
 | `--output` | `text` | Output format (`text` or `json`). |
-| `--offline` | `false` | Disable network calls to release API. |
+| `--offline` | `false` | Disable network calls to release API (returns `Verified: false`). |
+| `--key` | (embedded) | Path to public key PEM file for release artifact signature verification. |
 
 ---
+
 
 ## 13. `pokkum verify` / `pokkum repro doctor`
 

@@ -530,3 +530,41 @@ func TestResolve_OfflineMode(t *testing.T) {
 		t.Fatalf("offline mode without lock entry: expected core.ErrInvalidBaseImage, got %v", err)
 	}
 }
+
+func TestResolve_BaseImageCosignSignatureVerification(t *testing.T) {
+	s, _ := newTestRegistry(t)
+	ref := pushImage(t, s, "app/unsigned:v1", ports.LinuxAMD64)
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	// 1. Unsigned image ref in test registry should fail when VerifySignature is true
+	reqUnsigned := ports.BaseImageRequest{
+		Preset:          ports.BaseImageCustom,
+		Ref:             ref,
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		Insecure:        true,
+		VerifySignature: true,
+	}
+
+	_, err := r.Resolve(ctx, reqUnsigned)
+	if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+		t.Fatalf("expected core.ErrBaseSignatureInvalid for unsigned image in registry, got: %v", err)
+	}
+
+	// 2. Unsigned image when VerifySignature is false should succeed
+	reqNoVerify := ports.BaseImageRequest{
+		Preset:          ports.BaseImageCustom,
+		Ref:             ref,
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		Insecure:        true,
+		VerifySignature: false,
+	}
+	res, err := r.Resolve(ctx, reqNoVerify)
+	if err != nil {
+		t.Fatalf("expected successful resolution when VerifySignature is false, got: %v", err)
+	}
+	if res.Digest.String() == "" {
+		t.Error("expected non-empty digest for resolved image")
+	}
+}

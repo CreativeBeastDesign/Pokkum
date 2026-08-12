@@ -16,8 +16,8 @@
   - Ephemeral OCI 1.1 Test Registry Utility is exported at `pkg/registry.NewServer()` for integration testing.
 - **Security Scanning & Guardrails (`v1.0 MVP Bundle 6`)**:
   - `pokkum scan [target]` subcommand runs security scans against project directories, images, or tarballs. Flags: `--fail-on=low|medium|high|critical` (default `critical`), `--toolchain` (OSV advisory lookups for embedded Bun and SvelteKit), `--output=text|json`, `--offline`.
-  - Base Image Cosign Signature Verification is enabled by default (`VerifySignature: true`); `--no-verify-base` provides opt-out.
-  - Secret-Inlining Guard (`secretguardutils`) runs build-time entropy and pattern scanning across project sources during `pokkum build` before packaging layers, preventing hardcoded secret leaks (`core.ErrSecretInlined`). Pass `--allow-secret-pattern=<regex>` to bypass false positives.
+  - Base Image Cosign Signature Verification is enabled by default (`VerifySignature: true`); queries target container registry for signature tags (`<repo>:sha256-<hex>.sig`) and verifies cryptographic payload signatures via `ports.CosignSigner` (`cosign.Signer`); `--no-verify-base` provides opt-out.
+  - Secret-Inlining Guard (`secretguard`) runs build-time entropy and pattern scanning across project sources during `pokkum build` before packaging layers, preventing hardcoded secret leaks (`core.ErrSecretInlined`). Pass `--allow-secret-pattern=<regex>` to bypass false positives.
 - **Structured JSON Schema Standard (`--output=json`)**:
   - Global `--output=text|json` flag standardizes CLI stdout into versioned `ports.JSONEnvelope` payloads (`schema_version: "1.0"`).
 - **Cluster Hardening & Manifest Defaults (`v1.0 MVP`)**:

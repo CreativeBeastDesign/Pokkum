@@ -65,13 +65,13 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `errors.go`: Defines standardized domain error types (`ErrPackageFailed`, `ErrUnsupportedPlatform`, `ErrBunResolutionFailed`, etc.).
 
 3. **Abstraction Ports (`internal/ports/`)**:
-   - Interfaces decoupling core logic from external adapters: `Compiler`, `Packager`, `Registry`, `BaseImageResolver`, `BunRuntimeResolver`, `SBOMGenerator`, `SupervisorProvider`, `K8sResolver`, `Signer`, `Attestor`, `BinaryInspector`, `ProvenanceResolver`, `ImageComparator`, and structured output envelopes (`JSONEnvelope`, `OutputFormat`).
+   - Interfaces decoupling core logic from external adapters: `Compiler`, `Packager`, `Registry`, `BaseImageResolver`, `BunRuntimeResolver`, `SBOMGenerator`, `SupervisorProvider`, `K8sResolver`, `Signer`, `Attestor`, `BinaryInspector`, `ProvenanceResolver`, `ImageComparator`, `ReleaseVerifier`, `SecretGuard`, and structured output envelopes (`JSONEnvelope`, `OutputFormat`).
 
 4. **Adapter Implementations (`internal/adapters/`)**:
    - `bunexec`: Wraps host `bun build --compile` for cross-compiling single executables.
    - `bunruntime`: Resolves, downloads, SHA256-verifies, and caches official Bun runtime binaries (`~/.cache/pokkum/bun`) for runtime layer assembly (`ports.BunRuntimeResolver`).
    - `packager`: Constructs reproducible OCI tarballs, custom single-binary layers (`BuildCustomFileLayer`), directory tree layers (`BuildDirectoryTreeLayer`), and multi-arch index manifests using `github.com/google/go-containerregistry`.
-   - `baseimage`: Resolves base image layers (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard `glibc-dynamic`) and maintains `pokkum.lock` digest locks.
+   - `baseimage`: Resolves base image layers (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard `glibc-dynamic`), verifies upstream Cosign signatures via `ports.CosignSigner`, and maintains `pokkum.lock` digest locks.
    - `lockfileutils`: Utility package for loading, parsing, and saving `pokkum.lock` base image lockfiles.
    - `jsonutils`: Utility package for structured, versioned JSON response formatting (`--output=json`).
    - `diagnosticsutils`: Utility package for container exit failure analysis and log tracing.
@@ -83,12 +83,14 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `supervisor`: Embedded supervisor binary assets (`/pokkum/init`).
    - `k8s`: Kubernetes manifest inspection, document rewriting, and `pokkum://` schema resolution.
    - `sveltekit`: Checks `@jesterkit/exe-sveltekit` adapter installation in target projects.
-   - `cosign`: Signs OCI images and attaches Cosign signatures to OCI registries.
+   - `cosign`: Signs OCI images, attaches Cosign signatures to OCI registries, and implements `ports.ReleaseVerifier` for release signature and SHA-256 checksum verification.
+   - `secretguard`: Build-time entropy and pattern scanner for detecting hardcoded secrets in source files before image packaging (`ports.SecretGuard`).
    - `slsa`: Generates SLSA v1.0 provenance predicate statements.
    - `dsse`: Wraps attestations in Dead Simple Signing Envelopes (DSSE).
    - `config`: Environment variable and CLI flag parsing/validation.
    - `ignore`: Reads `.pokkumignore` patterns to exclude unwanted files (`.env.local`, source maps, fixtures).
    - `nativeinspect`: Inspects compiled binaries (`DT_NEEDED`, glibc symbols) to ensure base image compatibility.
+
 
 
 5. **PID-1 Supervisor Subproject (`supervisor/cmd/pokkum-init`)**:

@@ -1,4 +1,4 @@
-package secretguardutils
+package secretguard
 
 import (
 	"bufio"
@@ -13,9 +13,6 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/ignoreutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
-
-// IsUtilityPackage is the sentinel marker identifying this package as a non-adapter utility.
-const IsUtilityPackage = true
 
 type rule struct {
 	Name    string
