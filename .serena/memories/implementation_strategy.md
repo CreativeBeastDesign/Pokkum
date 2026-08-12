@@ -1,4 +1,6 @@
-# Pokkum Implementation Strategy & Feature Bundles (v1.0 MVP COMPLETE)
+# Pokkum Implementation Strategy & Feature Bundles (v1.0 MVP In-Progress)
+
+Note: v1.0 core CLI features (CVE scanning, Base Image Cosign verification, SecretGuard, Hermetic builds, Multi-registry auth, NetworkPolicy hardening, Rollback, and Signed upgrade) are complete. Two open backlog items remain for v1.0 ecosystem automation: Trusted-Builder Mode (CI workflow) and automated base image update-PR bot.
 
 ## 📦 Bundle 1: Supply Chain & Reproducibility Lock (v0.2 & v0.5 M0) - COMPLETED
 - Base Image Lockfile (pokkum.lock) & Provenance Completeness M0

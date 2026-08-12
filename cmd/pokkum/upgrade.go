@@ -132,7 +132,7 @@ func runUpgrade(ctx context.Context, logger *slog.Logger, verifier ports.Release
 			envelope := ports.JSONEnvelope{
 				SchemaVersion: "1.0",
 				Command:       "upgrade",
-				Status:        "ok",
+				Status:        "success",
 				Data:          res,
 			}
 			enc := json.NewEncoder(os.Stdout)
@@ -223,7 +223,7 @@ func runUpgrade(ctx context.Context, logger *slog.Logger, verifier ports.Release
 			envelope := ports.JSONEnvelope{
 				SchemaVersion: "1.0",
 				Command:       "upgrade",
-				Status:        "ok",
+				Status:        "success",
 				Data:          res,
 			}
 			enc := json.NewEncoder(os.Stdout)
@@ -250,7 +250,7 @@ func runUpgrade(ctx context.Context, logger *slog.Logger, verifier ports.Release
 			envelope := ports.JSONEnvelope{
 				SchemaVersion: "1.0",
 				Command:       "upgrade",
-				Status:        "ok",
+				Status:        "success",
 				Data:          res,
 			}
 			enc := json.NewEncoder(os.Stdout)
@@ -327,7 +327,7 @@ func runUpgrade(ctx context.Context, logger *slog.Logger, verifier ports.Release
 		envelope := ports.JSONEnvelope{
 			SchemaVersion: "1.0",
 			Command:       "upgrade",
-			Status:        "ok",
+			Status:        "success",
 			Data:          res,
 		}
 		enc := json.NewEncoder(os.Stdout)

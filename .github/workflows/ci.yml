@@ -23,10 +23,16 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      - name: Check Code Formatting
+        run: test -z "$(gofmt -s -l .)"
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          install-mode: goinstall
+          version: v1.62.2
+
+      - name: Run govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       - name: Check Hexagonal Architecture Purity
         run: go test -v ./internal/architecture_test.go

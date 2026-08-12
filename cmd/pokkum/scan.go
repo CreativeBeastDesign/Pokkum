@@ -68,7 +68,7 @@ func runScan(ctx context.Context, logger *slog.Logger, flags *scanFlags, args []
 		envelope := ports.JSONEnvelope{
 			SchemaVersion: "1.0",
 			Command:       "scan",
-			Status:        "ok",
+			Status:        "success",
 			Data:          res,
 		}
 		if scanErr != nil {

@@ -54,6 +54,11 @@ lint:  ##  Run golangci-lint
 fmt:  ##  Format code with gofmt and goimports
 	@echo "Formatting code..."
 	@gofmt -s -w .
+	@go run golang.org/x/tools/cmd/goimports@latest -w .
+
+check-fmt:  ##  Check code formatting with gofmt
+	@echo "Checking code formatting..."
+	@test -z "$$(gofmt -s -l .)"
 
 clean:  ##  Clean build artifacts
 	@echo "Cleaning build artifacts..."

@@ -90,7 +90,7 @@ func runRollback(ctx context.Context, logger *slog.Logger, flags *rollbackFlags)
 		envelope := ports.JSONEnvelope{
 			SchemaVersion: "1.0",
 			Command:       "rollback",
-			Status:        "ok",
+			Status:        "success",
 			Data:          res,
 		}
 		enc := json.NewEncoder(os.Stdout)
