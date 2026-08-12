@@ -168,4 +168,10 @@ var (
 
 	// ErrHermeticViolation reports an unexpected network call or un-cached dependency in hermetic build mode.
 	ErrHermeticViolation = errors.New("hermetic build violation: network egress or missing local cache detected")
+
+	// ErrReleaseVerificationFailed reports release signature or checksum verification failure.
+	ErrReleaseVerificationFailed = errors.New("release signature or checksum verification failed")
+
+	// ErrReleaseUpgradeFailed reports failure during self-upgrade download or binary replacement.
+	ErrReleaseUpgradeFailed = errors.New("release self-upgrade failed")
 )

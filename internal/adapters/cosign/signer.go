@@ -126,7 +126,46 @@ func (s *Signer) Verify(ctx context.Context, bundle ports.CosignSignatureBundle,
 	return nil
 }
 
+// VerifyArtifactSignature validates that signatureBytes is a valid signature for artifactBytes using pubKeyPEM.
+func (s *Signer) VerifyArtifactSignature(ctx context.Context, req ports.VerifyReleaseArtifactRequest) error {
+	if len(req.PublicKeyPEM) == 0 {
+		return fmt.Errorf("cosign: public key PEM is required: %w", core.ErrInvalidRequest)
+	}
+	if len(req.ArtifactBytes) == 0 || len(req.SignatureBytes) == 0 {
+		return fmt.Errorf("cosign: empty artifact or signature: %w", core.ErrInvalidRequest)
+	}
+
+	pubKey, err := parsePublicKeyPEM(req.PublicKeyPEM)
+	if err != nil {
+		return fmt.Errorf("cosign: parse public key: %w", err)
+	}
+
+	sigBytes := req.SignatureBytes
+	if decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(req.SignatureBytes))); err == nil && len(decoded) > 0 {
+		sigBytes = decoded
+	}
+
+	if err := verifyPayload(pubKey, req.ArtifactBytes, sigBytes); err != nil {
+		return fmt.Errorf("cosign: artifact signature verification failed: %w: %w", err, core.ErrReleaseVerificationFailed)
+	}
+
+	s.log.DebugContext(ctx, "cosign: verified artifact signature", "artifact_bytes", len(req.ArtifactBytes))
+	return nil
+}
+
+// VerifyChecksum validates that content SHA256 matches expectedChecksumHex.
+func (s *Signer) VerifyChecksum(content []byte, expectedChecksumHex string) error {
+	h := sha256.Sum256(content)
+	actualHex := fmt.Sprintf("%x", h)
+	expectedHex := strings.TrimSpace(strings.ToLower(expectedChecksumHex))
+	if actualHex != expectedHex {
+		return fmt.Errorf("cosign: checksum mismatch: computed %s != expected %s: %w", actualHex, expectedHex, core.ErrReleaseVerificationFailed)
+	}
+	return nil
+}
+
 // signPayload signs payloadBytes using private key (ECDSA or Ed25519).
+
 func signPayload(priv crypto.PrivateKey, payloadBytes []byte) ([]byte, error) {
 	switch k := priv.(type) {
 	case *ecdsa.PrivateKey:

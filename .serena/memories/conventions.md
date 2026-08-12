@@ -8,7 +8,7 @@
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
 - **Day-2 Operations & CI/CD Ecosystem (`v1.0 MVP Bundle 8`)**:
   - `pokkum rollback -f <manifest> --to=<ref>` rolls back image references in Kubernetes manifests to a target tag or digest reference.
-  - `pokkum upgrade [--check]` checks for new Pokkum CLI releases, verifies Cosign signatures/checksums, and reports or applies self-updates.
+  - `pokkum upgrade [--check]` checks for new Pokkum CLI releases, verifies release `checksums.txt` and `checksums.txt.sig` via `ports.ReleaseVerifier` (implemented in `cosign.Signer`), and reports or applies binary self-updates. Supports `--version`, `--offline`, and `--key`.
   - `.github/actions/setup-pokkum/action.yml` exports the composite GitHub Action for automated CI setup.
 - **Enterprise Build Integrity & Hermetic Mode (`v1.0 MVP Bundle 7`)**:
   - Hermetic Build Mode (`pokkum build --hermetic`) enforces zero-network egress during compilation (`BUN_OFFLINE=1`), forces offline base image resolution (`--offline`), and checks local `node_modules/` pre-population (`core.ErrHermeticViolation`).

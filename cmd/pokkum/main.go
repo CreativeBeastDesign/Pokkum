@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/spf13/cobra"
 )
 
@@ -123,8 +124,9 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 	rootCmd.AddCommand(newMetricsCommand(ctx, logger))
 	rootCmd.AddCommand(newScanCommand(ctx, logger))
 	rootCmd.AddCommand(newRollbackCommand(ctx, logger))
-	rootCmd.AddCommand(newUpgradeCommand(ctx, logger))
+	rootCmd.AddCommand(newUpgradeCommand(ctx, logger, cosign.NewSigner(logger)))
 	rootCmd.AddCommand(newVerifyCommand(ctx, logger))
+
 	rootCmd.AddCommand(newReproDoctorCommand(ctx, logger))
 	rootCmd.AddCommand(newVersionCommand(ctx, logger))
 

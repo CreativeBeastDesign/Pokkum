@@ -22,7 +22,7 @@ type HeaderMismatch struct {
 
 // ContentMismatch describes a file payload checksum mismatch between two tar entries.
 type ContentMismatch struct {
-	Path        string `json:"path"`
+	Path         string `json:"path"`
 	Sha256First  string `json:"sha256_1"`
 	Sha256Second string `json:"sha256_2"`
 }
@@ -98,7 +98,7 @@ func CompareTarStreams(r1, r2 io.Reader) (*DiffResult, error) {
 		if e1.sha256 != e2.sha256 {
 			res.Identical = false
 			res.ContentDiffs = append(res.ContentDiffs, ContentMismatch{
-				Path:        path,
+				Path:         path,
 				Sha256First:  e1.sha256,
 				Sha256Second: e2.sha256,
 			})

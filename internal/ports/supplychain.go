@@ -267,3 +267,24 @@ type DSSESigner interface {
 	// Verify decodes envelope, validates its PAE signature against pubKeyPEM, and returns the raw payload bytes.
 	Verify(ctx context.Context, envelope DSSEEnvelope, pubKeyPEM []byte) ([]byte, error)
 }
+
+// VerifyReleaseArtifactRequest contains parameters for verifying a release artifact signature.
+type VerifyReleaseArtifactRequest struct {
+	// ArtifactBytes is the raw byte content of the artifact (e.g. checksums.txt content). Required.
+	ArtifactBytes []byte
+
+	// SignatureBytes is the signature bytes (raw DER/Ed25519 or Base64 encoded). Required.
+	SignatureBytes []byte
+
+	// PublicKeyPEM is the PEM-encoded ECDSA or Ed25519 public key bytes. Required.
+	PublicKeyPEM []byte
+}
+
+// ReleaseVerifier verifies release signatures and checksum integrity.
+type ReleaseVerifier interface {
+	// VerifyArtifactSignature verifies that SignatureBytes is a valid signature for ArtifactBytes using PublicKeyPEM.
+	VerifyArtifactSignature(ctx context.Context, req VerifyReleaseArtifactRequest) error
+
+	// VerifyChecksum validates that content SHA256 matches expectedChecksumHex.
+	VerifyChecksum(content []byte, expectedChecksumHex string) error
+}
