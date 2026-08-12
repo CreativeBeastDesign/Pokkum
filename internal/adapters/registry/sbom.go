@@ -48,7 +48,10 @@ func (a *Adapter) AttachSBOM(ctx context.Context, req ports.AttachSBOMRequest) (
 		return ports.PublishResult{}, fmt.Errorf("registry: attach sbom %s: build sbom image: %w: %w", req.Repo, err, core.ErrPushFailed)
 	}
 
-	opts := remoteOptions(ctx, req.Insecure, "")
+	opts, err := remoteOptions(ctx, req.Insecure, "", req.RegistryConfigPath)
+	if err != nil {
+		return ports.PublishResult{}, err
+	}
 
 	attachMode := req.AttachMode
 	if attachMode == "" {

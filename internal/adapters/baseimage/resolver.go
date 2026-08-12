@@ -56,6 +56,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/docker/cli/cli/config"
+	"github.com/docker/cli/cli/config/configfile"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -90,8 +92,9 @@ type Resolver struct {
 
 // pullKey identifies one top-level manifest pull.
 type pullKey struct {
-	ref      string
-	insecure bool
+	ref                string
+	insecure           bool
+	registryConfigPath string
 }
 
 // pullEntry caches the outcome of resolving ref to an index or a single
@@ -195,7 +198,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		return nil, fmt.Errorf("baseimage: parse %q: %w: %w", ref, err, core.ErrInvalidBaseImage)
 	}
 
-	pull, err := r.pull(ctx, parsedRef, ref, req.Insecure)
+	pull, err := r.pull(ctx, parsedRef, ref, req.Insecure, req.RegistryConfigPath)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +251,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 	}
 
 	if req.VerifySignature {
-		if err := r.verifyBaseImageSignature(ctx, ref, pull, req.Insecure); err != nil {
+		if err := r.verifyBaseImageSignature(ctx, ref, pull, req.Insecure, req.RegistryConfigPath); err != nil {
 			return nil, err
 		}
 	}
@@ -279,8 +282,8 @@ func effectiveRef(req ports.BaseImageRequest) (string, error) {
 
 // pull resolves ref to its top-level manifest, index or image, using the
 // cache when available.
-func (r *Resolver) pull(ctx context.Context, parsedRef name.Reference, rawRef string, insecure bool) (*pulledManifest, error) {
-	key := pullKey{ref: rawRef, insecure: insecure}
+func (r *Resolver) pull(ctx context.Context, parsedRef name.Reference, rawRef string, insecure bool, registryConfigPath string) (*pulledManifest, error) {
+	key := pullKey{ref: rawRef, insecure: insecure, registryConfigPath: registryConfigPath}
 
 	r.mu.Lock()
 	if e, ok := r.pulls[key]; ok {
@@ -291,7 +294,11 @@ func (r *Resolver) pull(ctx context.Context, parsedRef name.Reference, rawRef st
 	r.mu.Unlock()
 
 	r.logger().Debug("pulling base image manifest", "ref", rawRef, "insecure", insecure)
-	desc, err := remote.Get(parsedRef, r.remoteOptions(ctx, insecure)...)
+	opts, err := r.remoteOptions(ctx, insecure, registryConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	desc, err := remote.Get(parsedRef, opts...)
 
 	var (
 		pulled *pulledManifest
@@ -429,19 +436,65 @@ func staticBaseReason(ref string) (string, bool) {
 	return "", false
 }
 
+type customConfigFileKeychain struct {
+	cf *configfile.ConfigFile
+}
+
+func (k *customConfigFileKeychain) Resolve(target authn.Resource) (authn.Authenticator, error) {
+	if k.cf == nil {
+		return authn.Anonymous, nil
+	}
+	reg := target.RegistryStr()
+	cfg, err := k.cf.GetAuthConfig(reg)
+	if err != nil {
+		return authn.Anonymous, nil
+	}
+	if cfg.Username != "" || cfg.Password != "" || cfg.Auth != "" || cfg.IdentityToken != "" || cfg.RegistryToken != "" {
+		return authn.FromConfig(authn.AuthConfig{
+			Username:      cfg.Username,
+			Password:      cfg.Password,
+			Auth:          cfg.Auth,
+			IdentityToken: cfg.IdentityToken,
+			RegistryToken: cfg.RegistryToken,
+		}), nil
+	}
+	return authn.Anonymous, nil
+}
+
+func resolveKeychain(configPath string) (authn.Keychain, error) {
+	if configPath == "" {
+		return authn.DefaultKeychain, nil
+	}
+
+	f, err := os.Open(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("baseimage: open auth config %s: %w: %w", configPath, err, core.ErrRegistryAuth)
+	}
+	defer f.Close()
+
+	cf, err := config.LoadFromReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("baseimage: load auth config %s: %w: %w", configPath, err, core.ErrRegistryAuth)
+	}
+
+	return authn.NewMultiKeychain(&customConfigFileKeychain{cf: cf}, authn.DefaultKeychain), nil
+}
+
 // remoteOptions builds the go-containerregistry options common to every pull:
-// context threading (so a cancelled build stops pulling mid-transfer) and the
-// default keychain (so private and mirrored bases work without Pokkum ever
-// handling a credential itself).
-func (r *Resolver) remoteOptions(ctx context.Context, insecure bool) []remote.Option {
+// context threading (so a cancelled build stops pulling mid-transfer) and keychain resolution.
+func (r *Resolver) remoteOptions(ctx context.Context, insecure bool, registryConfigPath string) ([]remote.Option, error) {
+	kc, err := resolveKeychain(registryConfigPath)
+	if err != nil {
+		return nil, err
+	}
 	opts := []remote.Option{
 		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(authn.DefaultKeychain),
+		remote.WithAuthFromKeychain(kc),
 	}
 	if insecure {
 		opts = append(opts, remote.WithTransport(insecureTransport))
 	}
-	return opts
+	return opts, nil
 }
 
 // classifyPullErr maps a go-containerregistry transport error onto a core
@@ -497,7 +550,7 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7p+s2iXw81hZg75Ym3h58H4Xf8v0
 5jX5W9R+m6T4Z2g3h+r9n8l7k6j5i4h3g2f1e0d9c8b7a6
 -----END PUBLIC KEY-----`
 
-func (r *Resolver) verifyBaseImageSignature(ctx context.Context, ref string, pull *pulledManifest, insecure bool) error {
+func (r *Resolver) verifyBaseImageSignature(ctx context.Context, ref string, pull *pulledManifest, insecure bool, registryConfigPath string) error {
 	if strings.Contains(ref, "unsigned-test-image") {
 		return fmt.Errorf("baseimage: signature verification failed for %s: %w", ref, core.ErrBaseSignatureInvalid)
 	}
@@ -518,7 +571,10 @@ func (r *Resolver) verifyBaseImageSignature(ctx context.Context, ref string, pul
 		return fmt.Errorf("baseimage: parse signature reference %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
 	}
 
-	opts := r.remoteOptions(ctx, insecure)
+	opts, err := r.remoteOptions(ctx, insecure, registryConfigPath)
+	if err != nil {
+		return fmt.Errorf("baseimage: resolve auth for signature %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
+	}
 	sigImg, err := remote.Image(sigRef, opts...)
 	if err != nil {
 		return fmt.Errorf("baseimage: fetch Cosign signature for %s (%s): %w: %w", ref, sigRefStr, err, core.ErrBaseSignatureInvalid)

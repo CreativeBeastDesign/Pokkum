@@ -36,7 +36,11 @@ func (a *Adapter) Push(ctx context.Context, req ports.PushRequest) (ports.Publis
 	}
 
 	tags := tagsOrDefault(req.Tags)
-	opts := remoteOptions(ctx, req.Insecure, req.UserAgent)
+	opts, err := remoteOptions(ctx, req.Insecure, req.UserAgent, req.RegistryConfigPath)
+	if err != nil {
+		return ports.PublishResult{}, err
+	}
+
 	digestRef := repo.Digest(digest.String())
 
 	exists, err := a.digestExists(digestRef, opts)

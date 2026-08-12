@@ -568,3 +568,45 @@ func TestResolve_BaseImageCosignSignatureVerification(t *testing.T) {
 		t.Error("expected non-empty digest for resolved image")
 	}
 }
+
+func TestResolve_CustomRegistryConfig(t *testing.T) {
+	t.Run("invalid registry config path returns ErrRegistryAuth", func(t *testing.T) {
+		r := NewResolver(nil, nil)
+		_, err := r.Resolve(t.Context(), ports.BaseImageRequest{
+			Preset:             ports.BaseImageDistroless,
+			Platforms:          []ports.Platform{ports.LinuxAMD64},
+			RegistryConfigPath: "/nonexistent/path/config.json",
+		})
+		if err == nil || !errors.Is(err, core.ErrRegistryAuth) {
+			t.Fatalf("expected ErrRegistryAuth for non-existent config path, got %v", err)
+		}
+	})
+
+	t.Run("valid custom config.json resolves base image successfully", func(t *testing.T) {
+		s, _ := newTestRegistry(t)
+		ref := pushImage(t, s, "test/base-custom-auth:latest", ports.LinuxAMD64)
+
+		r := NewResolver(nil, nil)
+		tmpDir := t.TempDir()
+		configPath := filepath.Join(tmpDir, "config.json")
+		host := strings.TrimPrefix(s.URL, "http://")
+		configContent := `{"auths": {"` + host + `": {"auth": "dXNlcjpwYXNz"}}} `
+		if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+			t.Fatalf("failed to write custom config.json: %v", err)
+		}
+
+		res, err := r.Resolve(t.Context(), ports.BaseImageRequest{
+			Preset:             ports.BaseImageCustom,
+			Ref:                ref,
+			Platforms:          []ports.Platform{ports.LinuxAMD64},
+			Insecure:           true,
+			RegistryConfigPath: configPath,
+		})
+		if err != nil {
+			t.Fatalf("Resolve with custom registry config failed: %v", err)
+		}
+		if res.Digest.String() == "" {
+			t.Error("expected non-empty digest for resolved base image")
+		}
+	})
+}

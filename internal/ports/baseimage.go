@@ -114,6 +114,9 @@ type BaseImageRequest struct {
 
 	// VerifySignature verifies Cosign signatures on upstream base images when pulling. True by default.
 	VerifySignature bool
+
+	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
+	RegistryConfigPath string
 }
 
 // PokkumLockfileName is the canonical lockfile name.

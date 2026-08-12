@@ -93,6 +93,9 @@ type PushRequest struct {
 	// UserAgent is appended to the User-Agent header sent to the registry.
 	// Empty means the adapter's default.
 	UserAgent string
+
+	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
+	RegistryConfigPath string
 }
 
 // AttachSBOMRequest publishes an SBOM alongside an already-pushed image, under
@@ -116,6 +119,9 @@ type AttachSBOMRequest struct {
 
 	// Insecure permits plain HTTP and skips TLS verification.
 	Insecure bool
+
+	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
+	RegistryConfigPath string
 }
 
 // LoadRequest imports an image into the local Docker daemon, the `--local`

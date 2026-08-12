@@ -1,10 +1,12 @@
 package registry
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
@@ -183,4 +186,46 @@ func indexWithAttestationPlaceholder(t *testing.T, p ports.Platform) v1.ImageInd
 		},
 	)
 	return idx
+}
+
+func TestRegistry_CustomRegistryConfig(t *testing.T) {
+	t.Run("invalid config path returns ErrRegistryAuth", func(t *testing.T) {
+		a := NewAdapter(nil)
+		img := randomImage(t)
+		_, err := a.Push(t.Context(), ports.PushRequest{
+			Repo:               "localhost:5000/test/app",
+			Payload:            ports.Payload{Image: img},
+			RegistryConfigPath: "/nonexistent/path/config.json",
+		})
+		if err == nil || !errors.Is(err, core.ErrRegistryAuth) {
+			t.Fatalf("expected ErrRegistryAuth for non-existent config path, got %v", err)
+		}
+	})
+
+	t.Run("valid custom config.json resolves successfully", func(t *testing.T) {
+		s, _ := newTestRegistry(t)
+		host := strings.TrimPrefix(s.URL, "http://")
+		a := NewAdapter(nil)
+		img := randomImage(t)
+
+		tmpDir := t.TempDir()
+		configPath := filepath.Join(tmpDir, "config.json")
+		configContent := `{"auths": {"` + host + `": {"auth": "dXNlcjpwYXNz"}}} `
+		if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+			t.Fatalf("failed to write custom config.json: %v", err)
+		}
+
+		res, err := a.Push(t.Context(), ports.PushRequest{
+			Repo:               host + "/test/custom-auth",
+			Payload:            ports.Payload{Image: img},
+			Insecure:           true,
+			RegistryConfigPath: configPath,
+		})
+		if err != nil {
+			t.Fatalf("Push with custom registry config failed: %v", err)
+		}
+		if res.Ref == "" {
+			t.Fatal("expected non-empty ref from Push")
+		}
+	})
 }

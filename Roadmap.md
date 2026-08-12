@@ -132,7 +132,8 @@ _The shippable minimum viable product for enterprise-grade adoption._
 - [x] Version pinning of `pokkum` itself in generated manifest annotations. (no new flag — folds into `--image-label`/auto-annotations above)
 - [x] A GitHub Action wrapping the CLI (mirroring `setup-ko`). (no new `pokkum` flag — Action inputs like `version`/`token`, mirroring `setup-ko`)
 - [x] Rollback support (`pokkum rollback` reading from build history). (new subcommand: `pokkum rollback -f <manifest> --to=<ref>`, reusing `-f`/`--file` from `resolve`/`apply`)
-- [x] Signed Self-Distribution (`pokkum upgrade`): Signature verification of release artifacts. (new subcommand: `pokkum upgrade`, new flag: `--check`)
+- [x] Signed Self-Distribution (`pokkum upgrade`): Signature verification of release artifacts and binary self-updates via `ports.ReleaseVerifier` and `cosign`. (new subcommand: `pokkum upgrade`, new flags: `--check`, `--version`, `--offline`, `--key`)
+
 
 ## Beyond v1.0 / Backlog
 

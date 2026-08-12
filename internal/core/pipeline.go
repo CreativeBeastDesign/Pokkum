@@ -489,11 +489,12 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			return result, err
 		}
 		att, err := deps.Registry.AttachSBOM(ctx, ports.AttachSBOMRequest{
-			Repo:       req.Repo,
-			Subject:    pub.Digest,
-			Document:   *doc,
-			AttachMode: req.SBOM.AttachMode,
-			Insecure:   req.Insecure,
+			Repo:               req.Repo,
+			Subject:            pub.Digest,
+			Document:           *doc,
+			AttachMode:         req.SBOM.AttachMode,
+			Insecure:           req.Insecure,
+			RegistryConfigPath: req.RegistryConfigPath,
 		})
 		if err != nil {
 			return result, fmt.Errorf("core: attach sbom to %s (the image itself was pushed; set SBOM.NoAttach to skip this step): %w", pub.Ref, err)
@@ -719,11 +720,12 @@ func publish(ctx context.Context, deps Deps, req BuildRequest, payload ports.Pay
 	switch req.Output.Mode {
 	case OutputPush:
 		return deps.Registry.Push(ctx, ports.PushRequest{
-			Repo:      req.Repo,
-			Tags:      slices.Clone(req.Tags),
-			Payload:   payload,
-			Insecure:  req.Insecure,
-			UserAgent: deps.UserAgent,
+			Repo:               req.Repo,
+			Tags:               slices.Clone(req.Tags),
+			Payload:            payload,
+			Insecure:           req.Insecure,
+			UserAgent:          deps.UserAgent,
+			RegistryConfigPath: req.RegistryConfigPath,
 		})
 
 	case OutputLocal:
