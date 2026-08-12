@@ -1,6 +1,6 @@
 # Pokkum CLI Vocabulary
 
-A single reference for every flag Pokkum's CLI exposes, the conventions flags follow, and the open backlog items on [Roadmap.md](Roadmap.md).
+A single reference for every flag Pokkum's CLI exposes, the conventions flags follow, and the open backlog items on [Roadmap.md](Roadmap.md). See [fixes-to-v1.md](fixes-to-v1.md), [for-users.md](for-users.md), and [unfixed-limitation.md](unfixed-limitation.md) for a post-v1.0 audit round that changed some of the behavior documented below.
 
 Pokkum's stated model is "`ko` for SvelteKit" (see [README.md](README.md)), so the vocabulary borrows `ko`'s shape deliberately: a `*_DOCKER_REPO` environment variable as the one required input, `-f`/`--recursive` for manifest commands, `--local`/`--push`-style output-mode flags, `--platform` as the multi-arch surface, and boolean toggles that read as prose (`--bare`, `--insecure-registry` in `ko`; `--hardened`, `--dry-run` here). Where this document says "follows `ko` convention," that is the specific precedent being matched.
 
@@ -44,10 +44,10 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--sbom-attach` | — | — | `referrer` | SBOM attachment mode: `referrer` (OCI 1.1) or `tag` (legacy `.sbom` tag). |
 | `--local` | — | — | `false` | Load into the local Docker daemon instead of pushing. Mutually exclusive with `--tarball`. |
 | `--image-label` | — | — | (none) | Custom image label (`key=value`), repeatable. |
-| `--no-verify-base` | — | — | `false` | Suppress Cosign signature verification on upstream base images. |
+| `--no-verify-base` | — | — | `false` | Suppress Cosign signature verification on base images. Verification checks against a static public key (`POKKUM_BASE_IMAGE_PUBKEY`) — real protection for a custom/self-signed base, but it does not cover the stock `distroless`/`chainguard` presets' actual (keyless) signatures; see [unfixed-limitation.md](unfixed-limitation.md). |
 | `--allow-secret-pattern` | — | — | (none) | Regex pattern to ignore during build-time secret scanning, repeatable. |
 | `--hermetic` | — | — | `false` | Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required). |
-| `--registry-config` | — | — | (none) | Path to custom OCI registry auth config file (`config.json`). |
+| `--registry-config` | — | — | (none) | Path to a `docker config.json`-style auth file, keyed by registry hostname (`"auths": {"<host>": {...}}`), merged ahead of `authn.DefaultKeychain`. Not cloud-provider-specific — no ECR/GCR/ACR credential-helper invocation, just static per-registry credentials from the file. |
 | `--tarball` | — | — | (none) | Export as an OCI archive to the given path. Mutually exclusive with `--local`. |
 | `--dry-run` | — | — | `false` | Resolve and report; perform no writes. Mutually exclusive with `--print-manifest`. |
 | `--print-manifest` | — | — | `false` | Emit the computed OCI manifest/config without pushing. Mutually exclusive with `--dry-run`. |
@@ -85,11 +85,11 @@ Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode) and `
 | `--recursive` | — | `false` | Process YAML files in the directory recursively. |
 | `--security-context` | — | `true` | Inject hardened `securityContext` defaults for pokkum-built containers. |
 | `--no-security-context` | — | `false` | Disable securityContext injection; wins over `--security-context` if both are set. |
-| `--network-policy` | — | `true` | Generate NetworkPolicy document restricting ingress and egress. |
+| `--network-policy` | — | `true` | Generate NetworkPolicy document restricting ingress and egress, `podSelector` scoped to the workload's own Pod-template labels when found. |
 | `--no-network-policy` | — | `false` | Disable NetworkPolicy generation. |
-| `--resource-defaults` | — | `true` | Inject default CPU/memory requests and limits and append a PodDisruptionBudget. |
+| `--resource-defaults` | — | `true` | Inject default CPU/memory requests and limits and append a PodDisruptionBudget, selector-scoped to the workload (skipped entirely if no labels are found — never emitted namespace-wide). |
 | `--no-resource-defaults` | — | `false` | Disable resource default injection and PodDisruptionBudget generation. |
-| `--registry-config` | — | (none) | Path to custom OCI registry auth config file (`config.json`). |
+| `--registry-config` | — | (none) | Path to a `docker config.json`-style auth file, keyed by registry hostname; see the `pokkum build` flag table above for the exact merge behavior. |
 
 ---
 
@@ -169,7 +169,9 @@ Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode) and `
 | `--version` | (latest) | Target version to upgrade to. |
 | `--output` | `text` | Output format (`text` or `json`). |
 | `--offline` | `false` | Disable network calls to release API (returns `Verified: false`). |
-| `--key` | (embedded) | Path to public key PEM file for release artifact signature verification. |
+| `--key` | (embedded) | Path to public key PEM file for release artifact signature verification. Overrides the embedded `DefaultReleasePublicKeyPEM`, which must match this repo's `COSIGN_PRIVATE_KEY` CI secret — see [for-users.md](for-users.md). |
+
+Without `--check`, `pokkum upgrade` refuses to install anything if it cannot verify the release signature (fails closed, including when no verifier is configured at all) — it does not fall back to an unverified install.
 
 ---
 

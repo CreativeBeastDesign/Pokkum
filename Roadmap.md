@@ -3,6 +3,12 @@
 See [Vocabulary.md](Vocabulary.md) for the full CLI flag reference, naming
 conventions, and the rationale behind each new flag noted below.
 
+See [fixes-to-v1.md](fixes-to-v1.md) for a post-v1.0 audit that found
+several `[x]` items below overstated what they actually did, and the fixes
+applied for each; [for-users.md](for-users.md) for what changed as a
+result; and [unfixed-limitation.md](unfixed-limitation.md) for the one gap
+still open (base image signature verification, noted inline below).
+
 ## Implementation Strategy & Feature Bundles
 
 Open roadmap items are organized into **4 cohesive implementation bundles**, structured by technical dependencies and architectural boundaries:
@@ -108,15 +114,15 @@ _The shippable minimum viable product for enterprise-grade adoption._
 - [x] Trusted-Builder Mode: SLSA L3 via an isolated CI job (GitHub Actions provenance generation). (no new flag — a CI workflow concern, not a CLI flag)
 - [x] CVE Scanning Integration (`pokkum scan`): Run vulnerability scanning against image, tarball, or directory and fail pipeline above severity threshold. (new flag: `--fail-on=critical`)
 - [x] Toolchain CVE Awareness: OSV.dev advisory lookups keyed on embedded Bun and SvelteKit versions. (new flag: `pokkum scan --toolchain`, extending `scan`)
-- [x] Base Image Signature Verification: Verify upstream Cosign signatures on distroless/Chainguard base images at pull time. (new flag: `--no-verify-base` opt-out)
+- [x] Base Image Signature Verification: Verifies Cosign signatures against a static public key (`POKKUM_BASE_IMAGE_PUBKEY`) at pull time — real protection for a custom or self-signed base image. Does **not** yet cover the stock `distroless`/`chainguard` presets' actual signatures, which use keyless Sigstore signing (Fulcio + Rekor) with no fixed key to check against; see [unfixed-limitation.md](unfixed-limitation.md). (new flag: `--no-verify-base` opt-out)
 - [x] Secret-Inlining Guard: Build-time entropy/pattern scan to prevent leaked secrets in layers. (new flag: `--allow-secret-pattern` escape hatch for false positives)
 - [x] Base image digest pinning + automated update PRs (Renovate/Dependabot-style). (reuses `pokkum base update --preset <name>` from the v0.2 lockfile item; update-PR half is a bot, not a flag) (see [pokkum-lock-concept.md](pokkum-lock-concept.md))
-- [x] Standard OCI Annotations: Auto-populate `org.opencontainers.image.*` from git metadata. (new flag: `--image-label key=value`, repeatable, for user-supplied overrides — matches `ko build --image-label`)
+- [x] Standard OCI Annotations: `--image-label key=value` (repeatable) mirrors user-supplied labels onto the matching `org.opencontainers.image.*` annotation keys. No git-metadata auto-population exists yet — annotations only appear if you pass them explicitly. (new flag: `--image-label key=value`, repeatable — matches `ko build --image-label`)
 
 ### Cluster-side hardening
 
-- [x] `NetworkPolicy` generation restricting egress and ingress limited to expected ports. (new flags: `--network-policy` / `--no-network-policy` on `resolve`/`apply`)
-- [x] Resource `requests`/`limits` and a `PodDisruptionBudget` by default in generated manifests. (new flags: `--resource-defaults` / `--no-resource-defaults` on `resolve`/`apply`)
+- [x] `NetworkPolicy` generation restricting egress and ingress limited to expected ports, `podSelector` scoped to the workload's own Pod-template labels. (new flags: `--network-policy` / `--no-network-policy` on `resolve`/`apply`)
+- [x] Resource `requests`/`limits` and a `PodDisruptionBudget` by default in generated manifests, selector-scoped to the workload rather than the whole namespace — skipped entirely, not emitted unscoped, when no workload labels can be found. (new flags: `--resource-defaults` / `--no-resource-defaults` on `resolve`/`apply`)
 - [x] `readOnlyRootFilesystem: true` where feasible (supervisor + compiled binary). (no new flag — folds into `--security-context`)
 - [x] Readiness Drain on SIGTERM: Supervisor holds `/readyz` at 503 while the app drains. (no new flag — bounded by the existing `POKKUM_SHUTDOWN_TIMEOUT` env var)
 - [x] Secrets via `envFrom` referencing Kubernetes `Secret`/external-secrets, never baked into image layers. (no new flag — expressed in the manifest itself)
@@ -124,8 +130,8 @@ _The shippable minimum viable product for enterprise-grade adoption._
 ### Build integrity
 
 - [x] Hermetic builds: No network egress during the compile step (SLSA L3 requirement). (new flag: `--hermetic`, opt-in)
-- [x] Multi-registry support with per-registry auth chains (ECR/GCR/ACR/self-hosted). (new flag: `--registry-config=<path>`)
-- [x] Ephemeral test registry (`pkg/registry.New()`) wired into CI for integration tests. (no new flag — test infra only)
+- [x] Multi-registry support with per-registry auth chains via a `docker config.json`-style file keyed by registry hostname, merged ahead of the default keychain (self-hosted and any registry with static credentials in the file). No ECR/GCR/ACR-specific credential-helper invocation. (new flag: `--registry-config=<path>`)
+- [x] Ephemeral test registry (`pkg/registry.NewServer()`) wired into CI for integration tests. (no new flag — test infra only)
 
 ### Operational maturity
 

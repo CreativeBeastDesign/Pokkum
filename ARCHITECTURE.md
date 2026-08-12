@@ -4,6 +4,11 @@
 
 It builds multi-architecture OCI images (`linux/amd64`, `linux/arm64`), embeds a PID-1 supervisor, generates Software Bills of Materials (SBOMs), and pushes reproducible container images directly to OCI registries — **without requiring Docker or a Docker daemon**.
 
+See also [fixes-to-v1.md](fixes-to-v1.md) for a post-v1.0 audit and the
+fixes it produced, and [unfixed-limitation.md](unfixed-limitation.md) for
+the one known gap left open (base image signature verification doesn't
+cover real upstream distroless/Chainguard signatures).
+
 ---
 
 ## 1. High-Level System Architecture
@@ -72,14 +77,14 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `bunexec`: Wraps host `bun build --compile` for cross-compiling single executables.
    - `bunruntime`: Resolves, downloads, SHA256-verifies, and caches official Bun runtime binaries (`~/.cache/pokkum/bun`) for runtime layer assembly (`ports.BunRuntimeResolver`).
    - `packager`: Constructs reproducible OCI tarballs, custom single-binary layers (`BuildCustomFileLayer`), directory tree layers (`BuildDirectoryTreeLayer`), and multi-arch index manifests using `github.com/google/go-containerregistry`.
-   - `baseimage`: Resolves base image layers (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard `glibc-dynamic`), verifies upstream Cosign signatures via `ports.CosignSigner`, and maintains `pokkum.lock` digest locks.
+   - `baseimage`: Resolves base image layers (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard `glibc-dynamic`), verifies Cosign signatures against a static public key via `ports.CosignSigner`, and maintains `pokkum.lock` digest locks. The static-key check covers a custom or self-signed base image (`POKKUM_BASE_IMAGE_PUBKEY`); it does not verify the stock presets' real upstream signatures, which use keyless Sigstore signing — see [unfixed-limitation.md](unfixed-limitation.md).
    - `lockfileutils`: Utility package for loading, parsing, and saving `pokkum.lock` base image lockfiles.
    - `jsonutils`: Utility package for structured, versioned JSON response formatting (`--output=json`).
    - `diagnosticsutils`: Utility package for container exit failure analysis and log tracing.
    - `layerdiffutils`: Utility package for entry-by-entry tar merge-walking and header/content diff heuristics.
    - `provenance`: Adapter resolving remote SLSA provenance statements and Cosign attestations.
    - `comparator`: Adapter performing L1/L2/L3 multi-level image digest and file diff comparisons.
-   - `registry`: Handles OCI registry authentication, blob uploads, and index pushes.
+   - `registry`: Handles OCI registry authentication (including per-registry auth chains from a `docker config.json`-style file via `--registry-config`), blob uploads, and index pushes.
    - `sbom`: Generates SPDX or CycloneDX SBOMs using `github.com/anchore/syft`.
    - `supervisor`: Embedded supervisor binary assets (`/pokkum/init`).
    - `k8s`: Kubernetes manifest inspection, document rewriting, and `pokkum://` schema resolution.
@@ -218,8 +223,8 @@ Pokkum includes a native Kubernetes resolver (`pokkum resolve` / `pokkum apply`)
    - Pushes the built multi-arch image to `POKKUM_DOCKER_REPO`.
    - Injects secure `securityContext` defaults (`runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`) unless `--no-security-context` is provided.
    - Injects default container resource `requests` (`cpu: 50m`, `memory: 64Mi`) and `limits` (`memory: 256Mi`) unless `--no-resource-defaults` is provided.
-   - Appends a `PodDisruptionBudget` document (`minAvailable: 1`) unless `--no-resource-defaults` is provided.
-   - Appends a `NetworkPolicy` document restricting ingress to actual workload container ports (`containerPort`, defaulting to 3000 and 8081) and egress to expected infrastructure ports (DNS 53, HTTPS 443, OTLP 4317/4318/8889) unless `--no-network-policy` is provided.
+   - Appends a `PodDisruptionBudget` document (`minAvailable: 1`) unless `--no-resource-defaults` is provided, with `selector.matchLabels` scoped to the workload's own Pod-template labels (read from `spec.template.metadata.labels`, or `metadata.labels` for a bare Pod) rather than matching every Pod in the namespace. Skipped entirely — no document emitted — when no labels can be found on the workload, since a namespace-wide selector would be actively wrong rather than merely imprecise.
+   - Appends a `NetworkPolicy` document restricting ingress to actual workload container ports (`containerPort`, defaulting to 3000 and 8081) and egress to expected infrastructure ports (DNS 53, HTTPS 443, OTLP 4317/4318/8889) unless `--no-network-policy` is provided. `podSelector` is scoped to the same workload labels as the PodDisruptionBudget above when available, falling back to an unscoped selector (`{}`) only when no labels can be found.
    - Replaces `pokkum://./my-app` with the immutable digest:
      ```yaml
      image: ghcr.io/example/my-app@sha256:123456789abcdef...
