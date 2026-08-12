@@ -25,6 +25,8 @@ jobs:
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
+        with:
+          install-mode: goinstall
 
       - name: Check Hexagonal Architecture Purity
         run: go test -v ./internal/architecture_test.go
