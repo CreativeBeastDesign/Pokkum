@@ -134,7 +134,7 @@ const (
 
 	DefaultTag = ports.DefaultTag
 
-	DefaultBunVersion  = ports.DefaultBunVersion
+	DefaultBunVersion = ports.DefaultBunVersion
 	// BunVariantStandard targets standard AVX2 x86-64 / arm64 CPUs.
 	BunVariantStandard = ports.BunVariantStandard
 	// BunVariantBaseline targets pre-AVX2 x86-64 CPUs.
@@ -152,8 +152,6 @@ const (
 	// CompressionZstd applies zstd compression.
 	CompressionZstd = ports.CompressionZstd
 )
-
-
 
 // Re-exported platform values.
 var (
@@ -420,7 +418,6 @@ type BunRuntimeOptions struct {
 	// CustomBinaryPath is an optional local path to a bun executable (--bun-binary).
 	CustomBinaryPath string
 }
-
 
 // BuildRequest is the complete description of one `pokkum build`. It is
 // assembled by the command layer from flags, config and environment, then

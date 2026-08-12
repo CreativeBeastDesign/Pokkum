@@ -156,4 +156,3 @@ func CheckTelemetrySupported(projectDir string) (bool, string, error) {
 	}
 	return IsVersionAtLeast(ver, 2, 31), ver, nil
 }
-

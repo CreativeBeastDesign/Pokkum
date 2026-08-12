@@ -19,8 +19,8 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scanner"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sbom"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scanner"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/secretguardutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/slsa"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
@@ -73,8 +73,6 @@ type buildFlags struct {
 	hermetic            bool
 	registryConfig      string
 }
-
-
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
 	flags := &buildFlags{}
@@ -291,7 +289,6 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 			req.Labels[strings.TrimSpace(k)] = strings.TrimSpace(v)
 		}
 	}
-
 
 	req.BaseImage.NoVerifyBase = flags.noVerifyBase
 	req.AllowSecretPatterns = flags.allowSecretPatterns

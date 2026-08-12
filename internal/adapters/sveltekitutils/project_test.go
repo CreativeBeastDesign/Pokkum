@@ -148,4 +148,3 @@ func TestCheckTelemetrySupported(t *testing.T) {
 		t.Errorf("expected supported=true for @sveltejs/kit %s", ver)
 	}
 }
-

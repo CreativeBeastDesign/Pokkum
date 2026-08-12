@@ -71,15 +71,15 @@ func TestRealBuildIsReproducibleAcrossRuns(t *testing.T) {
 
 	for i := 0; i < runs; i++ {
 		deps := core.Deps{
-			Compiler:   bunexec.NewCompiler(testLogger()),
-			BaseImages: &mockBaseResolver{t: t},
-			Supervisor: &mockSupervisorProvider{},
+			Compiler:        bunexec.NewCompiler(testLogger()),
+			BaseImages:      &mockBaseResolver{t: t},
+			Supervisor:      &mockSupervisorProvider{},
 			Packager:        packager.NewPackager(testLogger()),
 			BunRuntime:      bunruntime.NewResolver("", nil),
 			Tarballs:        registry.NewAdapter(testLogger()),
 			NativeInspector: nativeinspect.NewClosuredAdapter(),
 			Logger:          testLogger(),
-			Version:    "0.1.0-repro-test",
+			Version:         "0.1.0-repro-test",
 		}
 
 		req := core.BuildRequest{

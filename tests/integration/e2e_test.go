@@ -99,16 +99,16 @@ func TestFixtureDrivenE2E(t *testing.T) {
 	repoName := harness.Repo("sveltekit-basic-app")
 
 	deps := core.Deps{
-		Compiler:   &mockCompiler{},
-		BaseImages: &mockBaseResolver{t: t},
-		Supervisor: &mockSupervisorProvider{},
+		Compiler:        &mockCompiler{},
+		BaseImages:      &mockBaseResolver{t: t},
+		Supervisor:      &mockSupervisorProvider{},
 		Packager:        packager.NewPackager(testLogger()),
 		BunRuntime:      bunruntime.NewResolver("", nil),
 		Registry:        registry.NewAdapter(testLogger()),
 		SBOM:            sbom.NewGenerator(testLogger()),
 		NativeInspector: nativeinspect.NewClosuredAdapter(),
 		Logger:          testLogger(),
-		Version:    "0.1.0-integration-test",
+		Version:         "0.1.0-integration-test",
 	}
 
 	req := core.BuildRequest{
@@ -238,16 +238,16 @@ func TestE2ESinglePlatformPush(t *testing.T) {
 	repoName := harness.Repo("single-arch-app")
 
 	deps := core.Deps{
-		Compiler:   &mockCompiler{},
-		BaseImages: &mockBaseResolver{t: t},
-		Supervisor: &mockSupervisorProvider{},
+		Compiler:        &mockCompiler{},
+		BaseImages:      &mockBaseResolver{t: t},
+		Supervisor:      &mockSupervisorProvider{},
 		Packager:        packager.NewPackager(testLogger()),
 		BunRuntime:      bunruntime.NewResolver("", nil),
 		Registry:        registry.NewAdapter(testLogger()),
 		SBOM:            sbom.NewGenerator(testLogger()),
 		NativeInspector: nativeinspect.NewClosuredAdapter(),
 		Logger:          testLogger(),
-		Version:    "0.1.0-integration-test",
+		Version:         "0.1.0-integration-test",
 	}
 
 	req := core.BuildRequest{

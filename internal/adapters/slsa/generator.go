@@ -151,9 +151,9 @@ func (g *Generator) Generate(ctx context.Context, req ports.SLSAGeneratorRequest
 		PredicateType: ports.SLSAProvenancePredicateType,
 		Predicate: ports.SLSAPredicate{
 			BuildDefinition: ports.SLSABuildDefinition{
-				BuildType:          ports.SLSABuildType,
-				ExternalParameters: extParams,
-				InternalParameters: intParams,
+				BuildType:            ports.SLSABuildType,
+				ExternalParameters:   extParams,
+				InternalParameters:   intParams,
 				ResolvedDependencies: deps,
 			},
 			RunDetails: ports.SLSARunDetails{

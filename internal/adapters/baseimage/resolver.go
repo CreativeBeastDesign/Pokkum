@@ -145,7 +145,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 
 	// Handle pokkum.lock lookup
 	var (
-		lf         *ports.PokkumLockfile
+		lf          *ports.PokkumLockfile
 		lockedFound bool
 		lockKey     = string(req.Preset)
 	)

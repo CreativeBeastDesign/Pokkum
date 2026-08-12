@@ -563,4 +563,3 @@ spec:
 		Content: []byte(strings.TrimSpace(pdbYAML) + "\n"),
 	}
 }
-

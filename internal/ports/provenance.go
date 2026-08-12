@@ -22,15 +22,15 @@ type PinnedBuildInputs struct {
 
 // ProvenanceSummary holds the validated attestation metadata for an image reference.
 type ProvenanceSummary struct {
-	ImageRef         string            `json:"image_ref"`
-	ImageDigest      string            `json:"image_digest"`
-	HasProvenance    bool              `json:"has_provenance"`
-	SignatureValid   bool              `json:"signature_valid"`
-	SignerIdentity   string            `json:"signer_identity,omitempty"`
-	PinnedInputs     PinnedBuildInputs `json:"pinned_inputs"`
-	ToolchainMatch   bool              `json:"toolchain_match"`
-	ToolchainNotes   string            `json:"toolchain_notes"`
-	ExpectedL1Match  bool              `json:"expected_l1_match"`
+	ImageRef        string            `json:"image_ref"`
+	ImageDigest     string            `json:"image_digest"`
+	HasProvenance   bool              `json:"has_provenance"`
+	SignatureValid  bool              `json:"signature_valid"`
+	SignerIdentity  string            `json:"signer_identity,omitempty"`
+	PinnedInputs    PinnedBuildInputs `json:"pinned_inputs"`
+	ToolchainMatch  bool              `json:"toolchain_match"`
+	ToolchainNotes  string            `json:"toolchain_notes"`
+	ExpectedL1Match bool              `json:"expected_l1_match"`
 }
 
 // ProvenanceResolverRequest represents a request to fetch and validate provenance for an image.

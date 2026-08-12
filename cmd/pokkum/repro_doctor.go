@@ -13,10 +13,10 @@ import (
 )
 
 type reproDoctorOptions struct {
-	fast     bool
-	perturb  bool
-	dir      string
-	output   string
+	fast    bool
+	perturb bool
+	dir     string
+	output  string
 }
 
 func newReproDoctorCommand(_ context.Context, logger *slog.Logger) *cobra.Command {
@@ -71,12 +71,12 @@ func runReproDoctor(logger *slog.Logger, opts *reproDoctorOptions) error {
 	}
 
 	payload := map[string]interface{}{
-		"mode":              "repro doctor",
-		"fast_mode":         opts.fast,
-		"perturb_mode":      opts.perturb,
-		"deterministic":     allDeterministic,
-		"checks":            checks,
-		"summary":           "Static reproducibility checks completed successfully.",
+		"mode":          "repro doctor",
+		"fast_mode":     opts.fast,
+		"perturb_mode":  opts.perturb,
+		"deterministic": allDeterministic,
+		"checks":        checks,
+		"summary":       "Static reproducibility checks completed successfully.",
 	}
 
 	if outputFormat == ports.FormatJSON {

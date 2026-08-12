@@ -1,16 +1,25 @@
 # Task Completion & Verification Protocol
 
-When Go source code (`.go` files, build manifests, dependencies) has been created, modified, or refactored in Pokkum, execute the following 3-step verification protocol (with `BypassSandbox: true` if socket binding / network access fails in standard sandbox):
+The verification protocol applies **ONLY when Go source code (`.go` files, build manifests, dependencies) has been created, modified, or refactored**.
 
-1. **Adapter Tests**:
+- Do **NOT** run the verification test suite for simple user questions, code exploration, planning, or documentation updates (e.g. `Roadmap.md`, `AGENTS.md`, `.md` files, docstrings, or memory graph edits).
+- Tests must be executed **only before declaring completion of actual code modifications**.
+
+When code changes have occurred, agents **MUST** execute the following 4-step verification suite (with `BypassSandbox: true` if socket binding / network access fails in standard sandbox):
+
+1. **Formatting & Static Analysis**:
+   ```bash
+   gofmt -s -w . && go vet ./...
+   ```
+2. **Adapter Unit Tests**:
    ```bash
    go test ./internal/adapters/...
    ```
-2. **CLI Compilation Check**:
+3. **CLI Compilation Check**:
    ```bash
    go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test
    ```
-3. **Full Internal Test Suite**:
+4. **Full Internal Test Suite (includes AST Architecture Purity Check)**:
    ```bash
    go test ./internal/...
    ```

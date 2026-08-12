@@ -14,10 +14,10 @@ import (
 )
 
 type scanFlags struct {
-	failOn        string
-	toolchain     bool
-	output        string
-	offline       bool
+	failOn    string
+	toolchain bool
+	output    string
+	offline   bool
 }
 
 func newScanCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {

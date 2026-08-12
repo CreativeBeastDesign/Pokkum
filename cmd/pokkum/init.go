@@ -67,10 +67,10 @@ coverage
 	}
 
 	payload := map[string]interface{}{
-		"directory":        opts.dir,
-		"created_ignore":   createdIgnore,
-		"ignore_path":      ignorePath,
-		"status":           "initialized",
+		"directory":      opts.dir,
+		"created_ignore": createdIgnore,
+		"ignore_path":    ignorePath,
+		"status":         "initialized",
 	}
 
 	if outputFormat == ports.FormatJSON {

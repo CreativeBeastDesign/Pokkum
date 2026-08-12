@@ -510,11 +510,11 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		}
 		log.Info("generating SLSA provenance attestation", "ref", pub.Ref)
 		slsaStmt, serr := deps.SLSAGenerator.Generate(ctx, ports.SLSAGeneratorRequest{
-			ProjectDir:      req.ProjectDir,
-			Repo:            req.Repo,
-			Tags:            req.Tags,
-			Platforms:       req.Platforms,
-			OutputMode:      req.Output.Mode.String(),
+			ProjectDir: req.ProjectDir,
+			Repo:       req.Repo,
+			Tags:       req.Tags,
+			Platforms:  req.Platforms,
+			OutputMode: req.Output.Mode.String(),
 			BaseImage: ports.SLSABaseImage{
 				Preset:    req.BaseImage.Preset,
 				Ref:       base.Ref,

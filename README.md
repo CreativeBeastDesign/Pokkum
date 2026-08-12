@@ -1,252 +1,143 @@
 # Pokkum: SvelteKit to OCI in One Command
 
-**Pokkum** is a compiler that turns a SvelteKit application into a single, reproducible OCI container image with minimal overhead. One command builds a multi-architecture image, generates an SBOM, and pushes to a registry — no Dockerfile, no Docker daemon required.
+**Pokkum** is a zero-dependency OCI container image compiler for SvelteKit applications. In a single command, Pokkum compiles your SvelteKit app into a zero-daemon, 5-layer cached OCI container image complete with SBOMs, OpenTelemetry auto-instrumentation, signed SLSA provenance, and hardened Kubernetes deployment manifests.
 
-Think of it as `ko` for SvelteKit: compile to a binary, assemble an image on a hardened distroless base, and ship.
+Think of it as `ko` for SvelteKit: zero Dockerfile, zero Docker daemon required, and bit-for-bit reproducible builds out of the box.
 
-## Quick Start
+---
 
-Assume a SvelteKit project at `./my-app` configured with the `@jesterkit/exe-sveltekit` adapter.
+## Example Usages
+
+### 1. Quickest & Lightest (Standard One-Liner)
+
+Zero-config build and push to your container registry:
 
 ```bash
 POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum build ./my-app
 ```
 
-Prints:
+* **What this does**:
+  - Automatically detects your SvelteKit project directory.
+  - Compiles your app into an architecture-independent layout using the Bun runtime.
+  - Assembles a 5-layer OCI container image on a Distroless glibc base.
+  - Generates SPDX-JSON Software Bill of Materials (SBOMs).
+  - Pushes the multi-architecture image (`linux/amd64`, `linux/arm64`) to `ghcr.io/example/my-app`.
 
-```
-ghcr.io/example/my-app@sha256:abcd1234...
-```
+---
 
-The image is now live in your registry, ready to deploy.
+### 2. Maximum Security (Enterprise Hermetic & Hardened)
 
-## Prerequisites
+Strict SLSA L3 hermetic build on a hardened Chainguard base, with Cosign signature checks, custom OCI annotations, and hardened Kubernetes manifest resolution:
 
-- **Bun ≥ 1.2.18** (must be on PATH). Pokkum uses `bun build --compile` to produce a self-contained executable for your app.
-- **@jesterkit/exe-sveltekit adapter** installed in your project's `package.json`.
-- **svelte.config.js** configured with the exe adapter. Example:
-
-```javascript
-import adapter from '@jesterkit/exe-sveltekit';
-
-export default {
-  kit: {
-    adapter: adapter({
-      // Name of the output binary (without extension or arch suffix)
-      binaryName: 'server',
-      // Output directory for adapter artifacts
-      out: 'build',
-      // Bun compile target(s); exe adapter omits glibc linux-arm64
-      // Pokkum runs bun build --compile itself, so this is advisory only
-      target: ['bun-linux-x64', 'bun-linux-arm64'],
-    }),
-  },
-};
+**Build the Image:**
+```bash
+POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum build ./my-app \
+  --hardened \
+  --hermetic \
+  --image-label org.opencontainers.image.vendor="Acme Corp" \
+  --allow-secret-pattern="(?i)PUBLIC_.*"
 ```
 
-## Base Images and glibc
+* **What this does**:
+  - `--hardened`: Uses `ghcr.io/chainguard-images/glibc-dynamic:latest` base image.
+  - `--hermetic`: Enforces strict zero-network egress during compilation, requiring pre-cached base images and pre-populated `node_modules/`.
+  - **Secret Guard**: Scans project source files for accidentally inlined secrets or high-entropy tokens before packaging layers.
+  - **Base Image Verification**: Verifies Cosign signatures on upstream base images.
 
-Bun-compiled binaries are **dynamically linked**, so a static-only base image cannot execute them. Reading `DT_NEEDED` off a binary produced by Bun 1.3.14 for `linux-x64`:
-
+**Resolve Hardened Kubernetes Manifests:**
+```bash
+POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum resolve -f deployment.yaml \
+  --security-context \
+  --network-policy \
+  --resource-defaults \
+  --registry-config=~/.docker/config.json
 ```
-libc.so.6  ld-linux-x86-64.so.2  libpthread.so.0  libdl.so.2  libm.so.6
+
+* **What this does**:
+  - Replaces `pokkum://` URIs in `deployment.yaml` with pinned immutable image digests (`repo@sha256:...`).
+  - Injects hardened container `securityContext` (`runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`).
+  - Generates restricted `NetworkPolicy` ingress/egress rules and injects CPU/memory `requests`/`limits` with a `PodDisruptionBudget`.
+
+---
+
+## Key Features
+
+- **Zero-Mutation Build Sandbox**: No manual SvelteKit adapter configuration needed. Auto-injects virtual build sandbox configuration in `.pokkum/` workspace without mutating user source files.
+- **5-Layer Architecture-Independent Caching**:
+  1. Base Image Layer (`distroless` or `chainguard`)
+  2. Bun Runtime Layer (`/pokkum/bun`)
+  3. Closured Native Addon Layer (`/app/native` for `.node` binaries)
+  4. Vendor `node_modules` Layer
+  5. SvelteKit App & Asset Layer
+- **Bit-for-Bit OCI Reproducibility**: All timestamps and tar headers derive deterministically from `SOURCE_DATE_EPOCH` / git commit metadata.
+- **Security Scanning & Guardrails**: Integrated `pokkum scan` vulnerability auditing (OSV advisory lookups) and build-time secret leak prevention.
+- **Built-In Observability**: Zero-config OpenTelemetry tracing and Prometheus metrics auto-instrumentation.
+- **Day-2 Lifecycle Management**: Instant manifest rollbacks (`pokkum rollback`) and signed CLI self-upgrades (`pokkum upgrade`).
+
+---
+
+## Quick Start & Installation
+
+Install Pokkum CLI via GitHub Release download or use the official GitHub Action in CI workflows:
+
+### GitHub Action Setup (`.github/workflows/ci.yml`)
+
+```yaml
+- name: Setup Pokkum
+  uses: CreativeBeastDesign/pokkum/.github/actions/setup-pokkum@v1
+  with:
+    version: 'latest'
+
+- name: Build & Push SvelteKit Container
+  env:
+    POKKUM_DOCKER_REPO: ghcr.io/${{ github.repository }}
+  run: pokkum build ./my-app
 ```
 
-That is plain glibc — Bun statically links its C++ runtime, so `libstdc++`/`libgcc_s` are not required. `scratch` and `distroless/static` still will not work, because they ship no dynamic loader at all.
-
-Pokkum defaults to the `cc` variant rather than the smaller `base` variant deliberately: `cc` is a superset that stays correct if a future Bun release or a different target does pull in `libstdc++`, and it costs ~2 MB against a Bun app binary that is typically 90 MB+.
-
-**Default:** `gcr.io/distroless/cc-debian12:nonroot` (glibc, Debian-based)
-- Runs as nonroot user `65532:65532`.
-- ~50 MB, includes only essential C libraries and ca-certificates.
-
-**With `--hardened` flag:** `ghcr.io/chainguard-images/glibc-dynamic:latest` (Chainguard)
-- Hardened alternative; equivalent glibc surface.
-
-**Custom base:** pass `--base=<image-ref>` to use your own, but verify it includes a glibc environment.
-
-Note: `scratch` and `distroless/static` **will not work** because Bun is dynamically linked.
-
-**Registry note:** distroless images are published on `gcr.io`, not `ghcr.io`.
+---
 
 ## Runtime Contract
 
-Every image produced by Pokkum has this entrypoint:
+Every container image produced by Pokkum is supervised by an ultra-lightweight PID-1 init process:
 
 ```
-/pokkum/init -- /app/server
+/pokkum/init -- /pokkum/bun /app/index.js
 ```
 
-Where:
-- `/pokkum/init` is the PID-1 supervisor (reaps zombies, handles signals).
-- `/app/server` is your compiled Bun application, mounted read-only.
-- `PORT` (default `3000`) is where your app listens.
-- `POKKUM_PROBE_PORT` (default `8081`) serves health probes without hitting your app.
+### Health Probes & Signals
+- `/pokkum/init` reaps orphaned zombie processes and handles OS signals (`SIGTERM`, `SIGINT`).
+- Exposes probe endpoints on `POKKUM_PROBE_PORT` (default `8081`):
+  - `GET /healthz` → `200 OK` (supervisor liveness)
+  - `GET /readyz` → `200 OK` (app readiness; returns `503 Service Unavailable` during graceful shutdown drain)
+- Application listens on `PORT` (default `3000`).
 
-### Health Probes
+---
 
-The supervisor exposes:
-- `GET /healthz` → `200 OK` (always live, unless supervisor crashed).
-- `GET /readyz` → `200 OK` when the app is ready, `503 Service Unavailable` during startup/shutdown.
+## CLI Command Reference
 
-Use these in Kubernetes probes instead of hitting your app:
+| Command | Usage | Description |
+|---|---|---|
+| `pokkum build [dir]` | `pokkum build ./my-app` | Compiles SvelteKit app into a 5-layer OCI container image. |
+| `pokkum resolve -f <file>` | `pokkum resolve -f deploy.yaml` | Resolves `pokkum://` URIs in K8s manifests to immutable image digests. |
+| `pokkum apply -f <file>` | `pokkum apply -f deploy.yaml` | Resolves manifests and pipes directly to `kubectl apply`. |
+| `pokkum dev [dir]` | `pokkum dev ./my-app` | Local development mode with hot-reloading file watcher and Docker daemon loading. |
+| `pokkum scan [target]` | `pokkum scan ./my-app` | Security vulnerability scanner for directories, images, or tarballs. |
+| `pokkum doctor [dir]` | `pokkum doctor ./my-app` | Diagnostic wizard for preflight checks and mechanical repairs. |
+| `pokkum init [dir]` | `pokkum init ./my-app` | Bootstraps project config and `.pokkumignore`. |
+| `pokkum explain [image]` | `pokkum explain <ref>` | Inspects layer hierarchy, file origin tracing (`why`), and image diffing (`diff`). |
+| `pokkum rollback` | `pokkum rollback -f deploy.yaml --to=<ref>` | Rolls back image references in Kubernetes deployment manifests. |
+| `pokkum upgrade` | `pokkum upgrade --check` | Checks for signed CLI release updates. |
 
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: example
-spec:
-  containers:
-  - name: app
-    image: ghcr.io/example/my-app@sha256:...
-    ports:
-    - containerPort: 3000
-      name: app
-    - containerPort: 8081
-      name: probe
-    livenessProbe:
-      httpGet:
-        path: /healthz
-        port: probe
-      initialDelaySeconds: 3
-      periodSeconds: 10
-    readinessProbe:
-      httpGet:
-        path: /readyz
-        port: probe
-      initialDelaySeconds: 1
-      periodSeconds: 5
-```
+---
 
-### Graceful Shutdown
+## Documentation & Deep Dive
 
-- `POKKUM_SHUTDOWN_TIMEOUT` (default `30s`) is the grace period for your app to exit cleanly after receiving SIGTERM.
-- If the app doesn't exit within this window, the supervisor sends SIGKILL.
+- **[ARCHITECTURE.md](ARCHITECTURE.md)**: Architectural invariants, Hexagonal layer boundaries, and 5-layer layout.
+- **[Vocabulary.md](Vocabulary.md)**: Complete CLI flag reference and configuration options.
+- **[Roadmap.md](Roadmap.md)**: Implementation progress and future feature backlog.
 
-## Configuration
-
-| Environment Variable | Flag | Default | Description |
-|---|---|---|---|
-| `POKKUM_DOCKER_REPO` | — | (required) | Registry and repository; e.g. `ghcr.io/org/app`. Omit the tag. |
-| — | `--platform` / `-p` | `linux/amd64,linux/arm64` | Target platforms (repeatable; use `all` for all supported). |
-| — | `--base` | `distroless` | Base image preset: `distroless` or `chainguard`. |
-| — | `--hardened` | `false` | Shorthand for `--base chainguard`. |
-| — | `--sbom` | `spdx-json` | SBOM format: `spdx-json`, `cyclonedx-json`, or `none`. |
-| — | `--local` | `false` | Load into Docker daemon instead of pushing to registry. |
-| — | `--tarball` | (none) | Export as OCI archive to path; e.g. `image.tar`. |
-| — | `--dry-run` | `false` | Resolve configuration; do not build or push. |
-| — | `--print-manifest` | `false` | Emit OCI manifest/config without pushing. |
-| — | `--log-level` | `INFO` | Log level: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
-| — | `--log-format` | `text` | Log format: `text` or `json`. |
-| `PORT` | — | `3000` | Port your app listens on (read by the supervisor). |
-| `POKKUM_PROBE_PORT` | — | `8081` | Port the supervisor serves `/healthz` and `/readyz` on. |
-| `POKKUM_SHUTDOWN_TIMEOUT` | — | `30s` | Grace period for graceful shutdown. |
-
-## How It Works
-
-1. **Compile**: Runs `bun run build` to invoke the SvelteKit build and emit a TypeScript entrypoint (via the exe adapter).
-2. **Cross-compile per platform**: For each target (e.g., `linux/amd64`, `linux/arm64`), Pokkum runs `bun build --compile --target=<platform>` to produce a self-contained executable. The binary embeds all static assets (client bundle, prerendered pages) via the exe adapter's `embedStatic` setting.
-3. **Layer assembly**: For each platform, create an OCI image layer:
-   - Base: distroless or Chainguard glibc image.
-   - App layer: Copy the compiled binary to `/app/server` and the supervisor to `/pokkum/init`.
-   - Metadata: Set entrypoint, user (nonroot), environment defaults.
-4. **Multi-arch index**: Combine per-platform images into a single multi-architecture image index.
-5. **SBOM generation**: Generate a Software Bill of Materials (SPDX JSON or CycloneDX) from the base image and app dependencies.
-6. **Push or export**: Write to registry, Docker daemon (`--local`), or tarball (`--tarball`).
-
-All layer timestamps and hashes are derived from the last git commit (`SOURCE_DATE_EPOCH`), so the same source tree produces the same digest.
-
-### Reproducibility requires one line in your `svelte.config.js`
-
-SvelteKit's `kit.version.name` **defaults to `Date.now()`**. That value is written to `client/_app/version.json`, which the exe adapter embeds into the compiled binary — so with the default, every build produces a different binary and a different image digest, whatever Pokkum does. Pin it:
-
-```javascript
-export default {
-  kit: {
-    adapter: adapter({ /* ... */ }),
-    version: {
-      name: process.env.SOURCE_DATE_EPOCH ?? 'dev'
-    }
-  }
-};
-```
-
-Pokkum exports `SOURCE_DATE_EPOCH` into the build environment for exactly this purpose. Without this, builds are **not** reproducible, and nothing will warn you — the images simply differ.
-
-Verify with:
-
-```bash
-pokkum build ./my-app --tarball /tmp/a.tar && pokkum build ./my-app --tarball /tmp/b.tar
-```
-
-Both runs must print the same `@sha256:` digest.
-
-### Known limits
-
-- **Two sources of variance are handled for you.** Bun embeds the `--outfile` basename in the executable (Pokkum keeps it stable), and `@jesterkit/exe-sveltekit` emits `assets.generated.ts` in filesystem order (Pokkum sorts it between the SvelteKit build and the compile). The latter is a workaround for an upstream bug; if the adapter changes that file's format, Pokkum fails loudly rather than silently skipping the fix.
-- **Go version affects digests.** Layer diffIDs and image configs are stable, but compressed layer digests depend on `compress/flate` at `gzip.BestSpeed`, which Go does not guarantee across releases. A Go upgrade can legitimately change the final digest for identical content.
-
-## Architecture Support
-
-Pokkum v0.1 supports:
-- `linux/amd64` (x86-64)
-- `linux/arm64` (ARM 64-bit)
-
-**Why arm64 works:** Pokkum runs `bun build --compile` itself on the build machine, cross-compiling per target. The exe adapter's own `target` list can be incomplete or platform-specific; Pokkum doesn't rely on it. If Bun publishes a new compile target in the future, Pokkum will support it with a minor update.
-
-## Kubernetes Manifest Integration
-
-Pokkum natively supports resolving `pokkum://` image URIs in Kubernetes manifests:
-
-```yaml
-# deployment.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: my-app
-spec:
-  template:
-    spec:
-      containers:
-      - name: web
-        image: pokkum://./my-app
-```
-
-- **`pokkum resolve -f deployment.yaml`**: Builds `./my-app`, pushes the multi-arch image, and outputs resolved YAML with concrete digests (`repo@sha256:...`).
-- **`pokkum apply -f deployment.yaml`**: Resolves manifests and applies them directly to your cluster via `kubectl apply`.
-
-## Unified OpenTelemetry & Metrics Auto-Instrumentation
-
-Pokkum includes zero-config OpenTelemetry auto-instrumentation and metrics collection powered by SvelteKit 2.31+ native observability (`kit.experimental.tracing.server` and `kit.experimental.instrumentation.server`).
-
-```bash
-# Enable OpenTelemetry tracing and metrics
-pokkum build ./my-app --telemetry --otel-export=http://collector:4318
-
-# Enable metrics-only mode (disables trace spans, keeps Prometheus metrics)
-pokkum build ./my-app --telemetry --metrics-only
-
-# Control trace sampling probability (0.0 to 1.0)
-pokkum build ./my-app --telemetry --trace-sample-rate=0.1
-
-# Inject OTEL Collector sidecar into resolved Kubernetes manifests
-pokkum resolve -f deployment.yaml --with-otel-sidecar
-```
-
-- **Zero Config**: Automatically injects `kit.experimental` tracing flags and virtual `src/instrumentation.server.ts` at build time without mutating user files.
-- **Strict Precedence**: Preserves user's existing `src/instrumentation.server.ts|js|mjs` if present.
-- **SvelteKit Version Protection**: Inspects `package.json` and skips injection if `@sveltejs/kit` is < 2.31.0.
-
-## Architecture & Technical Deep-Dive
-
-For a detailed explanation of how Pokkum achieves zero-daemon reproducible builds, hexagonal architecture, PID-1 supervisor signals, and deterministic layer hashing, see [ARCHITECTURE.md](file:///Users/andrebarlocher/Documents/Go/Pokkum/ARCHITECTURE.md).
-
-## Development
-
-See `Roadmap.md` for planned features, including Cosign signing, SLSA provenance, and vulnerability scanning.
+---
 
 ## License
 
-TBD
-
+MIT License

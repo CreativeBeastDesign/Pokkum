@@ -14,15 +14,15 @@ const IsUtilityPackage = true
 
 // HeaderMismatch describes a metadata discrepancy between two tar entries.
 type HeaderMismatch struct {
-	Path     string `json:"path"`
-	Field    string `json:"field"` // "mtime", "mode", "size", "uid", "gid"
-	Value1   string `json:"value_1"`
-	Value2   string `json:"value_2"`
+	Path   string `json:"path"`
+	Field  string `json:"field"` // "mtime", "mode", "size", "uid", "gid"
+	Value1 string `json:"value_1"`
+	Value2 string `json:"value_2"`
 }
 
 // ContentMismatch describes a file payload checksum mismatch between two tar entries.
 type ContentMismatch struct {
-	Path    string `json:"path"`
+	Path     string `json:"path"`
 	SHA256_1 string `json:"sha256_1"`
 	SHA256_2 string `json:"sha256_2"`
 }

@@ -530,4 +530,3 @@ func TestResolve_OfflineMode(t *testing.T) {
 		t.Fatalf("offline mode without lock entry: expected core.ErrInvalidBaseImage, got %v", err)
 	}
 }
-

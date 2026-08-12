@@ -198,9 +198,9 @@ func checkRegistryAuth() ports.DoctorCheck {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ports.DoctorCheck{
-			Name:        "Registry Authentication",
-			Passed:      true,
-			Message:     "unspecified (user home directory unavailable)",
+			Name:    "Registry Authentication",
+			Passed:  true,
+			Message: "unspecified (user home directory unavailable)",
 		}
 	}
 

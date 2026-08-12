@@ -69,22 +69,27 @@ Use Serena's `write_memory` or `edit_memory` tools to keep memories concise, inv
 
 ## 5. Task Completion Verification Protocol
 
-The verification protocol applies **ONLY when Go source code (`.go` files, build manifests, dependencies) has been created, modified, or refactored**. 
+The verification protocol applies **ONLY when Go source code (`.go` files, build manifests, dependencies) has been created, modified, or refactored**.
 
-> [!NOTE]
-> Documentation updates (e.g. `Roadmap.md`, `AGENTS.md`, `.md` files, docstrings, or memory graph edits) do **NOT** require running the test suite.
+> [!IMPORTANT]
+> - Do **NOT** run the verification test suite for simple user questions, code exploration, planning, or documentation updates (e.g. `Roadmap.md`, `AGENTS.md`, `.md` files, docstrings, or memory graph edits).
+> - Tests should be executed **only before declaring completion of actual code modifications**.
 
-When code changes have occurred, agents **MUST** execute the following 3-step verification suite before declaring completion:
+When code changes have occurred, agents **MUST** execute the following 4-step verification suite before declaring completion:
 
-1. **Adapter Tests**:
+1. **Formatting & Static Analysis**:
+   ```bash
+   gofmt -s -w . && go vet ./...
+   ```
+2. **Adapter Unit Tests**:
    ```bash
    go test ./internal/adapters/...
    ```
-2. **CLI Compilation Check**:
+3. **CLI Compilation Check**:
    ```bash
    go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test
    ```
-3. **Full Internal Test Suite (includes Architecture Purity Verification `internal/architecture_test.go`)**:
+4. **Full Internal Test Suite (includes Architecture Purity Verification `internal/architecture_test.go`)**:
    ```bash
    go test ./internal/...
    ```

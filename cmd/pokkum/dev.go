@@ -174,7 +174,7 @@ func runDevContainer(ctx context.Context, logger *slog.Logger, flags *devFlags, 
 
 func watchAndRunDevContainer(ctx context.Context, logger *slog.Logger, flags *devFlags, absDir, repoName string) error {
 	containerCtx, cancelContainer := context.WithCancel(ctx)
-	defer cancelContainer()
+	defer func() { cancelContainer() }()
 
 	// Launch initial container in background
 	cmdErrChan := make(chan error, 1)
@@ -199,6 +199,7 @@ func watchAndRunDevContainer(ctx context.Context, logger *slog.Logger, flags *de
 			cancelContainer()
 			return ctx.Err()
 		case err := <-cmdErrChan:
+			cancelContainer()
 			if err != nil && ctx.Err() == nil {
 				logger.Error("container exited with error", "error", err)
 			}
@@ -218,10 +219,11 @@ func watchAndRunDevContainer(ctx context.Context, logger *slog.Logger, flags *de
 					continue
 				}
 
-				containerCtx, cancelContainer = context.WithCancel(ctx)
-				go func() {
-					cmdErrChan <- runDevContainer(containerCtx, logger, flags, repoName)
-				}()
+				var nextCtx context.Context
+				nextCtx, cancelContainer = context.WithCancel(ctx)
+				go func(cCtx context.Context) {
+					cmdErrChan <- runDevContainer(cCtx, logger, flags, repoName)
+				}(nextCtx)
 			}
 		}
 	}

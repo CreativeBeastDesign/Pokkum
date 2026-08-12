@@ -12,7 +12,7 @@ const IsUtilityPackage = true
 // DiagnosticsResult holds analysis of a container or build failure log.
 type DiagnosticsResult struct {
 	ExitCode       int    `json:"exit_code"`
-	ProbableCause string `json:"probable_cause"`
+	ProbableCause  string `json:"probable_cause"`
 	Recommendation string `json:"recommendation"`
 }
 
@@ -20,7 +20,7 @@ type DiagnosticsResult struct {
 func AnalyzeFailure(exitCode int, logTail string) DiagnosticsResult {
 	res := DiagnosticsResult{
 		ExitCode:       exitCode,
-		ProbableCause: "Unknown container runtime error",
+		ProbableCause:  "Unknown container runtime error",
 		Recommendation: "Check container logs with `--debug` or inspect application source code.",
 	}
 

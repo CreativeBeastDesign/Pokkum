@@ -438,4 +438,3 @@ func BuildDirectoryTreeLayer(ctx context.Context, platform ports.Platform, hostD
 	}
 	return layer, nil
 }
-

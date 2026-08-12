@@ -378,4 +378,3 @@ func TestPreflight_HermeticViolation(t *testing.T) {
 		t.Fatalf("expected Preflight with node_modules present to pass, got %v", err)
 	}
 }
-

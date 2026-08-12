@@ -153,4 +153,3 @@ export default {
 		t.Errorf("expected experimental.instrumentation flag in transformed config:\n%s", transformed)
 	}
 }
-

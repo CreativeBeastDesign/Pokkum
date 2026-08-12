@@ -29,9 +29,9 @@ type ResourceDescriptor struct {
 
 // SLSABuildDefinition describes the build process per the SLSA v1.0 spec.
 type SLSABuildDefinition struct {
-	BuildType          string               `json:"buildType"`
-	ExternalParameters map[string]any       `json:"externalParameters"`
-	InternalParameters map[string]any       `json:"internalParameters,omitempty"`
+	BuildType            string               `json:"buildType"`
+	ExternalParameters   map[string]any       `json:"externalParameters"`
+	InternalParameters   map[string]any       `json:"internalParameters,omitempty"`
 	ResolvedDependencies []ResourceDescriptor `json:"resolvedDependencies,omitempty"`
 }
 
@@ -251,9 +251,9 @@ type DSSESignRequest struct {
 
 // SigstoreBundle represents a keyless Sigstore bundle payload (application/vnd.dev.sigstore.bundle+json).
 type SigstoreBundle struct {
-	MediaType string        `json:"mediaType"`
+	MediaType            string         `json:"mediaType"`
 	VerificationMaterial map[string]any `json:"verificationMaterial"`
-	DSSEEnvelope *DSSEEnvelope `json:"dsseEnvelope,omitempty"`
+	DSSEEnvelope         *DSSEEnvelope  `json:"dsseEnvelope,omitempty"`
 }
 
 // DSSESigner wraps payloads into DSSE envelopes, signs PAE encodings, and verifies signatures.

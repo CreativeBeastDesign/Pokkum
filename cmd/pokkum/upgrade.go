@@ -25,11 +25,11 @@ type upgradeFlags struct {
 
 // UpgradeResult holds output details for self-upgrade checks.
 type UpgradeResult struct {
-	CurrentVersion string `json:"current_version"`
-	LatestVersion  string `json:"latest_version"`
-	UpToDate       bool   `json:"up_to_date"`
+	CurrentVersion  string `json:"current_version"`
+	LatestVersion   string `json:"latest_version"`
+	UpToDate        bool   `json:"up_to_date"`
 	UpdateAvailable bool   `json:"update_available"`
-	Verified       bool   `json:"verified"`
+	Verified        bool   `json:"verified"`
 }
 
 type githubRelease struct {

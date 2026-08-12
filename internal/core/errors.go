@@ -169,5 +169,3 @@ var (
 	// ErrHermeticViolation reports an unexpected network call or un-cached dependency in hermetic build mode.
 	ErrHermeticViolation = errors.New("hermetic build violation: network egress or missing local cache detected")
 )
-
-

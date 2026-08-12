@@ -123,11 +123,11 @@ func newDiffCommand(_ context.Context, _ *slog.Logger) *cobra.Command {
 			outFlag, _ := cmd.Flags().GetString("output")
 
 			payload := map[string]interface{}{
-				"image1":     img1,
-				"image2":     img2,
-				"size_diff":  1048576, // +1 MB
-				"identical":  false,
-				"modified":   []string{"Layer #3 (App JS)"},
+				"image1":    img1,
+				"image2":    img2,
+				"size_diff": 1048576, // +1 MB
+				"identical": false,
+				"modified":  []string{"Layer #3 (App JS)"},
 			}
 
 			if ports.OutputFormat(outFlag) == ports.FormatJSON {

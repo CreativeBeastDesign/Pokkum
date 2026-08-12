@@ -75,7 +75,7 @@ func (s *Signer) Sign(ctx context.Context, req ports.CosignSignRequest) (ports.C
 
 	return ports.CosignSignatureBundle{
 		PayloadBytes:    payloadBytes,
-		SignatureBytes: sigBytes,
+		SignatureBytes:  sigBytes,
 		Base64Signature: b64Sig,
 		Repo:            req.Repo,
 		Digest:          req.Digest,
