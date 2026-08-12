@@ -28,7 +28,8 @@ builds:
       - -X main.buildDate={{.Date}}
 
 archives:
-  - format: tar.gz
+  - formats:
+      - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE
@@ -39,7 +40,7 @@ brews:
       owner: CreativeBeastDesign
       name: homebrew-pokkum
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    folder: Formula
+    directory: Formula
     homepage: "https://github.com/CreativeBeastDesign/pokkum"
     description: "Zero-dependency OCI container image compiler for SvelteKit applications"
     license: "Apache-2.0"
