@@ -7,6 +7,8 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunruntime"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sbom"
@@ -100,10 +102,12 @@ func TestFixtureDrivenE2E(t *testing.T) {
 		Compiler:   &mockCompiler{},
 		BaseImages: &mockBaseResolver{t: t},
 		Supervisor: &mockSupervisorProvider{},
-		Packager:   packager.NewPackager(testLogger()),
-		Registry:   registry.NewAdapter(testLogger()),
-		SBOM:       sbom.NewGenerator(testLogger()),
-		Logger:     testLogger(),
+		Packager:        packager.NewPackager(testLogger()),
+		BunRuntime:      bunruntime.NewResolver("", nil),
+		Registry:        registry.NewAdapter(testLogger()),
+		SBOM:            sbom.NewGenerator(testLogger()),
+		NativeInspector: nativeinspect.NewClosuredAdapter(),
+		Logger:          testLogger(),
 		Version:    "0.1.0-integration-test",
 	}
 
@@ -112,9 +116,10 @@ func TestFixtureDrivenE2E(t *testing.T) {
 		Repo:            repoName,
 		Tags:            []string{"latest", "1.0.0"},
 		Platforms:       []ports.Platform{ports.LinuxAMD64, ports.LinuxARM64},
+		Compile:         core.CompileOptions{Strategy: core.StrategyExe},
 		Output:          core.OutputOptions{Mode: core.OutputPush},
 		Insecure:        true,
-		SBOM:            core.SBOMOptions{Format: ports.SBOMFormatSPDXJSON, NoAttach: false},
+		SBOM:            core.SBOMOptions{Format: ports.SBOMFormatSPDXJSON, AttachMode: ports.SBOMAttachTag, NoAttach: false},
 		SourceDateEpoch: testEpoch,
 	}
 
@@ -236,10 +241,12 @@ func TestE2ESinglePlatformPush(t *testing.T) {
 		Compiler:   &mockCompiler{},
 		BaseImages: &mockBaseResolver{t: t},
 		Supervisor: &mockSupervisorProvider{},
-		Packager:   packager.NewPackager(testLogger()),
-		Registry:   registry.NewAdapter(testLogger()),
-		SBOM:       sbom.NewGenerator(testLogger()),
-		Logger:     testLogger(),
+		Packager:        packager.NewPackager(testLogger()),
+		BunRuntime:      bunruntime.NewResolver("", nil),
+		Registry:        registry.NewAdapter(testLogger()),
+		SBOM:            sbom.NewGenerator(testLogger()),
+		NativeInspector: nativeinspect.NewClosuredAdapter(),
+		Logger:          testLogger(),
 		Version:    "0.1.0-integration-test",
 	}
 
@@ -248,9 +255,10 @@ func TestE2ESinglePlatformPush(t *testing.T) {
 		Repo:            repoName,
 		Tags:            []string{"v1"},
 		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		Compile:         core.CompileOptions{Strategy: core.StrategyExe},
 		Output:          core.OutputOptions{Mode: core.OutputPush},
 		Insecure:        true,
-		SBOM:            core.SBOMOptions{Format: ports.SBOMFormatSPDXJSON},
+		SBOM:            core.SBOMOptions{Format: ports.SBOMFormatSPDXJSON, AttachMode: ports.SBOMAttachTag},
 		SourceDateEpoch: testEpoch,
 	}
 

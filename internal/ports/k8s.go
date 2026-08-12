@@ -109,6 +109,13 @@ type ResolveRequest struct {
 	// WithOTELSidecar, when true, injects an OpenTelemetry Collector sidecar container
 	// specification into Pod specs where pokkum:// references were resolved.
 	WithOTELSidecar bool
+
+	// NetworkPolicy, when true, appends a NetworkPolicy manifest restricting egress/ingress.
+	NetworkPolicy bool
+
+	// ResourceDefaults, when true, injects default CPU/memory requests and limits,
+	// and appends a PodDisruptionBudget.
+	ResourceDefaults bool
 }
 
 // ResolveResult carries the rewritten manifests.

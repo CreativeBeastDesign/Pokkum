@@ -12,6 +12,11 @@
 - **Structured JSON Schema Standard (`--output=json`)**:
   - Global `--output=text|json` flag standardizes CLI stdout into versioned `ports.JSONEnvelope` payloads (`schema_version: "1.0"`).
   - Diagnostic, inspection, and verification subcommands (`pokkum doctor`, `pokkum init`, `pokkum explain`, `pokkum why`, `pokkum diff`, `pokkum metrics`, `pokkum verify`, `pokkum repro doctor`) emit structured JSON natively when `--output=json` is provided.
+- **Cluster Hardening & Manifest Defaults (`v1.0 MVP`)**:
+  - `pokkum resolve` and `pokkum apply` inject hardened `securityContext` defaults (`runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`), container resource limits/requests (`requests: cpu 50m, memory 64Mi`; `limits: memory 256Mi`), and append `NetworkPolicy` and `PodDisruptionBudget` documents by default.
+  - Opt-out flags: `--no-security-context`, `--no-resource-defaults`, `--no-network-policy`.
+- **Custom & Standard OCI Image Annotations**:
+  - `pokkum build` supports `--image-label key=value` (repeatable) to inject custom user labels, auto-populating OCI annotations (`org.opencontainers.image.*`) with git metadata, CLI version, Bun version, and supervisor version.
 - **Rebuild Verification & Diagnosis (`v0.5`)**:
   - `pokkum verify` performs SLSA attestation checks (`--no-rebuild`) and bit-for-bit rebuild verification (`--rebuild`) using `PinnedBuildInputs` in clean temporary git worktrees (`git worktree add`).
   - Rebuild verdicts evaluate L1 (exact OCI index match), L2 (uncompressed `diffIDs` match), and L3 (file-level `layerdiffutils` mismatch report).

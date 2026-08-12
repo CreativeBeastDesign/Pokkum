@@ -13,10 +13,14 @@ import (
 
 // resolveFlags holds all command-line flags for the resolve command.
 type resolveFlags struct {
-	file              string
-	recursive         bool
-	securityContext   bool
-	noSecurityContext bool
+	file               string
+	recursive          bool
+	securityContext    bool
+	noSecurityContext  bool
+	networkPolicy      bool
+	noNetworkPolicy    bool
+	resourceDefaults   bool
+	noResourceDefaults bool
 }
 
 func newResolveCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -49,6 +53,14 @@ All logging goes to stderr.`,
 		"Inject hardened securityContext defaults (runAsNonRoot, seccompProfile, allowPrivilegeEscalation, dropped capabilities) for pokkum-built containers")
 	cmd.Flags().BoolVar(&flags.noSecurityContext, "no-security-context", false,
 		"Disable securityContext default injection (shorthand for --security-context=false)")
+	cmd.Flags().BoolVar(&flags.networkPolicy, "network-policy", true,
+		"Generate NetworkPolicy document restricting ingress and egress for resolved workloads")
+	cmd.Flags().BoolVar(&flags.noNetworkPolicy, "no-network-policy", false,
+		"Disable NetworkPolicy generation")
+	cmd.Flags().BoolVar(&flags.resourceDefaults, "resource-defaults", true,
+		"Inject default CPU/memory requests and limits and append a PodDisruptionBudget")
+	cmd.Flags().BoolVar(&flags.noResourceDefaults, "no-resource-defaults", false,
+		"Disable resource default injection and PodDisruptionBudget generation")
 
 	// file is required
 	_ = cmd.MarkFlagRequired("file")
@@ -60,14 +72,24 @@ func runResolve(ctx context.Context, logger *slog.Logger, flags *resolveFlags) e
 	if flags.file == "" {
 		return fmt.Errorf("--file is required: %w", core.ErrInvalidRequest)
 	}
-	securityContext := securityContextEnabled(flags.securityContext, flags.noSecurityContext)
+	secCtx := securityContextEnabled(flags.securityContext, flags.noSecurityContext)
+	netPol := flags.networkPolicy && !flags.noNetworkPolicy
+	resDefs := flags.resourceDefaults && !flags.noResourceDefaults
 
 	logger.Debug("resolve command started",
 		"file", flags.file,
 		"recursive", flags.recursive,
-		"securityContext", securityContext)
+		"securityContext", secCtx,
+		"networkPolicy", netPol,
+		"resourceDefaults", resDefs)
 
-	out, err := resolveManifests(ctx, logger, flags.file, flags.recursive, securityContext)
+	out, err := resolveManifests(ctx, logger, resolveManifestsOptions{
+		File:             flags.file,
+		Recursive:        flags.recursive,
+		SecurityContext:  secCtx,
+		NetworkPolicy:    netPol,
+		ResourceDefaults: resDefs,
+	})
 	if err != nil {
 		return err
 	}

@@ -111,15 +111,15 @@ _The shippable minimum viable product for enterprise-grade adoption._
 - [ ] Base Image Signature Verification: Verify upstream Cosign signatures on distroless/Chainguard base images at pull time. (new flag: `--no-verify-base` opt-out)
 - [ ] Secret-Inlining Guard: Build-time entropy/pattern scan to prevent leaked `.env` values in layers. (new flag: `--allow-secret-pattern` escape hatch for false positives)
 - [ ] Base image digest pinning + automated update PRs (Renovate/Dependabot-style). (reuses `pokkum base update --preset <name>` from the v0.2 lockfile item; update-PR half is a bot, not a flag) (see [pokkum-lock-concept.md](pokkum-lock-concept.md))
-- [ ] Standard OCI Annotations: Auto-populate `org.opencontainers.image.*` from git metadata. (new flag: `--image-label key=value`, repeatable, for user-supplied overrides — matches `ko build --image-label`)
+- [x] Standard OCI Annotations: Auto-populate `org.opencontainers.image.*` from git metadata. (new flag: `--image-label key=value`, repeatable, for user-supplied overrides — matches `ko build --image-label`)
 
 ### Cluster-side hardening
 
-- [ ] `NetworkPolicy` generation restricting egress and ingress limited to expected ports. (new flags: `--network-policy` / `--no-network-policy` on `resolve`/`apply`)
-- [ ] Resource `requests`/`limits` and a `PodDisruptionBudget` by default in generated manifests. (new flags: `--resource-defaults` / `--no-resource-defaults` on `resolve`/`apply`)
-- [ ] `readOnlyRootFilesystem: true` where feasible (supervisor + compiled binary). (no new flag — folds into `--security-context`)
-- [ ] Readiness Drain on SIGTERM: Supervisor holds `/readyz` at 503 while the app drains. (no new flag — bounded by the existing `POKKUM_SHUTDOWN_TIMEOUT` env var)
-- [ ] Secrets via `envFrom` referencing Kubernetes `Secret`/external-secrets, never baked into image layers. (no new flag — expressed in the manifest itself)
+- [x] `NetworkPolicy` generation restricting egress and ingress limited to expected ports. (new flags: `--network-policy` / `--no-network-policy` on `resolve`/`apply`)
+- [x] Resource `requests`/`limits` and a `PodDisruptionBudget` by default in generated manifests. (new flags: `--resource-defaults` / `--no-resource-defaults` on `resolve`/`apply`)
+- [x] `readOnlyRootFilesystem: true` where feasible (supervisor + compiled binary). (no new flag — folds into `--security-context`)
+- [x] Readiness Drain on SIGTERM: Supervisor holds `/readyz` at 503 while the app drains. (no new flag — bounded by the existing `POKKUM_SHUTDOWN_TIMEOUT` env var)
+- [x] Secrets via `envFrom` referencing Kubernetes `Secret`/external-secrets, never baked into image layers. (no new flag — expressed in the manifest itself)
 
 ### Build integrity
 
@@ -129,7 +129,7 @@ _The shippable minimum viable product for enterprise-grade adoption._
 
 ### Operational maturity
 
-- [ ] Version pinning of `pokkum` itself in generated manifest annotations. (no new flag — folds into `--image-label`/auto-annotations above)
+- [x] Version pinning of `pokkum` itself in generated manifest annotations. (no new flag — folds into `--image-label`/auto-annotations above)
 - [ ] A GitHub Action wrapping the CLI (mirroring `setup-ko`). (no new `pokkum` flag — Action inputs like `version`/`token`, mirroring `setup-ko`)
 - [ ] Rollback support (`pokkum rollback` reading from build history). (new subcommand: `pokkum rollback -f <manifest> --to=<ref>`, reusing `-f`/`--file` from `resolve`/`apply`)
 - [ ] Signed Self-Distribution (`pokkum upgrade`): Signature verification of release artifacts. (new subcommand: `pokkum upgrade`, new flag: `--check`)

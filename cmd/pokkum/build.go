@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -62,6 +63,8 @@ type buildFlags struct {
 	bunVariant  string
 	strategy    string
 	compression string
+
+	imageLabels []string
 }
 
 
@@ -149,6 +152,8 @@ The project directory defaults to the current working directory.`,
 		"Packaging strategy: layered (5-layer arch-independent layout [default]) or exe (single executable)")
 	cmd.Flags().StringVar(&flags.compression, "compression", "gzip",
 		"Layer compression algorithm: gzip (default) or zstd")
+	cmd.Flags().StringSliceVar(&flags.imageLabels, "image-label", nil,
+		"Custom image labels (key=value), repeatable")
 
 	return cmd
 }
@@ -256,6 +261,18 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	req.BunRuntime = core.BunRuntimeOptions{
 		CustomBinaryPath: flags.bunBinary,
 		Variant:          core.BunVariant(flags.bunVariant),
+	}
+
+	// Parse image labels
+	if len(flags.imageLabels) > 0 {
+		req.Labels = make(map[string]string, len(flags.imageLabels))
+		for _, lbl := range flags.imageLabels {
+			k, v, ok := strings.Cut(lbl, "=")
+			if !ok {
+				return fmt.Errorf("invalid --image-label %q: expected key=value", lbl)
+			}
+			req.Labels[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
 	}
 
 

@@ -436,6 +436,10 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 				}
 			}
 
+			if req.ResourceDefaults {
+				injectContainerResourceDefaults(t.containerNode)
+			}
+
 			if req.WithOTELSidecar && t.podSpecNode != nil {
 				injectOTELCollectorSidecar(t.podSpecNode)
 			}
@@ -448,6 +452,13 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 		resultDocs[i] = ports.Document{
 			Name:    pd.doc.Name,
 			Content: rewrittenContent,
+		}
+
+		if req.NetworkPolicy {
+			resultDocs = append(resultDocs, generateNetworkPolicyDocument(pd.doc.Name))
+		}
+		if req.ResourceDefaults {
+			resultDocs = append(resultDocs, generatePodDisruptionBudgetDocument(pd.doc.Name))
 		}
 	}
 
@@ -489,6 +500,67 @@ ports:
 	var node yaml.Node
 	if err := yaml.Unmarshal([]byte(sidecarYAML), &node); err == nil && len(node.Content) > 0 {
 		containersNode.Content = append(containersNode.Content, node.Content[0])
+	}
+}
+
+func injectContainerResourceDefaults(container *yaml.Node) {
+	if container == nil || container.Kind != yaml.MappingNode {
+		return
+	}
+	if _, ok := mapGet(container, "resources"); ok {
+		return
+	}
+	resYAML := `
+requests:
+  cpu: 50m
+  memory: 64Mi
+limits:
+  memory: 256Mi
+`
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(strings.TrimSpace(resYAML)), &node); err == nil && len(node.Content) > 0 {
+		mapAppend(container, "resources", node.Content[0])
+	}
+}
+
+func generateNetworkPolicyDocument(docName string) ports.Document {
+	netPolYAML := `apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pokkum-network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 3000
+        - protocol: TCP
+          port: 8081
+  egress:
+    - {}
+`
+	return ports.Document{
+		Name:    docName + "#network-policy",
+		Content: []byte(strings.TrimSpace(netPolYAML) + "\n"),
+	}
+}
+
+func generatePodDisruptionBudgetDocument(docName string) ports.Document {
+	pdbYAML := `apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pokkum-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {}
+`
+	return ports.Document{
+		Name:    docName + "#pdb",
+		Content: []byte(strings.TrimSpace(pdbYAML) + "\n"),
 	}
 }
 

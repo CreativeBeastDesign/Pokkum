@@ -760,5 +760,49 @@ spec:
 			t.Errorf("expected OTLP HTTP port 4318 in output:\n%s", output)
 		}
 	})
+
+	t.Run("with network policy and resource defaults", func(t *testing.T) {
+		doc := ports.Document{
+			Name: "deploy.yaml",
+			Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+      - name: main
+        image: pokkum://./src/app
+`),
+		}
+		res, err := r.Resolve(ctx, ports.ResolveRequest{
+			Documents:        []ports.Document{doc},
+			NetworkPolicy:    true,
+			ResourceDefaults: true,
+			Build: func(_ context.Context, _ string) (string, error) {
+				return "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(res.Documents) != 3 {
+			t.Fatalf("expected 3 documents (deployment + netpol + pdb), got %d", len(res.Documents))
+		}
+		mainDoc := string(res.Documents[0].Content)
+		if !strings.Contains(mainDoc, "resources:") || !strings.Contains(mainDoc, "50m") || !strings.Contains(mainDoc, "256Mi") {
+			t.Errorf("expected resources injected into main document:\n%s", mainDoc)
+		}
+		netPolDoc := string(res.Documents[1].Content)
+		if !strings.Contains(netPolDoc, "kind: NetworkPolicy") || !strings.Contains(netPolDoc, "pokkum-network-policy") {
+			t.Errorf("expected NetworkPolicy in document 1:\n%s", netPolDoc)
+		}
+		pdbDoc := string(res.Documents[2].Content)
+		if !strings.Contains(pdbDoc, "kind: PodDisruptionBudget") || !strings.Contains(pdbDoc, "pokkum-pdb") {
+			t.Errorf("expected PodDisruptionBudget in document 2:\n%s", pdbDoc)
+		}
+	})
 }
+
 

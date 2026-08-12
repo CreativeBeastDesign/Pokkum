@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunexec"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunruntime"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -72,15 +74,18 @@ func TestRealBuildIsReproducibleAcrossRuns(t *testing.T) {
 			Compiler:   bunexec.NewCompiler(testLogger()),
 			BaseImages: &mockBaseResolver{t: t},
 			Supervisor: &mockSupervisorProvider{},
-			Packager:   packager.NewPackager(testLogger()),
-			Tarballs:   registry.NewAdapter(testLogger()),
-			Logger:     testLogger(),
+			Packager:        packager.NewPackager(testLogger()),
+			BunRuntime:      bunruntime.NewResolver("", nil),
+			Tarballs:        registry.NewAdapter(testLogger()),
+			NativeInspector: nativeinspect.NewClosuredAdapter(),
+			Logger:          testLogger(),
 			Version:    "0.1.0-repro-test",
 		}
 
 		req := core.BuildRequest{
 			ProjectDir: fixtureDir,
 			Platforms:  []ports.Platform{ports.LinuxAMD64, ports.LinuxARM64},
+			Compile:    core.CompileOptions{Strategy: core.StrategyExe},
 			Output: core.OutputOptions{
 				Mode:        core.OutputTarball,
 				TarballPath: filepath.Join(t.TempDir(), "image.tar"),

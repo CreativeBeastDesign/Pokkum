@@ -39,7 +39,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
 ### Core Layers
 
 1. **CLI Layer (`cmd/pokkum/`)**:
-   - `build.go`: Parses flags (`--platform`, `--base`, `--sbom`, `--sbom-attach`, `--local`, `--tarball`, `--update-base`, `--offline`, `--bun-binary`, `--bun-variant`) and invokes the core build pipeline.
+   - `build.go`: Parses flags (`--platform`, `--base`, `--sbom`, `--sbom-attach`, `--local`, `--tarball`, `--update-base`, `--offline`, `--bun-binary`, `--bun-variant`, `--image-label`) and invokes the core build pipeline.
    - `dev.go`: Implements `pokkum dev [dir]` subcommand for local container development, supporting `--debug` interactive shell debugging, local Docker daemon loading, and hot-reload source watching.
    - `doctor.go`: Implements `pokkum doctor [dir]` for environment preflight checks (Bun runtime, registry credentials, SvelteKit version compatibility, `.pokkumignore` sanity) and mechanical repairs (`--fix`).
    - `init.go`: Implements `pokkum init [dir]` subcommand to bootstrap project configuration and `.pokkumignore`.
@@ -208,6 +208,9 @@ Pokkum includes a native Kubernetes resolver (`pokkum resolve` / `pokkum apply`)
    - Automatically builds the SvelteKit app located at `./my-app`.
    - Pushes the built multi-arch image to `POKKUM_DOCKER_REPO`.
    - Injects secure `securityContext` defaults (`runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`) unless `--no-security-context` is provided.
+   - Injects default container resource `requests` (`cpu: 50m`, `memory: 64Mi`) and `limits` (`memory: 256Mi`) unless `--no-resource-defaults` is provided.
+   - Appends a `PodDisruptionBudget` document (`minAvailable: 1`) unless `--no-resource-defaults` is provided.
+   - Appends a `NetworkPolicy` document restricting ingress to application (3000) and probe (8081) ports unless `--no-network-policy` is provided.
    - Replaces `pokkum://./my-app` with the immutable digest:
      ```yaml
      image: ghcr.io/example/my-app@sha256:123456789abcdef...

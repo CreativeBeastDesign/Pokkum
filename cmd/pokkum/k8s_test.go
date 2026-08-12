@@ -196,7 +196,11 @@ func TestResolveManifests_MissingDockerRepoFailsFast(t *testing.T) {
 	// file-not-found error, which is the behaviour being guarded against.
 	missing := filepath.Join(t.TempDir(), "does-not-exist.yaml")
 
-	_, err := resolveManifests(context.Background(), discardLogger(), missing, false, true)
+	_, err := resolveManifests(context.Background(), discardLogger(), resolveManifestsOptions{
+		File:            missing,
+		Recursive:       false,
+		SecurityContext: true,
+	})
 	if !errors.Is(err, core.ErrNoDockerRepo) {
 		t.Fatalf("expected ErrNoDockerRepo before any file is touched, got %v", err)
 	}

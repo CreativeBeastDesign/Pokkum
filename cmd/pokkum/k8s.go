@@ -26,13 +26,17 @@ func securityContextEnabled(securityContext, noSecurityContext bool) bool {
 	return securityContext && !noSecurityContext
 }
 
-// resolveManifests is the shared engine behind `pokkum resolve` and
-// `pokkum apply`: it loads the manifests named by file, resolves every
-// pokkum:// reference by building and pushing the referenced project, and
-// returns the rewritten YAML stream ready to write to stdout or pipe into
-// `kubectl apply -f -`. All progress is logged to logger (stderr); the
-// returned bytes are the only thing that belongs on stdout.
-func resolveManifests(ctx context.Context, logger *slog.Logger, file string, recursive, securityContext bool) ([]byte, error) {
+// resolveManifestsOptions holds options for resolveManifests.
+type resolveManifestsOptions struct {
+	File             string
+	Recursive        bool
+	SecurityContext  bool
+	NetworkPolicy    bool
+	ResourceDefaults bool
+}
+
+// resolveManifests is the shared engine behind `pokkum resolve` and `pokkum apply`.
+func resolveManifests(ctx context.Context, logger *slog.Logger, opts resolveManifestsOptions) ([]byte, error) {
 	// Both commands push, exactly like `pokkum build`, so they need the same
 	// destination repository — and since resolving means building, failing
 	// fast here (before reading any file or touching the network) mirrors
@@ -42,12 +46,12 @@ func resolveManifests(ctx context.Context, logger *slog.Logger, file string, rec
 		return nil, fmt.Errorf("POKKUM_DOCKER_REPO must be set: resolving pokkum:// references builds and pushes images: %w", core.ErrNoDockerRepo)
 	}
 
-	docs, err := loadDocuments(file, recursive)
+	docs, err := loadDocuments(opts.File, opts.Recursive)
 	if err != nil {
 		return nil, err
 	}
 
-	baseDir, err := manifestBaseDir(file)
+	baseDir, err := manifestBaseDir(opts.File)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +61,9 @@ func resolveManifests(ctx context.Context, logger *slog.Logger, file string, rec
 		Documents:        docs,
 		Build:            newImageBuilder(logger, baseDir, dockerRepo),
 		Strict:           true,
-		SecurityDefaults: securityContext,
+		SecurityDefaults: opts.SecurityContext,
+		NetworkPolicy:    opts.NetworkPolicy,
+		ResourceDefaults: opts.ResourceDefaults,
 	})
 	if err != nil {
 		return nil, err
