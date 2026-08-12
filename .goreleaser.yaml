@@ -1,0 +1,60 @@
+version: 2
+
+project_name: pokkum
+
+before:
+  hooks:
+    - go mod tidy
+    - make supervisor
+
+builds:
+  - id: pokkum
+    main: ./cmd/pokkum
+    binary: pokkum
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.buildDate={{.Date}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+brews:
+  - repository:
+      owner: CreativeBeastDesign
+      name: homebrew-pokkum
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    folder: Formula
+    homepage: "https://github.com/CreativeBeastDesign/pokkum"
+    description: "Zero-dependency OCI container image compiler for SvelteKit applications"
+    license: "Apache-2.0"
+    install: |
+      bin.install "pokkum"
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

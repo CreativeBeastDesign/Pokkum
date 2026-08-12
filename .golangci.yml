@@ -34,8 +34,25 @@ issues:
         - gosec
       text: G204
 
+    # Allow standard 0644 permissions on user config/ignore files
+    - linters:
+        - gosec
+      text: G306
+
     # Exclude test files from some linters
     - path: _test\.go$
       linters:
         - gosec
         - staticcheck
+        - revive
+
+    # Allow unused parameters in CLI subcommand handlers and interface implementations
+    - path: cmd/pokkum/.*
+      linters:
+        - revive
+      text: "unused-parameter"
+
+    - path: internal/adapters/nativeinspect/.*
+      linters:
+        - revive
+      text: "unused-parameter"

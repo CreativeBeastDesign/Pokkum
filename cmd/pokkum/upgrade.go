@@ -59,7 +59,7 @@ and reports or applies updates.`,
 	return cmd
 }
 
-func runUpgrade(ctx context.Context, logger *slog.Logger, flags *upgradeFlags) error {
+func runUpgrade(ctx context.Context, _ *slog.Logger, flags *upgradeFlags) error {
 	currVer := version
 	if currVer == "" {
 		currVer = "1.0.0-dev"

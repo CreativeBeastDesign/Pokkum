@@ -22,7 +22,7 @@ func NewStrictAdapter() *StrictNativeAdapter {
 }
 
 // Inspect checks projectDir for native Node dependencies and computed dynamic imports.
-func (a *StrictNativeAdapter) Inspect(ctx context.Context, projectDir string, targetPlatform ports.Platform) (ports.NativeInspectionResult, error) {
+func (a *StrictNativeAdapter) Inspect(_ context.Context, projectDir string, targetPlatform ports.Platform) (ports.NativeInspectionResult, error) {
 	pkg, err := sveltekitutils.ReadPackageJSON(projectDir)
 	if err != nil {
 		pkg = sveltekitutils.PackageJSON{}

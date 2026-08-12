@@ -43,7 +43,7 @@ func newDoctorCommand(_ context.Context, logger *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func runDoctor(logger *slog.Logger, opts *doctorOptions) error {
+func runDoctor(_ *slog.Logger, opts *doctorOptions) error {
 	outputFormat := ports.OutputFormat(opts.output)
 	checks := []ports.DoctorCheck{}
 	allPassed := true

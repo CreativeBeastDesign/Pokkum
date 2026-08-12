@@ -46,7 +46,7 @@ func NewClosuredAdapter() *ClosuredNativeAdapter {
 
 // Inspect scans projectDir, inspects target ELF binaries, builds the .so closure,
 // and checks glibc symbol versions.
-func (a *ClosuredNativeAdapter) Inspect(ctx context.Context, projectDir string, targetPlatform ports.Platform) (ports.NativeInspectionResult, error) {
+func (a *ClosuredNativeAdapter) Inspect(_ context.Context, projectDir string, targetPlatform ports.Platform) (ports.NativeInspectionResult, error) {
 	pkg, err := sveltekitutils.ReadPackageJSON(projectDir)
 	if err != nil {
 		pkg = sveltekitutils.PackageJSON{}

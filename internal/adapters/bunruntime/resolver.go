@@ -193,7 +193,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: create temp file %s: %w: %w", tmpPath, err, core.ErrBunDownloadFailed)
 	}
 
-	size, err := io.Copy(outFile, rc)
+	_, err = io.Copy(outFile, io.LimitReader(rc, 200<<20))
 	outFile.Close()
 	if err != nil {
 		os.Remove(tmpPath)

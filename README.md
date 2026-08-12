@@ -1,5 +1,11 @@
 # Pokkum: SvelteKit to OCI in One Command
 
+[![GitHub Actions Build Status](https://github.com/CreativeBeastDesign/pokkum/workflows/ci/badge.svg)](https://github.com/CreativeBeastDesign/pokkum/actions)
+[![pkg.go.dev](https://pkg.go.dev/badge/github.com/CreativeBeastDesign/pokkum.svg)](https://pkg.go.dev/github.com/CreativeBeastDesign/pokkum)
+[![Go Report Card](https://goreportcard.com/badge/github.com/CreativeBeastDesign/pokkum)](https://goreportcard.com/report/github.com/CreativeBeastDesign/pokkum)
+[![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 **Pokkum** is a zero-dependency OCI container image compiler for SvelteKit applications. In a single command, Pokkum compiles your SvelteKit app into a zero-daemon, 5-layer cached OCI container image complete with SBOMs, OpenTelemetry auto-instrumentation, signed SLSA provenance, and hardened Kubernetes deployment manifests.
 
 Think of it as `ko` for SvelteKit: zero Dockerfile, zero Docker daemon required, and bit-for-bit reproducible builds out of the box.
@@ -16,7 +22,7 @@ Zero-config build and push to your container registry:
 POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum build ./my-app
 ```
 
-* **What this does**:
+- **What this does**:
   - Automatically detects your SvelteKit project directory.
   - Compiles your app into an architecture-independent layout using the Bun runtime.
   - Assembles a 5-layer OCI container image on a Distroless glibc base.
@@ -30,6 +36,7 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum build ./my-app
 Strict SLSA L3 hermetic build on a hardened Chainguard base, with Cosign signature checks, custom OCI annotations, and hardened Kubernetes manifest resolution:
 
 **Build the Image:**
+
 ```bash
 POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum build ./my-app \
   --hardened \
@@ -38,13 +45,14 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum build ./my-app \
   --allow-secret-pattern="(?i)PUBLIC_.*"
 ```
 
-* **What this does**:
+- **What this does**:
   - `--hardened`: Uses `ghcr.io/chainguard-images/glibc-dynamic:latest` base image.
   - `--hermetic`: Enforces strict zero-network egress during compilation, requiring pre-cached base images and pre-populated `node_modules/`.
   - **Secret Guard**: Scans project source files for accidentally inlined secrets or high-entropy tokens before packaging layers.
   - **Base Image Verification**: Verifies Cosign signatures on upstream base images.
 
 **Resolve Hardened Kubernetes Manifests:**
+
 ```bash
 POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum resolve -f deployment.yaml \
   --security-context \
@@ -53,7 +61,7 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum resolve -f deployment.yaml \
   --registry-config=~/.docker/config.json
 ```
 
-* **What this does**:
+- **What this does**:
   - Replaces `pokkum://` URIs in `deployment.yaml` with pinned immutable image digests (`repo@sha256:...`).
   - Injects hardened container `securityContext` (`runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`).
   - Generates restricted `NetworkPolicy` ingress/egress rules and injects CPU/memory `requests`/`limits` with a `PodDisruptionBudget`.
@@ -76,11 +84,43 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum resolve -f deployment.yaml \
 
 ---
 
-## Quick Start & Installation
+## Installation & Setup
 
-Install Pokkum CLI via GitHub Release download or use the official GitHub Action in CI workflows:
+Choose your preferred installation method:
 
-### GitHub Action Setup (`.github/workflows/ci.yml`)
+### 1. Homebrew (macOS & Linux)
+
+```bash
+brew install CreativeBeastDesign/pokkum/pokkum
+```
+
+---
+
+### 2. NPM / NPX (Zero-Install One-Liner)
+
+Run directly via `npx` or `bunx` without manual installation:
+
+```bash
+npx @pokkum/cli build ./my-app
+```
+
+Or install globally:
+
+```bash
+npm install -g @pokkum/cli
+```
+
+---
+
+### 3. Standalone Installer Script (Linux / macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CreativeBeastDesign/pokkum/main/install.sh | sh
+```
+
+---
+
+### 4. GitHub Action for CI/CD Pipelines (`.github/workflows/ci.yml`)
 
 ```yaml
 - name: Setup Pokkum
@@ -105,6 +145,7 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 ```
 
 ### Health Probes & Signals
+
 - `/pokkum/init` reaps orphaned zombie processes and handles OS signals (`SIGTERM`, `SIGINT`).
 - Exposes probe endpoints on `POKKUM_PROBE_PORT` (default `8081`):
   - `GET /healthz` → `200 OK` (supervisor liveness)
@@ -115,18 +156,18 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 
 ## CLI Command Reference
 
-| Command | Usage | Description |
-|---|---|---|
-| `pokkum build [dir]` | `pokkum build ./my-app` | Compiles SvelteKit app into a 5-layer OCI container image. |
-| `pokkum resolve -f <file>` | `pokkum resolve -f deploy.yaml` | Resolves `pokkum://` URIs in K8s manifests to immutable image digests. |
-| `pokkum apply -f <file>` | `pokkum apply -f deploy.yaml` | Resolves manifests and pipes directly to `kubectl apply`. |
-| `pokkum dev [dir]` | `pokkum dev ./my-app` | Local development mode with hot-reloading file watcher and Docker daemon loading. |
-| `pokkum scan [target]` | `pokkum scan ./my-app` | Security vulnerability scanner for directories, images, or tarballs. |
-| `pokkum doctor [dir]` | `pokkum doctor ./my-app` | Diagnostic wizard for preflight checks and mechanical repairs. |
-| `pokkum init [dir]` | `pokkum init ./my-app` | Bootstraps project config and `.pokkumignore`. |
-| `pokkum explain [image]` | `pokkum explain <ref>` | Inspects layer hierarchy, file origin tracing (`why`), and image diffing (`diff`). |
-| `pokkum rollback` | `pokkum rollback -f deploy.yaml --to=<ref>` | Rolls back image references in Kubernetes deployment manifests. |
-| `pokkum upgrade` | `pokkum upgrade --check` | Checks for signed CLI release updates. |
+| Command                    | Usage                                       | Description                                                                        |
+| -------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `pokkum build [dir]`       | `pokkum build ./my-app`                     | Compiles SvelteKit app into a 5-layer OCI container image.                         |
+| `pokkum resolve -f <file>` | `pokkum resolve -f deploy.yaml`             | Resolves `pokkum://` URIs in K8s manifests to immutable image digests.             |
+| `pokkum apply -f <file>`   | `pokkum apply -f deploy.yaml`               | Resolves manifests and pipes directly to `kubectl apply`.                          |
+| `pokkum dev [dir]`         | `pokkum dev ./my-app`                       | Local development mode with hot-reloading file watcher and Docker daemon loading.  |
+| `pokkum scan [target]`     | `pokkum scan ./my-app`                      | Security vulnerability scanner for directories, images, or tarballs.               |
+| `pokkum doctor [dir]`      | `pokkum doctor ./my-app`                    | Diagnostic wizard for preflight checks and mechanical repairs.                     |
+| `pokkum init [dir]`        | `pokkum init ./my-app`                      | Bootstraps project config and `.pokkumignore`.                                     |
+| `pokkum explain [image]`   | `pokkum explain <ref>`                      | Inspects layer hierarchy, file origin tracing (`why`), and image diffing (`diff`). |
+| `pokkum rollback`          | `pokkum rollback -f deploy.yaml --to=<ref>` | Rolls back image references in Kubernetes deployment manifests.                    |
+| `pokkum upgrade`           | `pokkum upgrade --check`                    | Checks for signed CLI release updates.                                             |
 
 ---
 
@@ -140,4 +181,4 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 
 ## License
 
-MIT License
+Apache 2.0

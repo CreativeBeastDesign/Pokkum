@@ -42,7 +42,7 @@ func newReproDoctorCommand(_ context.Context, logger *slog.Logger) *cobra.Comman
 	return cmd
 }
 
-func runReproDoctor(logger *slog.Logger, opts *reproDoctorOptions) error {
+func runReproDoctor(_ *slog.Logger, opts *reproDoctorOptions) error {
 	outputFormat := ports.OutputFormat(opts.output)
 
 	// Check 1: Static timestamp check

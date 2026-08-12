@@ -40,25 +40,25 @@ var embeddedAdvisories = []ports.Vulnerability{
 	},
 }
 
-// ScannerAdapter implements ports.Scanner.
-type ScannerAdapter struct {
+// Adapter implements ports.Scanner.
+type Adapter struct {
 	logger *slog.Logger
 	client *http.Client
 }
 
-// NewAdapter constructs a ScannerAdapter.
-func NewAdapter(logger *slog.Logger) *ScannerAdapter {
+// NewAdapter constructs a Scanner Adapter.
+func NewAdapter(logger *slog.Logger) *Adapter {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ScannerAdapter{
+	return &Adapter{
 		logger: logger,
 		client: &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
 // Scan scans an image reference, tarball, or directory for security vulnerabilities and toolchain advisories.
-func (s *ScannerAdapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanResult, error) {
+func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanResult, error) {
 	if req.FailOn == "" {
 		req.FailOn = ports.SeverityCritical
 	}
@@ -110,7 +110,7 @@ func (s *ScannerAdapter) Scan(ctx context.Context, req ports.ScanRequest) (ports
 	return res, nil
 }
 
-func (s *ScannerAdapter) scanProjectToolchain(ctx context.Context, projectDir string, offline bool) ([]ports.Vulnerability, error) {
+func (s *Adapter) scanProjectToolchain(ctx context.Context, projectDir string, offline bool) ([]ports.Vulnerability, error) {
 	pkg, err := sveltekitutils.ReadPackageJSON(projectDir)
 	if err != nil {
 		return nil, err
@@ -131,7 +131,7 @@ func (s *ScannerAdapter) scanProjectToolchain(ctx context.Context, projectDir st
 	return advisories, nil
 }
 
-func (s *ScannerAdapter) checkEmbeddedAdvisories(bunVer, kitVer string) []ports.Vulnerability {
+func (s *Adapter) checkEmbeddedAdvisories(bunVer, kitVer string) []ports.Vulnerability {
 	var matches []ports.Vulnerability
 	for _, adv := range embeddedAdvisories {
 		if adv.Package == "bun" && isVersionOlderThan(bunVer, adv.FixedVersion) {
@@ -162,7 +162,7 @@ type osvResponse struct {
 	} `json:"vulns"`
 }
 
-func (s *ScannerAdapter) queryOSV(ctx context.Context, pkgName, version string) ([]ports.Vulnerability, error) {
+func (s *Adapter) queryOSV(ctx context.Context, pkgName, version string) ([]ports.Vulnerability, error) {
 	if version == "" {
 		return nil, nil
 	}
