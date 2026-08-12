@@ -25,8 +25,6 @@ jobs:
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.64.0
 
       - name: Run Unit & Integration Tests
         run: go test ./...
@@ -50,7 +48,7 @@ jobs:
       - name: Set up Node.js (for NPM Publisher)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Run GoReleaser
