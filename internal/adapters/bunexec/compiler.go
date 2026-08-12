@@ -89,6 +89,8 @@ const (
 	kitPackage     = "@sveltejs/kit"
 )
 
+var _ ports.Compiler = (*Compiler)(nil)
+
 // Compiler implements ports.Compiler by shelling out to a `bun` executable
 // found on PATH. The zero value is not usable; construct one with
 // NewCompiler.

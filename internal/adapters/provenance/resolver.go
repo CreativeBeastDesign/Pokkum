@@ -11,6 +11,8 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+var _ ports.ProvenanceResolver = (*Resolver)(nil)
+
 // Resolver implements ports.ProvenanceResolver.
 type Resolver struct {
 	log *slog.Logger

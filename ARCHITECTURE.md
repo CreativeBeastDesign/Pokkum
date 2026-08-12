@@ -68,6 +68,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - Interfaces decoupling core logic from external adapters: `Compiler`, `Packager`, `Registry`, `BaseImageResolver`, `BunRuntimeResolver`, `SBOMGenerator`, `SupervisorProvider`, `K8sResolver`, `Signer`, `Attestor`, `BinaryInspector`, `ProvenanceResolver`, `ImageComparator`, `ReleaseVerifier`, `SecretGuard`, and structured output envelopes (`JSONEnvelope`, `OutputFormat`).
 
 4. **Adapter Implementations (`internal/adapters/`)**:
+   - Every concrete adapter package enforces explicit compile-time interface assertions (e.g., `var _ ports.BaseImageResolver = (*Resolver)(nil)`) to guarantee immediate compile-time detection of port contract drift.
    - `bunexec`: Wraps host `bun build --compile` for cross-compiling single executables.
    - `bunruntime`: Resolves, downloads, SHA256-verifies, and caches official Bun runtime binaries (`~/.cache/pokkum/bun`) for runtime layer assembly (`ports.BunRuntimeResolver`).
    - `packager`: Constructs reproducible OCI tarballs, custom single-binary layers (`BuildCustomFileLayer`), directory tree layers (`BuildDirectoryTreeLayer`), and multi-arch index manifests using `github.com/google/go-containerregistry`.
@@ -218,7 +219,7 @@ Pokkum includes a native Kubernetes resolver (`pokkum resolve` / `pokkum apply`)
    - Injects secure `securityContext` defaults (`runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`) unless `--no-security-context` is provided.
    - Injects default container resource `requests` (`cpu: 50m`, `memory: 64Mi`) and `limits` (`memory: 256Mi`) unless `--no-resource-defaults` is provided.
    - Appends a `PodDisruptionBudget` document (`minAvailable: 1`) unless `--no-resource-defaults` is provided.
-   - Appends a `NetworkPolicy` document restricting ingress to application (3000) and probe (8081) ports unless `--no-network-policy` is provided.
+   - Appends a `NetworkPolicy` document restricting ingress to actual workload container ports (`containerPort`, defaulting to 3000 and 8081) and egress to expected infrastructure ports (DNS 53, HTTPS 443, OTLP 4317/4318/8889) unless `--no-network-policy` is provided.
    - Replaces `pokkum://./my-app` with the immutable digest:
      ```yaml
      image: ghcr.io/example/my-app@sha256:123456789abcdef...

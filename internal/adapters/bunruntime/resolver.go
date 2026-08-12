@@ -29,6 +29,8 @@ var pinnedReleaseChecksums = map[string]string{
 	"1.2.2/bun-linux-aarch64":      "d7aeceaaeb37ff1adfe8f5c353ea2eb0498cfc9c7df62df27f818d6a78280f49",
 }
 
+var _ ports.BunRuntimeResolver = (*Resolver)(nil)
+
 // Resolver implements ports.BunRuntimeResolver with disk caching (~/.cache/pokkum/bun).
 type Resolver struct {
 	// CacheDir is the root directory for cached Bun binaries.

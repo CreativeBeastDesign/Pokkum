@@ -70,6 +70,12 @@ var insecureTransport http.RoundTripper = &http.Transport{
 	TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // opt-in via Insecure fields
 }
 
+var (
+	_ ports.Registry      = (*Adapter)(nil)
+	_ ports.LocalLoader   = (*Adapter)(nil)
+	_ ports.TarballWriter = (*Adapter)(nil)
+)
+
 // Adapter implements ports.Registry, ports.LocalLoader and
 // ports.TarballWriter. The zero value is not usable; construct with
 // NewAdapter.

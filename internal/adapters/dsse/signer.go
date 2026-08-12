@@ -18,6 +18,8 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+var _ ports.DSSESigner = (*Signer)(nil)
+
 // Signer implements ports.DSSESigner.
 type Signer struct {
 	log *slog.Logger

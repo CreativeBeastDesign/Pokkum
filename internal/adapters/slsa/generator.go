@@ -10,6 +10,8 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+var _ ports.SLSAGenerator = (*Generator)(nil)
+
 // Generator implements ports.SLSAGenerator.
 type Generator struct {
 	log *slog.Logger

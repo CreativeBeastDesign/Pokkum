@@ -17,6 +17,8 @@ import (
 //go:embed all:bin
 var binaries embed.FS
 
+var _ ports.SupervisorProvider = (*Provider)(nil)
+
 // Provider is the SupervisorProvider implementation, supplying the embedded
 // pokkum-init binaries to the packager.
 type Provider struct {

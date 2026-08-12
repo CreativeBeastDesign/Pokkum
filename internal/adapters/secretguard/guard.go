@@ -42,6 +42,8 @@ var defaultSecretRules = []rule{
 	},
 }
 
+var _ ports.SecretGuard = (*SecretGuardAdapter)(nil)
+
 // SecretGuardAdapter implements ports.SecretGuard.
 type SecretGuardAdapter struct{}
 

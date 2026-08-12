@@ -30,6 +30,8 @@ var standardBaseLibs = map[string]bool{
 // Regex to parse GLIBC_2.XX version strings
 var glibcVersionPattern = regexp.MustCompile(`GLIBC_(\d+)\.(\d+)`)
 
+var _ ports.NativeInspector = (*ClosuredNativeAdapter)(nil)
+
 // ClosuredNativeAdapter implements ports.NativeInspector by inspecting ELF headers of
 // native .node binaries and shared libraries to calculate dynamic library closures (.so dependencies)
 // and validate glibc version requirements against the base image surface.

@@ -22,6 +22,11 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+var (
+	_ ports.CosignSigner    = (*Signer)(nil)
+	_ ports.ReleaseVerifier = (*Signer)(nil)
+)
+
 // Signer implements ports.CosignSigner.
 type Signer struct {
 	log *slog.Logger

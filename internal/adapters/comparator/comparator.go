@@ -9,6 +9,8 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+var _ ports.ImageComparator = (*Comparator)(nil)
+
 // Comparator implements ports.ImageComparator.
 type Comparator struct {
 	log *slog.Logger

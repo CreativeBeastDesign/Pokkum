@@ -77,6 +77,8 @@ var insecureTransport http.RoundTripper = &http.Transport{
 	TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // opt-in via BaseImageRequest.Insecure
 }
 
+var _ ports.BaseImageResolver = (*Resolver)(nil)
+
 // Resolver implements ports.BaseImageResolver against a real container
 // registry. The zero value is not usable; construct with NewResolver.
 //

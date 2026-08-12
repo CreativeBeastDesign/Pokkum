@@ -10,6 +10,8 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+var _ ports.NativeInspector = (*StrictNativeAdapter)(nil)
+
 // StrictNativeAdapter implements ports.NativeInspector by performing a strict
 // pre-flight check. If native Node C++ addons or untraceable dynamic imports are
 // detected, it returns an error wrapping core.ErrNativeModulesUnsupported to halt

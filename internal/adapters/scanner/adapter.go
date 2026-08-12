@@ -40,6 +40,8 @@ var embeddedAdvisories = []ports.Vulnerability{
 	},
 }
 
+var _ ports.Scanner = (*Adapter)(nil)
+
 // Adapter implements ports.Scanner.
 type Adapter struct {
 	logger *slog.Logger
