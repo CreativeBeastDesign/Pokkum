@@ -9,55 +9,6 @@ applied for each; [for-users.md](for-users.md) for what changed as a
 result; and [unfixed-limitation.md](unfixed-limitation.md) for the one gap
 still open (base image signature verification, noted inline below).
 
-## Implementation Strategy & Feature Bundles
-
-Open roadmap items are organized into **4 cohesive implementation bundles**, structured by technical dependencies and architectural boundaries:
-
-### 📦 Bundle 1: Supply Chain & Reproducibility Lock
-* **Target Release**: `v0.2` & `v0.5`
-* **Focus**: Lock base image digests and capture complete build toolchain parameters in signed attestations.
-* **Included Items**:
-  1. **Base Image Lockfile (`pokkum.lock`)** (see [pokkum-lock-concept.md](pokkum-lock-concept.md)) — `pokkum base update` and offline base resolving.
-  2. **Provenance Completeness M0** (see [pokkum-verify-concept.md](pokkum-verify-concept.md)) — Extends `slsa/generator.go` to capture Go runtime version, builder OS/arch, Bun binary hash, base digest, and lockfile hashes.
-* **Why Bundled**: `pokkum.lock` locks the inputs; Provenance M0 records them in the SLSA statement. Implementing them together ensures every build produces complete, future-proof attestations.
-
----
-
-### 📦 Bundle 2: Layer Caching & Architecture Shift
-* **Target Release**: `v0.3` (Milestones M1–M4)
-* **Focus**: Shift from monolithic single-binary builds to a 5-layer arch-independent image layout.
-* **Included Items**:
-  1. **M1 (Bun Runtime Plumbing)** (see [pokkum-layer-caching-concept.md](pokkum-layer-caching-concept.md)) — `bunruntime` resolver/downloader and packager directory-tree support.
-  2. **M2 (Hand-rolled Adapter & Phase-1 Layering)** — SvelteKit adapter emitting split JS/asset layers (`--strategy=layered`).
-  3. **M3 (Vendor Splitting & Native Closure)** — `bun build --splitting` and ELF `.node` addon support.
-  4. **M4 (Hardening & Cutover)** — `readOnlyRootFilesystem` default security context and `exe` strategy deprecation.
-  5. **Image Optimization** — Layer deduplication and zstd layer compression (`--compression=gzip|zstd`).
-* **Why Bundled**: Cohesive core refactoring that replaces the packaging engine end-to-end. `bunruntime` from M1 also provides the pinned toolchain fetcher needed by future `pokkum verify` runs.
-
----
-
-### 📦 Bundle 3: Telemetry & Machine-Readable DX
-* **Target Release**: `v0.4`
-* **Focus**: Standardize structured JSON schemas, zero-config OpenTelemetry, and diagnostic wizards.
-* **Included Items**:
-  1. **`--output=json` Schema Standard** — Machine-readable build and inspection output schema family.
-  2. **Unified Metrics & Telemetry** (see [pokkum-metrics-otel-concept.md](pokkum-metrics-otel-concept.md)) — Experimental SvelteKit tracing/metrics injection and OTEL Collector K8s sidecar generation.
-  3. **Developer Experience Wizards** — `pokkum init`, `pokkum doctor`, and `pokkum explain`/`why`.
-* **Why Bundled**: `--output=json` provides the common JSON schema. Building Telemetry, Diagnostics, and `pokkum explain` together guarantees all developer tools emit structured JSON natively from day one.
-
----
-
-### 📦 Bundle 4: Verification & Non-Determinism Diagnosis
-* **Target Release**: `v0.5` (Milestones M1–M4)
-* **Focus**: Independent rebuild verification and stage-level non-determinism bisection.
-* **Included Items**:
-  1. **Shared `layerdiff` Engine** (see [pokkum-verify-concept.md](pokkum-verify-concept.md) & [pokkum-repro-doctor-concept.md](pokkum-repro-doctor-concept.md)) — Entry-by-entry tar merge-walking and header vs. content diffing.
-  2. **`pokkum repro doctor`** — Stage-level pipeline bisection, static checks (`--fast`), cause heuristics, and `--perturb` environment testing.
-  3. **`pokkum verify --rebuild`** — Rebuild pipeline, L1/L2 digest comparison, and L3 mismatch explanation.
-* **Why Bundled**: `layerdiff` is ~80% shared machinery between `repro doctor` and `verify`. Building them together prevents code duplication and completes Pokkum's core reproducibility promise.
-
-
-
 ## v0.1 (Completed)
 
 - [x] Reproducible layer timestamps: set every layer/config timestamp to `SOURCE_DATE_EPOCH` derived from the last git commit (`git log -1 --pretty=%ct`), not build time
@@ -137,9 +88,8 @@ _The shippable minimum viable product for enterprise-grade adoption._
 
 - [x] Version pinning of `pokkum` itself in generated manifest annotations. (no new flag — folds into `--image-label`/auto-annotations above)
 - [x] A GitHub Action wrapping the CLI (mirroring `setup-ko`). (no new `pokkum` flag — Action inputs like `version`/`token`, mirroring `setup-ko`)
-- [x] Rollback support (`pokkum rollback` rewrites a manifest's `image:` reference to a user-supplied tag/digest). (new subcommand: `pokkum rollback -f <manifest> --to=<ref>`, reusing `-f`/`--file` from `resolve`/`apply`; `--to` is required — there is no build-history store to auto-discover a prior version from, see Backlog)
+- [x] Rollback support (`pokkum rollback` reading from declarative manifest annotations `pokkum.dev/previous-image`). (new subcommand: `pokkum rollback -f <manifest> [--to=<ref>]`, reusing `-f`/`--file` from `resolve`/`apply`; `--to` is optional and defaults to `pokkum.dev/previous-image` annotation)
 - [x] Signed Self-Distribution (`pokkum upgrade`): Signature verification of release artifacts and binary self-updates via `ports.ReleaseVerifier` and `cosign`. (new subcommand: `pokkum upgrade`, new flags: `--check`, `--version`, `--offline`, `--key`)
-
 
 ## Beyond v1.0 / Backlog
 

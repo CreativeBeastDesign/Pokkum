@@ -156,7 +156,7 @@ Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode) and `
 | Flag | Shorthand | Default | Description |
 |---|---|---|---|
 | `--file` | `-f` | (required) | Manifest file to roll back. |
-| `--to` | — | (required) | Target container image reference or digest to roll back to. |
+| `--to` | — | (optional) | Target container image reference or digest to roll back to (defaults to `pokkum.dev/previous-image` annotation). |
 | `--output` | — | `text` | Output format (`text` or `json`). |
 
 ---

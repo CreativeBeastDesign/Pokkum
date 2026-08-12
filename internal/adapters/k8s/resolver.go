@@ -270,6 +270,81 @@ func ensureStringListDefault(parent *yaml.Node, key string, values ...string) {
 	mapAppend(parent, key, &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: items})
 }
 
+// setMappingKey sets key in mapping m to val, overwriting if present, or appending if absent.
+func setMappingKey(m *yaml.Node, key, val string) {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			m.Content[i+1].Value = val
+			m.Content[i+1].Tag = "!!str"
+			return
+		}
+	}
+	mapAppend(m, key, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: val})
+}
+
+// setAnnotation sets key to val under parent's metadata.annotations mapping.
+func setAnnotation(parent *yaml.Node, key, val string) {
+	if parent == nil {
+		return
+	}
+	target := parent
+	if parent.Kind == yaml.DocumentNode {
+		for _, item := range parent.Content {
+			if item.Kind == yaml.MappingNode {
+				target = item
+				break
+			}
+		}
+	}
+	if target == nil || target.Kind != yaml.MappingNode {
+		return
+	}
+	meta := ensureChildMapping(target, "metadata")
+	if meta == nil {
+		return
+	}
+	ann := ensureChildMapping(meta, "annotations")
+	if ann == nil {
+		return
+	}
+	setMappingKey(ann, key, val)
+}
+
+// getAnnotation reads key under parent's metadata.annotations mapping.
+func getAnnotation(parent *yaml.Node, key string) (string, bool) {
+	if parent == nil {
+		return "", false
+	}
+	target := parent
+	if parent.Kind == yaml.DocumentNode {
+		for _, item := range parent.Content {
+			if item.Kind == yaml.MappingNode {
+				target = item
+				break
+			}
+		}
+	}
+	if target == nil || target.Kind != yaml.MappingNode {
+		return "", false
+	}
+	meta, ok := mapGet(target, "metadata")
+	if !ok || meta.Kind != yaml.MappingNode {
+		return "", false
+	}
+	ann, ok := mapGet(meta, "annotations")
+	if !ok || ann.Kind != yaml.MappingNode {
+		return "", false
+	}
+	valNode, ok := mapGet(ann, key)
+	if !ok || valNode.Kind != yaml.ScalarNode {
+		return "", false
+	}
+	return valNode.Value, true
+}
+
 // injectPodSecurityDefaults fills in the pod-level hardened defaults on
 // podSpec: runAsNonRoot and the RuntimeDefault seccomp profile. It never
 // injects runAsUser — Pokkum images already run as UID 65532 baked into the
@@ -452,6 +527,17 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 			val := t.valNode.Value
 			path, _, _ := parsePokkumRef(val, false)
 			resolved := resolvedMap[path]
+
+			// Preserve displaced concrete image into pokkum.dev/previous-image annotation
+			if val != "" && !strings.HasPrefix(val, ports.Scheme) {
+				if t.templateNode != nil {
+					setAnnotation(t.templateNode, ports.AnnotationPreviousImage, val)
+				}
+				if len(pd.nodes) > 0 {
+					setAnnotation(pd.nodes[0], ports.AnnotationPreviousImage, val)
+				}
+			}
+
 			t.valNode.Value = resolved
 			references = append(references, ports.Reference{
 				Document: pd.doc.Name,

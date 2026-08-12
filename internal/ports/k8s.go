@@ -18,6 +18,10 @@ import "context"
 // build tool is the only thing that ever knows the digest.
 const Scheme = "pokkum://"
 
+// AnnotationPreviousImage is the Kubernetes annotation key used to store
+// the displaced image reference prior to an image update or rollback.
+const AnnotationPreviousImage = "pokkum.dev/previous-image"
+
 // ImageBuilder builds and publishes the project at path and returns the
 // resulting immutable reference, in "repo@sha256:…" form.
 //

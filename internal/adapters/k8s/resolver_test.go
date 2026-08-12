@@ -904,3 +904,43 @@ spec:
 		t.Errorf("NetworkPolicy must NOT contain unrestricted wildcard egress:\n%s", netPolDoc)
 	}
 }
+
+func TestResolver_PreviousImageAnnotation(t *testing.T) {
+	r := k8s.NewResolver()
+	ctx := context.Background()
+
+	doc := ports.Document{
+		Name: "deploy.yaml",
+		Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  annotations:
+    pokkum.dev/previous-image: "ghcr.io/acme/app@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+spec:
+  template:
+    spec:
+      containers:
+      - name: main
+        image: pokkum://./src/app
+`),
+	}
+
+	res, err := r.Resolve(ctx, ports.ResolveRequest{
+		Documents: []ports.Document{doc},
+		Build: func(_ context.Context, _ string) (string, error) {
+			return "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out := string(res.Documents[0].Content)
+	if !strings.Contains(out, "pokkum.dev/previous-image:") {
+		t.Fatalf("expected pokkum.dev/previous-image annotation in resolved document, got:\n%s", out)
+	}
+	if !strings.Contains(out, "ghcr.io/acme/app@sha256:0000000000000000000000000000000000000000000000000000000000000000") {
+		t.Errorf("expected previous image digest preserved in annotation, got:\n%s", out)
+	}
+}
