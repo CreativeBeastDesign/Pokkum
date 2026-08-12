@@ -1,8 +1,7 @@
-// Package registry provides an ephemeral, in-memory OCI 1.1 compliant registry
-// helper for integration tests and local development workflows.
 package registry
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 
@@ -15,10 +14,33 @@ type Server struct {
 	URL    string
 }
 
+// Option configures a Server during construction.
+type Option func(*serverConfig)
+
+type serverConfig struct {
+	wrapper func(http.Handler) http.Handler
+}
+
+// WithHandlerWrapper wraps the registry's HTTP handler (e.g., for request counting or logging).
+func WithHandlerWrapper(wrapper func(http.Handler) http.Handler) Option {
+	return func(cfg *serverConfig) {
+		cfg.wrapper = wrapper
+	}
+}
+
 // NewServer constructs and starts a new ephemeral in-memory OCI registry.
-func NewServer() (*Server, error) {
-	regHandler := registry.New()
-	ts := httptest.NewServer(regHandler)
+func NewServer(opts ...Option) (*Server, error) {
+	var cfg serverConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	var handler http.Handler = registry.New()
+	if cfg.wrapper != nil {
+		handler = cfg.wrapper(handler)
+	}
+
+	ts := httptest.NewServer(handler)
 	return &Server{
 		server: ts,
 		URL:    ts.URL,
@@ -36,6 +58,19 @@ func (s *Server) Addr() string {
 // Host returns the host and port without protocol prefix (suitable for docker repo refs).
 func (s *Server) Host() string {
 	return strings.TrimPrefix(s.URL, "http://")
+}
+
+// Repo constructs a repository reference string for this test registry (e.g., "127.0.0.1:54321/my-repo").
+func (s *Server) Repo(name string) string {
+	return s.Host() + "/" + strings.TrimPrefix(name, "/")
+}
+
+// HTTPServer returns the underlying httptest.Server.
+func (s *Server) HTTPServer() *httptest.Server {
+	if s == nil {
+		return nil
+	}
+	return s.server
 }
 
 // Close shuts down the test registry server.

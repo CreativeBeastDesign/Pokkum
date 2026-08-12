@@ -13,7 +13,7 @@
 - **Enterprise Build Integrity & Hermetic Mode (`v1.0 MVP Bundle 7`)**:
   - Hermetic Build Mode (`pokkum build --hermetic`) enforces zero-network egress during compilation (`BUN_OFFLINE=1`), forces offline base image resolution (`--offline`), and checks local `node_modules/` pre-population (`core.ErrHermeticViolation`).
   - Multi-Registry Auth Config (`--registry-config=<path>`) is supported across `build`, `resolve`, and `apply` for private registries, ECR/GCR credential helpers, and custom auth chains via `customConfigFileKeychain` parsing custom `config.json` files taking primary precedence over `authn.DefaultKeychain`.
-  - Ephemeral OCI 1.1 Test Registry Utility is exported at `pkg/registry.NewServer()` for integration testing.
+  - Ephemeral OCI 1.1 Test Registry Utility is exported at `pkg/registry.NewServer()` and wired as the canonical test registry factory in `tests/integration/harness_test.go` (`NewRegistryHarness`) with `WithHandlerWrapper` middleware support.
 - **Security Scanning & Guardrails (`v1.0 MVP Bundle 6`)**:
   - `pokkum scan [target]` subcommand runs security scans against project directories, images, or tarballs. Flags: `--fail-on=low|medium|high|critical` (default `critical`), `--toolchain` (OSV advisory lookups for embedded Bun and SvelteKit), `--output=text|json`, `--offline`.
   - Base Image Cosign Signature Verification is enabled by default (`VerifySignature: true`); queries target container registry for signature tags (`<repo>:sha256-<hex>.sig`) and verifies cryptographic payload signatures via `ports.CosignSigner` (`cosign.Signer`); `--no-verify-base` provides opt-out.

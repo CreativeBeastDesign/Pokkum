@@ -7,16 +7,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
@@ -24,6 +21,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
+	pokkumregistry "github.com/CreativeBeastDesign/pokkum/pkg/registry"
 )
 
 func TestMain(m *testing.M) {
@@ -73,21 +71,27 @@ func (c *countingRegistry) count() int {
 	return len(c.reqs)
 }
 
-// RegistryHarness wraps an in-memory ggcr registry behind httptest.Server.
+// RegistryHarness wraps an in-memory ggcr registry behind httptest.Server using pkg/registry.
 type RegistryHarness struct {
-	Server   *httptest.Server
+	Server   *pokkumregistry.Server
 	counting *countingRegistry
 }
 
-// NewRegistryHarness spins up a new in-memory OCI registry.
+// NewRegistryHarness spins up a new in-memory OCI registry using pkg/registry.NewServer.
 func NewRegistryHarness(t *testing.T) *RegistryHarness {
 	t.Helper()
-	cr := &countingRegistry{inner: registry.New()}
-	s := httptest.NewServer(cr)
-	t.Cleanup(s.Close)
+	cr := &countingRegistry{}
+	srv, err := pokkumregistry.NewServer(pokkumregistry.WithHandlerWrapper(func(h http.Handler) http.Handler {
+		cr.inner = h
+		return cr
+	}))
+	if err != nil {
+		t.Fatalf("failed to start ephemeral registry: %v", err)
+	}
+	t.Cleanup(srv.Close)
 
 	return &RegistryHarness{
-		Server:   s,
+		Server:   srv,
 		counting: cr,
 	}
 }
@@ -99,12 +103,12 @@ func (h *RegistryHarness) URL() string {
 
 // Address returns the host:port string of the registry without "http://".
 func (h *RegistryHarness) Address() string {
-	return strings.TrimPrefix(h.Server.URL, "http://")
+	return h.Server.Host()
 }
 
 // Repo constructs a repository reference string for this test registry, e.g. "127.0.0.1:12345/my-repo".
 func (h *RegistryHarness) Repo(name string) string {
-	return h.Address() + "/" + name
+	return h.Server.Repo(name)
 }
 
 // RecordedRequests returns a copy of all HTTP requests received by the test registry.
