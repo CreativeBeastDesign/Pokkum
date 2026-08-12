@@ -769,7 +769,13 @@ kind: Deployment
 metadata:
   name: app
 spec:
+  selector:
+    matchLabels:
+      app: app
   template:
+    metadata:
+      labels:
+        app: app
     spec:
       containers:
       - name: main
@@ -801,6 +807,45 @@ spec:
 		pdbDoc := string(res.Documents[2].Content)
 		if !strings.Contains(pdbDoc, "kind: PodDisruptionBudget") || !strings.Contains(pdbDoc, "pokkum-pdb") {
 			t.Errorf("expected PodDisruptionBudget in document 2:\n%s", pdbDoc)
+		}
+		if !strings.Contains(pdbDoc, `app: "app"`) {
+			t.Errorf("expected PodDisruptionBudget selector scoped to workload label app=app, not empty:\n%s", pdbDoc)
+		}
+		if strings.Contains(pdbDoc, "matchLabels: {}") {
+			t.Errorf("PodDisruptionBudget selector must not be the namespace-wide empty selector:\n%s", pdbDoc)
+		}
+		if !strings.Contains(netPolDoc, `app: "app"`) || strings.Contains(netPolDoc, "podSelector: {}") {
+			t.Errorf("expected NetworkPolicy podSelector scoped to workload label app=app, not empty:\n%s", netPolDoc)
+		}
+	})
+
+	t.Run("resource defaults without extractable labels skips PDB", func(t *testing.T) {
+		doc := ports.Document{
+			Name: "deploy-nolabels.yaml",
+			Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+      - name: main
+        image: pokkum://./src/app
+`),
+		}
+		res, err := r.Resolve(ctx, ports.ResolveRequest{
+			Documents:        []ports.Document{doc},
+			ResourceDefaults: true,
+			Build: func(_ context.Context, _ string) (string, error) {
+				return "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(res.Documents) != 1 {
+			t.Fatalf("expected PDB generation to be skipped when no workload labels are found, got %d documents", len(res.Documents))
 		}
 	})
 }

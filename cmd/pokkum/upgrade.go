@@ -22,10 +22,14 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
-// DefaultReleasePublicKeyPEM is the default embedded Cosign public key for Pokkum release verification.
+// DefaultReleasePublicKeyPEM is the default embedded Cosign public key for
+// Pokkum release verification, used when --key is not given. It must match
+// the private key CI signs releases with (the COSIGN_PRIVATE_KEY secret
+// referenced by the "signs" block in .goreleaser.yaml) or every upgrade
+// will correctly report verified=false against real releases.
 const DefaultReleasePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7p+s2iXw81hZg75Ym3h58H4Xf8v0
-5jX5W9R+m6T4Z2g3h+r9n8l7k6j5i4h3g2f1e0d9c8b7a6
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEuKBM0mSB+mXkDMDhYhoYbKhRrcSx
+6y7e6Uw4PRw2wuxzSJN4GeK+/JY2llqKlVWnmMwZSqeweiCftb1h0A5dUw==
 -----END PUBLIC KEY-----`
 
 type upgradeFlags struct {
@@ -191,7 +195,20 @@ func runUpgrade(ctx context.Context, logger *slog.Logger, verifier ports.Release
 	}
 
 	verified := false
-	if verifier != nil {
+	switch {
+	case verifier == nil && !flags.check:
+		// Apply mode with no verifier at all must fail closed: silently
+		// skipping straight to download+install would reintroduce the
+		// original bug (Verified hardcoded true with zero checks) in a new
+		// shape — "no verifier configured" behaving identically to "verified".
+		return fmt.Errorf("upgrade: no release verifier configured, refusing to install an unverified binary: %w", core.ErrReleaseVerificationFailed)
+	case verifier == nil:
+		// --check only reports; nothing gets installed, so an honest
+		// verified=false is safe to surface instead of hard-failing.
+		if logger != nil {
+			logger.WarnContext(ctx, "no release verifier configured; skipping signature check")
+		}
+	default:
 		err := verifier.VerifyArtifactSignature(ctx, ports.VerifyReleaseArtifactRequest{
 			ArtifactBytes:  checksumsData,
 			SignatureBytes: checksumsSigData,
@@ -281,10 +298,14 @@ func runUpgrade(ctx context.Context, logger *slog.Logger, verifier ports.Release
 		return fmt.Errorf("parse checksum for %s: %w: %w", archiveName, err, core.ErrReleaseUpgradeFailed)
 	}
 
-	if verifier != nil {
-		if err := verifier.VerifyChecksum(archiveData, expectedChecksum); err != nil {
-			return fmt.Errorf("release checksum verification failed: %w: %w", err, core.ErrReleaseVerificationFailed)
-		}
+	// verifier is guaranteed non-nil here: the signature-check switch above
+	// already returned an error for (verifier == nil && !flags.check), and
+	// this download/apply path only runs when !flags.check.
+	if verifier == nil {
+		return fmt.Errorf("upgrade: no release verifier configured, refusing to install an unverified binary: %w", core.ErrReleaseVerificationFailed)
+	}
+	if err := verifier.VerifyChecksum(archiveData, expectedChecksum); err != nil {
+		return fmt.Errorf("release checksum verification failed: %w: %w", err, core.ErrReleaseVerificationFailed)
 	}
 
 	binaryBytes, err := extractBinaryFromTarGz(archiveData, "pokkum")
@@ -372,7 +393,7 @@ func extractBinaryFromTarGz(tarGzData []byte, binaryName string) ([]byte, error)
 		}
 
 		baseName := filepath.Base(header.Name)
-		if baseName == binaryName && (header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeRegA) {
+		if baseName == binaryName && header.Typeflag == tar.TypeReg {
 			return io.ReadAll(tr)
 		}
 	}

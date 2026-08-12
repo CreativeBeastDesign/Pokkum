@@ -54,8 +54,17 @@ signs:
   - id: cosign
     signature: "${artifact}.sig"
     cmd: cosign
+    # Key-based signing, not keyless: pokkum upgrade verifies against a
+    # fixed embedded public key (DefaultReleasePublicKeyPEM in
+    # cmd/pokkum/upgrade.go), which has no way to validate a Fulcio
+    # short-lived cert chain or do a Rekor transparency-log lookup. The
+    # corresponding private key must be set as the COSIGN_PRIVATE_KEY
+    # secret in this repo's Actions settings (see .github/workflows/release.yml);
+    # its public half must match DefaultReleasePublicKeyPEM exactly, or every
+    # `pokkum upgrade` will report verified=false against real releases.
     args:
       - "sign-blob"
+      - "--key=env://COSIGN_PRIVATE_KEY"
       - "--output-signature=${signature}"
       - "${artifact}"
       - "--yes"

@@ -2,6 +2,12 @@ package baseimage
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,7 +25,9 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/static"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -567,6 +575,171 @@ func TestResolve_BaseImageCosignSignatureVerification(t *testing.T) {
 	if res.Digest.String() == "" {
 		t.Error("expected non-empty digest for resolved image")
 	}
+}
+
+// genECKeyPairPEM generates an ephemeral P-256 key pair for signature tests,
+// so verification correctness is proven independently of whatever the
+// package's embedded DefaultBaseImagePublicKeyPEM happens to be.
+func genECKeyPairPEM(t *testing.T) (privPEM, pubPEM []byte) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	privDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("MarshalPKIXPublicKey: %v", err)
+	}
+	privPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER})
+	pubPEM = pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
+	return privPEM, pubPEM
+}
+
+// pushCosignSignature signs digest with privPEM using a real cosign.Signer
+// and pushes the resulting Simple Signing payload as an OCI image tagged
+// "<repo>:<alg>-<hex>.sig", exactly as verifyBaseImageSignature expects to
+// find it — a real signature artifact, not a stub.
+func pushCosignSignature(t *testing.T, s *httptest.Server, repo string, digest v1.Hash, privPEM []byte, corrupt bool) {
+	t.Helper()
+
+	signer := cosign.NewSigner(nil)
+	bundle, err := signer.Sign(context.Background(), ports.CosignSignRequest{
+		Repo:   repo,
+		Digest: digest,
+		KeyPEM: privPEM,
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	b64Sig := bundle.Base64Signature
+	if corrupt {
+		// Flip the signature's first byte after decoding so the bundle is
+		// still valid base64 (and gets past the decode step) but fails
+		// cryptographic verification.
+		raw, err := base64.StdEncoding.DecodeString(b64Sig)
+		if err != nil {
+			t.Fatalf("decode signature for corruption: %v", err)
+		}
+		raw[0] ^= 0xFF
+		b64Sig = base64.StdEncoding.EncodeToString(raw)
+	}
+
+	layer := static.NewLayer(bundle.PayloadBytes, "application/vnd.dev.cosign.simplesigning.v1+json")
+	sigImg, err := mutate.Append(empty.Image, mutate.Addendum{
+		Layer:       layer,
+		Annotations: map[string]string{"dev.cosignproject.cosign/signature": b64Sig},
+	})
+	if err != nil {
+		t.Fatalf("mutate.Append: %v", err)
+	}
+
+	sigRef := registryRef(t, s, repo[strings.Index(repo, "/")+1:]+":"+digest.Algorithm+"-"+digest.Hex+".sig")
+	tag, err := name.NewTag(sigRef, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(%q): %v", sigRef, err)
+	}
+	if err := remote.Write(tag, sigImg); err != nil {
+		t.Fatalf("Write signature: %v", err)
+	}
+}
+
+func TestResolve_BaseImageCosignSignatureVerification_RealSignature(t *testing.T) {
+	s, _ := newTestRegistry(t)
+	ref := pushImage(t, s, "app/signed:v1", ports.LinuxAMD64)
+	privPEM, pubPEM := genECKeyPairPEM(t)
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	// Resolve once without verification to learn the pushed digest and repo
+	// string exactly as the resolver computes them.
+	pre, err := r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:    ports.BaseImageCustom,
+		Ref:       ref,
+		Platforms: []ports.Platform{ports.LinuxAMD64},
+		Insecure:  true,
+	})
+	if err != nil {
+		t.Fatalf("pre-resolve: %v", err)
+	}
+	parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	repo := parsedRef.Context().Name()
+
+	t.Run("genuinely signed image passes verification", func(t *testing.T) {
+		pushCosignSignature(t, s, repo, pre.Digest, privPEM, false)
+		t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
+
+		res, err := r.Resolve(ctx, ports.BaseImageRequest{
+			Preset:          ports.BaseImageCustom,
+			Ref:             ref,
+			Platforms:       []ports.Platform{ports.LinuxAMD64},
+			Insecure:        true,
+			VerifySignature: true,
+		})
+		if err != nil {
+			t.Fatalf("expected genuinely-signed image to verify, got: %v", err)
+		}
+		if res.Digest != pre.Digest {
+			t.Errorf("digest mismatch: got %s, want %s", res.Digest, pre.Digest)
+		}
+	})
+
+	t.Run("tampered signature fails verification", func(t *testing.T) {
+		ref2 := pushImage(t, s, "app/tampered:v1", ports.LinuxAMD64)
+		pre2, err := r.Resolve(ctx, ports.BaseImageRequest{
+			Preset: ports.BaseImageCustom, Ref: ref2,
+			Platforms: []ports.Platform{ports.LinuxAMD64}, Insecure: true,
+		})
+		if err != nil {
+			t.Fatalf("pre-resolve: %v", err)
+		}
+		pushCosignSignature(t, s, "app/tampered", pre2.Digest, privPEM, true)
+		t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
+
+		_, err = r.Resolve(ctx, ports.BaseImageRequest{
+			Preset:          ports.BaseImageCustom,
+			Ref:             ref2,
+			Platforms:       []ports.Platform{ports.LinuxAMD64},
+			Insecure:        true,
+			VerifySignature: true,
+		})
+		if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+			t.Fatalf("expected core.ErrBaseSignatureInvalid for tampered signature, got: %v", err)
+		}
+	})
+
+	t.Run("wrong public key fails verification", func(t *testing.T) {
+		ref3 := pushImage(t, s, "app/wrongkey:v1", ports.LinuxAMD64)
+		pre3, err := r.Resolve(ctx, ports.BaseImageRequest{
+			Preset: ports.BaseImageCustom, Ref: ref3,
+			Platforms: []ports.Platform{ports.LinuxAMD64}, Insecure: true,
+		})
+		if err != nil {
+			t.Fatalf("pre-resolve: %v", err)
+		}
+		pushCosignSignature(t, s, "app/wrongkey", pre3.Digest, privPEM, false)
+		_, otherPub := genECKeyPairPEM(t)
+		t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(otherPub))
+
+		_, err = r.Resolve(ctx, ports.BaseImageRequest{
+			Preset:          ports.BaseImageCustom,
+			Ref:             ref3,
+			Platforms:       []ports.Platform{ports.LinuxAMD64},
+			Insecure:        true,
+			VerifySignature: true,
+		})
+		if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+			t.Fatalf("expected core.ErrBaseSignatureInvalid for wrong public key, got: %v", err)
+		}
+	})
 }
 
 func TestResolve_CustomRegistryConfig(t *testing.T) {

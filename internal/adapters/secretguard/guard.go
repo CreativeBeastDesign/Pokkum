@@ -42,18 +42,18 @@ var defaultSecretRules = []rule{
 	},
 }
 
-var _ ports.SecretGuard = (*SecretGuardAdapter)(nil)
+var _ ports.SecretGuard = (*Adapter)(nil)
 
-// SecretGuardAdapter implements ports.SecretGuard.
-type SecretGuardAdapter struct{}
+// Adapter implements ports.SecretGuard.
+type Adapter struct{}
 
-// NewAdapter constructs a new SecretGuardAdapter.
-func NewAdapter() *SecretGuardAdapter {
-	return &SecretGuardAdapter{}
+// NewAdapter constructs a new Adapter.
+func NewAdapter() *Adapter {
+	return &Adapter{}
 }
 
 // ScanDirectory walks req.ProjectDir and checks files for hardcoded secret leaks.
-func (a *SecretGuardAdapter) ScanDirectory(ctx context.Context, req ports.SecretScanRequest) (ports.SecretScanResult, error) {
+func (a *Adapter) ScanDirectory(ctx context.Context, req ports.SecretScanRequest) (ports.SecretScanResult, error) {
 	if req.ProjectDir == "" {
 		return ports.SecretScanResult{Passed: true}, nil
 	}
@@ -67,7 +67,7 @@ func (a *SecretGuardAdapter) ScanDirectory(ctx context.Context, req ports.Secret
 		}
 		re, err := regexp.Compile(pat)
 		if err != nil {
-			return ports.SecretScanResult{}, fmt.Errorf("secretguardutils: invalid allow pattern %q: %w", pat, err)
+			return ports.SecretScanResult{}, fmt.Errorf("secretguard: invalid allow pattern %q: %w", pat, err)
 		}
 		compiledAllow = append(compiledAllow, re)
 	}
@@ -116,7 +116,7 @@ func (a *SecretGuardAdapter) ScanDirectory(ctx context.Context, req ports.Secret
 	})
 
 	if err != nil {
-		return ports.SecretScanResult{}, fmt.Errorf("secretguardutils: scan %s: %w", req.ProjectDir, err)
+		return ports.SecretScanResult{}, fmt.Errorf("secretguard: scan %s: %w", req.ProjectDir, err)
 	}
 
 	return ports.SecretScanResult{

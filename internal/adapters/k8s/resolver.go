@@ -47,6 +47,16 @@ type imageNodeTarget struct {
 	// ancestor was found (a container-shaped mapping outside any recognisable
 	// Pod spec), in which case pod-level injection is skipped for it.
 	podSpecNode *yaml.Node
+
+	// templateNode is the nearest ancestor mapping that owns both a
+	// "metadata" and a "spec" key and contains podSpecNode somewhere beneath
+	// its "spec" — i.e. the Pod template (v1.PodTemplateSpec) for a
+	// Deployment/StatefulSet/DaemonSet/Job, or the Pod object itself for a
+	// bare Pod. Its "metadata.labels" are the labels the running Pod will
+	// actually carry, which is what NetworkPolicy/PodDisruptionBudget
+	// selectors need to scope to this workload instead of the whole
+	// namespace. Nil when no such ancestor was found.
+	templateNode *yaml.Node
 }
 
 // parseYAMLDocuments decodes a byte slice into individual YAML AST document nodes.
@@ -104,17 +114,29 @@ func isContainersKey(k string) bool {
 // nearest ancestor Pod spec mapping for each one.
 func findImageNodes(node *yaml.Node) []imageNodeTarget {
 	var targets []imageNodeTarget
-	var walk func(n *yaml.Node, podSpec *yaml.Node)
-	walk = func(n *yaml.Node, podSpec *yaml.Node) {
+	var walk func(n *yaml.Node, podSpec *yaml.Node, template *yaml.Node)
+	walk = func(n *yaml.Node, podSpec *yaml.Node, template *yaml.Node) {
 		if n == nil {
 			return
 		}
 		switch n.Kind {
 		case yaml.DocumentNode:
 			for _, item := range n.Content {
-				walk(item, podSpec)
+				walk(item, podSpec, template)
 			}
 		case yaml.MappingNode:
+			// A mapping that owns both "metadata" and "spec" is a
+			// PodTemplateSpec-shaped object — the Pod template nested under
+			// a Deployment/StatefulSet/DaemonSet/(Cron)Job, or a bare Pod
+			// itself. Re-evaluated at every level so the innermost match
+			// (the actual template, not an outer wrapper like a CronJob's
+			// jobTemplate) wins by the time we reach the containers.
+			childTemplate := template
+			if _, hasMeta := mapGet(n, "metadata"); hasMeta {
+				if _, hasSpec := mapGet(n, "spec"); hasSpec {
+					childTemplate = n
+				}
+			}
 			for i := 0; i < len(n.Content)-1; i += 2 {
 				keyNode := n.Content[i]
 				valNode := n.Content[i+1]
@@ -124,25 +146,26 @@ func findImageNodes(node *yaml.Node) []imageNodeTarget {
 						valNode:       valNode,
 						containerNode: n,
 						podSpecNode:   podSpec,
+						templateNode:  childTemplate,
 					})
 				}
 				childPodSpec := podSpec
 				if keyNode.Kind == yaml.ScalarNode && isContainersKey(keyNode.Value) && valNode.Kind == yaml.SequenceNode {
 					childPodSpec = n
 				}
-				walk(valNode, childPodSpec)
+				walk(valNode, childPodSpec, childTemplate)
 			}
 		case yaml.SequenceNode:
 			for _, item := range n.Content {
-				walk(item, podSpec)
+				walk(item, podSpec, template)
 			}
 		case yaml.AliasNode:
 			if n.Alias != nil {
-				walk(n.Alias, podSpec)
+				walk(n.Alias, podSpec, template)
 			}
 		}
 	}
-	walk(node, nil)
+	walk(node, nil, nil)
 	return targets
 }
 
@@ -416,9 +439,15 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 		}
 
 		var containerNodes []*yaml.Node
+		var templateNodes []*yaml.Node
+		seenTemplates := make(map[*yaml.Node]bool)
 		for _, t := range pd.targets {
 			if t.containerNode != nil {
 				containerNodes = append(containerNodes, t.containerNode)
+			}
+			if t.templateNode != nil && !seenTemplates[t.templateNode] {
+				seenTemplates[t.templateNode] = true
+				templateNodes = append(templateNodes, t.templateNode)
 			}
 			val := t.valNode.Value
 			path, _, _ := parsePokkumRef(val, false)
@@ -459,12 +488,15 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 			Content: rewrittenContent,
 		}
 
+		workloadLabels := extractWorkloadPodLabels(templateNodes)
 		if req.NetworkPolicy {
 			portsList := extractWorkloadContainerPorts(containerNodes)
-			resultDocs = append(resultDocs, generateNetworkPolicyDocument(pd.doc.Name, portsList, req.WithOTELSidecar))
+			resultDocs = append(resultDocs, generateNetworkPolicyDocument(pd.doc.Name, portsList, workloadLabels, req.WithOTELSidecar))
 		}
 		if req.ResourceDefaults {
-			resultDocs = append(resultDocs, generatePodDisruptionBudgetDocument(pd.doc.Name))
+			if pdbDoc, ok := generatePodDisruptionBudgetDocument(pd.doc.Name, workloadLabels); ok {
+				resultDocs = append(resultDocs, pdbDoc)
+			}
 		}
 	}
 
@@ -564,7 +596,56 @@ func extractWorkloadContainerPorts(containerNodes []*yaml.Node) []int {
 	return portsList
 }
 
-func generateNetworkPolicyDocument(docName string, portsList []int, withOTEL bool) ports.Document {
+// extractWorkloadPodLabels merges metadata.labels off every Pod template
+// found for a document into one map, keyed by label name. For a
+// Deployment/StatefulSet/DaemonSet/(Cron)Job this is spec.template.metadata.labels
+// — the labels the running Pod actually carries, and which the owning
+// controller's own spec.selector.matchLabels is required to match (the
+// Kubernetes API rejects a controller whose selector doesn't match its
+// template). For a bare Pod it is the Pod's own metadata.labels. Returns an
+// empty (non-nil) map when no labels were found anywhere.
+func extractWorkloadPodLabels(templateNodes []*yaml.Node) map[string]string {
+	labels := make(map[string]string)
+	for _, t := range templateNodes {
+		metaNode, ok := mapGet(t, "metadata")
+		if !ok {
+			continue
+		}
+		labelsNode, ok := mapGet(metaNode, "labels")
+		if !ok || labelsNode.Kind != yaml.MappingNode {
+			continue
+		}
+		for i := 0; i+1 < len(labelsNode.Content); i += 2 {
+			k, v := labelsNode.Content[i].Value, labelsNode.Content[i+1].Value
+			if k != "" {
+				labels[k] = v
+			}
+		}
+	}
+	return labels
+}
+
+// writeMatchLabels renders a "matchLabels:" block at the given indent (in
+// spaces), sorted by key for deterministic output. Renders "matchLabels: {}"
+// when labels is empty — callers that must not silently fall back to an
+// unscoped (namespace-wide) selector should check len(labels) before calling.
+func writeMatchLabels(sb *strings.Builder, indent string, labels map[string]string) {
+	if len(labels) == 0 {
+		sb.WriteString(indent + "matchLabels: {}\n")
+		return
+	}
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	sb.WriteString(indent + "matchLabels:\n")
+	for _, k := range keys {
+		fmt.Fprintf(sb, "%s  %s: %q\n", indent, k, labels[k])
+	}
+}
+
+func generateNetworkPolicyDocument(docName string, portsList []int, workloadLabels map[string]string, withOTEL bool) ports.Document {
 	if len(portsList) == 0 {
 		portsList = []int{3000, 8081}
 	}
@@ -576,7 +657,12 @@ func generateNetworkPolicyDocument(docName string, portsList []int, withOTEL boo
 	sb.WriteString("metadata:\n")
 	sb.WriteString("  name: pokkum-network-policy\n")
 	sb.WriteString("spec:\n")
-	sb.WriteString("  podSelector: {}\n")
+	if len(workloadLabels) > 0 {
+		sb.WriteString("  podSelector:\n")
+		writeMatchLabels(&sb, "    ", workloadLabels)
+	} else {
+		sb.WriteString("  podSelector: {}\n")
+	}
 	sb.WriteString("  policyTypes:\n")
 	sb.WriteString("    - Ingress\n")
 	sb.WriteString("    - Egress\n")
@@ -602,18 +688,30 @@ func generateNetworkPolicyDocument(docName string, portsList []int, withOTEL boo
 	}
 }
 
-func generatePodDisruptionBudgetDocument(docName string) ports.Document {
-	pdbYAML := `apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: pokkum-pdb
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels: {}
-`
+// generatePodDisruptionBudgetDocument builds a PodDisruptionBudget scoped to
+// workloadLabels, the labels pulled off the workload's own Pod template.
+// Returns ok=false and skips generation entirely when no labels could be
+// found: an empty selector matches every Pod in the namespace, and silently
+// emitting a namespace-wide eviction budget would be worse than emitting
+// none — the caller is expected to log or otherwise surface this rather than
+// treat it as success.
+func generatePodDisruptionBudgetDocument(docName string, workloadLabels map[string]string) (ports.Document, bool) {
+	if len(workloadLabels) == 0 {
+		return ports.Document{}, false
+	}
+
+	var sb strings.Builder
+	sb.WriteString("apiVersion: policy/v1\n")
+	sb.WriteString("kind: PodDisruptionBudget\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString("  name: pokkum-pdb\n")
+	sb.WriteString("spec:\n")
+	sb.WriteString("  minAvailable: 1\n")
+	sb.WriteString("  selector:\n")
+	writeMatchLabels(&sb, "    ", workloadLabels)
+
 	return ports.Document{
 		Name:    docName + "#pdb",
-		Content: []byte(strings.TrimSpace(pdbYAML) + "\n"),
-	}
+		Content: []byte(sb.String()),
+	}, true
 }

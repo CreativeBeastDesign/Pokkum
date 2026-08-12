@@ -546,15 +546,34 @@ func (r *Resolver) logger() *slog.Logger {
 	return r.log
 }
 
-// DefaultBaseImagePublicKeyPEM is the fallback Cosign public key for verifying base images.
+// DefaultBaseImagePublicKeyPEM is the fallback Cosign public key for
+// verifying base images when POKKUM_BASE_IMAGE_PUBKEY is not set. It is a
+// real, valid P-256 PKIX public key so parsePublicKeyPEM always succeeds,
+// but it does not correspond to any key that actually signs upstream
+// distroless or Chainguard images — see the scope note below.
 const DefaultBaseImagePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7p+s2iXw81hZg75Ym3h58H4Xf8v0
-5jX5W9R+m6T4Z2g3h+r9n8l7k6j5i4h3g2f1e0d9c8b7a6
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbCr5pcxh+/q57RngLq9ycZmUDjZd
+3KhRlVmB3LMAG1HtAwVdDIsKATtrP020TSVXeBVvOy1TntoxpA3ijNvHcA==
 -----END PUBLIC KEY-----`
 
+// verifyBaseImageSignature checks a Cosign "Simple Signing" signature
+// against pull's digest, verified with a static ECDSA/Ed25519 public key
+// (POKKUM_BASE_IMAGE_PUBKEY, falling back to DefaultBaseImagePublicKeyPEM).
+//
+// Scope: this verifies base images signed the way Pokkum itself signs a
+// custom/self-hosted base with a static key pair. It does NOT verify real
+// upstream distroless or Chainguard images out of the box — both projects
+// sign with keyless Sigstore (Fulcio short-lived certs + Rekor transparency
+// log), which has no fixed public key to pin here. Verifying those would
+// need a separate keyless-verification path (cert-chain + Rekor lookup),
+// which this adapter does not implement. Operators who re-sign a pinned
+// base digest with their own key, or who use a custom base they sign
+// themselves, get real protection from this function today; operators
+// relying on the distroless/Chainguard defaults do not, despite
+// VerifySignature defaulting to true for every preset.
 func (r *Resolver) verifyBaseImageSignature(ctx context.Context, ref string, pull *pulledManifest, insecure bool, registryConfigPath string) error {
-	if strings.Contains(ref, "unsigned-test-image") {
-		return fmt.Errorf("baseimage: signature verification failed for %s: %w", ref, core.ErrBaseSignatureInvalid)
+	if r.signer == nil {
+		return fmt.Errorf("baseimage: no Cosign signer configured, refusing to treat %s as verified: %w", ref, core.ErrBaseSignatureInvalid)
 	}
 
 	parsedRef, err := name.ParseReference(ref)
@@ -603,23 +622,32 @@ func (r *Resolver) verifyBaseImageSignature(ctx context.Context, ref string, pul
 		return fmt.Errorf("baseimage: read signature manifest in %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
 	}
 
+	// dev.cosignproject.cosign/signature is Cosign's real static-signature
+	// annotation key (see sigstore/cosign pkg/oci/static). It is checked on
+	// the layer descriptor first (where cosign actually writes it) and, as a
+	// defensive fallback, on the manifest itself.
+	const cosignSignatureAnnotation = "dev.cosignproject.cosign/signature"
+
 	var b64Sig string
 	if len(manifest.Layers) > 0 && manifest.Layers[0].Annotations != nil {
-		if sig, ok := manifest.Layers[0].Annotations["dev.cosign.teleor/signature"]; ok {
+		if sig, ok := manifest.Layers[0].Annotations[cosignSignatureAnnotation]; ok {
 			b64Sig = sig
 		} else if sig, ok := manifest.Layers[0].Annotations["org.opencontainers.image.signature"]; ok {
 			b64Sig = sig
 		}
 	}
 	if b64Sig == "" && manifest.Annotations != nil {
-		if sig, ok := manifest.Annotations["dev.cosign.teleor/signature"]; ok {
+		if sig, ok := manifest.Annotations[cosignSignatureAnnotation]; ok {
 			b64Sig = sig
 		}
 	}
+	if b64Sig == "" {
+		return fmt.Errorf("baseimage: no %s annotation found on signature manifest %s: %w", cosignSignatureAnnotation, sigRefStr, core.ErrBaseSignatureInvalid)
+	}
 
-	sigBytes, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(b64Sig))
-	if len(sigBytes) == 0 {
-		sigBytes = payloadBytes
+	sigBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(b64Sig))
+	if decErr != nil || len(sigBytes) == 0 {
+		return fmt.Errorf("baseimage: decode base64 signature from %s: %w: %w", sigRefStr, decErr, core.ErrBaseSignatureInvalid)
 	}
 
 	bundle := ports.CosignSignatureBundle{
@@ -635,10 +663,8 @@ func (r *Resolver) verifyBaseImageSignature(ctx context.Context, ref string, pul
 		pubKeyPEM = []byte(DefaultBaseImagePublicKeyPEM)
 	}
 
-	if r.signer != nil {
-		if err := r.signer.Verify(ctx, bundle, pubKeyPEM, repo, digest); err != nil {
-			return fmt.Errorf("baseimage: Cosign signature verification failed for %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
-		}
+	if err := r.signer.Verify(ctx, bundle, pubKeyPEM, repo, digest); err != nil {
+		return fmt.Errorf("baseimage: Cosign signature verification failed for %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
 	}
 
 	r.logger().Info("base image Cosign signature verified", "ref", ref, "sig_ref", sigRefStr)

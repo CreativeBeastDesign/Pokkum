@@ -131,7 +131,7 @@ _The shippable minimum viable product for enterprise-grade adoption._
 
 - [x] Version pinning of `pokkum` itself in generated manifest annotations. (no new flag — folds into `--image-label`/auto-annotations above)
 - [x] A GitHub Action wrapping the CLI (mirroring `setup-ko`). (no new `pokkum` flag — Action inputs like `version`/`token`, mirroring `setup-ko`)
-- [x] Rollback support (`pokkum rollback` reading from build history). (new subcommand: `pokkum rollback -f <manifest> --to=<ref>`, reusing `-f`/`--file` from `resolve`/`apply`)
+- [x] Rollback support (`pokkum rollback` rewrites a manifest's `image:` reference to a user-supplied tag/digest). (new subcommand: `pokkum rollback -f <manifest> --to=<ref>`, reusing `-f`/`--file` from `resolve`/`apply`; `--to` is required — there is no build-history store to auto-discover a prior version from, see Backlog)
 - [x] Signed Self-Distribution (`pokkum upgrade`): Signature verification of release artifacts and binary self-updates via `ports.ReleaseVerifier` and `cosign`. (new subcommand: `pokkum upgrade`, new flags: `--check`, `--version`, `--offline`, `--key`)
 
 
@@ -146,6 +146,7 @@ _Features demoted or planned for later iterations._
 - [ ] Multi-Environment Management: Config templating and secret-manager integrations. (new flag: `--target-env=<name>` on `build`/`resolve`/`apply` — named to avoid colliding with `build`'s existing `--telemetry-env`)
 - [ ] Hooks System: Pre/post-build hooks (shell, Bun scripts, webhooks). (new subcommands: `pokkum hook pre-build`, `pokkum hook post-build`; new flag: `--skip-hooks` on `build`)
 - [ ] Image Provenance Timeline: `pokkum history <image>` linking back to CI runs and PRs. (new subcommand: `pokkum history <image>`, reuses `--output=json`)
+- [ ] History-Aware Rollback: `pokkum rollback` without `--to` auto-discovers the previous deployed ref instead of requiring the caller to already know it. Needs a build-history store — natural to build on top of the Image Provenance Timeline item above rather than duplicate its tracking.
 - [ ] Policy as Code: `pokkum policy check` with Rego/OPA. (new subcommand: `pokkum policy check`, new flag: `--policy=<path>`)
 - [ ] Service Mesh Integration: Auto-generate Istio/Linkerd configs and mTLS paths. (new subcommand: `pokkum mesh generate`, new flags: `--mtls`, `--mesh-telemetry` — named to avoid colliding with `build`'s OTel `--telemetry`)
 - [ ] Progressive Deployment Strategies: Canary/blue-green deployments (mostly handled by Argo/Flux). (new subcommand: `pokkum deploy`, new flags: `--canary=<percent>`, `--blue-green`, `--auto-rollback`)

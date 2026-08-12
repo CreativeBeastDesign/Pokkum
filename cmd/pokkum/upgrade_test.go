@@ -97,7 +97,9 @@ func TestUpgradeCommand_Check_OnlineVerified(t *testing.T) {
 		t.Fatalf("create temp key file: %v", err)
 	}
 	defer os.Remove(keyFile.Name())
-	keyFile.Write(pubPEM)
+	if _, err := keyFile.Write(pubPEM); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
 	keyFile.Close()
 
 	targetVer := "1.1.0"
@@ -147,7 +149,9 @@ func TestUpgradeCommand_Check_OnlineVerified(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
 	outStr := buf.String()
 
 	if !strings.Contains(outStr, `"verified": true`) {
@@ -166,7 +170,9 @@ func TestUpgradeCommand_Check_InvalidSignature(t *testing.T) {
 		t.Fatalf("create temp key file: %v", err)
 	}
 	defer os.Remove(keyFile.Name())
-	keyFile.Write(pubPEM)
+	if _, err := keyFile.Write(pubPEM); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
 	keyFile.Close()
 
 	targetVer := "1.1.0"
@@ -205,7 +211,9 @@ func TestUpgradeCommand_Check_InvalidSignature(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
 	outStr := buf.String()
 
 	if !strings.Contains(outStr, `"verified": false`) {
@@ -221,7 +229,9 @@ func TestUpgradeCommand_ApplyUpgrade(t *testing.T) {
 		t.Fatalf("create temp key file: %v", err)
 	}
 	defer os.Remove(keyFile.Name())
-	keyFile.Write(pubPEM)
+	if _, err := keyFile.Write(pubPEM); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
 	keyFile.Close()
 
 	// Create temp target binary path
@@ -232,7 +242,9 @@ func TestUpgradeCommand_ApplyUpgrade(t *testing.T) {
 	defer os.RemoveAll(tempTargetDir)
 
 	dummyExecPath := filepath.Join(tempTargetDir, "pokkum")
-	os.WriteFile(dummyExecPath, []byte("old binary"), 0755)
+	if err := os.WriteFile(dummyExecPath, []byte("old binary"), 0755); err != nil {
+		t.Fatalf("write dummy exec: %v", err)
+	}
 
 	targetVer := "1.2.0"
 	archiveName := fmt.Sprintf("pokkum_%s_%s_%s.tar.gz", targetVer, runtime.GOOS, runtime.GOARCH)
@@ -280,7 +292,9 @@ func TestUpgradeCommand_ApplyUpgrade(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
 	outStr := buf.String()
 
 	if !strings.Contains(outStr, `"applied": true`) {
@@ -294,5 +308,66 @@ func TestUpgradeCommand_ApplyUpgrade(t *testing.T) {
 	}
 	if string(newContent) != string(mockBinary) {
 		t.Errorf("binary content mismatch: expected %q, got %q", string(mockBinary), string(newContent))
+	}
+}
+
+// TestUpgradeCommand_NilVerifier_ApplyFailsClosed guards against the exact
+// shape of the original bug: a nil verifier must never let apply mode fall
+// through to downloading and installing a binary with Verified silently
+// true. It must error before any network call.
+func TestUpgradeCommand_NilVerifier_ApplyFailsClosed(t *testing.T) {
+	flags := &upgradeFlags{
+		check:  false,
+		target: "9.9.9",
+		output: "json",
+	}
+
+	err := runUpgrade(context.Background(), discardLogger(), nil, &mockFetcher{}, flags, "pokkum")
+	if err == nil {
+		t.Fatal("expected error when applying an upgrade with no verifier configured, got nil")
+	}
+}
+
+// TestUpgradeCommand_NilVerifier_CheckReportsUnverified confirms --check
+// with no verifier configured degrades to an honest verified=false report
+// instead of erroring — nothing gets installed in check mode, so this is
+// safe, unlike the apply-mode case above.
+func TestUpgradeCommand_NilVerifier_CheckReportsUnverified(t *testing.T) {
+	targetVer := "1.1.0"
+	archiveName := fmt.Sprintf("pokkum_%s_%s_%s.tar.gz", targetVer, runtime.GOOS, runtime.GOARCH)
+	checksumsContent := []byte(fmt.Sprintf("1111111111111111111111111111111111111111111111111111111111111111  %s\n", archiveName))
+
+	baseURL := fmt.Sprintf("https://github.com/CreativeBeastDesign/pokkum/releases/download/v%s", targetVer)
+	fetcher := &mockFetcher{
+		responses: map[string][]byte{
+			baseURL + "/checksums.txt":     checksumsContent,
+			baseURL + "/checksums.txt.sig": []byte("irrelevant-without-a-verifier"),
+		},
+	}
+
+	flags := &upgradeFlags{
+		check:  true,
+		target: targetVer,
+		output: "json",
+	}
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runUpgrade(context.Background(), discardLogger(), nil, fetcher, flags, "pokkum")
+	w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("runUpgrade check with nil verifier failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"verified": false`) {
+		t.Errorf("expected json output to contain verified: false with no verifier configured, got:\n%s", buf.String())
 	}
 }
