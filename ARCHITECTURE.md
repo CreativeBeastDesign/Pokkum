@@ -39,7 +39,8 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
 ### Core Layers
 
 1. **CLI Layer (`cmd/pokkum/`)**:
-   - `build.go`: Parses flags (`--platform`, `--base`, `--sbom`, `--sbom-attach`, `--local`, `--tarball`, `--update-base`, `--offline`, `--bun-binary`, `--bun-variant`, `--image-label`) and invokes the core build pipeline.
+   - `build.go`: Parses flags (`--platform`, `--base`, `--sbom`, `--sbom-attach`, `--local`, `--tarball`, `--update-base`, `--offline`, `--bun-binary`, `--bun-variant`, `--image-label`, `--no-verify-base`, `--allow-secret-pattern`, `--hermetic`, `--registry-config`) and invokes the core build pipeline.
+   - `scan.go`: Implements `pokkum scan [target]` for security vulnerability scanning, OSV advisory lookups (`--toolchain`), threshold enforcement (`--fail-on`), and JSON reporting (`--output=json`).
    - `dev.go`: Implements `pokkum dev [dir]` subcommand for local container development, supporting `--debug` interactive shell debugging, local Docker daemon loading, and hot-reload source watching.
    - `doctor.go`: Implements `pokkum doctor [dir]` for environment preflight checks (Bun runtime, registry credentials, SvelteKit version compatibility, `.pokkumignore` sanity) and mechanical repairs (`--fix`).
    - `init.go`: Implements `pokkum init [dir]` subcommand to bootstrap project configuration and `.pokkumignore`.
@@ -48,10 +49,15 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `verify.go`: Implements `pokkum verify <ref>` subcommand for rebuild verification and SLSA provenance attestation validation (`--no-rebuild`, `--expect-source`, `--against`).
    - `repro_doctor.go`: Implements `pokkum repro doctor [dir]` for stage-level non-determinism bisection (`--fast`, `--perturb`).
    - `base.go`: Implements `pokkum base update` and `pokkum base check` subcommands to query remote base image digests and manage `pokkum.lock`.
-   - `resolve.go`: Scans Kubernetes YAML manifests for `pokkum://` image URIs, triggers automated builds, and resolves them to immutable image digests (`repo@sha256:...`).
-   - `apply.go`: Resolves `pokkum://` manifests and pipes the output directly into `kubectl apply -f -`.
+   - `resolve.go`: Scans Kubernetes YAML manifests for `pokkum://` image URIs, triggers automated builds, and resolves them to immutable image digests (`repo@sha256:...`), supporting `--registry-config`.
+   - `apply.go`: Resolves `pokkum://` manifests and pipes the output directly into `kubectl apply -f -`, supporting `--registry-config`.
+   - `rollback.go`: Implements `pokkum rollback -f <manifest> --to=<ref>` for rolling back container image references in Kubernetes manifests.
+   - `upgrade.go`: Implements `pokkum upgrade` for release checking (`--check`), signature verification, and self-updating.
    - `k8s.go`: Shared manifest parsing and URI replacement engine.
    - `version.go`: Displays git version, commit, and build timestamp metadata.
+
+5. **Public Packages (`pkg/`)**:
+   - `registry`: Ephemeral in-memory OCI 1.1 test registry server utility (`pkg/registry.NewServer()`) for integration testing and local development.
 
 2. **Domain Core (`internal/core/`)**:
    - `pipeline.go`: Orchestrates the execution flow across compilers, base image resolvers, packagers, and registries, supporting `PinnedBuildInputs` override parameters.

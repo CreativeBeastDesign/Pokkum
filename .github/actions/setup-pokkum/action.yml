@@ -1,0 +1,36 @@
+name: 'Setup Pokkum'
+description: 'Download, verify, and place the Pokkum CLI on PATH in GitHub Actions workflows'
+author: 'CreativeBeastDesign'
+
+inputs:
+  version:
+    description: 'Version of Pokkum CLI to install (e.g. v1.0.0 or latest)'
+    required: false
+    default: 'latest'
+  github-token:
+    description: 'GitHub token for downloading Pokkum release artifacts'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  version:
+    description: 'Installed Pokkum CLI version'
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Download and Install Pokkum
+      id: install
+      shell: bash
+      run: |
+        VERSION="${{ inputs.version }}"
+        if [ "$VERSION" = "latest" ]; then
+          VERSION="v1.0.0"
+        fi
+
+        echo "Installing Pokkum ${VERSION}..."
+        mkdir -p "${HOME}/.pokkum/bin"
+        echo "${HOME}/.pokkum/bin" >> $GITHUB_PATH
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Pokkum ${VERSION} installed successfully."

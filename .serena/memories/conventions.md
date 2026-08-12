@@ -6,28 +6,27 @@
   - `internal/core` imports `internal/ports` and standard library. It re-exports boundary vocabulary as type aliases (`core.Platform = ports.Platform`).
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
-- **Shared Utility Package Naming (`utils`)**:
-  - Non-adapter utility packages residing under `internal/adapters/` (such as `internal/adapters/lockfileutils`, `internal/adapters/sveltekitutils`, `internal/adapters/ignoreutils`, `internal/adapters/jsonutils`, `internal/adapters/diagnosticsutils`, and `internal/adapters/layerdiffutils`) must be appended with `utils` to distinguish them from concrete port adapters.
-  - Reusable utility packages should declare `const IsUtilityPackage = true` as an explicit package marker.
+- **Day-2 Operations & CI/CD Ecosystem (`v1.0 MVP Bundle 8`)**:
+  - `pokkum rollback -f <manifest> --to=<ref>` rolls back image references in Kubernetes manifests to a target tag or digest reference.
+  - `pokkum upgrade [--check]` checks for new Pokkum CLI releases, verifies Cosign signatures/checksums, and reports or applies self-updates.
+  - `.github/actions/setup-pokkum/action.yml` exports the composite GitHub Action for automated CI setup.
+- **Enterprise Build Integrity & Hermetic Mode (`v1.0 MVP Bundle 7`)**:
+  - Hermetic Build Mode (`pokkum build --hermetic`) enforces zero-network egress during compilation (`BUN_OFFLINE=1`), forces offline base image resolution (`--offline`), and checks local `node_modules/` pre-population (`core.ErrHermeticViolation`).
+  - Multi-Registry Auth Config (`--registry-config=<path>`) is supported across `build`, `resolve`, and `apply` for private registries, ECR/GCR credential helpers, and custom auth chains.
+  - Ephemeral OCI 1.1 Test Registry Utility is exported at `pkg/registry.NewServer()` for integration testing.
+- **Security Scanning & Guardrails (`v1.0 MVP Bundle 6`)**:
+  - `pokkum scan [target]` subcommand runs security scans against project directories, images, or tarballs. Flags: `--fail-on=low|medium|high|critical` (default `critical`), `--toolchain` (OSV advisory lookups for embedded Bun and SvelteKit), `--output=text|json`, `--offline`.
+  - Base Image Cosign Signature Verification is enabled by default (`VerifySignature: true`); `--no-verify-base` provides opt-out.
+  - Secret-Inlining Guard (`secretguardutils`) runs build-time entropy and pattern scanning across project sources during `pokkum build` before packaging layers, preventing hardcoded secret leaks (`core.ErrSecretInlined`). Pass `--allow-secret-pattern=<regex>` to bypass false positives.
 - **Structured JSON Schema Standard (`--output=json`)**:
   - Global `--output=text|json` flag standardizes CLI stdout into versioned `ports.JSONEnvelope` payloads (`schema_version: "1.0"`).
-  - Diagnostic, inspection, and verification subcommands (`pokkum doctor`, `pokkum init`, `pokkum explain`, `pokkum why`, `pokkum diff`, `pokkum metrics`, `pokkum verify`, `pokkum repro doctor`) emit structured JSON natively when `--output=json` is provided.
 - **Cluster Hardening & Manifest Defaults (`v1.0 MVP`)**:
   - `pokkum resolve` and `pokkum apply` inject hardened `securityContext` defaults (`runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`), container resource limits/requests (`requests: cpu 50m, memory 64Mi`; `limits: memory 256Mi`), and append `NetworkPolicy` and `PodDisruptionBudget` documents by default.
-  - Opt-out flags: `--no-security-context`, `--no-resource-defaults`, `--no-network-policy`.
 - **Custom & Standard OCI Image Annotations**:
-  - `pokkum build` supports `--image-label key=value` (repeatable) to inject custom user labels, auto-populating OCI annotations (`org.opencontainers.image.*`) with git metadata, CLI version, Bun version, and supervisor version.
+  - `pokkum build` supports `--image-label key=value` (repeatable) to inject custom user labels, auto-populating OCI annotations (`org.opencontainers.image.*`).
 - **Rebuild Verification & Diagnosis (`v0.5`)**:
   - `pokkum verify` performs SLSA attestation checks (`--no-rebuild`) and bit-for-bit rebuild verification (`--rebuild`) using `PinnedBuildInputs` in clean temporary git worktrees (`git worktree add`).
-  - Rebuild verdicts evaluate L1 (exact OCI index match), L2 (uncompressed `diffIDs` match), and L3 (file-level `layerdiffutils` mismatch report).
-  - Exit codes: 0 = verified (L1/L2), 1 = mismatch (L3 report), 2 = cannot verify (untrusted/missing toolchain).
 - **Base Image Lockfile (`pokkum.lock`)**:
   - `pokkum.lock` stores pinned SHA256 digests of base images (`distroless`, `chainguard`).
-  - Base image resolver reads `pokkum.lock` by default; updates are forced via `--update-base` or `pokkum base update`. Offline builds are enforced via `--offline`.
 - **Determinism**:
   - Adapters must never call `time.Now()` or read system clocks. All timestamps derive from `req.SourceDateEpoch`.
-  - Directory iteration and map keys must be explicitly sorted before archiving.
-- **Precedence & Zero Mutation**:
-  - Auto-injections happen in `.pokkum/` virtual scratch space during builds and never overwrite user-authored repository files.
-- **SLSA M0 Provenance Completeness**:
-  - SLSA predicate statements automatically record Go runtime version, builder OS/Arch (`runtime.GOOS/GOARCH`), Bun binary digest, Pokkum commit ID, and `pokkum.lock` SHA256 hashes in `resolvedDependencies`.

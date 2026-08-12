@@ -116,6 +116,9 @@ type ResolveRequest struct {
 	// ResourceDefaults, when true, injects default CPU/memory requests and limits,
 	// and appends a PodDisruptionBudget.
 	ResourceDefaults bool
+
+	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
+	RegistryConfigPath string
 }
 
 // ResolveResult carries the rewritten manifests.

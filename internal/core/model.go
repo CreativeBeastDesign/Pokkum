@@ -86,6 +86,33 @@ type (
 
 	// BuildStrategy specifies the packaging strategy (StrategyLayered or StrategyExe).
 	BuildStrategy = ports.BuildStrategy
+
+	// Severity indicates the security risk level of a vulnerability.
+	Severity = ports.Severity
+
+	// Vulnerability details a security advisory or CVE.
+	Vulnerability = ports.Vulnerability
+
+	// ScanRequest specifies parameters for vulnerability scanning.
+	ScanRequest = ports.ScanRequest
+
+	// ScanResult contains discovered security vulnerabilities.
+	ScanResult = ports.ScanResult
+
+	// Scanner scans container images, tarballs, or toolchain versions for CVEs and advisories.
+	Scanner = ports.Scanner
+
+	// SecretMatch describes a detected secret or sensitive token leak in a file.
+	SecretMatch = ports.SecretMatch
+
+	// SecretScanRequest configures directory secret scanning options.
+	SecretScanRequest = ports.SecretScanRequest
+
+	// SecretScanResult reports secret scan findings.
+	SecretScanResult = ports.SecretScanResult
+
+	// SecretGuard defines the boundary port for build-time secret leak detection.
+	SecretGuard = ports.SecretGuard
 )
 
 // Re-exported enum values, so that the command layer can build a BuildRequest
@@ -314,6 +341,9 @@ type BaseImageOptions struct {
 
 	// Offline strictly enforces using pokkum.lock and local cache without remote registry calls.
 	Offline bool
+
+	// NoVerifyBase suppresses Cosign signature verification on upstream base images.
+	NoVerifyBase bool
 }
 
 // SBOMOptions controls bill-of-materials generation and attachment.
@@ -484,6 +514,15 @@ type BuildRequest struct {
 
 	// BunRuntime configures Bun runtime binary resolution and caching.
 	BunRuntime BunRuntimeOptions
+
+	// AllowSecretPatterns contains regex patterns to ignore during build-time secret scanning.
+	AllowSecretPatterns []string
+
+	// Hermetic enforces zero-network egress and offline mode during build.
+	Hermetic bool
+
+	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
+	RegistryConfigPath string
 }
 
 // Normalize fills in defaults in place. It is idempotent, it never fails, and
@@ -494,6 +533,9 @@ type BuildRequest struct {
 // Build calls Normalize then Validate itself, so callers that go through Build
 // need not do either.
 func (r *BuildRequest) Normalize() {
+	if r.Hermetic {
+		r.BaseImage.Offline = true
+	}
 	if r.Compile.Strategy == "" {
 		r.Compile.Strategy = DefaultBuildStrategy
 	}

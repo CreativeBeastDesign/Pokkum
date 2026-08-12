@@ -351,3 +351,31 @@ func TestPrepare_MissingEntrypointAfterSuccessfulBuild(t *testing.T) {
 		t.Fatalf("err = %v, want wrapping core.ErrPrepareFailed", err)
 	}
 }
+
+func TestPreflight_HermeticViolation(t *testing.T) {
+	dir := newProjectDir(t, validPackageJSON, validSvelteConfig)
+	putFakeBunOnPath(t, `echo "1.2.18"`)
+	c := NewCompiler(discardLogger())
+
+	// Without node_modules and Hermetic=true -> fails
+	_, err := c.Preflight(context.Background(), ports.PreflightRequest{
+		ProjectDir: dir,
+		Hermetic:   true,
+	})
+	if !errors.Is(err, core.ErrHermeticViolation) {
+		t.Fatalf("expected ErrHermeticViolation when node_modules is missing, got %v", err)
+	}
+
+	// Create node_modules -> passes
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules"), 0o755); err != nil {
+		t.Fatalf("mkdir node_modules: %v", err)
+	}
+	_, err = c.Preflight(context.Background(), ports.PreflightRequest{
+		ProjectDir: dir,
+		Hermetic:   true,
+	})
+	if err != nil {
+		t.Fatalf("expected Preflight with node_modules present to pass, got %v", err)
+	}
+}
+

@@ -106,10 +106,10 @@ _The shippable minimum viable product for enterprise-grade adoption._
 ### Supply Chain
 
 - [ ] Trusted-Builder Mode: SLSA L3 via an isolated CI job (GitHub Actions provenance generation). (no new flag — a CI workflow concern, not a CLI flag)
-- [ ] CVE Scanning Integration (`pokkum scan`): Run Grype/Trivy against the final image in CI and fail the pipeline above a severity threshold. (new flag: `--fail-on=critical`)
-- [ ] Toolchain CVE Awareness: OSV.dev advisory lookups keyed on embedded Bun version. (new flag: `pokkum scan --toolchain`, extending `scan` rather than a new subcommand)
-- [ ] Base Image Signature Verification: Verify upstream Cosign signatures on distroless/Chainguard base images at pull time. (new flag: `--no-verify-base` opt-out)
-- [ ] Secret-Inlining Guard: Build-time entropy/pattern scan to prevent leaked `.env` values in layers. (new flag: `--allow-secret-pattern` escape hatch for false positives)
+- [x] CVE Scanning Integration (`pokkum scan`): Run vulnerability scanning against image, tarball, or directory and fail pipeline above severity threshold. (new flag: `--fail-on=critical`)
+- [x] Toolchain CVE Awareness: OSV.dev advisory lookups keyed on embedded Bun and SvelteKit versions. (new flag: `pokkum scan --toolchain`, extending `scan`)
+- [x] Base Image Signature Verification: Verify upstream Cosign signatures on distroless/Chainguard base images at pull time. (new flag: `--no-verify-base` opt-out)
+- [x] Secret-Inlining Guard: Build-time entropy/pattern scan to prevent leaked secrets in layers. (new flag: `--allow-secret-pattern` escape hatch for false positives)
 - [ ] Base image digest pinning + automated update PRs (Renovate/Dependabot-style). (reuses `pokkum base update --preset <name>` from the v0.2 lockfile item; update-PR half is a bot, not a flag) (see [pokkum-lock-concept.md](pokkum-lock-concept.md))
 - [x] Standard OCI Annotations: Auto-populate `org.opencontainers.image.*` from git metadata. (new flag: `--image-label key=value`, repeatable, for user-supplied overrides — matches `ko build --image-label`)
 
@@ -123,16 +123,16 @@ _The shippable minimum viable product for enterprise-grade adoption._
 
 ### Build integrity
 
-- [ ] Hermetic builds: No network egress during the compile step (SLSA L3 requirement). (new flag: `--hermetic`, opt-in)
-- [ ] Multi-registry support with per-registry auth chains (ECR/GCR/ACR/self-hosted). (new flag: `--registry-config=<path>`)
-- [ ] Ephemeral test registry (`pkg/registry.New()`) wired into CI for integration tests. (no new flag — test infra only)
+- [x] Hermetic builds: No network egress during the compile step (SLSA L3 requirement). (new flag: `--hermetic`, opt-in)
+- [x] Multi-registry support with per-registry auth chains (ECR/GCR/ACR/self-hosted). (new flag: `--registry-config=<path>`)
+- [x] Ephemeral test registry (`pkg/registry.New()`) wired into CI for integration tests. (no new flag — test infra only)
 
 ### Operational maturity
 
 - [x] Version pinning of `pokkum` itself in generated manifest annotations. (no new flag — folds into `--image-label`/auto-annotations above)
-- [ ] A GitHub Action wrapping the CLI (mirroring `setup-ko`). (no new `pokkum` flag — Action inputs like `version`/`token`, mirroring `setup-ko`)
-- [ ] Rollback support (`pokkum rollback` reading from build history). (new subcommand: `pokkum rollback -f <manifest> --to=<ref>`, reusing `-f`/`--file` from `resolve`/`apply`)
-- [ ] Signed Self-Distribution (`pokkum upgrade`): Signature verification of release artifacts. (new subcommand: `pokkum upgrade`, new flag: `--check`)
+- [x] A GitHub Action wrapping the CLI (mirroring `setup-ko`). (no new `pokkum` flag — Action inputs like `version`/`token`, mirroring `setup-ko`)
+- [x] Rollback support (`pokkum rollback` reading from build history). (new subcommand: `pokkum rollback -f <manifest> --to=<ref>`, reusing `-f`/`--file` from `resolve`/`apply`)
+- [x] Signed Self-Distribution (`pokkum upgrade`): Signature verification of release artifacts. (new subcommand: `pokkum upgrade`, new flag: `--check`)
 
 ## Beyond v1.0 / Backlog
 

@@ -144,6 +144,14 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 		return ports.PreflightResult{}, fmt.Errorf("bunexec: preflight %s: %w", req.ProjectDir, err)
 	}
 
+	if req.Hermetic {
+		nodeModulesPath := filepath.Join(req.ProjectDir, "node_modules")
+		if info, err := os.Stat(nodeModulesPath); err != nil || !info.IsDir() {
+			return ports.PreflightResult{}, fmt.Errorf("bunexec: preflight %s: hermetic mode requires pre-populated node_modules: %w", req.ProjectDir, core.ErrHermeticViolation)
+		}
+		log.Info("bunexec: preflight hermetic mode active; node_modules verified", "projectDir", req.ProjectDir)
+	}
+
 	pkg, err := sveltekitutils.ReadPackageJSON(req.ProjectDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -251,6 +259,11 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 			log.Info("bunexec: virtual config injected", "path", vcRes.VirtualConfigPath, "adapter", vcRes.InjectedAdapter, "telemetry", vcRes.InjectedTelemetry)
 		}
 		baseEnv = sveltekitutils.BuildEnv(baseEnv, opts.SourceEpoch)
+	}
+
+	if req.Hermetic {
+		baseEnv = append(baseEnv, "BUN_OFFLINE=1", "NODE_ENV=production", "NO_UPDATE_NOTIFIER=1")
+		log.Info("bunexec: hermetic environment active", "offline", true)
 	}
 
 	cmd := exec.CommandContext(ctx, "bun", "run", "build")

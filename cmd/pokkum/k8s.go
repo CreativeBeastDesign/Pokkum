@@ -28,11 +28,13 @@ func securityContextEnabled(securityContext, noSecurityContext bool) bool {
 
 // resolveManifestsOptions holds options for resolveManifests.
 type resolveManifestsOptions struct {
-	File             string
-	Recursive        bool
-	SecurityContext  bool
-	NetworkPolicy    bool
-	ResourceDefaults bool
+	File               string
+	Recursive          bool
+	SecurityContext    bool
+	NetworkPolicy      bool
+	ResourceDefaults   bool
+	RegistryConfigPath string
+	ImageBuilder       ports.ImageBuilder
 }
 
 // resolveManifests is the shared engine behind `pokkum resolve` and `pokkum apply`.
@@ -56,14 +58,20 @@ func resolveManifests(ctx context.Context, logger *slog.Logger, opts resolveMani
 		return nil, err
 	}
 
+	builder := opts.ImageBuilder
+	if builder == nil {
+		builder = newImageBuilder(logger, baseDir, dockerRepo)
+	}
+
 	resolver := k8s.NewResolver()
 	res, err := resolver.Resolve(ctx, ports.ResolveRequest{
-		Documents:        docs,
-		Build:            newImageBuilder(logger, baseDir, dockerRepo),
-		Strict:           true,
-		SecurityDefaults: opts.SecurityContext,
-		NetworkPolicy:    opts.NetworkPolicy,
-		ResourceDefaults: opts.ResourceDefaults,
+		Documents:          docs,
+		Build:              builder,
+		Strict:             true,
+		SecurityDefaults:   opts.SecurityContext,
+		NetworkPolicy:      opts.NetworkPolicy,
+		ResourceDefaults:   opts.ResourceDefaults,
+		RegistryConfigPath: opts.RegistryConfigPath,
 	})
 	if err != nil {
 		return nil, err

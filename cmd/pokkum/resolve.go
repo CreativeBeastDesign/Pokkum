@@ -21,6 +21,7 @@ type resolveFlags struct {
 	noNetworkPolicy    bool
 	resourceDefaults   bool
 	noResourceDefaults bool
+	registryConfig     string
 }
 
 func newResolveCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -61,6 +62,8 @@ All logging goes to stderr.`,
 		"Inject default CPU/memory requests and limits and append a PodDisruptionBudget")
 	cmd.Flags().BoolVar(&flags.noResourceDefaults, "no-resource-defaults", false,
 		"Disable resource default injection and PodDisruptionBudget generation")
+	cmd.Flags().StringVar(&flags.registryConfig, "registry-config", "",
+		"Path to custom OCI registry auth config file (config.json)")
 
 	// file is required
 	_ = cmd.MarkFlagRequired("file")
@@ -84,11 +87,12 @@ func runResolve(ctx context.Context, logger *slog.Logger, flags *resolveFlags) e
 		"resourceDefaults", resDefs)
 
 	out, err := resolveManifests(ctx, logger, resolveManifestsOptions{
-		File:             flags.file,
-		Recursive:        flags.recursive,
-		SecurityContext:  secCtx,
-		NetworkPolicy:    netPol,
-		ResourceDefaults: resDefs,
+		File:               flags.file,
+		Recursive:          flags.recursive,
+		SecurityContext:    secCtx,
+		NetworkPolicy:      netPol,
+		ResourceDefaults:   resDefs,
+		RegistryConfigPath: flags.registryConfig,
 	})
 	if err != nil {
 		return err

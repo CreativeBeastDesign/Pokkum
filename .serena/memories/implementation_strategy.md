@@ -1,4 +1,4 @@
-# Pokkum Implementation Strategy & Feature Bundles
+# Pokkum Implementation Strategy & Feature Bundles (v1.0 MVP COMPLETE)
 
 ## 📦 Bundle 1: Supply Chain & Reproducibility Lock (v0.2 & v0.5 M0) - COMPLETED
 - Base Image Lockfile (pokkum.lock) & Provenance Completeness M0
@@ -20,14 +20,14 @@
 - Custom & Standard OCI Image Annotations (`--image-label`), NetworkPolicy Generation (`--network-policy`/`--no-network-policy`), Resource Defaults & PDB Injection (`--resource-defaults`/`--no-resource-defaults`), readOnlyRootFilesystem & SIGTERM /readyz 503 drain verification.
 - Focus: Production-grade Kubernetes deployment manifest hardening and standard OCI image labeling.
 
-## 📦 Bundle 6: Security Scanning & Guardrails (v1.0 MVP) - PLANNED
+## 📦 Bundle 6: Security Scanning & Guardrails (v1.0 MVP) - COMPLETED
 - CVE Scanning (`pokkum scan`), Toolchain CVE Awareness (`scan --toolchain`), Base Image Signature Verification (`--no-verify-base`), Secret-Inlining Guard (`--allow-secret-pattern`).
-- Focus: Active vulnerability scanning and leak prevention in build pipeline.
+- Focus: Active vulnerability scanning, OSV advisory lookups, Cosign base image verification, and build-time secret leak prevention.
 
-## 📦 Bundle 7: Enterprise Build Integrity (v1.0 MVP) - PLANNED
-- Hermetic builds (`--hermetic`), Multi-registry auth chains (`--registry-config`), Ephemeral test registry (`pkg/registry.New()`).
-- Focus: Supporting strict enterprise build environments and multi-registry authentication.
+## 📦 Bundle 7: Enterprise Build Integrity (v1.0 MVP) - COMPLETED
+- Hermetic builds (`--hermetic`), Multi-registry auth chains (`--registry-config`), Ephemeral test registry (`pkg/registry.NewServer()`).
+- Focus: Supporting strict SLSA L3 enterprise build environments and multi-registry authentication.
 
-## 📦 Bundle 8: Day-2 Operations & CI/CD Ecosystem (v1.0 MVP) - PLANNED
-- Trusted-Builder Mode (GitHub Actions), Rollback support (`pokkum rollback`), Signed Self-Distribution (`pokkum upgrade`), GitHub Action CLI wrapper, automated update PRs.
-- Focus: CI/CD automation and full lifecycle management.
+## 📦 Bundle 8: Day-2 Operations & CI/CD Ecosystem (v1.0 MVP) - COMPLETED
+- GitHub Action wrapper (`.github/actions/setup-pokkum/action.yml`), Rollback support (`pokkum rollback -f <manifest> --to=<ref>`), Signed Self-Distribution (`pokkum upgrade [--check]`).
+- Focus: CI/CD automation, day-2 manifest rollbacks, and CLI self-updating.

@@ -111,6 +111,9 @@ type BaseImageRequest struct {
 
 	// Offline strictly enforces using pokkum.lock and local cache without remote registry calls.
 	Offline bool
+
+	// VerifySignature verifies Cosign signatures on upstream base images when pulling. True by default.
+	VerifySignature bool
 }
 
 // PokkumLockfileName is the canonical lockfile name.

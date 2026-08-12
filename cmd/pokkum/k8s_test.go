@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -203,6 +204,49 @@ func TestResolveManifests_MissingDockerRepoFailsFast(t *testing.T) {
 	})
 	if !errors.Is(err, core.ErrNoDockerRepo) {
 		t.Fatalf("expected ErrNoDockerRepo before any file is touched, got %v", err)
+	}
+}
+
+func TestResolveManifests_WithMockedBuild(t *testing.T) {
+	t.Setenv("POKKUM_DOCKER_REPO", "ghcr.io/test/repo")
+
+	manifestDir := t.TempDir()
+	manifestPath := filepath.Join(manifestDir, "test.yaml")
+	writeFile(t, manifestPath, `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: pokkum://./src
+`)
+
+	mockBuilder := func(ctx context.Context, path string) (string, error) {
+		if path != "./src" {
+			t.Errorf("unexpected path passed to builder: got %q, want %q", path, "./src")
+		}
+		return "ghcr.io/test/repo/src@sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
+	}
+
+	out, err := resolveManifests(context.Background(), discardLogger(), resolveManifestsOptions{
+		File:             manifestPath,
+		SecurityContext:  false,
+		NetworkPolicy:    false,
+		ResourceDefaults: false,
+		ImageBuilder:     mockBuilder,
+	})
+	if err != nil {
+		t.Fatalf("resolveManifests failed: %v", err)
+	}
+
+	outStr := string(out)
+	wantImage := "image: ghcr.io/test/repo/src@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	if !strings.Contains(outStr, wantImage) {
+		t.Errorf("expected resolved manifest to contain %q, got:\n%s", wantImage, outStr)
 	}
 }
 

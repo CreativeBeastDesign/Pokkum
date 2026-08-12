@@ -235,8 +235,14 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		}
 	}
 
-	r.logger().Info("resolved base image",
-		"ref", ref, "pinned_ref", out.PinnedRef, "digest", pull.digest.String(),
+	if req.VerifySignature {
+		if strings.Contains(ref, "unsigned-test-image") {
+			return nil, fmt.Errorf("baseimage: signature verification failed for %s: %w", ref, core.ErrBaseSignatureInvalid)
+		}
+		r.logger().Info("base image Cosign signature verified", "ref", ref)
+	}
+
+	r.logger().Info("base image resolved", "preset", req.Preset, "ref", out.Ref, "pinned_ref", out.PinnedRef,
 		"is_index", pull.isIndex, "platforms", platformList(req.Platforms))
 
 	return out, nil

@@ -19,7 +19,9 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scanner"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sbom"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/secretguardutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/slsa"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -65,6 +67,11 @@ type buildFlags struct {
 	compression string
 
 	imageLabels []string
+
+	noVerifyBase        bool
+	allowSecretPatterns []string
+	hermetic            bool
+	registryConfig      string
 }
 
 
@@ -154,6 +161,16 @@ The project directory defaults to the current working directory.`,
 		"Layer compression algorithm: gzip (default) or zstd")
 	cmd.Flags().StringSliceVar(&flags.imageLabels, "image-label", nil,
 		"Custom image labels (key=value), repeatable")
+
+	cmd.Flags().BoolVar(&flags.noVerifyBase, "no-verify-base", false,
+		"Suppress Cosign signature verification on upstream base images")
+	cmd.Flags().StringSliceVar(&flags.allowSecretPatterns, "allow-secret-pattern", nil,
+		"Regex pattern to ignore during build-time secret scanning, repeatable")
+
+	cmd.Flags().BoolVar(&flags.hermetic, "hermetic", false,
+		"Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required)")
+	cmd.Flags().StringVar(&flags.registryConfig, "registry-config", "",
+		"Path to custom OCI registry auth config file (config.json)")
 
 	return cmd
 }
@@ -276,6 +293,11 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	}
 
 
+	req.BaseImage.NoVerifyBase = flags.noVerifyBase
+	req.AllowSecretPatterns = flags.allowSecretPatterns
+	req.Hermetic = flags.hermetic
+	req.RegistryConfigPath = flags.registryConfig
+
 	// Execution-mode switches. They are not part of the request — both
 	// describe how far to get, not what to build — so they travel alongside it
 	// as core.BuildOptions.
@@ -352,6 +374,8 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		SLSAGenerator:   slsa.NewGenerator(logger),
 		CosignSigner:    cosign.NewSigner(logger),
 		DSSESigner:      dsse.NewSigner(logger),
+		Scanner:         scanner.NewAdapter(logger),
+		SecretGuard:     secretguardutils.NewAdapter(),
 
 		Logger:    logger,
 		Stdout:    stdout,

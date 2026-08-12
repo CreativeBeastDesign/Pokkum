@@ -241,6 +241,9 @@ type PreflightRequest struct {
 	// Env is additional environment for any probe subprocess, as KEY=VALUE
 	// entries appended to the inherited environment. Nil means inherit only.
 	Env []string
+
+	// Hermetic enforces zero-network egress and requires all dependencies to be cached locally.
+	Hermetic bool
 }
 
 // PreflightResult reports what the Compiler found. Every field is
@@ -294,6 +297,9 @@ type PrepareRequest struct {
 	// Env is additional environment for the build subprocess, as KEY=VALUE
 	// entries appended to the inherited environment. Nil means inherit only.
 	Env []string
+
+	// Hermetic enforces zero-network egress during compile.
+	Hermetic bool
 
 	// Platforms is the set of targets the subsequent Compile calls will use. It
 	// is passed so the adapter can fail fast on an unsupported target before

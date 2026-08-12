@@ -80,6 +80,12 @@ type Deps struct {
 	// Required when signing is enabled and the build is not a dry run.
 	DSSESigner ports.DSSESigner
 
+	// Scanner scans container images and toolchain advisories for CVEs. Optional.
+	Scanner ports.Scanner
+
+	// SecretGuard performs build-time secret scanning on source files. Optional.
+	SecretGuard ports.SecretGuard
+
 	// Logger receives every progress and diagnostic line. Nil means
 	// slog.Default(). Everything the pipeline logs is a log line, never
 	// program output; see Stdout.
@@ -264,6 +270,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		ProjectDir:    req.ProjectDir,
 		MinBunVersion: req.Compile.MinBunVersion,
 		Env:           req.Compile.Env,
+		Hermetic:      req.Hermetic,
 	})
 	if err != nil {
 		return BuildResult{}, err
@@ -299,13 +306,14 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	// is deliberately outside the per-platform fan-out — which is also what
 	// makes it reachable from --dry-run.
 	base, err := deps.BaseImages.Resolve(ctx, ports.BaseImageRequest{
-		Preset:       req.BaseImage.Preset,
-		Ref:          req.BaseImage.Ref,
-		Platforms:    req.Platforms,
-		Insecure:     req.Insecure,
-		LockfilePath: filepath.Join(req.ProjectDir, ports.PokkumLockfileName),
-		UpdateBase:   req.BaseImage.UpdateBase,
-		Offline:      req.BaseImage.Offline,
+		Preset:          req.BaseImage.Preset,
+		Ref:             req.BaseImage.Ref,
+		Platforms:       req.Platforms,
+		Insecure:        req.Insecure,
+		LockfilePath:    filepath.Join(req.ProjectDir, ports.PokkumLockfileName),
+		UpdateBase:      req.BaseImage.UpdateBase,
+		Offline:         req.BaseImage.Offline,
+		VerifySignature: !req.BaseImage.NoVerifyBase,
 	})
 	if err != nil {
 		return BuildResult{}, err
@@ -320,6 +328,20 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		Digest:    base.Digest,
 	}
 	log.Info("base image resolved", "ref", baseInfo.Ref, "pinned", baseInfo.PinnedRef, "isIndex", base.IsIndex)
+
+	if deps.SecretGuard != nil {
+		secretRes, err := deps.SecretGuard.ScanDirectory(ctx, ports.SecretScanRequest{
+			ProjectDir:    req.ProjectDir,
+			AllowPatterns: req.AllowSecretPatterns,
+		})
+		if err != nil {
+			return BuildResult{}, fmt.Errorf("secret guard: %w", err)
+		}
+		if !secretRes.Passed {
+			return BuildResult{}, fmt.Errorf("secret guard: detected %d hardcoded secret(s): %w", len(secretRes.Matches), ErrSecretInlined)
+		}
+		log.Info("secret guard ok", "checked", req.ProjectDir)
+	}
 
 	// Stage 4: --dry-run stops here, having touched nothing.
 	if opts.DryRun {
@@ -364,6 +386,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		Env:             req.Compile.Env,
 		Platforms:       slices.Clone(req.Platforms),
 		NoInject:        req.Compile.NoInject,
+		Hermetic:        req.Hermetic,
 	})
 	if err != nil {
 		return BuildResult{}, err

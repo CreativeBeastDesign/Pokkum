@@ -156,6 +156,18 @@ var (
 
 	// ErrInvalidStrategy reports an unrecognized packaging strategy (must be layered or exe).
 	ErrInvalidStrategy = errors.New("invalid build strategy")
+
+	// ErrVulnerabilityThresholdExceeded reports that vulnerabilities were found exceeding threshold.
+	ErrVulnerabilityThresholdExceeded = errors.New("vulnerabilities found exceeding threshold")
+
+	// ErrSecretInlined reports hardcoded secret or sensitive token leak detected in build sources.
+	ErrSecretInlined = errors.New("hardcoded secret or sensitive pattern detected in build sources")
+
+	// ErrBaseSignatureInvalid reports base image Cosign signature verification failure.
+	ErrBaseSignatureInvalid = errors.New("base image Cosign signature verification failed")
+
+	// ErrHermeticViolation reports an unexpected network call or un-cached dependency in hermetic build mode.
+	ErrHermeticViolation = errors.New("hermetic build violation: network egress or missing local cache detected")
 )
 
 
