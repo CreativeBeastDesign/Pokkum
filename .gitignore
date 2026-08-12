@@ -1,9 +1,11 @@
 # Go
 /pokkum
+/pokkum-test
 /pokkum-init
 *.test
 *.out
 /dist/
+/.pokkum/
 
 # Generated supervisor binaries
 internal/adapters/supervisor/bin/pokkum-init-*
