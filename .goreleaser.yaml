@@ -53,21 +53,30 @@ checksum:
 signs:
   - id: cosign
     signature: "${artifact}.sig"
-    cmd: cosign
     # Key-based signing, not keyless: pokkum upgrade verifies against a
     # fixed embedded public key (DefaultReleasePublicKeyPEM in
     # cmd/pokkum/upgrade.go), which has no way to validate a Fulcio
     # short-lived cert chain or do a Rekor transparency-log lookup. The
-    # corresponding private key must be set as the COSIGN_PRIVATE_KEY
-    # secret in this repo's Actions settings (see .github/workflows/release.yml);
-    # its public half must match DefaultReleasePublicKeyPEM exactly, or every
-    # `pokkum upgrade` will report verified=false against real releases.
+    # corresponding private key must be a cosign-native key pair (generate
+    # with `cosign generate-key-pair` — cosign's --key loader rejects plain
+    # OpenSSL-generated PEM keys, both SEC1 and PKCS8, confirmed against a
+    # real cosign v3.1.3 binary) set as the COSIGN_PRIVATE_KEY secret, with
+    # its password as COSIGN_PASSWORD, in this repo's Actions settings (see
+    # .github/workflows/release.yml). The public half must match
+    # DefaultReleasePublicKeyPEM exactly, or every `pokkum upgrade` will
+    # report verified=false against real releases.
+    #
+    # cmd is a wrapper, not `cosign` directly: cosign v3.x's `sign-blob` no
+    # longer supports writing a bare signature via --output-signature — only
+    # --bundle (a JSON envelope including a public Rekor transparency-log
+    # entry). scripts/cosign-sign-blob.sh calls the real cosign CLI with
+    # --bundle, then extracts just messageSignature.signature into the plain
+    # file goreleaser (and Pokkum's existing Go verifier) expects, so no
+    # verification code has to change to understand the bundle format.
+    cmd: ./scripts/cosign-sign-blob.sh
     args:
-      - "sign-blob"
-      - "--key=env://COSIGN_PRIVATE_KEY"
-      - "--output-signature=${signature}"
       - "${artifact}"
-      - "--yes"
+      - "${signature}"
     artifacts: checksum
 
 snapshot:

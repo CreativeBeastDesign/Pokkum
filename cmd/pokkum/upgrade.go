@@ -27,9 +27,16 @@ import (
 // the private key CI signs releases with (the COSIGN_PRIVATE_KEY secret
 // referenced by the "signs" block in .goreleaser.yaml) or every upgrade
 // will correctly report verified=false against real releases.
+//
+// This key must be generated with `cosign generate-key-pair` — cosign's own
+// --key loader rejects plain OpenSSL-generated PEM keys (confirmed against
+// a real cosign v3.1.3 binary: both SEC1 "EC PRIVATE KEY" and PKCS8
+// "PRIVATE KEY" fail with "unsupported pem type"). The public half it
+// writes alongside the private key is standard PKIX PEM, same as this
+// constant — only the private key needs cosign's own format.
 const DefaultReleasePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEuKBM0mSB+mXkDMDhYhoYbKhRrcSx
-6y7e6Uw4PRw2wuxzSJN4GeK+/JY2llqKlVWnmMwZSqeweiCftb1h0A5dUw==
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2HR7TtlhsEwhADJJgxE7vyi7qTpY
+QXexxQdEFu8lDf+lWHRraoeilxMOcTTsxRsQRVCrNjeG6Lm0ND+djT3V/Q==
 -----END PUBLIC KEY-----`
 
 type upgradeFlags struct {
