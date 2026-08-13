@@ -82,10 +82,18 @@ and keyless Sigstore identities. Two modes are available:
   under-checking), just not the friendliest error message.
 - `pokkum base update`/`pokkum base check` (which manage `pokkum.lock`) don't
   run signature verification themselves — a digest gets pinned into the
-  lockfile on trust-on-first-use. `pokkum build` re-verifies the locked
-  digest's real signature at build time regardless, so this isn't a way to
-  slip an unverified image past you permanently — just don't treat `base
-  update` succeeding as itself a verification result.
+  lockfile on trust-on-first-use, by design. `pokkum build` re-verifies the
+  locked digest's real signature at build time regardless, so this isn't a
+  way to slip an unverified image past you permanently — just don't treat
+  `base update` succeeding as itself a verification result.
+
+Separately, `--registry-config` staying a generic `docker config.json`
+reader (no ECR/GCR/ACR-specific credential-helper code) is also by design,
+not an oversight — it's the deliberate boundary that keeps Pokkum
+zero-dependency instead of vendoring cloud-provider SDKs. If your registry
+supports static credentials in `docker config.json` (most do, including via
+`docker login`), you're covered; credential-helper-based cloud auth is out
+of scope.
 
 ## PodDisruptionBudget: no longer generated for unlabeled workloads
 
@@ -139,14 +147,17 @@ needed, and there's no opt-out flag if you'd rather it didn't. An explicit
 `--image-label org.opencontainers.image.revision=...` still overrides the
 auto-populated value if you need something different.
 
-**Two things worth knowing:**
-1. `.created` (a commit timestamp annotation) is *not* auto-populated —
-   only `.revision`/`.source`/`.version` are, despite there being an
-   obvious source for it (`SOURCE_DATE_EPOCH`, already used elsewhere in
-   the build). Set it yourself via `--image-label` if you need it.
-2. If you build outside a git repository, or `git` isn't installed, these
-   three labels are just silently absent — the build succeeds, nothing
-   warns you. Worth a sanity check (`pokkum explain <image>` or inspecting
-   the pushed manifest) if you're relying on these for traceability and
-   your build environment is unusual (e.g. a packaged source tarball
-   instead of a git checkout).
+`.created` is included too, and it's guaranteed to match the actual image:
+it's set to the exact same `SOURCE_DATE_EPOCH`-resolved timestamp used for
+the image's real layer mtimes and config, not a separately-computed value
+that could disagree with it — and it's left unset (not filled in with the
+current wall-clock time) if that timestamp can't be determined, consistent
+with Pokkum never using the build machine's clock for anything that ends up
+in the image.
+
+**One thing worth knowing:** if you build outside a git repository, or
+`git` isn't installed, `.revision`/`.source`/`.version` are just silently
+absent — the build succeeds, nothing warns you. Worth a sanity check
+(`pokkum explain <image>` or inspecting the pushed manifest) if you're
+relying on these for traceability and your build environment is unusual
+(e.g. a packaged source tarball instead of a git checkout).

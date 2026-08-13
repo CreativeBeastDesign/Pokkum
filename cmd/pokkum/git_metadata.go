@@ -12,10 +12,20 @@ import (
 )
 
 // discoverGitMetadata attempts to auto-populate standard OCI image labels
-// (revision, source, version) from CI environment variables (e.g. GitHub Actions)
-// or local git repository metadata. Keys already specified explicitly by the caller
-// are preserved and take precedence.
-func discoverGitMetadata(ctx context.Context, dir string, labels map[string]string) map[string]string {
+// (revision, source, version, created) from CI environment variables (e.g.
+// GitHub Actions) or local git repository metadata. Keys already specified
+// explicitly by the caller are preserved and take precedence.
+//
+// created is deliberately NOT resolved independently here — it is set to
+// buildTimestamp, the exact same SOURCE_DATE_EPOCH-derived value the rest of
+// the build uses for layer mtimes, the image config, and history entries
+// (resolved once by the caller via config.Loader.ResolveBuildTimestamp,
+// before this function runs). A second, independent resolution here would
+// risk disagreeing with it — e.g. this function's own git lookup runs
+// against dir (the project directory) while ResolveBuildTimestamp's runs
+// against the CLI process's own working directory, which are not always the
+// same repository. A single resolution point removes that risk entirely.
+func discoverGitMetadata(ctx context.Context, dir string, labels map[string]string, buildTimestamp time.Time) map[string]string {
 	if labels == nil {
 		labels = make(map[string]string)
 	}
@@ -39,6 +49,15 @@ func discoverGitMetadata(ctx context.Context, dir string, labels map[string]stri
 		if ver := getGitVersion(ctx, dir); ver != "" {
 			labels[ports.LabelVersion] = ver
 		}
+	}
+
+	// 4. Created Timestamp (org.opencontainers.image.created) — see doc
+	// comment above for why this reuses buildTimestamp instead of resolving
+	// its own. Not set at all if the build timestamp is unresolved (the Go
+	// zero value); Normalize's own Unix-epoch fallback happens later, in
+	// core, and this function has no business anticipating it.
+	if !hasLabelKey(labels, ports.LabelCreated, "created") && !buildTimestamp.IsZero() {
+		labels[ports.LabelCreated] = buildTimestamp.UTC().Format(time.RFC3339)
 	}
 
 	return labels

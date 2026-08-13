@@ -188,9 +188,53 @@ Previously `org.opencontainers.image.*` annotations only ever appeared if a user
 
 An explicit `--image-label org.opencontainers.image.revision=...` (etc.) always overrides the auto-populated value — checked before auto-population runs, confirmed by `TestDiscoverGitMetadata_ExplicitLabelPrecedence`.
 
-**Two real gaps, not fixed here:**
-1. `org.opencontainers.image.created` is **not** populated — no commit-timestamp read exists, and it isn't wired to the pipeline's existing `SOURCE_DATE_EPOCH` mechanism despite that being the obvious source.
-2. Outside a git repository, or if `git` isn't on `PATH`, every git call fails and is swallowed silently — the build succeeds with those three labels simply absent, no warning printed. There's no opt-out flag either, so this silence is the only signal; a CI system with an unusually shallow/detached checkout would degrade quietly rather than loudly. The existing tests only cover the CI-env-var path, not a real `git` shell-out, so this path is exercised in production but not in the test suite.
+**One real gap remains:** outside a git repository, or if `git` isn't on
+`PATH`, every git call fails and is swallowed silently — the build succeeds
+with `revision`/`source`/`version` simply absent, no warning printed. There's
+no opt-out flag either, so this silence is the only signal; a CI system with
+an unusually shallow/detached checkout would degrade quietly rather than
+loudly. The existing tests only cover the CI-env-var path, not a real `git`
+shell-out, so this path is exercised in production but not in the test
+suite.
+
+### `org.opencontainers.image.created` (follow-up fix)
+
+`.created` was initially added with its own independent resolution
+(`SOURCE_DATE_EPOCH` env var → `git log -1 --format=%cI` in the project
+directory), which fixed the missing-annotation gap but introduced a subtler
+one: `cmd/pokkum/build.go` already resolves a build timestamp for the rest
+of the pipeline via `config.Loader.ResolveBuildTimestamp()` (`SOURCE_DATE_EPOCH`
+env var → `git log -1 --pretty=%ct` run in the **CLI process's own working
+directory**, not the project directory) — a second, independent resolution
+with a different git working directory is a real way for the `.created`
+annotation to end up describing a different instant than what's actually
+baked into the image's layer mtimes and config, for any invocation where
+the CLI isn't run from inside the target project's own repository (e.g.
+`pokkum build ../some-other-app`).
+
+Fixed by removing the independent resolution entirely: `runBuild` now
+resolves `SOURCE_DATE_EPOCH` once, before label discovery, and passes that
+single `time.Time` into `discoverGitMetadata`, which sets `.created` to
+exactly that value (or leaves it unset if the timestamp is the Go zero
+value — never fabricating a `time.Now()` fallback, matching the project's
+"adapters must never call `time.Now()`" invariant). One value, one source
+of truth, used everywhere. New tests: `TestDiscoverGitMetadata_EnvVars`
+asserts `.created` equals the passed-in timestamp exactly;
+`TestDiscoverGitMetadata_ZeroTimestampLeavesCreatedUnset` asserts no
+fabricated fallback; `TestDiscoverGitMetadata_ExplicitLabelPrecedence`
+covers `.created` alongside `.revision` for explicit-override precedence.
+
+### `--registry-config` and base-image TOFU pinning: confirmed as intended scope
+
+Two items previously flagged as caveats are deliberate design decisions,
+not gaps: `--registry-config` stays a generic `docker config.json` reader
+rather than gaining ECR/GCR/ACR-specific credential-helper code, to hold
+the line on Pokkum's zero-dependency design rather than vendor
+cloud-provider SDKs. `pokkum base update`/`base check` pinning digests into
+`pokkum.lock` without running verification is accepted as trust-on-first-use,
+because `pokkum build` independently re-verifies the locked digest's real
+signature (static-key or keyless) at build time regardless — the lockfile
+entry is never trusted on its own.
 
 ## Dependency vulnerabilities closed
 

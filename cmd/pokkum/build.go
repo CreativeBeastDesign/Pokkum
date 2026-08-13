@@ -290,6 +290,16 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		Variant:          core.BunVariant(flags.bunVariant),
 	}
 
+	// Resolve SOURCE_DATE_EPOCH before label discovery: the "created" label
+	// must report exactly the timestamp the rest of the build actually uses
+	// (layer mtimes, image config, history entries), not a second,
+	// independently-resolved value that could disagree with it.
+	timestamp, err := cfg.ResolveBuildTimestamp()
+	if err != nil {
+		return fmt.Errorf("source date epoch: %w", err)
+	}
+	req.SourceDateEpoch = timestamp
+
 	// Parse image labels
 	if req.Labels == nil {
 		req.Labels = make(map[string]string)
@@ -303,7 +313,7 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 			req.Labels[strings.TrimSpace(k)] = strings.TrimSpace(v)
 		}
 	}
-	req.Labels = discoverGitMetadata(ctx, projectDir, req.Labels)
+	req.Labels = discoverGitMetadata(ctx, projectDir, req.Labels, timestamp)
 
 	req.BaseImage.NoVerifyBase = flags.noVerifyBase
 	if flags.baseVerifyMode != "" {
@@ -336,13 +346,6 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		DryRun:        flags.dryRun,
 		PrintManifest: flags.printManifest,
 	}
-
-	// Resolve SOURCE_DATE_EPOCH
-	timestamp, err := cfg.ResolveBuildTimestamp()
-	if err != nil {
-		return fmt.Errorf("source date epoch: %w", err)
-	}
-	req.SourceDateEpoch = timestamp
 
 	// Normalize and validate here as well as inside core.Build, so that a bad
 	// flag combination is reported before the composition root builds
