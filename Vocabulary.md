@@ -43,10 +43,10 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--sbom` | — | — | `spdx-json` | SBOM format: `spdx-json`, `cyclonedx-json`, or `none`. |
 | `--sbom-attach` | — | — | `referrer` | SBOM attachment mode: `referrer` (OCI 1.1) or `tag` (legacy `.sbom` tag). |
 | `--local` | — | — | `false` | Load into the local Docker daemon instead of pushing. Mutually exclusive with `--tarball`. |
-| `--image-label` | — | — | (none) | Custom image label (`key=value`), repeatable. |
+| `--image-label` | — | — | (none) | Custom image label (`key=value`), repeatable. `org.opencontainers.image.revision`/`.source`/`.version` are auto-populated from git by default (commit SHA, remote URL, `git describe`) even without this flag; an explicit `--image-label org.opencontainers.image.revision=...` always overrides the auto-populated value. No opt-out flag exists; outside a git repo the three labels are silently absent (no warning). `.created` is not auto-populated. |
 | `--base-verify-mode` | — | — | `auto` | Base image verification mode: `auto` (keyless for stock presets, static-key for custom), `keyless`, or `static-key`. |
-| `--base-keyless-identity` | — | — | (preset default) | Override the expected Fulcio certificate SAN for keyless verification. |
-| `--base-keyless-issuer` | — | — | (preset default) | Override the expected OIDC issuer for keyless verification. |
+| `--base-keyless-identity` | — | — | (preset default) | Override the expected Fulcio certificate SAN for keyless verification. Setting only this (without `--base-keyless-issuer`) makes the identity non-empty, so the preset's own default is *not* merged in for the missing half — verification then fails with a "must specify Issuer criteria" error rather than falling back. Set both together, or neither. |
+| `--base-keyless-issuer` | — | — | (preset default) | Override the expected OIDC issuer for keyless verification. Same partial-override caveat as `--base-keyless-identity` above, in reverse. |
 | `--sigstore-trusted-root` | — | — | (embedded) | Path to a custom Sigstore trusted root snapshot (e.g. for a private Sigstore deployment). |
 | `--no-verify-base` | — | — | `false` | Suppress base image signature verification entirely (both static-key and keyless). |
 | `--allow-secret-pattern` | — | — | (none) | Regex pattern to ignore during build-time secret scanning, repeatable. |
@@ -198,8 +198,8 @@ Without `--check`, `pokkum upgrade` refuses to install anything if it cannot ver
 
 | Subcommand / Flag | Default | Description |
 |---|---|---|
-| `pokkum base update --preset <name>` | — | Re-resolve upstream base image tags against remote registry and update `pokkum.lock`. |
-| `pokkum base check` | — | Inspect current base image lockfile status and digest pinning. |
+| `pokkum base update --preset <name>` | — | Re-resolve upstream base image tags against remote registry and update `pokkum.lock`. Does **not** run signature verification (static-key or keyless) — the resolved digest is pinned on trust-on-first-use. `pokkum build` re-verifies the locked digest against the live signature at build time regardless, so this is not a verification bypass, but a compromised/mistyped tag could get pinned into the lockfile unverified. |
+| `pokkum base check` | — | Inspect current base image lockfile status and digest pinning. Same no-verification caveat as `base update` above. |
 
 ---
 

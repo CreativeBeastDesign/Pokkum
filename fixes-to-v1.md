@@ -162,9 +162,53 @@ Verified default identities (confirmed by decoding real live Sigstore signatures
 
 New tests: `internal/adapters/sigstore` includes hermetic tests against real captured signature fixtures (no network, doesn't expire — verification uses Rekor entry's recorded time), plus `internal/adapters/baseimage/resolver_network_test.go`'s `TestResolve_LiveKeylessVerification` testing against live upstream images. The resolver level also has a test proving the anti-downgrade guarantee: an image signed only with a static key, resolved under forced keyless mode, correctly fails rather than silently falling back.
 
+**Independent re-verification** (a second audit pass, adversarial by design given this codebase's history of security features that looked real but weren't): confirmed the verifier calls real `sigstore-go` APIs for chain building, SCT checking, and Rekor inclusion — nothing hand-rolled; confirmed `req.ChainPEM` (the attacker-suppliable chain annotation) is referenced in zero non-test verification-path lines; confirmed the empty-identity refusal runs before any Sigstore call; confirmed the verifier uses the Rekor entry's integrated time rather than `time.Now()` (proven empirically — a real captured cert whose 10-minute validity window expired days before this check still verifies); and confirmed `TestResolve_LiveKeylessVerification` genuinely hits the live `distroless` and `chainguard` registries with the exact zero-extra-flags shape of a plain `pokkum build` and both verify. Three minor, non-security items surfaced and are now documented rather than silently left:
+- `pokkum base update`/`base check` pin digests into `pokkum.lock` without running verification (trust-on-first-use) — `pokkum build` re-verifies the locked digest at build time regardless, so this isn't a bypass, but see [Vocabulary.md](Vocabulary.md) §14.
+- Setting only one of `--base-keyless-identity`/`--base-keyless-issuer` (not both) fails with a generic "must specify Issuer criteria" error instead of falling back to the preset's default for the unset half — fail-closed and safe, just a confusing message for a plausible mistake. See [Vocabulary.md](Vocabulary.md) §3.
+- The verification cache keys on the trusted-root file *path*, not its contents, so a mid-process edit of a custom `--sigstore-trusted-root` file could theoretically serve a stale cached result. Low real-world risk (the file doesn't change during a single build), noted for completeness.
+
+## Rollback history (manifest-based, one hop deep)
+
+**Files:** [cmd/pokkum/rollback.go](cmd/pokkum/rollback.go), [internal/adapters/k8s/resolver.go](internal/adapters/k8s/resolver.go), [internal/ports/k8s.go](internal/ports/k8s.go).
+
+Previously `pokkum rollback` required `--to=<ref>` unconditionally — the caller had to already know what to roll back to. Now `pokkum rollback -f <manifest>` works with no `--to`: `resolve`/`apply` write the displaced image ref into a `pokkum.dev/previous-image` manifest annotation whenever they overwrite an already-concrete `image:` value (not a fresh `pokkum://` reference), and `rollback` reads that annotation when `--to` is omitted. `rollback` itself also writes the annotation on every run — the ref it just replaced becomes the new "previous" — so it's self-toggling: running it twice in a row swaps back to where you started.
+
+This is genuinely real (verified independently): `setAnnotation`/`getAnnotation`-style YAML-node mutation in `resolver.go`, real regex-based annotation read/write in `rollback.go`, and tests that assert exact rewritten content and prove a real two-step toggle round-trip, not just "no error." `MarkFlagRequired("to")` is gone from the flag definition.
+
+**Scope note:** this is one hop deep by design, not full history. A second `rollback` call undoes the *first* rollback, it can't reach an arbitrary earlier generation — that would need a real build-history store, which doesn't exist. The Roadmap Backlog item is retitled "Multi-Generation Rollback History" to reflect that the one-hop case is now done and only the deeper case remains open.
+
+## OCI annotations now auto-populate from git
+
+**Files:** [cmd/pokkum/git_metadata.go](cmd/pokkum/git_metadata.go) (new), [cmd/pokkum/build.go](cmd/pokkum/build.go).
+
+Previously `org.opencontainers.image.*` annotations only ever appeared if a user passed `--image-label` explicitly — no git integration existed despite Roadmap.md claiming there was one. Now `discoverGitMetadata` runs unconditionally on every `pokkum build` and populates three of the four standard keys:
+- `org.opencontainers.image.revision` ← `git rev-parse HEAD` (or `GITHUB_SHA` in CI, checked first).
+- `org.opencontainers.image.source` ← `git config --get remote.origin.url` (or `GITHUB_SERVER_URL`/`GITHUB_REPOSITORY` in CI).
+- `org.opencontainers.image.version` ← `git describe --tags --always --dirty` (or the CI ref name).
+
+An explicit `--image-label org.opencontainers.image.revision=...` (etc.) always overrides the auto-populated value — checked before auto-population runs, confirmed by `TestDiscoverGitMetadata_ExplicitLabelPrecedence`.
+
+**Two real gaps, not fixed here:**
+1. `org.opencontainers.image.created` is **not** populated — no commit-timestamp read exists, and it isn't wired to the pipeline's existing `SOURCE_DATE_EPOCH` mechanism despite that being the obvious source.
+2. Outside a git repository, or if `git` isn't on `PATH`, every git call fails and is swallowed silently — the build succeeds with those three labels simply absent, no warning printed. There's no opt-out flag either, so this silence is the only signal; a CI system with an unusually shallow/detached checkout would degrade quietly rather than loudly. The existing tests only cover the CI-env-var path, not a real `git` shell-out, so this path is exercised in production but not in the test suite.
+
+## Dependency vulnerabilities closed
+
+`govulncheck` previously flagged two dependency-tree vulnerabilities (both
+unreachable from Pokkum's own code, but worth closing rather than carrying):
+`go.opentelemetry.io/otel`'s baggage-parsing issue (GO-2026-5158), fixed by
+bumping to v1.45.0; and the unmaintained `golang.org/x/crypto/openpgp`
+package (GO-2026-5932), fixed via a `replace` directive in `go.mod` pointing
+at the actively-maintained `github.com/ProtonMail/go-crypto/openpgp` fork —
+confirmed no remaining import of the original package anywhere in the
+codebase. `govulncheck ./...` now reports zero vulnerabilities, reachable or
+not.
+
 ## Verification
 
 After all of the above: `gofmt -l .` clean, `go vet ./...` clean,
 `golangci-lint run ./...` clean, `make check-arch` passes (hexagonal purity
 and utility-package naming convention both hold), `go build ./...` clean,
-and `go test ./...` passes in full, including `tests/integration`.
+`govulncheck ./...` reports zero vulnerabilities, and `go test ./...` passes
+in full, including `tests/integration` and live-network tests against the
+real `distroless`/`chainguard` registries.

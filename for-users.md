@@ -74,6 +74,19 @@ and keyless Sigstore identities. Two modes are available:
    `--no-verify-base` disables verification entirely (the workaround if you need
    to skip these checks for a base image that isn't signed).
 
+**Two things worth knowing:**
+- If you override the keyless identity, set **both** `--base-keyless-identity`
+  and `--base-keyless-issuer` together — setting only one produces a generic
+  "must specify Issuer criteria" error instead of falling back to the preset's
+  default for the half you didn't set. Safe (it fails rather than silently
+  under-checking), just not the friendliest error message.
+- `pokkum base update`/`pokkum base check` (which manage `pokkum.lock`) don't
+  run signature verification themselves — a digest gets pinned into the
+  lockfile on trust-on-first-use. `pokkum build` re-verifies the locked
+  digest's real signature at build time regardless, so this isn't a way to
+  slip an unverified image past you permanently — just don't treat `base
+  update` succeeding as itself a verification result.
+
 ## PodDisruptionBudget: no longer generated for unlabeled workloads
 
 **Before:** `pokkum resolve`/`apply --resource-defaults` always generated a
@@ -95,9 +108,45 @@ Deployment/StatefulSet/DaemonSet (the Kubernetes API rejects the resource
 otherwise), so any manifest that would have passed validation before
 already has the labels this needs.
 
-## Roadmap wording
+## `pokkum rollback` no longer needs `--to`
 
-[Roadmap.md](Roadmap.md)'s description of `pokkum rollback` was corrected —
-it does not read from any build history; it rewrites a manifest's `image:`
-reference to whatever ref you pass via the required `--to` flag. Behavior
-is unchanged, only the description was wrong.
+**Before:** `--to=<ref>` was required — you had to already know what to roll
+back to.
+
+**Now:** `pokkum rollback -f manifest.yaml` with no `--to` rolls back to the
+image ref that was most recently replaced, read from a
+`pokkum.dev/previous-image` annotation that `resolve`/`apply` (and
+`rollback` itself) write into the manifest automatically. `--to` still
+works if you want to target something specific.
+
+**One real limit to know about:** this only remembers one step. Running
+`rollback` twice in a row just toggles back and forth between the two most
+recent refs — it can't reach an image from three deploys ago. That needs a
+real build-history store, which doesn't exist yet (tracked in
+[Roadmap.md](Roadmap.md)'s Backlog as "Multi-Generation Rollback History").
+If your manifest doesn't have the annotation yet (e.g. it's never been
+through `resolve`/`apply`), `rollback` without `--to` will error — pass
+`--to` explicitly the first time.
+
+## OCI annotations now stamp themselves from git automatically
+
+**Before:** `org.opencontainers.image.*` annotations only appeared if you
+passed `--image-label` yourself.
+
+**Now:** every `pokkum build` automatically sets `.revision` (commit SHA),
+`.source` (remote URL), and `.version` (`git describe` output) — no flag
+needed, and there's no opt-out flag if you'd rather it didn't. An explicit
+`--image-label org.opencontainers.image.revision=...` still overrides the
+auto-populated value if you need something different.
+
+**Two things worth knowing:**
+1. `.created` (a commit timestamp annotation) is *not* auto-populated —
+   only `.revision`/`.source`/`.version` are, despite there being an
+   obvious source for it (`SOURCE_DATE_EPOCH`, already used elsewhere in
+   the build). Set it yourself via `--image-label` if you need it.
+2. If you build outside a git repository, or `git` isn't installed, these
+   three labels are just silently absent — the build succeeds, nothing
+   warns you. Worth a sanity check (`pokkum explain <image>` or inspecting
+   the pushed manifest) if you're relying on these for traceability and
+   your build environment is unusual (e.g. a packaged source tarball
+   instead of a git checkout).

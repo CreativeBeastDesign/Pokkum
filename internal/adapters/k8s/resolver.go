@@ -313,38 +313,6 @@ func setAnnotation(parent *yaml.Node, key, val string) {
 	setMappingKey(ann, key, val)
 }
 
-// getAnnotation reads key under parent's metadata.annotations mapping.
-func getAnnotation(parent *yaml.Node, key string) (string, bool) {
-	if parent == nil {
-		return "", false
-	}
-	target := parent
-	if parent.Kind == yaml.DocumentNode {
-		for _, item := range parent.Content {
-			if item.Kind == yaml.MappingNode {
-				target = item
-				break
-			}
-		}
-	}
-	if target == nil || target.Kind != yaml.MappingNode {
-		return "", false
-	}
-	meta, ok := mapGet(target, "metadata")
-	if !ok || meta.Kind != yaml.MappingNode {
-		return "", false
-	}
-	ann, ok := mapGet(meta, "annotations")
-	if !ok || ann.Kind != yaml.MappingNode {
-		return "", false
-	}
-	valNode, ok := mapGet(ann, key)
-	if !ok || valNode.Kind != yaml.ScalarNode {
-		return "", false
-	}
-	return valNode.Value, true
-}
-
 // injectPodSecurityDefaults fills in the pod-level hardened defaults on
 // podSpec: runAsNonRoot and the RuntimeDefault seccomp profile. It never
 // injects runAsUser — Pokkum images already run as UID 65532 baked into the

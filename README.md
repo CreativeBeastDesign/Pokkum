@@ -79,8 +79,9 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum resolve -f deployment.yaml \
   5. SvelteKit App & Asset Layer
 - **Bit-for-Bit OCI Reproducibility**: All timestamps and tar headers derive deterministically from `SOURCE_DATE_EPOCH` / git commit metadata.
 - **Security Scanning & Guardrails**: Integrated `pokkum scan` vulnerability auditing (OSV advisory lookups) and build-time secret leak prevention.
+- **Base Image Signature Verification by Default**: Real keyless Sigstore verification (Fulcio certificate chain + Rekor transparency log) runs automatically against the live `distroless`/`chainguard` base image signatures — no configuration required. Custom/self-signed bases are covered too, via a static public key.
 - **Built-In Observability**: Zero-config OpenTelemetry tracing and Prometheus metrics auto-instrumentation.
-- **Day-2 Lifecycle Management**: Instant manifest rollbacks (`pokkum rollback`) and signed CLI self-upgrades (`pokkum upgrade`).
+- **Day-2 Lifecycle Management**: Annotation-based manifest rollbacks (`pokkum rollback`, no `--to` needed for the last change) and signed CLI self-upgrades (`pokkum upgrade`).
 
 ---
 
@@ -166,7 +167,7 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 | `pokkum doctor [dir]`      | `pokkum doctor ./my-app`                    | Diagnostic wizard for preflight checks and mechanical repairs.                     |
 | `pokkum init [dir]`        | `pokkum init ./my-app`                      | Bootstraps project config and `.pokkumignore`.                                     |
 | `pokkum explain [image]`   | `pokkum explain <ref>`                      | Inspects layer hierarchy, file origin tracing (`why`), and image diffing (`diff`). |
-| `pokkum rollback`          | `pokkum rollback -f deploy.yaml --to=<ref>` | Rolls back image references in Kubernetes deployment manifests.                    |
+| `pokkum rollback`          | `pokkum rollback -f deploy.yaml`            | Rolls back to the previous image ref (`pokkum.dev/previous-image` annotation), or pass `--to=<ref>` explicitly. One hop deep. |
 | `pokkum upgrade`           | `pokkum upgrade --check`                    | Checks for signed CLI release updates.                                             |
 
 ---
