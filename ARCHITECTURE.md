@@ -5,9 +5,7 @@
 It builds multi-architecture OCI images (`linux/amd64`, `linux/arm64`), embeds a PID-1 supervisor, generates Software Bills of Materials (SBOMs), and pushes reproducible container images directly to OCI registries — **without requiring Docker or a Docker daemon**.
 
 See also [fixes-to-v1.md](fixes-to-v1.md) for a post-v1.0 audit and the
-fixes it produced, and [unfixed-limitation.md](unfixed-limitation.md) for
-the one known gap left open (base image signature verification doesn't
-cover real upstream distroless/Chainguard signatures).
+fixes it produced.
 
 ---
 
@@ -77,7 +75,8 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `bunexec`: Wraps host `bun build --compile` for cross-compiling single executables.
    - `bunruntime`: Resolves, downloads, SHA256-verifies, and caches official Bun runtime binaries (`~/.cache/pokkum/bun`) for runtime layer assembly (`ports.BunRuntimeResolver`).
    - `packager`: Constructs reproducible OCI tarballs, custom single-binary layers (`BuildCustomFileLayer`), directory tree layers (`BuildDirectoryTreeLayer`), and multi-arch index manifests using `github.com/google/go-containerregistry`.
-   - `baseimage`: Resolves base image layers (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard `glibc-dynamic`), verifies Cosign signatures against a static public key via `ports.CosignSigner`, and maintains `pokkum.lock` digest locks. The static-key check covers a custom or self-signed base image (`POKKUM_BASE_IMAGE_PUBKEY`); it does not verify the stock presets' real upstream signatures, which use keyless Sigstore signing — see [unfixed-limitation.md](unfixed-limitation.md).
+   - `baseimage`: Resolves base image layers (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard `glibc-dynamic`), verifies base image signatures (static-key via `ports.CosignSigner` for custom/self-signed bases, or keyless Sigstore via `ports.KeylessVerifier` for stock presets), and maintains `pokkum.lock` digest locks. The resolver picks verification mode from the preset/flag before fetching any signature material — never inferred from wire data, to prevent downgrade attacks.
+   - `sigstore`: Implements `ports.KeylessVerifier` to verify Sigstore keyless signatures (Fulcio certificate chain + Rekor transparency log inclusion) using `github.com/sigstore/sigstore-go`, against an embedded public-good trust root snapshot. Fully offline (no live TUF fetch), enabling verification in `--offline`/`--hermetic` builds.
    - `lockfileutils`: Utility package for loading, parsing, and saving `pokkum.lock` base image lockfiles.
    - `jsonutils`: Utility package for structured, versioned JSON response formatting (`--output=json`).
    - `diagnosticsutils`: Utility package for container exit failure analysis and log tracing.

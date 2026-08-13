@@ -49,7 +49,7 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum build ./my-app \
   - `--hardened`: Uses `ghcr.io/chainguard-images/glibc-dynamic:latest` base image.
   - `--hermetic`: Enforces strict zero-network egress during compilation, requiring pre-cached base images and pre-populated `node_modules/`.
   - **Secret Guard**: Scans project source files for accidentally inlined secrets or high-entropy tokens before packaging layers.
-  - **Base Image Verification**: Verifies Cosign signatures against a static public key (`POKKUM_BASE_IMAGE_PUBKEY`) — real protection for a custom or self-signed base image. Does **not** yet cover the stock `distroless`/`chainguard` presets' real signatures, which use keyless Sigstore signing with no fixed key to check against; see [unfixed-limitation.md](unfixed-limitation.md).
+  - **Base Image Verification**: Verifies both static-key Cosign signatures (for custom/self-signed bases) and keyless Sigstore signatures (Fulcio + Rekor, for stock `distroless`/`chainguard` presets by default).
 
 **Resolve Hardened Kubernetes Manifests:**
 
@@ -178,7 +178,6 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 - **[Roadmap.md](Roadmap.md)**: Implementation progress and future feature backlog.
 - **[fixes-to-v1.md](fixes-to-v1.md)**: Post-v1.0 audit findings and the fixes applied for each.
 - **[for-users.md](for-users.md)**: User-visible behavior changes from that fix round and what they require of you.
-- **[unfixed-limitation.md](unfixed-limitation.md)**: The one known gap left open — base image verification doesn't cover real upstream distroless/Chainguard signatures.
 
 ---
 

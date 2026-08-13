@@ -15,7 +15,21 @@
 // pulling and inspecting every layer — so this is a best-effort filter for the
 // mistake users actually make, not a guarantee.
 //
+// # Signature verification
+//
+// When BaseImageRequest.VerifySignature is set, Resolve verifies the base
+// image's Cosign signature by one of two paths — a static public key, or a
+// keyless Sigstore signature (Fulcio certificate + Rekor transparency log,
+// delegated to internal/adapters/sigstore). Which path runs is decided from
+// the request and the preset before any signature material is fetched, never
+// from what happens to be published alongside the image; see verifyBaseImage.
+//
 // # Caching
+//
+// A Resolver also caches successful signature verifications per (ref, digest,
+// mode, identity, trusted root, key fingerprint, insecure, registry config),
+// so re-resolving the same image does not re-fetch and re-verify signature
+// material it has already proved. Failures are never cached.
 //
 // A Resolver caches its network round-trips per (ref, insecure) for the
 // top-level pull (index or single image plus its digest), and per (ref,
@@ -44,8 +58,10 @@ package baseimage
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +82,7 @@ import (
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -84,12 +101,21 @@ var _ ports.BaseImageResolver = (*Resolver)(nil)
 //
 // Resolver is safe for concurrent use: all mutable state lives behind mu.
 type Resolver struct {
-	log    *slog.Logger
-	signer ports.CosignSigner
+	log *slog.Logger
 
-	mu     sync.Mutex
-	pulls  map[pullKey]pullEntry
-	images map[imageKey]imageEntry
+	// signer verifies static-key Cosign signatures (the custom / self-signed
+	// base image case); keyless verifies Sigstore keyless signatures (Fulcio
+	// certificate + Rekor entry), which is how the stock distroless and
+	// chainguard presets are signed. Which one runs for a given Resolve call
+	// is decided by verifyBaseImage from the request, never from the bytes
+	// found on the registry.
+	signer  ports.CosignSigner
+	keyless ports.KeylessVerifier
+
+	mu            sync.Mutex
+	pulls         map[pullKey]pullEntry
+	images        map[imageKey]imageEntry
+	verifications map[verifyKey]struct{}
 }
 
 // pullKey identifies one top-level manifest pull.
@@ -129,24 +155,74 @@ type imageEntry struct {
 	err   error
 }
 
+// verifyKey identifies one signature verification that already succeeded. It
+// deliberately carries every input that can change the verdict — including a
+// fingerprint of the static public key actually used, so that changing
+// POKKUM_BASE_IMAGE_PUBKEY mid-process cannot be satisfied by a cache entry
+// proved against the previous key.
+type verifyKey struct {
+	ref                string
+	digest             string
+	mode               ports.BaseImageVerifyMode
+	identity           ports.KeylessIdentity
+	trustedRootPath    string
+	pubKeyFingerprint  string
+	insecure           bool
+	registryConfigPath string
+}
+
+// Option supplies an optional Resolver dependency to NewResolver.
+//
+// Go permits only one variadic parameter, so the Resolver's two optional
+// adapters — the static-key Cosign signer and the keyless Sigstore verifier —
+// are passed as options rather than as two variadic dependency lists. A nil
+// Option is accepted and ignored, so NewResolver(log, nil) still means "all
+// defaults", exactly as the previous `signer ...ports.CosignSigner` form did.
+type Option func(*Resolver)
+
+// WithCosignSigner overrides the static-key Cosign signer used by the
+// static-key verification path. A nil signer is ignored (the default stands).
+func WithCosignSigner(signer ports.CosignSigner) Option {
+	return func(r *Resolver) {
+		if signer != nil {
+			r.signer = signer
+		}
+	}
+}
+
+// WithKeylessVerifier overrides the keyless Sigstore verifier used by the
+// keyless verification path. A nil verifier is ignored (the default stands).
+func WithKeylessVerifier(verifier ports.KeylessVerifier) Option {
+	return func(r *Resolver) {
+		if verifier != nil {
+			r.keyless = verifier
+		}
+	}
+}
+
 // NewResolver constructs a Resolver. A nil logger defaults to slog.Default().
-// An optional CosignSigner can be provided; if omitted, it defaults to cosign.NewSigner(log).
-func NewResolver(log *slog.Logger, signer ...ports.CosignSigner) *Resolver {
+// The optional dependencies default to cosign.NewSigner(log) for static-key
+// signature verification and sigstore.NewVerifier(log) for keyless
+// verification; pass WithCosignSigner / WithKeylessVerifier to override
+// either.
+func NewResolver(log *slog.Logger, opts ...Option) *Resolver {
 	if log == nil {
 		log = slog.Default()
 	}
-	var s ports.CosignSigner
-	if len(signer) > 0 && signer[0] != nil {
-		s = signer[0]
-	} else {
-		s = cosign.NewSigner(log)
+	r := &Resolver{
+		log:           log,
+		signer:        cosign.NewSigner(log),
+		keyless:       sigstore.NewVerifier(log),
+		pulls:         make(map[pullKey]pullEntry),
+		images:        make(map[imageKey]imageEntry),
+		verifications: make(map[verifyKey]struct{}),
 	}
-	return &Resolver{
-		log:    log,
-		signer: s,
-		pulls:  make(map[pullKey]pullEntry),
-		images: make(map[imageKey]imageEntry),
+	for _, opt := range opts {
+		if opt != nil {
+			opt(r)
+		}
 	}
+	return r
 }
 
 // Resolve implements ports.BaseImageResolver.
@@ -253,7 +329,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 	}
 
 	if req.VerifySignature {
-		if err := r.verifyBaseImageSignature(ctx, ref, pull, req.Insecure, req.RegistryConfigPath); err != nil {
+		if err := r.verifyBaseImage(ctx, ref, pull, req); err != nil {
 			return nil, err
 		}
 	}
@@ -556,117 +632,458 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbCr5pcxh+/q57RngLq9ycZmUDjZd
 3KhRlVmB3LMAG1HtAwVdDIsKATtrP020TSVXeBVvOy1TntoxpA3ijNvHcA==
 -----END PUBLIC KEY-----`
 
-// verifyBaseImageSignature checks a Cosign "Simple Signing" signature
-// against pull's digest, verified with a static ECDSA/Ed25519 public key
-// (POKKUM_BASE_IMAGE_PUBKEY, falling back to DefaultBaseImagePublicKeyPEM).
+// verifyBaseImage verifies the base image's Cosign signature. It is the entry
+// point for BaseImageRequest.VerifySignature and the single place where the
+// choice of verification path is made.
 //
-// Scope: this verifies base images signed the way Pokkum itself signs a
-// custom/self-hosted base with a static key pair. It does NOT verify real
-// upstream distroless or Chainguard images out of the box — both projects
-// sign with keyless Sigstore (Fulcio short-lived certs + Rekor transparency
-// log), which has no fixed public key to pin here. Verifying those would
-// need a separate keyless-verification path (cert-chain + Rekor lookup),
-// which this adapter does not implement. Operators who re-sign a pinned
-// base digest with their own key, or who use a custom base they sign
-// themselves, get real protection from this function today; operators
-// relying on the distroless/Chainguard defaults do not, despite
-// VerifySignature defaulting to true for every preset.
-func (r *Resolver) verifyBaseImageSignature(ctx context.Context, ref string, pull *pulledManifest, insecure bool, registryConfigPath string) error {
-	if r.signer == nil {
-		return fmt.Errorf("baseimage: no Cosign signer configured, refusing to treat %s as verified: %w", ref, core.ErrBaseSignatureInvalid)
+// # Two verification paths
+//
+//   - static key: a Cosign "Simple Signing" signature verified against a
+//     static ECDSA/Ed25519 public key (POKKUM_BASE_IMAGE_PUBKEY, falling back
+//     to DefaultBaseImagePublicKeyPEM). This is how Pokkum itself signs a
+//     custom or self-hosted base, and it is the default for
+//     ports.BaseImageCustom.
+//
+//   - keyless: a Sigstore keyless signature — a short-lived Fulcio
+//     certificate plus its Rekor transparency-log entry — verified by
+//     internal/adapters/sigstore against the expected certificate identity
+//     (issuer + SAN). This is how the stock distroless and chainguard images
+//     are actually signed, so it is the default for those two presets; the
+//     expected identities come from ports.BaseImagePreset.DefaultKeylessIdentity.
+//
+// # Why the mode is decided before anything is fetched
+//
+// The mode comes from BaseImageRequest.VerifyMode, or from the preset when
+// that is BaseImageVerifyAuto. It is never inferred from which annotations
+// happen to be present on the registry's signature manifest. Inferring it
+// ("there is a certificate annotation, so verify keyless; otherwise verify
+// with the static key") would let whoever controls the bytes on the wire —
+// a compromised registry mirror, a MITM on an insecure pull — choose which
+// control runs, by stripping the real keyless material and substituting
+// something the weaker path would accept. So: decide the mode, then fetch,
+// then dispatch. There is deliberately no fallback from one path to the other
+// for a given Resolve call.
+func (r *Resolver) verifyBaseImage(ctx context.Context, ref string, pull *pulledManifest, req ports.BaseImageRequest) error {
+	mode := req.VerifyMode
+	if !mode.Valid() {
+		return fmt.Errorf("baseimage: %s: unknown verify mode %q for preset %q: %w", ref, mode, req.Preset, core.ErrBaseSignatureInvalid)
+	}
+	if mode == ports.BaseImageVerifyAuto {
+		mode = req.Preset.DefaultVerifyMode()
 	}
 
-	parsedRef, err := name.ParseReference(ref)
-	if err != nil {
-		return fmt.Errorf("baseimage: parse reference %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
+	var (
+		identity        ports.KeylessIdentity
+		trustedRootJSON []byte
+		pubKeyPEM       []byte
+	)
+
+	switch mode {
+	case ports.BaseImageVerifyStaticKey:
+		if r.signer == nil {
+			return fmt.Errorf("baseimage: no Cosign signer configured, refusing to treat %s as verified: %w", ref, core.ErrBaseSignatureInvalid)
+		}
+		pubKeyPEM = []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
+		if len(pubKeyPEM) == 0 {
+			pubKeyPEM = []byte(DefaultBaseImagePublicKeyPEM)
+		}
+
+	case ports.BaseImageVerifyKeyless:
+		if r.keyless == nil {
+			return fmt.Errorf("baseimage: no keyless verifier configured, refusing to treat %s as verified: %w", ref, core.ErrBaseSignatureInvalid)
+		}
+
+		// An operator who sets POKKUM_BASE_IMAGE_PUBKEY on a preset that
+		// verifies keyless by default almost certainly means "verify against
+		// my key", not "ignore my key" and certainly not "downgrade this
+		// preset's security model". Neither guess is ours to make silently,
+		// so fail loudly and name the flag that expresses the intent.
+		if os.Getenv("POKKUM_BASE_IMAGE_PUBKEY") != "" {
+			return fmt.Errorf(
+				"baseimage: %s: POKKUM_BASE_IMAGE_PUBKEY is set but preset %q verifies keyless by default; "+
+					"pass --base-verify-mode=static-key (or the equivalent BaseImageRequest.VerifyMode) if you "+
+					"intend to verify against that key instead of the upstream keyless signature: %w",
+				ref, req.Preset, core.ErrBaseSignatureInvalid)
+		}
+
+		identity = req.KeylessIdentity
+		if identity.Empty() {
+			if def, ok := req.Preset.DefaultKeylessIdentity(); ok {
+				identity = def
+			}
+		}
+		if identity.Empty() {
+			return fmt.Errorf(
+				"baseimage: %s: preset %q has no default keyless identity and none was supplied "+
+					"(BaseImageRequest.KeylessIdentity / --base-keyless-identity + --base-keyless-issuer); "+
+					"refusing to verify against an unconstrained identity: %w",
+				ref, req.Preset, core.ErrBaseSignatureInvalid)
+		}
+
+		if req.TrustedRootPath != "" {
+			b, err := os.ReadFile(req.TrustedRootPath)
+			if err != nil {
+				return fmt.Errorf("baseimage: %s: read trusted root %s: %w: %w", ref, req.TrustedRootPath, err, core.ErrBaseSignatureInvalid)
+			}
+			trustedRootJSON = b
+		}
+
+	default:
+		return fmt.Errorf("baseimage: %s: verify mode %q not implemented: %w", ref, mode, core.ErrBaseSignatureInvalid)
 	}
-	repo := parsedRef.Context().Name()
+
+	key := verifyKey{
+		ref:                ref,
+		digest:             pull.digest.String(),
+		mode:               mode,
+		identity:           identity,
+		trustedRootPath:    req.TrustedRootPath,
+		pubKeyFingerprint:  fingerprint(pubKeyPEM),
+		insecure:           req.Insecure,
+		registryConfigPath: req.RegistryConfigPath,
+	}
+	r.mu.Lock()
+	_, cached := r.verifications[key]
+	r.mu.Unlock()
+	if cached {
+		r.logger().Debug("base image signature verification cache hit", "ref", ref, "mode", mode.String())
+		return nil
+	}
+
+	if err := r.runVerification(ctx, ref, pull, req, mode, identity, trustedRootJSON, pubKeyPEM); err != nil {
+		// Only successes are cached. A failure aborts the build anyway, so
+		// there is nothing to save by remembering it, and caching it would
+		// mean caching transient causes (a registry timeout mid-fetch) as if
+		// they were verification verdicts.
+		return err
+	}
+
+	r.mu.Lock()
+	r.verifications[key] = struct{}{}
+	r.mu.Unlock()
+	return nil
+}
+
+// runVerification performs the fetch-then-dispatch half of verifyBaseImage,
+// after the mode and all of its inputs have been settled.
+func (r *Resolver) runVerification(
+	ctx context.Context,
+	ref string,
+	pull *pulledManifest,
+	req ports.BaseImageRequest,
+	mode ports.BaseImageVerifyMode,
+	identity ports.KeylessIdentity,
+	trustedRootJSON []byte,
+	pubKeyPEM []byte,
+) error {
+	repo, sigRefStr, layers, err := r.fetchCosignSigLayers(ctx, ref, pull, req.Insecure, req.RegistryConfigPath)
+	if err != nil {
+		return err
+	}
+
+	switch mode {
+	case ports.BaseImageVerifyStaticKey:
+		return r.verifyStaticKeySignature(ctx, ref, repo, sigRefStr, layers, pull.digest, pubKeyPEM)
+	case ports.BaseImageVerifyKeyless:
+		return r.verifyKeylessSignature(ctx, ref, repo, sigRefStr, layers, pull.digest, identity, trustedRootJSON)
+	default:
+		return fmt.Errorf("baseimage: %s: verify mode %q not implemented: %w", ref, mode, core.ErrBaseSignatureInvalid)
+	}
+}
+
+// cosignSigLayer is one signature layer of a Cosign "<repo>:<alg>-<hex>.sig"
+// manifest: the signed payload blob plus the annotations on its manifest
+// descriptor. A signature tag may legitimately carry several of these — an
+// image re-signed over the years accumulates one layer per signing — so every
+// layer is read and every layer is a verification candidate.
+type cosignSigLayer struct {
+	// index is the layer's position in the signature manifest, used only to
+	// make per-layer error messages locatable.
+	index int
+
+	payloadBytes []byte
+	b64Sig       string
+	certPEM      []byte // sigstore.CosignCertificateAnnotation, nil if absent
+	chainPEM     []byte // sigstore.CosignChainAnnotation, nil if absent
+	bundleJSON   []byte // sigstore.CosignBundleAnnotation, nil if absent
+}
+
+// fetchCosignSigLayers pulls the Cosign signature manifest for pull's digest
+// and returns every signature layer it carries, along with the repository name
+// and the signature reference (both wanted for error messages and payload
+// claim checks). It is mode-agnostic on purpose: the same bytes feed whichever
+// verification path verifyBaseImage already chose.
+func (r *Resolver) fetchCosignSigLayers(ctx context.Context, ref string, pull *pulledManifest, insecure bool, registryConfigPath string) (repo string, sigRefStr string, out []cosignSigLayer, err error) {
+	// Same name options Resolve used for the base pull itself: without them an
+	// insecure non-loopback registry parses for the image and fails for its
+	// signature.
+	nameOpts := []name.Option{name.WeakValidation}
+	if insecure {
+		nameOpts = append(nameOpts, name.Insecure)
+	}
+
+	parsedRef, err := name.ParseReference(ref, nameOpts...)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("baseimage: parse reference %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
+	}
+	repo = parsedRef.Context().Name()
 	digest := pull.digest
 
 	// Cosign signature tag convention: <digest-alg>-<digest-hex>.sig
-	sigTagStr := digest.Algorithm + "-" + digest.Hex + ".sig"
-	sigRefStr := repo + ":" + sigTagStr
+	sigRefStr = repo + ":" + digest.Algorithm + "-" + digest.Hex + ".sig"
 
-	sigRef, err := name.ParseReference(sigRefStr)
+	sigRef, err := name.ParseReference(sigRefStr, nameOpts...)
 	if err != nil {
-		return fmt.Errorf("baseimage: parse signature reference %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
+		return repo, sigRefStr, nil, fmt.Errorf("baseimage: parse signature reference %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
 	}
 
 	opts, err := r.remoteOptions(ctx, insecure, registryConfigPath)
 	if err != nil {
-		return fmt.Errorf("baseimage: resolve auth for signature %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
+		return repo, sigRefStr, nil, fmt.Errorf("baseimage: resolve auth for signature %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
 	}
 	sigImg, err := remote.Image(sigRef, opts...)
 	if err != nil {
-		return fmt.Errorf("baseimage: fetch Cosign signature for %s (%s): %w: %w", ref, sigRefStr, err, core.ErrBaseSignatureInvalid)
+		return repo, sigRefStr, nil, fmt.Errorf("baseimage: fetch Cosign signature for %s (%s): %w: %w", ref, sigRefStr, err, core.ErrBaseSignatureInvalid)
 	}
 
 	layers, err := sigImg.Layers()
 	if err != nil || len(layers) == 0 {
-		return fmt.Errorf("baseimage: no signature layers found in %s: %w", sigRefStr, core.ErrBaseSignatureInvalid)
-	}
-
-	layerReader, err := layers[0].Compressed()
-	if err != nil {
-		return fmt.Errorf("baseimage: read signature layer in %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
-	}
-	defer layerReader.Close()
-
-	payloadBytes, err := io.ReadAll(layerReader)
-	if err != nil {
-		return fmt.Errorf("baseimage: read signature payload in %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
+		return repo, sigRefStr, nil, fmt.Errorf("baseimage: no signature layers found in %s: %w", sigRefStr, core.ErrBaseSignatureInvalid)
 	}
 
 	manifest, err := sigImg.Manifest()
 	if err != nil {
-		return fmt.Errorf("baseimage: read signature manifest in %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
+		return repo, sigRefStr, nil, fmt.Errorf("baseimage: read signature manifest in %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
 	}
 
-	// dev.cosignproject.cosign/signature is Cosign's real static-signature
-	// annotation key (see sigstore/cosign pkg/oci/static). It is checked on
-	// the layer descriptor first (where cosign actually writes it) and, as a
-	// defensive fallback, on the manifest itself.
-	const cosignSignatureAnnotation = "dev.cosignproject.cosign/signature"
-
-	var b64Sig string
-	if len(manifest.Layers) > 0 && manifest.Layers[0].Annotations != nil {
-		if sig, ok := manifest.Layers[0].Annotations[cosignSignatureAnnotation]; ok {
-			b64Sig = sig
-		} else if sig, ok := manifest.Layers[0].Annotations["org.opencontainers.image.signature"]; ok {
-			b64Sig = sig
+	out = make([]cosignSigLayer, 0, len(layers))
+	for i, l := range layers {
+		payloadBytes, rerr := readLayer(l)
+		if rerr != nil {
+			return repo, sigRefStr, nil, fmt.Errorf("baseimage: read signature layer %d in %s: %w: %w", i, sigRefStr, rerr, core.ErrBaseSignatureInvalid)
 		}
-	}
-	if b64Sig == "" && manifest.Annotations != nil {
-		if sig, ok := manifest.Annotations[cosignSignatureAnnotation]; ok {
-			b64Sig = sig
+
+		sl := cosignSigLayer{index: i, payloadBytes: payloadBytes}
+
+		var ann map[string]string
+		if i < len(manifest.Layers) {
+			ann = manifest.Layers[i].Annotations
 		}
-	}
-	if b64Sig == "" {
-		return fmt.Errorf("baseimage: no %s annotation found on signature manifest %s: %w", cosignSignatureAnnotation, sigRefStr, core.ErrBaseSignatureInvalid)
+		if ann != nil {
+			// dev.cosignproject.cosign/signature is Cosign's real
+			// static-signature annotation key (see sigstore/cosign
+			// pkg/oci/static); the OCI one is a defensive fallback.
+			if sig, ok := ann[sigstore.CosignSignatureAnnotation]; ok {
+				sl.b64Sig = sig
+			} else if sig, ok := ann["org.opencontainers.image.signature"]; ok {
+				sl.b64Sig = sig
+			}
+			sl.certPEM = annotationBytes(ann, sigstore.CosignCertificateAnnotation)
+			sl.chainPEM = annotationBytes(ann, sigstore.CosignChainAnnotation)
+			sl.bundleJSON = annotationBytes(ann, sigstore.CosignBundleAnnotation)
+		}
+		// Manifest-level fallback, kept from the original single-layer
+		// implementation for signature artifacts that annotate the manifest
+		// rather than the layer descriptor.
+		if sl.b64Sig == "" && manifest.Annotations != nil {
+			if sig, ok := manifest.Annotations[sigstore.CosignSignatureAnnotation]; ok {
+				sl.b64Sig = sig
+			}
+		}
+
+		out = append(out, sl)
 	}
 
-	sigBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(b64Sig))
-	if decErr != nil || len(sigBytes) == 0 {
-		return fmt.Errorf("baseimage: decode base64 signature from %s: %w: %w", sigRefStr, decErr, core.ErrBaseSignatureInvalid)
+	return repo, sigRefStr, out, nil
+}
+
+// readLayer reads one signature layer's blob. Split out so the reader is
+// closed per iteration rather than deferred to the end of a loop.
+func readLayer(l v1.Layer) ([]byte, error) {
+	rc, err := l.Compressed()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+// annotationBytes returns the named annotation's value with surrounding
+// whitespace trimmed, or nil when it is absent or empty.
+func annotationBytes(ann map[string]string, key string) []byte {
+	v := strings.TrimSpace(ann[key])
+	if v == "" {
+		return nil
+	}
+	return []byte(v)
+}
+
+// verifyStaticKeySignature verifies the signature layers against a static
+// public key. Any one layer verifying is enough — a signature tag carrying
+// several layers is signed several times, and one good signature by the
+// expected key is proof. cosign.Signer.Verify checks the payload's
+// docker-reference and docker-manifest-digest claims against repo/digest, so
+// a valid signature over some *other* image is not accepted here.
+func (r *Resolver) verifyStaticKeySignature(ctx context.Context, ref, repo, sigRefStr string, layers []cosignSigLayer, digest v1.Hash, pubKeyPEM []byte) error {
+	var errs []error
+
+	for _, l := range layers {
+		if l.b64Sig == "" {
+			errs = append(errs, fmt.Errorf("layer %d: no %s annotation found on signature manifest %s", l.index, sigstore.CosignSignatureAnnotation, sigRefStr))
+			continue
+		}
+		sigBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(l.b64Sig))
+		if decErr != nil || len(sigBytes) == 0 {
+			errs = append(errs, fmt.Errorf("layer %d: decode base64 signature from %s: %w", l.index, sigRefStr, decErr))
+			continue
+		}
+
+		bundle := ports.CosignSignatureBundle{
+			PayloadBytes:    l.payloadBytes,
+			SignatureBytes:  sigBytes,
+			Base64Signature: l.b64Sig,
+			Repo:            repo,
+			Digest:          digest,
+		}
+		if err := r.signer.Verify(ctx, bundle, pubKeyPEM, repo, digest); err != nil {
+			errs = append(errs, fmt.Errorf("layer %d: %w", l.index, err))
+			continue
+		}
+
+		r.logger().Info("base image Cosign signature verified", "ref", ref, "sig_ref", sigRefStr)
+		return nil
 	}
 
-	bundle := ports.CosignSignatureBundle{
-		PayloadBytes:    payloadBytes,
-		SignatureBytes:  sigBytes,
-		Base64Signature: b64Sig,
-		Repo:            repo,
-		Digest:          digest,
+	if len(errs) == 0 {
+		return fmt.Errorf("baseimage: no signature layers found in %s: %w", sigRefStr, core.ErrBaseSignatureInvalid)
+	}
+	return fmt.Errorf("baseimage: Cosign signature verification failed for %s: %w: %w", ref, errors.Join(errs...), core.ErrBaseSignatureInvalid)
+}
+
+// verifyKeylessSignature verifies the signature layers as Sigstore keyless
+// signatures against the expected certificate identity. Any one layer
+// verifying is enough, for the same reason as in the static-key path.
+//
+// Two things this does that the port's Verify cannot do for us:
+//
+//   - It refuses to run at all if no layer carries both the certificate and
+//     Rekor bundle annotations, rather than falling back to another mode. A
+//     missing keyless signature on a preset configured to verify keyless is a
+//     failure, not an invitation to try something weaker.
+//
+//   - It re-checks the payload's own claims after a successful verification.
+//     sigstore-go proves "this identity signed exactly these payload bytes";
+//     it says nothing about whether those bytes describe *this* image. Without
+//     the claim check, a genuine distroless signature over a different
+//     distroless digest would satisfy this function.
+func (r *Resolver) verifyKeylessSignature(
+	ctx context.Context,
+	ref, repo, sigRefStr string,
+	layers []cosignSigLayer,
+	digest v1.Hash,
+	identity ports.KeylessIdentity,
+	trustedRootJSON []byte,
+) error {
+	var errs []error
+
+	for _, l := range layers {
+		// Mode is fixed for the whole Resolve call, so a layer without
+		// keyless material is skipped, never verified some other way.
+		if len(l.certPEM) == 0 || len(l.bundleJSON) == 0 {
+			continue
+		}
+
+		sigBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(l.b64Sig))
+		if decErr != nil || len(sigBytes) == 0 {
+			errs = append(errs, fmt.Errorf("layer %d: decode base64 %s annotation from %s: %w", l.index, sigstore.CosignSignatureAnnotation, sigRefStr, decErr))
+			continue
+		}
+
+		result, err := r.keyless.Verify(ctx, ports.KeylessVerifyRequest{
+			PayloadBytes:    l.payloadBytes,
+			SignatureBytes:  sigBytes,
+			CertificatePEM:  l.certPEM,
+			ChainPEM:        l.chainPEM,
+			RekorBundleJSON: l.bundleJSON,
+			Identity:        identity,
+			TrustedRootJSON: trustedRootJSON,
+		})
+		if err != nil {
+			// ErrNoBundle means this particular layer is not keyless material
+			// after all (it should have been filtered out above; the verifier
+			// is the authority on what counts). Skip it without recording a
+			// verification failure — and without downgrading it.
+			if errors.Is(err, sigstore.ErrNoBundle) {
+				r.logger().Debug("skipping signature layer without keyless material", "ref", ref, "sig_ref", sigRefStr, "layer", l.index)
+				continue
+			}
+			errs = append(errs, fmt.Errorf("layer %d: %w", l.index, err))
+			continue
+		}
+
+		if err := checkSimpleSigningClaims(l.payloadBytes, repo, digest); err != nil {
+			errs = append(errs, fmt.Errorf("layer %d: keyless signature is valid but %w", l.index, err))
+			continue
+		}
+
+		r.logger().Info("base image keyless signature verified",
+			"ref", ref,
+			"sig_ref", sigRefStr,
+			"issuer", result.Issuer,
+			"san", result.SAN,
+			"rekor_log_id", result.RekorLogID,
+			"rekor_log_index", result.RekorLogIndex,
+			"integrated_time", result.IntegratedTime)
+		return nil
 	}
 
-	pubKeyPEM := []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
-	if len(pubKeyPEM) == 0 {
-		pubKeyPEM = []byte(DefaultBaseImagePublicKeyPEM)
+	if len(errs) == 0 {
+		return fmt.Errorf(
+			"baseimage: %s: signature manifest %s carries no keyless signature material — no layer has both the %s and %s "+
+				"annotations, so there is no Fulcio certificate or Rekor entry to verify; if this image is signed with a "+
+				"static key instead, pass --base-verify-mode=static-key (or the equivalent BaseImageRequest.VerifyMode) "+
+				"and set POKKUM_BASE_IMAGE_PUBKEY to that key: %w",
+			ref, sigRefStr, sigstore.CosignCertificateAnnotation, sigstore.CosignBundleAnnotation, core.ErrBaseSignatureInvalid)
+	}
+	return fmt.Errorf("baseimage: keyless signature verification failed for %s (%s): %w: %w", ref, sigRefStr, errors.Join(errs...), core.ErrBaseSignatureInvalid)
+}
+
+// checkSimpleSigningClaims validates that a Simple Signing payload actually
+// names repo at digest. The static-key path gets this from
+// cosign.Signer.Verify; the keyless path goes through ports.KeylessVerifier
+// instead, which proves only that the payload bytes were signed by the
+// expected identity, so the claims have to be checked here.
+//
+// Both payload type strings are accepted: real upstream Cosign signatures
+// (distroless, chainguard) write ports.CosignContainerImageSignatureType,
+// while Pokkum's own static-key signer writes ports.CosignSimpleSigningType.
+func checkSimpleSigningClaims(payloadBytes []byte, repo string, digest v1.Hash) error {
+	var payload ports.CosignSimpleSigningPayload
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return fmt.Errorf("its signed payload is not valid Simple Signing JSON: %w", err)
 	}
 
-	if err := r.signer.Verify(ctx, bundle, pubKeyPEM, repo, digest); err != nil {
-		return fmt.Errorf("baseimage: Cosign signature verification failed for %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
+	switch payload.Critical.Type {
+	case ports.CosignSimpleSigningType, ports.CosignContainerImageSignatureType:
+	default:
+		return fmt.Errorf("its signed payload type is %q, expected %q or %q",
+			payload.Critical.Type, ports.CosignContainerImageSignatureType, ports.CosignSimpleSigningType)
 	}
 
-	r.logger().Info("base image Cosign signature verified", "ref", ref, "sig_ref", sigRefStr)
+	if got := payload.Critical.Identity.DockerReference; got != repo {
+		return fmt.Errorf("it is a signature for repository %q, not %q", got, repo)
+	}
+	if got := payload.Critical.Image.DockerManifestDigest; got != digest.String() {
+		return fmt.Errorf("it is a signature for digest %q, not %q", got, digest.String())
+	}
 	return nil
+}
+
+// fingerprint hashes key material so it can be part of a comparable cache key
+// without the key itself being retained. Empty input yields "".
+func fingerprint(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(b))
 }

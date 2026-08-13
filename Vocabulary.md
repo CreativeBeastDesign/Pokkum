@@ -1,6 +1,6 @@
 # Pokkum CLI Vocabulary
 
-A single reference for every flag Pokkum's CLI exposes, the conventions flags follow, and the open backlog items on [Roadmap.md](Roadmap.md). See [fixes-to-v1.md](fixes-to-v1.md), [for-users.md](for-users.md), and [unfixed-limitation.md](unfixed-limitation.md) for a post-v1.0 audit round that changed some of the behavior documented below.
+A single reference for every flag Pokkum's CLI exposes, the conventions flags follow, and the open backlog items on [Roadmap.md](Roadmap.md). See [fixes-to-v1.md](fixes-to-v1.md) and [for-users.md](for-users.md) for a post-v1.0 audit round that changed some of the behavior documented below.
 
 Pokkum's stated model is "`ko` for SvelteKit" (see [README.md](README.md)), so the vocabulary borrows `ko`'s shape deliberately: a `*_DOCKER_REPO` environment variable as the one required input, `-f`/`--recursive` for manifest commands, `--local`/`--push`-style output-mode flags, `--platform` as the multi-arch surface, and boolean toggles that read as prose (`--bare`, `--insecure-registry` in `ko`; `--hardened`, `--dry-run` here). Where this document says "follows `ko` convention," that is the specific precedent being matched.
 
@@ -44,7 +44,11 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--sbom-attach` | — | — | `referrer` | SBOM attachment mode: `referrer` (OCI 1.1) or `tag` (legacy `.sbom` tag). |
 | `--local` | — | — | `false` | Load into the local Docker daemon instead of pushing. Mutually exclusive with `--tarball`. |
 | `--image-label` | — | — | (none) | Custom image label (`key=value`), repeatable. |
-| `--no-verify-base` | — | — | `false` | Suppress Cosign signature verification on base images. Verification checks against a static public key (`POKKUM_BASE_IMAGE_PUBKEY`) — real protection for a custom/self-signed base, but it does not cover the stock `distroless`/`chainguard` presets' actual (keyless) signatures; see [unfixed-limitation.md](unfixed-limitation.md). |
+| `--base-verify-mode` | — | — | `auto` | Base image verification mode: `auto` (keyless for stock presets, static-key for custom), `keyless`, or `static-key`. |
+| `--base-keyless-identity` | — | — | (preset default) | Override the expected Fulcio certificate SAN for keyless verification. |
+| `--base-keyless-issuer` | — | — | (preset default) | Override the expected OIDC issuer for keyless verification. |
+| `--sigstore-trusted-root` | — | — | (embedded) | Path to a custom Sigstore trusted root snapshot (e.g. for a private Sigstore deployment). |
+| `--no-verify-base` | — | — | `false` | Suppress base image signature verification entirely (both static-key and keyless). |
 | `--allow-secret-pattern` | — | — | (none) | Regex pattern to ignore during build-time secret scanning, repeatable. |
 | `--hermetic` | — | — | `false` | Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required). |
 | `--registry-config` | — | — | (none) | Path to a `docker config.json`-style auth file, keyed by registry hostname (`"auths": {"<host>": {...}}`), merged ahead of `authn.DefaultKeychain`. Not cloud-provider-specific — no ECR/GCR/ACR credential-helper invocation, just static per-registry credentials from the file. |

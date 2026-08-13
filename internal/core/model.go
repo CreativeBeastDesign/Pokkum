@@ -60,6 +60,9 @@ type (
 	// BaseImagePreset names a supported base-image tier.
 	BaseImagePreset = ports.BaseImagePreset
 
+	// BaseImageVerifyMode selects how base image signature verification is performed.
+	BaseImageVerifyMode = ports.BaseImageVerifyMode
+
 	// RuntimeConfig describes the runtime behaviour baked into the image.
 	RuntimeConfig = ports.RuntimeConfig
 
@@ -298,6 +301,16 @@ func ParseBaseImagePreset(s string) (BaseImagePreset, error) {
 	return p, nil
 }
 
+// ParseBaseImageVerifyMode converts user input to a BaseImageVerifyMode,
+// accepting any case and surrounding whitespace.
+func ParseBaseImageVerifyMode(s string) (BaseImageVerifyMode, error) {
+	m := BaseImageVerifyMode(strings.ToLower(strings.TrimSpace(s)))
+	if !m.Valid() {
+		return "", fmt.Errorf("base image verify mode %q: %w", s, ErrInvalidBaseImage)
+	}
+	return m, nil
+}
+
 // ParseSourceDateEpoch parses a SOURCE_DATE_EPOCH value: a decimal count of
 // seconds since the Unix epoch, as specified by the reproducible-builds
 // standard. An empty string yields the zero Time and a nil error, meaning
@@ -342,6 +355,18 @@ type BaseImageOptions struct {
 
 	// NoVerifyBase suppresses Cosign signature verification on upstream base images.
 	NoVerifyBase bool
+
+	// VerifyMode selects how base image signature verification is performed. Empty means use the preset default.
+	VerifyMode BaseImageVerifyMode
+
+	// KeylessSAN is the expected Fulcio certificate Subject Alternative Name for keyless verification. Empty means use the preset default.
+	KeylessSAN string
+
+	// KeylessIssuer is the expected OIDC issuer for keyless verification. Empty means use the preset default.
+	KeylessIssuer string
+
+	// TrustedRootPath is the path to a Sigstore trusted-root JSON file overriding the embedded default. Empty means use the embedded default.
+	TrustedRootPath string
 }
 
 // SBOMOptions controls bill-of-materials generation and attachment.

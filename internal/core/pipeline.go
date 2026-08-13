@@ -314,6 +314,12 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		UpdateBase:      req.BaseImage.UpdateBase,
 		Offline:         req.BaseImage.Offline,
 		VerifySignature: !req.BaseImage.NoVerifyBase,
+		VerifyMode:      req.BaseImage.VerifyMode,
+		KeylessIdentity: ports.KeylessIdentity{
+			SAN:    req.BaseImage.KeylessSAN,
+			Issuer: req.BaseImage.KeylessIssuer,
+		},
+		TrustedRootPath: req.BaseImage.TrustedRootPath,
 	})
 	if err != nil {
 		return BuildResult{}, err

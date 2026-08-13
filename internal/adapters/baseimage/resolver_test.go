@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/static"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -782,4 +783,268 @@ func TestResolve_CustomRegistryConfig(t *testing.T) {
 			t.Error("expected non-empty digest for resolved base image")
 		}
 	})
+}
+
+// --- M6b: resolver dispatch-logic tests, especially the anti-downgrade
+// guarantee ---------------------------------------------------------------
+//
+// The tests below do not re-test cryptographic correctness (that is M3's and
+// M6a's job, for internal/adapters/cosign and internal/adapters/sigstore
+// respectively). They pin down verifyBaseImage's dispatch logic: which
+// verification path runs for a given request, and that it never silently
+// substitutes a weaker one.
+
+// TestResolve_KeylessMode_RejectsStaticKeySignature is the anti-downgrade
+// test: the single most important test in this milestone.
+//
+// An operator who explicitly asks for keyless verification (VerifyMode:
+// BaseImageVerifyKeyless) must never have that request silently satisfied by
+// a static-key signature, even when one is genuinely present and
+// cryptographically valid, and even though the custom preset defaults to
+// static-key verification. verifyKeylessSignature must refuse to run at all
+// when no layer carries the keyless (certificate + bundle) annotations —
+// there is deliberately no fallback to the weaker static-key path for a
+// given Resolve call, because falling back would let whoever controls the
+// signature tag choose which control actually runs.
+func TestResolve_KeylessMode_RejectsStaticKeySignature(t *testing.T) {
+	s, _ := newTestRegistry(t)
+	ref := pushImage(t, s, "app/static-only:v1", ports.LinuxAMD64)
+	privPEM, _ := genECKeyPairPEM(t)
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	pre, err := r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:    ports.BaseImageCustom,
+		Ref:       ref,
+		Platforms: []ports.Platform{ports.LinuxAMD64},
+		Insecure:  true,
+	})
+	if err != nil {
+		t.Fatalf("pre-resolve: %v", err)
+	}
+	parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	repo := parsedRef.Context().Name()
+
+	// A genuine, valid static-key signature — and nothing else — is present
+	// on the signature tag.
+	pushCosignSignature(t, s, repo, pre.Digest, privPEM, false)
+
+	// Force keyless verification explicitly (the custom preset's own default
+	// is static-key, so VerifyMode must be set to simulate "operator
+	// explicitly asked for keyless"). The identity's value must not matter:
+	// resolution has to fail before identity is ever checked, since there is
+	// no keyless material to check it against.
+	_, err = r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:          ports.BaseImageCustom,
+		Ref:             ref,
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		Insecure:        true,
+		VerifySignature: true,
+		VerifyMode:      ports.BaseImageVerifyKeyless,
+		KeylessIdentity: ports.KeylessIdentity{Issuer: "irrelevant", SAN: "irrelevant"},
+	})
+	if err == nil {
+		t.Fatal("expected keyless verification to fail against an image carrying only a static-key signature, got nil error")
+	}
+	if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+		t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+	}
+	// Confirm the failure is specifically "no keyless material found", not
+	// some other unrelated failure — otherwise this test could pass for the
+	// wrong reason without actually proving the anti-downgrade guarantee.
+	if !strings.Contains(err.Error(), "carries no keyless signature material") {
+		t.Fatalf("error does not indicate the expected no-keyless-material failure, got: %v", err)
+	}
+}
+
+// TestResolve_KeylessMode_PubkeyConflictGuard proves that setting
+// POKKUM_BASE_IMAGE_PUBKEY against a preset that verifies keyless by default
+// fails loudly instead of being silently ignored or silently downgrading to
+// static-key verification.
+func TestResolve_KeylessMode_PubkeyConflictGuard(t *testing.T) {
+	s, _ := newTestRegistry(t)
+	// Any image works: the guard fires before any signature material is
+	// fetched, so nothing needs to be pushed to the ".sig" tag.
+	ref := pushImage(t, s, "app/pubkey-conflict:v1", ports.LinuxAMD64)
+
+	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", "irrelevant-value")
+
+	r := NewResolver(nil)
+	// ports.BaseImageDistroless has DefaultVerifyMode() == keyless.
+	// BaseImageRequest.Ref overriding a preset's default ref while keeping
+	// the preset's semantics is exactly what effectiveRef supports, so this
+	// resolves the locally pushed image under the distroless preset's
+	// keyless-by-default policy.
+	_, err := r.Resolve(context.Background(), ports.BaseImageRequest{
+		Preset:          ports.BaseImageDistroless,
+		Ref:             ref,
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		Insecure:        true,
+		VerifySignature: true,
+		VerifyMode:      ports.BaseImageVerifyAuto,
+	})
+	if err == nil {
+		t.Fatal("expected resolve to fail when POKKUM_BASE_IMAGE_PUBKEY is set for a keyless-by-default preset")
+	}
+	if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+		t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "POKKUM_BASE_IMAGE_PUBKEY") {
+		t.Errorf("error should name the conflicting env var POKKUM_BASE_IMAGE_PUBKEY, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--base-verify-mode=static-key") {
+		t.Errorf("error should point at --base-verify-mode=static-key as the way to express the intent, got: %v", err)
+	}
+}
+
+// pushKeylessSignatureFixture pushes a "<repo>:<alg>-<hex>.sig" tag manifest
+// for repo@digest whose layer blob and annotations are copied verbatim from
+// a real, captured keyless Sigstore signature fixture (see
+// internal/adapters/sigstore/testdata/distroless-nonroot/README.md), rather
+// than freshly generated material. This lets a test attach a genuine,
+// cryptographically valid keyless signature to an image the signature was
+// never actually issued for — exactly what
+// TestResolve_KeylessMode_ClaimsMismatchFailsClosed needs in order to prove
+// the payload-claims re-check is load-bearing and not just decoration.
+func pushKeylessSignatureFixture(t *testing.T, s *httptest.Server, repo string, digest v1.Hash, fixtureDir string) {
+	t.Helper()
+
+	payloadBytes, err := os.ReadFile(filepath.Join(fixtureDir, "payload.json"))
+	if err != nil {
+		t.Fatalf("read payload.json: %v", err)
+	}
+	sigBytes, err := os.ReadFile(filepath.Join(fixtureDir, "signature.bin"))
+	if err != nil {
+		t.Fatalf("read signature.bin: %v", err)
+	}
+	certPEM, err := os.ReadFile(filepath.Join(fixtureDir, "certificate.pem"))
+	if err != nil {
+		t.Fatalf("read certificate.pem: %v", err)
+	}
+	chainPEM, err := os.ReadFile(filepath.Join(fixtureDir, "chain.pem"))
+	if err != nil {
+		t.Fatalf("read chain.pem: %v", err)
+	}
+	bundleJSON, err := os.ReadFile(filepath.Join(fixtureDir, "bundle.json"))
+	if err != nil {
+		t.Fatalf("read bundle.json: %v", err)
+	}
+
+	layer := static.NewLayer(payloadBytes, "application/vnd.dev.cosign.simplesigning.v1+json")
+	sigImg, err := mutate.Append(empty.Image, mutate.Addendum{
+		Layer: layer,
+		Annotations: map[string]string{
+			sigstore.CosignSignatureAnnotation:   base64.StdEncoding.EncodeToString(sigBytes),
+			sigstore.CosignCertificateAnnotation: string(certPEM),
+			sigstore.CosignChainAnnotation:       string(chainPEM),
+			sigstore.CosignBundleAnnotation:      string(bundleJSON),
+		},
+	})
+	if err != nil {
+		t.Fatalf("mutate.Append: %v", err)
+	}
+
+	sigRef := registryRef(t, s, repo[strings.Index(repo, "/")+1:]+":"+digest.Algorithm+"-"+digest.Hex+".sig")
+	tag, err := name.NewTag(sigRef, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(%q): %v", sigRef, err)
+	}
+	if err := remote.Write(tag, sigImg); err != nil {
+		t.Fatalf("Write signature: %v", err)
+	}
+}
+
+// TestResolve_KeylessMode_ClaimsMismatchFailsClosed proves that genuine
+// Sigstore cryptographic success alone is not sufficient: the resolver must
+// also confirm the signed payload actually names the image being resolved.
+//
+// It attaches a real, captured distroless keyless signature — verbatim
+// payload, signature bytes, certificate and Rekor bundle — to a completely
+// unrelated locally pushed image, then resolves with the real distroless
+// identity (Issuer/SAN). Fulcio identity matching succeeds (the certificate
+// really was issued to that identity) and full Sigstore cryptographic
+// verification succeeds (chain, SCT, Rekor SET all check out against the
+// embedded public-good trust root, fully offline). The resolve must still
+// fail, because checkSimpleSigningClaims notices the payload's
+// docker-reference names gcr.io/distroless/cc-debian12, not the local image.
+func TestResolve_KeylessMode_ClaimsMismatchFailsClosed(t *testing.T) {
+	s, _ := newTestRegistry(t)
+	ref := pushImage(t, s, "app/claims-mismatch:v1", ports.LinuxAMD64)
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	pre, err := r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:    ports.BaseImageCustom,
+		Ref:       ref,
+		Platforms: []ports.Platform{ports.LinuxAMD64},
+		Insecure:  true,
+	})
+	if err != nil {
+		t.Fatalf("pre-resolve: %v", err)
+	}
+	parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	repo := parsedRef.Context().Name()
+
+	pushKeylessSignatureFixture(t, s, repo, pre.Digest, "../sigstore/testdata/distroless-nonroot")
+
+	_, err = r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:          ports.BaseImageCustom,
+		Ref:             ref,
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		Insecure:        true,
+		VerifySignature: true,
+		VerifyMode:      ports.BaseImageVerifyKeyless,
+		KeylessIdentity: ports.KeylessIdentity{
+			Issuer: ports.DistrolessKeylessIssuer,
+			SAN:    ports.DistrolessKeylessSAN,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected resolve to fail: a genuine distroless signature was attached to an unrelated image")
+	}
+	if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+		t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "is a signature for repository") {
+		t.Fatalf("error does not indicate a claims (repository/digest) mismatch, got: %v", err)
+	}
+}
+
+// TestResolve_KeylessMode_EmptyIdentityRefused proves that keyless
+// verification refuses to run against an unconstrained identity rather than
+// treating a zero-value KeylessIdentity as "match anything". The custom
+// preset has no default keyless identity, so leaving
+// BaseImageRequest.KeylessIdentity empty must fail before any signature
+// material is even fetched.
+func TestResolve_KeylessMode_EmptyIdentityRefused(t *testing.T) {
+	s, _ := newTestRegistry(t)
+	ref := pushImage(t, s, "app/empty-identity:v1", ports.LinuxAMD64)
+
+	r := NewResolver(nil)
+	_, err := r.Resolve(context.Background(), ports.BaseImageRequest{
+		Preset:          ports.BaseImageCustom,
+		Ref:             ref,
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		Insecure:        true,
+		VerifySignature: true,
+		VerifyMode:      ports.BaseImageVerifyKeyless,
+		// KeylessIdentity deliberately left at its zero value.
+	})
+	if err == nil {
+		t.Fatal("expected resolve to fail for an unconstrained (empty) keyless identity")
+	}
+	if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+		t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "unconstrained identity") {
+		t.Errorf("error should mention refusing an unconstrained identity, got: %v", err)
+	}
 }

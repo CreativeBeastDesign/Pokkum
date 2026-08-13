@@ -33,6 +33,42 @@ const (
 	BaseImageCustom BaseImagePreset = "custom"
 )
 
+// BaseImageVerifyMode selects how base image signature verification is
+// performed. The zero value (BaseImageVerifyAuto) defers to the preset's
+// BaseImagePreset.DefaultVerifyMode().
+type BaseImageVerifyMode string
+
+const (
+	// BaseImageVerifyAuto lets the preset decide (distroless/chainguard ->
+	// keyless; custom -> static-key). This is the zero value.
+	BaseImageVerifyAuto BaseImageVerifyMode = ""
+
+	// BaseImageVerifyKeyless verifies a keyless Sigstore signature (Fulcio +
+	// Rekor) against a KeylessIdentity. Never falls back to static-key
+	// verification if no keyless signature material is found — that would be
+	// a silent downgrade.
+	BaseImageVerifyKeyless BaseImageVerifyMode = "keyless"
+
+	// BaseImageVerifyStaticKey verifies a Cosign signature against a static
+	// public key (POKKUM_BASE_IMAGE_PUBKEY or the embedded default),
+	// unchanged from the pre-existing behavior.
+	BaseImageVerifyStaticKey BaseImageVerifyMode = "static-key"
+)
+
+// Valid reports whether m is a known verification mode. The zero value IS
+// valid (it means "auto").
+func (m BaseImageVerifyMode) Valid() bool {
+	switch m {
+	case BaseImageVerifyAuto, BaseImageVerifyKeyless, BaseImageVerifyStaticKey:
+		return true
+	default:
+		return false
+	}
+}
+
+// String implements fmt.Stringer.
+func (m BaseImageVerifyMode) String() string { return string(m) }
+
 // DefaultBaseImagePreset is the preset used when a BuildRequest leaves the
 // base-image options at their zero value.
 const DefaultBaseImagePreset = BaseImageDistroless
@@ -44,6 +80,66 @@ const DefaultBaseImagePreset = BaseImageDistroless
 const (
 	DistrolessBaseRef = "gcr.io/distroless/cc-debian12:nonroot"
 	ChainguardBaseRef = "cgr.dev/chainguard/glibc-dynamic:latest"
+)
+
+// Keyless Sigstore identity constants for the stock distroless/chainguard
+// presets. Verified on 2026-08-12 by pulling live Cosign signature artifacts
+// and decoding their Fulcio leaf certificates; see the doc comment on
+// DefaultKeylessIdentity for the re-verification procedure. These are
+// security policy, not incidental values — do not "fix" a build failure by
+// loosening them without re-deriving from a fresh pull first.
+//
+// Evidence behind these values (all certs chained to O=sigstore.dev,
+// CN=sigstore-intermediate under the sigstore.dev public-good root, with
+// ~10-minute validity windows, i.e. genuine ephemeral Fulcio keyless certs):
+//
+//   - gcr.io/distroless/cc-debian12:nonroot @ sha256:adcd20c7b4c988b73cbfbdd
+//     b26d2eee574571e6d7c9ffea29b3821e0690efb77 — SAN
+//     "email:keyless@distroless.iam.gserviceaccount.com", OIDC issuer
+//     extension (both OID .1.1 and .1.8) "https://accounts.google.com".
+//     Cross-checked against gcr.io/distroless/base-debian12:nonroot and two
+//     historical cc-debian12 signature tags (certs issued 2024-10-25 and
+//     2025-10-13). Those historical signature tags carry many signature
+//     layers each (re-signings); all 27 leaf certs decoded agree exactly on
+//     both the SAN and the issuer.
+//
+//   - cgr.dev/chainguard/glibc-dynamic:latest @ sha256:df4e22a4b5dcd8e15a51f
+//     e9b04e16717d411dd9f4fe4b3844c1bf425b14be303 — SAN
+//     "URI:https://github.com/chainguard-images/images/.github/workflows/rel
+//     ease.yaml@refs/heads/main", issuer extension
+//     "https://token.actions.githubusercontent.com".
+const (
+	DistrolessKeylessIssuer = "https://accounts.google.com"
+	DistrolessKeylessSAN    = "keyless@distroless.iam.gserviceaccount.com"
+
+	ChainguardKeylessIssuer = "https://token.actions.githubusercontent.com"
+
+	// ChainguardKeylessSAN is matched exactly, not by regex, and that is a
+	// deliberate, evidence-backed choice rather than an oversight.
+	//
+	// The obvious worry with a GitHub Actions signer is that the SAN embeds
+	// run-specific detail, which would force a regex anchored on the stable
+	// workflow path. That worry does not hold here. The GitHub Actions Fulcio
+	// SAN is the *workflow ref* — "<repo URL>/<workflow path>@<git ref>" — and
+	// carries no run identity at all. Everything that varies per build lives in
+	// other certificate extensions, not the SAN: the build-signer digest
+	// (OID 1.3.6.1.4.1.57264.1.3/.1.10/.1.13), the run invocation URI
+	// (.1.21, e.g. ".../actions/runs/31639200520/attempts/1"), and the run ID
+	// (.1.15).
+	//
+	// Confirmed empirically by decoding glibc-dynamic signature certificates
+	// from three builds spanning three years — leaf certs issued 2023-03-10,
+	// 2025-08-08 and 2026-08-12 — plus cgr.dev/chainguard/static:latest. The
+	// per-run extensions differ in every one of them; this SAN string is
+	// byte-identical in all four. An exact match is therefore strictly
+	// stronger than a regex here and costs nothing.
+	//
+	// If Chainguard ever renames the workflow file or releases from a
+	// non-main ref, this constant will stop matching and builds will fail
+	// closed. That is the intended behavior: re-run the procedure documented
+	// on DefaultKeylessIdentity and update the constant to the newly observed
+	// value. Do not replace it with a loose regex to make the failure go away.
+	ChainguardKeylessSAN = "https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main"
 )
 
 // Valid reports whether p is a known preset. The zero value ("") is NOT valid;
@@ -71,6 +167,61 @@ func (p BaseImagePreset) DefaultRef() (string, bool) {
 		return ChainguardBaseRef, true
 	default:
 		return "", false
+	}
+}
+
+// DefaultVerifyMode returns the verification mode a preset uses when the
+// caller leaves BaseImageRequest.VerifyMode at BaseImageVerifyAuto.
+// distroless and chainguard verify keyless by default, since neither project
+// signs with a static key; custom defaults to static-key, the pre-existing
+// behavior for a self-signed base image.
+func (p BaseImagePreset) DefaultVerifyMode() BaseImageVerifyMode {
+	switch p {
+	case BaseImageDistroless, BaseImageChainguard:
+		return BaseImageVerifyKeyless
+	default:
+		return BaseImageVerifyStaticKey
+	}
+}
+
+// DefaultKeylessIdentity returns the expected Fulcio certificate identity for
+// a preset's upstream signer, and reports false for presets with no known
+// default (BaseImageCustom, or an unrecognized preset — the caller must
+// supply BaseImageRequest.KeylessIdentity explicitly in that case).
+//
+// Re-verification procedure: resolve the image to a digest, fetch its
+// "<repo>:<alg>-<hex>.sig" signature tag manifest, and read the
+// dev.sigstore.cosign/certificate annotation off each signature layer (it is
+// plain PEM text, not base64, for both presets today — handle either). Decode
+// it as an X.509 certificate and inspect its Subject Alternative Name and the
+// Fulcio OIDC-issuer extension (OID 1.3.6.1.4.1.57264.1.8, or the older
+// 1.3.6.1.4.1.57264.1.1):
+//
+//	openssl x509 -in cert.pem -noout -text
+//
+// A signature tag may carry more than one signature layer (older distroless
+// tags carry many, from repeated re-signings); decode every layer and confirm
+// they agree before trusting any one of them. Sanity-check that the leaf is
+// short-lived (~10 minutes) and chains to O=sigstore.dev,
+// CN=sigstore-intermediate — that is what distinguishes a real keyless Fulcio
+// cert from an unrelated CA.
+//
+// Re-run this before ever changing the values below — they are the sole gate
+// on whether Pokkum trusts an upstream base image signature.
+func (p BaseImagePreset) DefaultKeylessIdentity() (KeylessIdentity, bool) {
+	switch p {
+	case BaseImageDistroless:
+		return KeylessIdentity{
+			Issuer: DistrolessKeylessIssuer,
+			SAN:    DistrolessKeylessSAN,
+		}, true
+	case BaseImageChainguard:
+		return KeylessIdentity{
+			Issuer: ChainguardKeylessIssuer,
+			SAN:    ChainguardKeylessSAN,
+		}, true
+	default:
+		return KeylessIdentity{}, false
 	}
 }
 
@@ -114,6 +265,23 @@ type BaseImageRequest struct {
 
 	// VerifySignature verifies Cosign signatures on upstream base images when pulling. True by default.
 	VerifySignature bool
+
+	// VerifyMode selects how VerifySignature is performed. Empty
+	// (BaseImageVerifyAuto) defers to Preset.DefaultVerifyMode(). Ignored
+	// when VerifySignature is false.
+	VerifyMode BaseImageVerifyMode
+
+	// KeylessIdentity is the expected certificate identity for keyless
+	// verification. Empty means "use Preset.DefaultKeylessIdentity()"; if
+	// that also has no default (e.g. BaseImageCustom) and the effective
+	// VerifyMode is keyless, resolution must fail rather than verify against
+	// an empty identity.
+	KeylessIdentity KeylessIdentity
+
+	// TrustedRootPath is an optional path to a Sigstore trusted-root JSON
+	// file overriding the embedded public-good default. Empty means use the
+	// embedded default.
+	TrustedRootPath string
 
 	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
 	RegistryConfigPath string

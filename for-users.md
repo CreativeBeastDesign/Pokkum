@@ -42,21 +42,37 @@ key or annotation lookup was ever repaired) or always fail (with the
 broken default key, which is what actually shipped). Neither behavior was
 useful.
 
-**Now:** verification does real ECDSA/Ed25519 cryptography against a
-static public key. Two things follow from that:
+**Now:** verification does real cryptography against both static public keys
+and keyless Sigstore identities. Two modes are available:
 
-1. **If you build against `distroless` or `chainguard` base image presets
-   with the default configuration, verification does not protect you.**
-   Both projects sign their images with keyless Sigstore signing (Fulcio +
-   Rekor), which has no fixed public key to check against. See
-   [unfixed-limitation.md](unfixed-limitation.md) for the full explanation.
-   If you were relying on `VerifySignature`/`--verify-base` defaulting to
-   `true` as a real security control against the stock base image presets,
-   it currently is not one.
-2. **If you sign your own custom base image** (or re-sign a pinned
-   digest with your own key as part of your own base-image pipeline), set
-   `POKKUM_BASE_IMAGE_PUBKEY` to your public key PEM and verification will
-   genuinely check it — this path is now real and tested.
+1. **For stock `distroless` and `chainguard` base image presets, keyless
+   Sigstore verification (Fulcio + Rekor) now runs by default.** Verification
+   checks the certificate chain against Fulcio's root CA, validates the
+   certificate's Subject Alternative Name (SAN) identity and OIDC issuer match
+   expected values, and confirms the signature was logged to the Rekor
+   transparency log. The verified identities are:
+   - `distroless`: OIDC issuer `https://accounts.google.com`, certificate SAN
+     `keyless@distroless.iam.gserviceaccount.com`.
+   - `chainguard`: OIDC issuer `https://token.actions.githubusercontent.com`,
+     certificate SAN `https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main`.
+   These defaults are automatic and verified to work with the live upstream
+   images. You can override them with `--base-keyless-identity` and
+   `--base-keyless-issuer` if needed (e.g. verifying a custom base that uses
+   keyless signing, or a private Sigstore deployment). `--sigstore-trusted-root`
+   allows you to provide a custom trust root snapshot.
+2. **If you sign your own custom base image** (or re-sign a pinned digest with
+   your own key as part of your own base-image pipeline), set
+   `POKKUM_BASE_IMAGE_PUBKEY` to your public key PEM and static-key verification
+   will check it — pass `--base-verify-mode=static-key` to use that path
+   explicitly. This mode is now real and tested.
+3. **Verification mode selection** is controlled by `--base-verify-mode {auto|keyless|static-key}`
+   (default `auto`). In `auto` mode, `distroless`/`chainguard` presets default to
+   keyless verification, while a `custom` base image preset defaults to static-key.
+   Pass `--base-verify-mode=keyless` or `--base-verify-mode=static-key` to force a
+   specific mode — the resolver will fail explicitly if you request a mode that
+   doesn't match the signature material found, rather than silently falling back.
+   `--no-verify-base` disables verification entirely (the workaround if you need
+   to skip these checks for a base image that isn't signed).
 
 ## PodDisruptionBudget: no longer generated for unlabeled workloads
 

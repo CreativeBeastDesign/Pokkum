@@ -137,6 +137,13 @@ type SLSAGenerator interface {
 // CosignSimpleSigningType is the Red Hat Simple Signing payload type string.
 const CosignSimpleSigningType = "atomic container signature"
 
+// CosignContainerImageSignatureType is the payload type string used by
+// real upstream Cosign keyless signatures (e.g. on the stock
+// distroless/chainguard base image presets), as distinct from
+// CosignSimpleSigningType which is what Pokkum's own static-key signer
+// writes. Both are valid "type" claims a Simple Signing payload may carry.
+const CosignContainerImageSignatureType = "cosign container image signature"
+
 // CosignCriticalIdentity names the container repository reference claim.
 type CosignCriticalIdentity struct {
 	DockerReference string `json:"docker-reference"`
@@ -247,13 +254,6 @@ type DSSESignRequest struct {
 
 	// KeyID is an optional identifier associated with the key.
 	KeyID string
-}
-
-// SigstoreBundle represents a keyless Sigstore bundle payload (application/vnd.dev.sigstore.bundle+json).
-type SigstoreBundle struct {
-	MediaType            string         `json:"mediaType"`
-	VerificationMaterial map[string]any `json:"verificationMaterial"`
-	DSSEEnvelope         *DSSEEnvelope  `json:"dsseEnvelope,omitempty"`
 }
 
 // DSSESigner wraps payloads into DSSE envelopes, signs PAE encodings, and verifies signatures.

@@ -103,3 +103,88 @@ func TestResolve_LiveRegistries_IncompatibleCustomBase(t *testing.T) {
 		t.Fatalf("err = %v, want core.ErrBaseImageIncompatible", err)
 	}
 }
+
+// TestResolve_LiveKeylessVerification resolves the real distroless and
+// chainguard presets with keyless Sigstore signature verification enabled,
+// against the live upstream registries, using the realistic default
+// configuration a real `pokkum build` takes (VerifySignature: true,
+// VerifyMode left at its zero value so each preset's own default — keyless —
+// is what actually runs).
+//
+// This is the one test in the whole keyless-verification effort that would
+// catch a real upstream identity rotation — distroless changing its signer's
+// GCP service account, or Chainguard renaming its release workflow — because
+// it is the only test that checks a live certificate against
+// internal/ports/baseimage.go's DistrolessKeylessIssuer/SAN and
+// ChainguardKeylessIssuer/SAN constants. Every other keyless test in this
+// package and in internal/adapters/sigstore is hermetic and verifies against
+// a frozen fixture captured on a specific date; none of them can ever notice
+// that upstream has started signing with a different identity. That
+// blind spot is exactly why this test exists despite the redundancy with the
+// hermetic coverage.
+//
+// It is skipped under -short so the default `go test ./...` stays hermetic.
+// Run explicitly with:
+//
+//	go test ./internal/adapters/baseimage/... -run LiveKeyless -v
+//
+// Note for anyone investigating a CI failure here: cgr.dev/chainguard/glibc-
+// dynamic:latest is rebuilt frequently (potentially hourly, per earlier
+// research), so a transient failure on the chainguard case is more likely to
+// be a flaky or mid-rebuild registry than a real regression. Re-run this test
+// before concluding that the identity constants in internal/ports/baseimage.go
+// need updating.
+func TestResolve_LiveKeylessVerification(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network-dependent base image resolution in -short mode")
+	}
+
+	type target struct {
+		name   string
+		preset ports.BaseImagePreset
+	}
+
+	targets := []target{
+		{name: "distroless", preset: ports.BaseImageDistroless},
+		{name: "chainguard", preset: ports.BaseImageChainguard},
+	}
+
+	r := NewResolver(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	for _, tgt := range targets {
+		t.Run(tgt.name, func(t *testing.T) {
+			got, err := r.Resolve(ctx, ports.BaseImageRequest{
+				Preset:          tgt.preset,
+				Platforms:       []ports.Platform{ports.LinuxAMD64},
+				VerifySignature: true,
+			})
+			if err != nil {
+				t.Fatalf("Resolve(%s) with keyless signature verification = %v", tgt.name, err)
+			}
+			t.Logf("%s: keyless signature verified, digest=%s pinned_ref=%s", tgt.name, got.Digest, got.PinnedRef)
+		})
+	}
+
+	// Small addition: prove the KeylessIdentity override path actually gets
+	// checked against real registry data, not just the hermetic fixture.
+	// An obviously wrong identity must make a live resolve fail.
+	t.Run("wrong identity override is rejected live", func(t *testing.T) {
+		_, err := r.Resolve(ctx, ports.BaseImageRequest{
+			Preset:          ports.BaseImageDistroless,
+			Platforms:       []ports.Platform{ports.LinuxAMD64},
+			VerifySignature: true,
+			KeylessIdentity: ports.KeylessIdentity{
+				Issuer: "https://example.com/not-the-real-issuer",
+				SAN:    "nobody@example.com",
+			},
+		})
+		if err == nil {
+			t.Fatal("expected resolve to fail: KeylessIdentity override does not match the real distroless signer")
+		}
+		if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+			t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+		}
+	})
+}

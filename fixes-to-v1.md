@@ -63,9 +63,11 @@ present at all," which a magic-string stub or a mis-wired annotation key
 would pass just as easily as a real check.
 
 **Scope note:** this now correctly verifies base images signed with a
-static key pair, but it does **not** verify real upstream distroless or
-Chainguard image signatures out of the box — see
-[unfixed-limitation.md](unfixed-limitation.md).
+static key pair. Keyless Sigstore signature verification for stock
+`distroless`/`chainguard` presets was added in a later round and is
+documented in the "Base image signature verification now covers real
+upstream distroless/Chainguard signatures (keyless Sigstore)" section
+below.
 
 ## `pokkum upgrade` signature verification could fail open
 
@@ -132,6 +134,33 @@ idiom. Re-reading both files directly showed both already had it, inside a
 multi-line `var (...)` block — the earlier automated grep pattern
 (`var _ ports\.`) only matched the single-line form and missed it. No code
 change was needed; noted here so the false alarm doesn't get re-investigated.
+
+## Base image signature verification now covers real upstream distroless/Chainguard signatures (keyless Sigstore)
+
+**Files:** [internal/adapters/baseimage/resolver.go](internal/adapters/baseimage/resolver.go), [internal/adapters/sigstore/](internal/adapters/sigstore/) (new package), [internal/ports/keyless.go](internal/ports/keyless.go) (new), [internal/ports/baseimage.go](internal/ports/baseimage.go).
+
+The static-key verifier fixed in the "Base image Cosign signature verification was non-functional" section above could not structurally check keyless Sigstore signatures (Fulcio short-lived certificates + Rekor transparency log, no fixed public key). Real upstream `distroless` and `chainguard` images sign with keyless Sigstore, so their signatures were never actually verified: `VerifySignature` defaulting to `true` for those presets either required `--no-verify-base` as a workaround or failed with `core.ErrBaseSignatureInvalid`.
+
+A new `ports.KeylessVerifier` interface and `internal/adapters/sigstore` adapter implementation now handle keyless signatures. The adapter uses `github.com/sigstore/sigstore-go` to verify:
+- The certificate chain against Fulcio's root CA.
+- The certificate's OIDC issuer and Subject Alternative Name (SAN) match expected identities (e.g., Google OIDC for distroless, GitHub OIDC for Chainguard).
+- The signature's inclusion in Rekor, the transparency log.
+
+Against an embedded offline trust root snapshot (no live network calls), enabling verification in `--offline`/`--hermetic` build modes.
+
+The resolver (`internal/adapters/baseimage/resolver.go`) determines verification mode (static-key vs. keyless) from the base image preset/flag *before* fetching any signature material — never inferred from what's discovered on the wire. This prevents downgrade attacks (e.g., if an operator mistakenly sets `POKKUM_BASE_IMAGE_PUBKEY` while a preset defaults to keyless, resolution fails explicitly telling them to pass `--base-verify-mode=static-key` if that's intended).
+
+New CLI flags on `pokkum build`:
+- `--base-verify-mode {auto|keyless|static-key}` — selects verification mode (default `auto`: `distroless`/`chainguard` presets use keyless by default, `custom` preset uses static-key by default).
+- `--base-keyless-identity <SAN>` — overrides the expected certificate SAN for keyless verification.
+- `--base-keyless-issuer <issuer URL>` — overrides the expected OIDC issuer for keyless verification.
+- `--sigstore-trusted-root <path>` — overrides the embedded trust root snapshot (e.g. for a private Sigstore deployment).
+
+Verified default identities (confirmed by decoding real live Sigstore signatures on 2026-08-12; re-verification procedure is documented on `ports.BaseImagePreset.DefaultKeylessIdentity` in `internal/ports/baseimage.go`):
+- `distroless`: OIDC issuer `https://accounts.google.com`, certificate SAN `keyless@distroless.iam.gserviceaccount.com`.
+- `chainguard`: OIDC issuer `https://token.actions.githubusercontent.com`, certificate SAN `https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main`.
+
+New tests: `internal/adapters/sigstore` includes hermetic tests against real captured signature fixtures (no network, doesn't expire — verification uses Rekor entry's recorded time), plus `internal/adapters/baseimage/resolver_network_test.go`'s `TestResolve_LiveKeylessVerification` testing against live upstream images. The resolver level also has a test proving the anti-downgrade guarantee: an image signed only with a static key, resolved under forced keyless mode, correctly fails rather than silently falling back.
 
 ## Verification
 

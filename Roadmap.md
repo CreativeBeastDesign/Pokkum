@@ -6,8 +6,7 @@ conventions, and the rationale behind each new flag noted below.
 See [fixes-to-v1.md](fixes-to-v1.md) for a post-v1.0 audit that found
 several `[x]` items below overstated what they actually did, and the fixes
 applied for each; [for-users.md](for-users.md) for what changed as a
-result; and [unfixed-limitation.md](unfixed-limitation.md) for the one gap
-still open (base image signature verification, noted inline below).
+result.
 
 ## v0.1 (Completed)
 
@@ -65,7 +64,7 @@ _The shippable minimum viable product for enterprise-grade adoption._
 - [x] Trusted-Builder Mode: SLSA L3 via an isolated CI job (GitHub Actions provenance generation). (no new flag — a CI workflow concern, not a CLI flag)
 - [x] CVE Scanning Integration (`pokkum scan`): Run vulnerability scanning against image, tarball, or directory and fail pipeline above severity threshold. (new flag: `--fail-on=critical`)
 - [x] Toolchain CVE Awareness: OSV.dev advisory lookups keyed on embedded Bun and SvelteKit versions. (new flag: `pokkum scan --toolchain`, extending `scan`)
-- [x] Base Image Signature Verification: Verifies Cosign signatures against a static public key (`POKKUM_BASE_IMAGE_PUBKEY`) at pull time — real protection for a custom or self-signed base image. Does **not** yet cover the stock `distroless`/`chainguard` presets' actual signatures, which use keyless Sigstore signing (Fulcio + Rekor) with no fixed key to check against; see [unfixed-limitation.md](unfixed-limitation.md). (new flag: `--no-verify-base` opt-out)
+- [x] Base Image Signature Verification: Two modes — static-key Cosign verification for custom/self-signed bases (`POKKUM_BASE_IMAGE_PUBKEY`), and keyless Sigstore verification (Fulcio + Rekor) for stock `distroless`/`chainguard` presets by default. (new flags: `--base-verify-mode {auto|keyless|static-key}`, `--base-keyless-identity`, `--base-keyless-issuer`, `--sigstore-trusted-root`, `--no-verify-base` opt-out)
 - [x] Secret-Inlining Guard: Build-time entropy/pattern scan to prevent leaked secrets in layers. (new flag: `--allow-secret-pattern` escape hatch for false positives)
 - [x] Base image digest pinning + automated update PRs (Renovate/Dependabot-style). (reuses `pokkum base update --preset <name>` from the v0.2 lockfile item; update-PR half is a bot, not a flag) (see [pokkum-lock-concept.md](pokkum-lock-concept.md))
 - [x] Standard OCI Annotations: `--image-label key=value` (repeatable) mirrors user-supplied labels onto the matching `org.opencontainers.image.*` annotation keys. No git-metadata auto-population exists yet — annotations only appear if you pass them explicitly. (new flag: `--image-label key=value`, repeatable — matches `ko build --image-label`)

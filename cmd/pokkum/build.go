@@ -69,6 +69,10 @@ type buildFlags struct {
 	imageLabels []string
 
 	noVerifyBase        bool
+	baseVerifyMode      string
+	baseKeylessIdentity string
+	baseKeylessIssuer   string
+	sigstoreTrustedRoot string
 	allowSecretPatterns []string
 	hermetic            bool
 	registryConfig      string
@@ -162,6 +166,14 @@ The project directory defaults to the current working directory.`,
 
 	cmd.Flags().BoolVar(&flags.noVerifyBase, "no-verify-base", false,
 		"Suppress Cosign signature verification on upstream base images")
+	cmd.Flags().StringVar(&flags.baseVerifyMode, "base-verify-mode", "",
+		"Base image signature verification mode: auto (preset decides), keyless (Fulcio/Rekor, the default for distroless/chainguard), or static-key (Cosign key-based verification)")
+	cmd.Flags().StringVar(&flags.baseKeylessIdentity, "base-keyless-identity", "",
+		"Expected Fulcio certificate Subject Alternative Name for keyless base image verification (overrides the preset default)")
+	cmd.Flags().StringVar(&flags.baseKeylessIssuer, "base-keyless-issuer", "",
+		"Expected OIDC issuer for keyless base image verification (overrides the preset default)")
+	cmd.Flags().StringVar(&flags.sigstoreTrustedRoot, "sigstore-trusted-root", "",
+		"Path to a Sigstore trusted-root JSON file overriding the embedded public-good default")
 	cmd.Flags().StringSliceVar(&flags.allowSecretPatterns, "allow-secret-pattern", nil,
 		"Regex pattern to ignore during build-time secret scanning, repeatable")
 
@@ -291,6 +303,22 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	}
 
 	req.BaseImage.NoVerifyBase = flags.noVerifyBase
+	if flags.baseVerifyMode != "" {
+		verifyMode, err := core.ParseBaseImageVerifyMode(flags.baseVerifyMode)
+		if err != nil {
+			return fmt.Errorf("invalid base verify mode: %w", err)
+		}
+		req.BaseImage.VerifyMode = verifyMode
+	}
+	if flags.baseKeylessIdentity != "" {
+		req.BaseImage.KeylessSAN = flags.baseKeylessIdentity
+	}
+	if flags.baseKeylessIssuer != "" {
+		req.BaseImage.KeylessIssuer = flags.baseKeylessIssuer
+	}
+	if flags.sigstoreTrustedRoot != "" {
+		req.BaseImage.TrustedRootPath = flags.sigstoreTrustedRoot
+	}
 	req.AllowSecretPatterns = flags.allowSecretPatterns
 	req.Hermetic = flags.hermetic
 	req.RegistryConfigPath = flags.registryConfig
