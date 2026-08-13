@@ -179,6 +179,7 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 - **[Roadmap.md](Roadmap.md)**: Implementation progress and future feature backlog.
 - **[fixes-to-v1.md](fixes-to-v1.md)**: Post-v1.0 audit findings and the fixes applied for each.
 - **[for-users.md](for-users.md)**: User-visible behavior changes from that fix round and what they require of you.
+- **[paranoid-testing-guide.md](paranoid-testing-guide.md)**: Step-by-step "believe nothing" verification guide for testing Pokkum against a real project — cross-checks every claim (build, signature, provenance, reproducibility) with an independent tool.
 
 ---
 

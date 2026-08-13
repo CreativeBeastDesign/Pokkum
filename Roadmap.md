@@ -90,10 +90,121 @@ _The shippable minimum viable product for enterprise-grade adoption._
 - [x] Rollback support (`pokkum rollback` reading from declarative manifest annotations `pokkum.dev/previous-image`). (new subcommand: `pokkum rollback -f <manifest> [--to=<ref>]`, reusing `-f`/`--file` from `resolve`/`apply`; `--to` is optional and defaults to `pokkum.dev/previous-image` annotation)
 - [x] Signed Self-Distribution (`pokkum upgrade`): Signature verification of release artifacts and binary self-updates via `ports.ReleaseVerifier` and `cosign`. (new subcommand: `pokkum upgrade`, new flags: `--check`, `--version`, `--offline`, `--key`)
 
+## Recommended Next Steps (Post-v1.0)
+
+v1.0's supply-chain claims are now genuinely backed by working code (see
+[fixes-to-v1.md](fixes-to-v1.md)) rather than partially aspirational. The
+question that matters now isn't "does what's built work" but "what's the
+highest-leverage thing to build next for someone actually adopting this
+tool." Prioritized:
+
+### Tier 1 — Close the CVE-detection gap
+
+This tier exists because of a real, concrete incident: a CRITICAL `libssl3`
+CVE in `gcr.io/distroless/nodejs24-debian12:nonroot` was the actual reason
+Pokkum got picked up for evaluation in the first place — moving off a
+Node.js-runtime base image entirely (which Pokkum's Bun-compiled,
+`distroless/cc`-or-`chainguard`-glibc-dynamic architecture already does) is
+exactly the kind of problem this tool exists to solve. But the CVE-visibility
+half of that story isn't there yet:
+
+1. **Real image/OS-package vulnerability scanning for `pokkum scan`.**
+   Verified fact: `pokkum scan <image-ref-or-tarball>` today does not pull
+   or inspect the target at all — `internal/adapters/scanner/adapter.go`'s
+   `Scan()` only recognizes a local directory target (for toolchain/OSV
+   checks); anything else falls through to a hardcoded 2-entry advisory
+   list (`embeddedAdvisories`), regardless of what image or tarball was
+   actually passed. This directly contradicts the command's own help text
+   ("Scan inspects a project directory, container image, or toolchain
+   dependencies..."). A `libssl3` CVE in a resolved base image would not be
+   caught by `pokkum scan` today. Natural implementation: the SBOM
+   generation this project already has (`internal/adapters/sbom`, via
+   `syft`) already enumerates OS packages — feed those into the existing
+   `queryOSV` plumbing in `scanner/adapter.go` (OSV.dev has ecosystem
+   coverage for Debian/Alpine packages, not just language-package
+   ecosystems), instead of only checking embedded Bun/SvelteKit versions.
+   Most of the pieces already exist; the missing part is wiring OS
+   packages into the same lookup path.
+2. **Base image CVE reactivity.** `.github/workflows/update-base-lock.yml`
+   runs on a Monday-only weekly cron. A critical CVE disclosed Tuesday sits
+   unactioned until the following week. Once (1) above exists, the
+   natural fix is for `pokkum build`/`pokkum doctor` to actively warn (or
+   fail, above a threshold) when the *currently locked* base digest has a
+   known CVE — turning a passive weekly bot into an active gate, not just
+   a faster cron.
+3. **Base Image Escrow / Mirroring** — see the dedicated note below; this
+   is both a CVE-reactivity concern (an upstream base with no accessible
+   older digest can't be rolled back to) and a reproducibility concern.
+
+### Tier 2 — Close `--registry-config`'s cloud-provider gap without abandoning zero-dependency
+
+`--registry-config` is deliberately a generic `docker config.json` reader,
+not an ECR/GCR/ACR SDK integration — see [Vocabulary.md](Vocabulary.md) §3
+for the confirmed rationale (Pokkum stays zero-dependency rather than
+vendoring cloud SDKs). That boundary doesn't have to mean no cloud-provider
+support: `docker config.json`'s own `credHelpers`/`credsStore` keys already
+name which `docker-credential-*` binary to shell out to per registry — this
+is literally how `docker login` against ECR/GCR/ACR already works today,
+and those binaries are typically already on `PATH` in any CI environment
+that authenticates to those registries by other means. Pokkum's
+`--registry-config` resolver could invoke the same mechanism (shell out to
+the named credential helper, exactly as Docker does) instead of reading
+only the static `auths` block it handles today. Real cloud-provider
+support, zero new dependencies, no violation of the stated design
+philosophy — this closes the gap the philosophy itself creates room for.
+
+### Tier 3 — Adoption-lowering features (this is what makes it a product, not a demo)
+
+4. **`pokkum adopt`** (already backlogged below) is the single
+   highest-leverage feature for getting other developers to actually use
+   this: an automated Vercel/Node-adapter-to-Pokkum codemod removes the
+   single biggest switching-cost objection ("I'd have to rewrite my
+   Dockerfile/deploy setup"). Every other feature in this roadmap benefits
+   nobody who never adopts the tool.
+5. **Multi-Generation Rollback History** and **Image Provenance Timeline**
+   (already backlogged, natural pairing — see below) turn "day-2 lifecycle
+   management" from a nice-to-have into something an SRE team can actually
+   depend on during an incident.
+6. **Runtime Env Contract** (already backlogged) is cheap and well-scoped:
+   closes a real footgun (a missing required env var surfacing as a
+   confusing runtime crash instead of a build/deploy-time error).
+
+### Base Image Escrow / Mirroring (Chainguard `:latest`-drift)
+
+Real, structural risk, not a hypothetical: free/anonymous access to
+Chainguard Images is generally limited to the `:latest` tag — historical
+digests routinely become unpullable once Chainguard rebuilds and the
+registry stops serving blobs no live tag references, even though the
+digest itself is technically immutable content-addressed data. This is a
+widely-reported pain point across the container ecosystem, not specific to
+Pokkum. For a tool whose central promise is bit-for-bit reproducibility,
+that's a gap `pokkum.lock` alone doesn't close: pinning a digest guarantees
+*what* to reproduce, not that reproducing it will still be *possible*
+months later if the only copy lived at an upstream registry that already
+moved on.
+
+Recommended pattern — **Base Image Escrow**: when `pokkum base update`
+locks a new digest, optionally copy that exact image (by digest, using the
+copy primitives `go-containerregistry` already provides — no new
+dependency) into a registry the project controls (GHCR under the same org
+is the natural zero-new-infrastructure choice, and matches this project's
+existing GHCR-centric examples). Record both the upstream ref and the
+mirror ref in `pokkum.lock`; resolve upstream first, mirror as fallback (or
+the reverse, configurable) — giving durable reproducibility independent of
+any single upstream registry's retention policy, at the cost of one small
+image copy per lock update (already-compressed layers, so cheap) and a
+modest `pokkum.lock` schema extension. This is exactly the class of problem
+`pokkum.lock` already exists to solve (see
+[pokkum-lock-concept.md](pokkum-lock-concept.md)) — escrow closes the
+remaining gap between "pinned" and "durably fetchable."
+
 ## Beyond v1.0 / Backlog
 
 _Features demoted or planned for later iterations._
 
+- [ ] Real Image/OS Vulnerability Scanning: `pokkum scan <image>`/`<tarball>` currently returns a hardcoded 2-entry advisory list regardless of target — no image is actually pulled or inspected. Reuse the existing SBOM generation (`internal/adapters/sbom`) and OSV.dev query plumbing (`scanner/adapter.go`'s `queryOSV`, already used for Bun/SvelteKit) against the image's actual OS packages. See "Recommended Next Steps" above for the concrete motivating case. (no new flag — fixes the existing `pokkum scan [target]` contract to match its own documented behavior)
+- [ ] Base Image Escrow / Mirroring: copy each `pokkum.lock`-pinned base image digest (by digest) into a project-controlled mirror registry (e.g. GHCR) at lock-update time, recording both refs, so reproducibility and CVE-driven rollback don't depend on an upstream registry's tag-retention policy (notably Chainguard's free tier, `:latest`-only). See "Recommended Next Steps" above. (new flag: `--mirror-registry=<repo>` on `pokkum base update`, extends `pokkum.lock` schema)
+- [ ] Registry Credential-Helper Invocation: `--registry-config` currently reads only the static `auths` block of a `docker config.json`-style file. Extend it to shell out to whatever `docker-credential-*` binary the file's `credHelpers`/`credsStore` keys name — the same mechanism `docker login` itself uses for ECR/GCR/ACR — giving real cloud-provider registry support with zero new dependencies. (no new flag — extends existing `--registry-config=<path>` behavior)
 - [ ] `pokkum adopt` (Migration Codemod): Auto-convert Vercel/Node adapter projects. (new subcommand: `pokkum adopt [dir]`, new flags: `--dry-run` (reusing `build`'s semantics), `--remove-dockerfile`)
 - [ ] Runtime Env Contract: Declare required env vars in image annotations; validate at startup. (new flag: `--require-env=KEY1,KEY2` on `build`; supersedes the old build-time `--env-file` injection idea, dropped as a secret-baking footgun)
 - [ ] Monorepo Affected-Detection: Git-diff input tracking per `pokkum://` app. (new flag: `--since=<git-ref>` on `resolve`)
