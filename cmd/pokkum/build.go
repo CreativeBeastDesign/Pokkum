@@ -291,8 +291,10 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	}
 
 	// Parse image labels
+	if req.Labels == nil {
+		req.Labels = make(map[string]string)
+	}
 	if len(flags.imageLabels) > 0 {
-		req.Labels = make(map[string]string, len(flags.imageLabels))
 		for _, lbl := range flags.imageLabels {
 			k, v, ok := strings.Cut(lbl, "=")
 			if !ok {
@@ -301,6 +303,7 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 			req.Labels[strings.TrimSpace(k)] = strings.TrimSpace(v)
 		}
 	}
+	req.Labels = discoverGitMetadata(ctx, projectDir, req.Labels)
 
 	req.BaseImage.NoVerifyBase = flags.noVerifyBase
 	if flags.baseVerifyMode != "" {
