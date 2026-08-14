@@ -84,3 +84,93 @@ func TestRunApply_RequiresFile(t *testing.T) {
 		t.Fatal("expected an error when --file is empty")
 	}
 }
+
+func TestApplyCommandClusterInspectFlags(t *testing.T) {
+	cmd := newApplyCommand(context.Background(), discardLogger())
+	cmd.SetArgs([]string{"--cluster-inspect", "--no-cluster-inspect", "-f", "deploy.yaml"})
+
+	if flag := cmd.Flags().Lookup("cluster-inspect"); flag == nil {
+		t.Fatalf("expected --cluster-inspect flag to be registered")
+	}
+	if flag := cmd.Flags().Lookup("no-cluster-inspect"); flag == nil {
+		t.Fatalf("expected --no-cluster-inspect flag to be registered")
+	}
+}
+
+func TestKubectlClusterInspector(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping shell script test on windows")
+	}
+
+	dir := t.TempDir()
+	kubectlPath := filepath.Join(dir, "kubectl")
+	script := `#!/bin/sh
+if [ "$1" = "get" ]; then
+  cat << 'EOF'
+{
+  "metadata": {
+    "annotations": {
+      "pokkum.dev/current-image": "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "pokkum.dev/image-history": "ghcr.io/acme/app@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "spec": {
+    "template": {
+      "spec": {
+        "containers": [
+          {
+            "name": "web",
+            "image": "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      }
+    }
+  }
+}
+EOF
+  exit 0
+fi
+exit 1
+`
+	if err := os.WriteFile(kubectlPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake kubectl: %v", err)
+	}
+
+	inspector := newKubectlClusterInspector(discardLogger(), kubectlPath)
+	state, err := inspector(context.Background(), "Deployment", "web-app", "prod")
+	if err != nil {
+		t.Fatalf("unexpected inspector error: %v", err)
+	}
+
+	if state.Annotations["pokkum.dev/current-image"] != "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111" {
+		t.Errorf("unexpected current-image annotation: %v", state.Annotations["pokkum.dev/current-image"])
+	}
+	if state.Containers["web"] != "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111" {
+		t.Errorf("unexpected container image: %v", state.Containers["web"])
+	}
+}
+
+func TestKubectlClusterInspector_NotFoundGraceful(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping shell script test on windows")
+	}
+
+	dir := t.TempDir()
+	kubectlPath := filepath.Join(dir, "kubectl")
+	script := `#!/bin/sh
+echo "Error from server (NotFound): deployments.apps \"missing\" not found" >&2
+exit 1
+`
+	if err := os.WriteFile(kubectlPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake kubectl: %v", err)
+	}
+
+	inspector := newKubectlClusterInspector(discardLogger(), kubectlPath)
+	state, err := inspector(context.Background(), "Deployment", "missing", "default")
+	if err != nil {
+		t.Fatalf("expected no error on not found, got %v", err)
+	}
+	if len(state.Annotations) != 0 || len(state.Containers) != 0 {
+		t.Errorf("expected empty state on not found, got: %v", state)
+	}
+}

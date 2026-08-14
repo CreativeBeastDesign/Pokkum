@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
+	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
 // applyFlags holds all command-line flags for the apply command.
@@ -25,6 +26,8 @@ type applyFlags struct {
 	noNetworkPolicy    bool
 	resourceDefaults   bool
 	noResourceDefaults bool
+	clusterInspect     bool
+	noClusterInspect   bool
 	registryConfig     string
 }
 
@@ -63,6 +66,10 @@ PATH and is equivalent to:
 		"Inject default CPU/memory requests and limits and append a PodDisruptionBudget")
 	cmd.Flags().BoolVar(&flags.noResourceDefaults, "no-resource-defaults", false,
 		"Disable resource default injection and PodDisruptionBudget generation")
+	cmd.Flags().BoolVar(&flags.clusterInspect, "cluster-inspect", true,
+		"Inspect live cluster workload annotations before resolving to seed multi-generation history")
+	cmd.Flags().BoolVar(&flags.noClusterInspect, "no-cluster-inspect", false,
+		"Disable live cluster annotation inspection (shorthand for --cluster-inspect=false)")
 	cmd.Flags().StringVar(&flags.registryConfig, "registry-config", "",
 		"Path to custom OCI registry auth config file (config.json)")
 
@@ -79,13 +86,15 @@ func runApply(ctx context.Context, logger *slog.Logger, flags *applyFlags) error
 	secCtx := securityContextEnabled(flags.securityContext, flags.noSecurityContext)
 	netPol := flags.networkPolicy && !flags.noNetworkPolicy
 	resDefs := flags.resourceDefaults && !flags.noResourceDefaults
+	inspectCluster := flags.clusterInspect && !flags.noClusterInspect
 
 	logger.Debug("apply command started",
 		"file", flags.file,
 		"recursive", flags.recursive,
 		"securityContext", secCtx,
 		"networkPolicy", netPol,
-		"resourceDefaults", resDefs)
+		"resourceDefaults", resDefs,
+		"clusterInspect", inspectCluster)
 
 	// Look up kubectl before doing any of the (potentially expensive) build
 	// and push work, so a missing kubectl fails in milliseconds rather than
@@ -95,6 +104,11 @@ func runApply(ctx context.Context, logger *slog.Logger, flags *applyFlags) error
 		return fmt.Errorf("kubectl not found on PATH: install kubectl (https://kubernetes.io/docs/tasks/tools/) or add it to PATH before running `pokkum apply`: %w", core.ErrInvalidRequest)
 	}
 
+	var inspector ports.ClusterInspector
+	if inspectCluster {
+		inspector = newKubectlClusterInspector(logger, kubectlPath)
+	}
+
 	out, err := resolveManifests(ctx, logger, resolveManifestsOptions{
 		File:               flags.file,
 		Recursive:          flags.recursive,
@@ -102,6 +116,7 @@ func runApply(ctx context.Context, logger *slog.Logger, flags *applyFlags) error
 		NetworkPolicy:      netPol,
 		ResourceDefaults:   resDefs,
 		RegistryConfigPath: flags.registryConfig,
+		ClusterInspector:   inspector,
 	})
 	if err != nil {
 		return err

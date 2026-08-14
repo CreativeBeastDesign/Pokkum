@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	pathpkg "path"
 	"path/filepath"
 	"sort"
@@ -35,6 +37,7 @@ type resolveManifestsOptions struct {
 	ResourceDefaults   bool
 	RegistryConfigPath string
 	ImageBuilder       ports.ImageBuilder
+	ClusterInspector   ports.ClusterInspector
 }
 
 // resolveManifests is the shared engine behind `pokkum resolve` and `pokkum apply`.
@@ -72,6 +75,7 @@ func resolveManifests(ctx context.Context, logger *slog.Logger, opts resolveMani
 		NetworkPolicy:      opts.NetworkPolicy,
 		ResourceDefaults:   opts.ResourceDefaults,
 		RegistryConfigPath: opts.RegistryConfigPath,
+		ClusterInspector:   opts.ClusterInspector,
 	})
 	if err != nil {
 		return nil, err
@@ -83,6 +87,84 @@ func resolveManifests(ctx context.Context, logger *slog.Logger, opts resolveMani
 	}
 
 	return joinDocuments(res.Documents), nil
+}
+
+// newKubectlClusterInspector creates a ports.ClusterInspector that queries live cluster workload state via kubectl.
+func newKubectlClusterInspector(logger *slog.Logger, kubectlPath string) ports.ClusterInspector {
+	return func(ctx context.Context, kind, name, namespace string) (ports.ClusterWorkloadState, error) {
+		if kubectlPath == "" {
+			return ports.ClusterWorkloadState{}, nil
+		}
+		target := fmt.Sprintf("%s/%s", strings.ToLower(kind), name)
+		args := []string{"get", target, "-o", "json"}
+		if namespace != "" {
+			args = append(args, "-n", namespace)
+		}
+
+		logger.DebugContext(ctx, "inspecting live cluster annotations", "workload", target, "namespace", namespace)
+		cmd := exec.CommandContext(ctx, kubectlPath, args...)
+		out, err := cmd.Output()
+		if err != nil {
+			// Workload not found or cluster unreachable — return empty state gracefully
+			logger.DebugContext(ctx, "cluster workload inspection returned error (treating as fresh workload)", "workload", target, "error", err)
+			return ports.ClusterWorkloadState{}, nil
+		}
+
+		var obj struct {
+			Metadata struct {
+				Annotations map[string]string `json:"annotations"`
+			} `json:"metadata"`
+			Spec struct {
+				Template struct {
+					Metadata struct {
+						Annotations map[string]string `json:"annotations"`
+					} `json:"metadata"`
+					Spec struct {
+						Containers []struct {
+							Name  string `json:"name"`
+							Image string `json:"image"`
+						} `json:"containers"`
+					} `json:"spec"`
+				} `json:"template"`
+				Containers []struct {
+					Name  string `json:"name"`
+					Image string `json:"image"`
+				} `json:"containers"`
+			} `json:"spec"`
+		}
+
+		if jerr := json.Unmarshal(out, &obj); jerr != nil {
+			logger.DebugContext(ctx, "failed to unmarshal live workload json", "workload", target, "error", jerr)
+			return ports.ClusterWorkloadState{}, nil
+		}
+
+		ann := make(map[string]string)
+		for k, v := range obj.Metadata.Annotations {
+			ann[k] = v
+		}
+		for k, v := range obj.Spec.Template.Metadata.Annotations {
+			if _, exists := ann[k]; !exists {
+				ann[k] = v
+			}
+		}
+
+		containers := make(map[string]string)
+		for _, c := range obj.Spec.Template.Spec.Containers {
+			if c.Name != "" && c.Image != "" {
+				containers[c.Name] = c.Image
+			}
+		}
+		for _, c := range obj.Spec.Containers {
+			if c.Name != "" && c.Image != "" {
+				containers[c.Name] = c.Image
+			}
+		}
+
+		return ports.ClusterWorkloadState{
+			Annotations: ann,
+			Containers:  containers,
+		}, nil
+	}
 }
 
 // newImageBuilder returns the ports.ImageBuilder that turns a pokkum://<path>

@@ -137,7 +137,23 @@ type ResolveRequest struct {
 
 	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
 	RegistryConfigPath string
+
+	// ClusterInspector queries live cluster state for a workload's annotations and container images.
+	// Nil when cluster inspection is disabled (e.g. standalone resolve, dry-run, or air-gapped apply).
+	ClusterInspector ClusterInspector
 }
+
+// ClusterWorkloadState holds live annotations and container image references queried from a cluster.
+type ClusterWorkloadState struct {
+	Annotations map[string]string
+	Containers  map[string]string // container name -> image ref
+}
+
+// ClusterInspector queries a live Kubernetes cluster for a workload's current state.
+// It receives the resource kind (e.g. "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod"),
+// resource name, and namespace. It returns the active annotations and container images, or empty state
+// if the workload does not exist in the cluster.
+type ClusterInspector func(ctx context.Context, kind, name, namespace string) (ClusterWorkloadState, error)
 
 // ResolveResult carries the rewritten manifests.
 type ResolveResult struct {

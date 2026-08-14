@@ -1049,3 +1049,218 @@ spec:
 			first.Documents[0].Content, second.Documents[0].Content)
 	}
 }
+
+func TestResolver_ClusterInspector_SeedsLiveHistory(t *testing.T) {
+	r := k8s.NewResolver()
+	ctx := context.Background()
+
+	// Clean static template with no annotations
+	doc := ports.Document{
+		Name: "deploy.yaml",
+		Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  namespace: prod
+spec:
+  template:
+    spec:
+      containers:
+      - name: web
+        image: pokkum://./src/app
+`),
+	}
+
+	liveImage1 := "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	liveImage0 := "ghcr.io/acme/app@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	newImage2 := "ghcr.io/acme/app@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
+	inspectorCalled := false
+	inspector := func(_ context.Context, kind, name, ns string) (ports.ClusterWorkloadState, error) {
+		inspectorCalled = true
+		if kind != "Deployment" || name != "web-app" || ns != "prod" {
+			t.Errorf("unexpected inspector args: kind=%s, name=%s, ns=%s", kind, name, ns)
+		}
+		return ports.ClusterWorkloadState{
+			Annotations: map[string]string{
+				ports.AnnotationCurrentImage:  liveImage1,
+				ports.AnnotationPreviousImage: liveImage0,
+				ports.AnnotationImageHistory:  liveImage0,
+			},
+		}, nil
+	}
+
+	res, err := r.Resolve(ctx, ports.ResolveRequest{
+		Documents:        []ports.Document{doc},
+		ClusterInspector: inspector,
+		Build: func(_ context.Context, _ string) (string, error) {
+			return newImage2, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected resolve error: %v", err)
+	}
+	if !inspectorCalled {
+		t.Errorf("expected ClusterInspector to be invoked")
+	}
+
+	out := string(res.Documents[0].Content)
+	if !strings.Contains(out, "image: "+newImage2) {
+		t.Errorf("expected image to be %s, got:\n%s", newImage2, out)
+	}
+	if !strings.Contains(out, "pokkum.dev/current-image: "+newImage2) {
+		t.Errorf("expected current-image to be %s, got:\n%s", newImage2, out)
+	}
+	if !strings.Contains(out, "pokkum.dev/previous-image: "+liveImage1) {
+		t.Errorf("expected previous-image to be %s, got:\n%s", liveImage1, out)
+	}
+	expectedHistory := liveImage1 + "," + liveImage0
+	if !strings.Contains(out, "pokkum.dev/image-history: "+expectedHistory) {
+		t.Errorf("expected image-history to be %s, got:\n%s", expectedHistory, out)
+	}
+}
+
+func TestResolver_ClusterInspector_SeedsLiveContainerFallback(t *testing.T) {
+	r := k8s.NewResolver()
+	ctx := context.Background()
+
+	doc := ports.Document{
+		Name: "deploy.yaml",
+		Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-service
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: pokkum://./src/api
+`),
+	}
+
+	legacyRunningImage := "docker.io/legacy/api:1.0.0"
+	newBuiltImage := "ghcr.io/acme/api@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+
+	inspector := func(_ context.Context, _, _, _ string) (ports.ClusterWorkloadState, error) {
+		return ports.ClusterWorkloadState{
+			Containers: map[string]string{
+				"api": legacyRunningImage,
+			},
+		}, nil
+	}
+
+	res, err := r.Resolve(ctx, ports.ResolveRequest{
+		Documents:        []ports.Document{doc},
+		ClusterInspector: inspector,
+		Build: func(_ context.Context, _ string) (string, error) {
+			return newBuiltImage, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected resolve error: %v", err)
+	}
+
+	out := string(res.Documents[0].Content)
+	if !strings.Contains(out, "pokkum.dev/previous-image: "+legacyRunningImage) {
+		t.Errorf("expected fallback previous-image from live container %s, got:\n%s", legacyRunningImage, out)
+	}
+	if !strings.Contains(out, "pokkum.dev/image-history: "+legacyRunningImage) {
+		t.Errorf("expected fallback image-history %s, got:\n%s", legacyRunningImage, out)
+	}
+}
+
+func TestResolver_ClusterInspector_NotFoundGraceful(t *testing.T) {
+	r := k8s.NewResolver()
+	ctx := context.Background()
+
+	doc := ports.Document{
+		Name: "deploy.yaml",
+		Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: new-service
+spec:
+  template:
+    spec:
+      containers:
+      - name: web
+        image: pokkum://./src/web
+`),
+	}
+
+	newBuiltImage := "ghcr.io/acme/web@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+
+	inspector := func(_ context.Context, _, _, _ string) (ports.ClusterWorkloadState, error) {
+		return ports.ClusterWorkloadState{}, fmt.Errorf("deployments.apps %q not found", "new-service")
+	}
+
+	res, err := r.Resolve(ctx, ports.ResolveRequest{
+		Documents:        []ports.Document{doc},
+		ClusterInspector: inspector,
+		Build: func(_ context.Context, _ string) (string, error) {
+			return newBuiltImage, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected resolve to succeed gracefully on not found: %v", err)
+	}
+
+	out := string(res.Documents[0].Content)
+	if !strings.Contains(out, "pokkum.dev/current-image: "+newBuiltImage) {
+		t.Errorf("expected current-image %s, got:\n%s", newBuiltImage, out)
+	}
+	if strings.Contains(out, "pokkum.dev/previous-image:") {
+		t.Errorf("expected no previous-image on first deployment, got:\n%s", out)
+	}
+}
+
+func TestResolver_ClusterInspector_LocalAnnotationsTakePrecedence(t *testing.T) {
+	r := k8s.NewResolver()
+	ctx := context.Background()
+
+	localCurrentImage := "ghcr.io/acme/web@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+	doc := ports.Document{
+		Name: "deploy.yaml",
+		Content: []byte(fmt.Sprintf(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  annotations:
+    pokkum.dev/current-image: %s
+spec:
+  template:
+    spec:
+      containers:
+      - name: web
+        image: pokkum://./src/web
+`, localCurrentImage)),
+	}
+
+	clusterImage := "ghcr.io/acme/web@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	newBuiltImage := "ghcr.io/acme/web@sha256:5555555555555555555555555555555555555555555555555555555555555555"
+
+	inspector := func(_ context.Context, _, _, _ string) (ports.ClusterWorkloadState, error) {
+		return ports.ClusterWorkloadState{
+			Annotations: map[string]string{
+				ports.AnnotationCurrentImage: clusterImage,
+			},
+		}, nil
+	}
+
+	res, err := r.Resolve(ctx, ports.ResolveRequest{
+		Documents:        []ports.Document{doc},
+		ClusterInspector: inspector,
+		Build: func(_ context.Context, _ string) (string, error) {
+			return newBuiltImage, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected resolve error: %v", err)
+	}
+
+	out := string(res.Documents[0].Content)
+	if !strings.Contains(out, "pokkum.dev/previous-image: "+localCurrentImage) {
+		t.Errorf("expected local explicit annotation %s to take precedence over cluster %s, got:\n%s", localCurrentImage, clusterImage, out)
+	}
+}

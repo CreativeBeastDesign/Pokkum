@@ -111,6 +111,7 @@ The post-v1.0 milestones addressed critical supply chain verification, CVE gatin
 - [x] **Migration Codemod (`pokkum adopt`)**: Auto-converts `@sveltejs/adapter-node`, `adapter-vercel`, `adapter-auto`, and `adapter-cloudflare` projects to native Pokkum compilation defaults with AST/regex config rewrites, `.pokkumignore` bootstrapping, and optional legacy Dockerfile removal (`--dry-run`, `--remove-dockerfile`).
 - [x] **Multi-Generation Rollback History**: `pokkum rollback` supports arbitrary historical rollback depths via `pokkum.dev/image-history` manifest annotations with timeline inspection (`--list`) and generation selection (`--generation=<n>`, `-g <n>`).
 - [x] **Image Provenance Timeline (`pokkum history`)**: Inspects published OCI manifests and extracts standard `org.opencontainers.image.*` provenance annotations (git commit, repository, build timestamp, version).
+- [x] **Live Cluster Annotation Inspection**: `pokkum apply` queries live cluster state (`kubectl get <kind>/<name> -n <ns> -o json`) before manifest resolution to seed `pokkum.dev/image-history` and active images, enabling multi-generation history accumulation across independent CLI runs on static `pokkum://` templates (`--cluster-inspect`, `--no-cluster-inspect`).
 - [x] **Runtime Environment Contract**: Declares required runtime environment variables in OCI image annotations (`pokkum.dev/required-env`) and embeds contract into runtime config, enforced by PID-1 supervisor (`/pokkum/init`) to fail-fast on startup if any are missing (`--require-env=KEY1,KEY2` on `build`).
 
 ---
@@ -119,24 +120,19 @@ The post-v1.0 milestones addressed critical supply chain verification, CVE gatin
 
 Prioritized backlog for ongoing development:
 
-### 1. Live Cluster Annotation Inspection for `pokkum apply` (High Priority)
-- **Problem**: `pokkum resolve` operating against static, untouched `pokkum://` manifest templates across independent CLI runs cannot accumulate multi-generation deployment history unless intermediate manifests are committed to git.
-- **Solution**: Enhance `pokkum apply` with a pre-flight live cluster query (`kubectl get <workload> -n <ns> -o jsonpath='...'`) before manifest resolution. When existing deployed pods contain `pokkum.dev/image-history` or current image annotations, `pokkum apply` seeds history with the cluster's live state, ensuring seamless multi-generation rollback across independent CI/CD invocations.
-- **Flags/Interface**: Enabled by default during `pokkum apply`; optional `--no-cluster-inspect` escape hatch for air-gapped / disconnected templating.
-
-### 2. Monorepo Affected-Detection (Medium Priority)
+### 1. Monorepo Affected-Detection (High Priority)
 - **Problem**: In multi-app monorepos with multiple `pokkum://` image URIs, running `resolve`/`apply` builds all services regardless of which files changed.
 - **Solution**: Implement git-diff input tracking per SvelteKit app directory. If files in an application's source tree have not changed since a base commit, skip compilation and packaging entirely.
 - **Flags/Interface**: `--since=<git-ref>` on `pokkum resolve` and `pokkum apply`.
 
-### 3. Static / Prerendered Page Optimization (Medium Priority)
+### 2. Static / Prerendered Page Optimization (Medium Priority)
 - **Problem**: Fully static or predominantly prerendered SvelteKit sites still incur Bun runtime memory overhead and layer distribution size.
 - **Solution**:
   - Extract prerendered static assets (`.svelte-kit/output/prerendered`) to a dedicated slim OCI layer with immutable Cache-Control metadata.
   - Add a `--static` mode compiling purely static sites onto an `nginx:alpine` or minimal static file server image with zero JavaScript runtime overhead.
 - **Flags/Interface**: `--static` on `pokkum build`.
 
-### 4. Policy as Code Enforcement (Low Priority / Backlog)
+### 3. Policy as Code Enforcement (Low Priority / Backlog)
 - **Problem**: Security compliance rules (e.g., "no critical CVEs", "must contain SBOM", "must run as non-root") are currently validated imperatively across disparate flags.
 - **Solution**: Integrate Open Policy Agent (OPA) / Rego policy evaluation to assert organizational supply-chain and container security policies against image metadata, SBOMs, and scan results prior to publishing.
 - **Flags/Interface**: `pokkum policy check --policy=<path>` subcommand and `--policy=<path>` build gate.

@@ -96,6 +96,8 @@ Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode) and `
 | `--no-network-policy` | — | `false` | Disable NetworkPolicy generation. |
 | `--resource-defaults` | — | `true` | Inject default CPU/memory requests and limits and append a PodDisruptionBudget, selector-scoped to the workload (skipped entirely if no labels are found — never emitted namespace-wide). |
 | `--no-resource-defaults` | — | `false` | Disable resource default injection and PodDisruptionBudget generation. |
+| `--cluster-inspect` | — | `true` | (`apply` only) Query live cluster workload annotations before resolution to seed multi-generation deployment history. |
+| `--no-cluster-inspect` | — | `false` | (`apply` only) Disable live cluster annotation inspection; wins over `--cluster-inspect` if both are set. |
 | `--registry-config` | — | (none) | Path to a `docker config.json`-style auth file, keyed by registry hostname; see the `pokkum build` flag table above for the exact merge behavior. |
 
 ---

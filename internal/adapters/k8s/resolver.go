@@ -345,6 +345,37 @@ func getAnnotation(parent *yaml.Node, key string) string {
 	return valNode.Value
 }
 
+// getDocKindAndMeta extracts the kind, name, and namespace from a root document mapping.
+func getDocKindAndMeta(docRoot *yaml.Node) (kind, name, namespace string) {
+	if docRoot == nil {
+		return "", "", ""
+	}
+	target := docRoot
+	if docRoot.Kind == yaml.DocumentNode {
+		for _, item := range docRoot.Content {
+			if item.Kind == yaml.MappingNode {
+				target = item
+				break
+			}
+		}
+	}
+	if target == nil || target.Kind != yaml.MappingNode {
+		return "", "", ""
+	}
+	if kNode, ok := mapGet(target, "kind"); ok && kNode.Kind == yaml.ScalarNode {
+		kind = kNode.Value
+	}
+	if metaNode, ok := mapGet(target, "metadata"); ok && metaNode.Kind == yaml.MappingNode {
+		if nNode, ok := mapGet(metaNode, "name"); ok && nNode.Kind == yaml.ScalarNode {
+			name = nNode.Value
+		}
+		if nsNode, ok := mapGet(metaNode, "namespace"); ok && nsNode.Kind == yaml.ScalarNode {
+			namespace = nsNode.Value
+		}
+	}
+	return kind, name, namespace
+}
+
 // updateImageHistory tracks multi-generation previous image history in annotations.
 func updateImageHistory(parent *yaml.Node, newDisplaced string) {
 	if parent == nil || newDisplaced == "" {
@@ -537,6 +568,23 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 			continue
 		}
 
+		var docRoot *yaml.Node
+		if len(pd.nodes) > 0 {
+			docRoot = pd.nodes[0]
+		}
+
+		// Live cluster annotation inspection: if inspector is configured, query cluster state
+		// for this workload before resolving image references.
+		var clusterState ports.ClusterWorkloadState
+		if req.ClusterInspector != nil && docRoot != nil {
+			kind, name, ns := getDocKindAndMeta(docRoot)
+			if kind != "" && name != "" {
+				if st, err := req.ClusterInspector(ctx, kind, name, ns); err == nil {
+					clusterState = st
+				}
+			}
+		}
+
 		var containerNodes []*yaml.Node
 		var templateNodes []*yaml.Node
 		seenTemplates := make(map[*yaml.Node]bool)
@@ -559,15 +607,45 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 			// prior resolved digest survives between runs is
 			// AnnotationCurrentImage, written by the previous Resolve call
 			// on this same file; compare against that instead.
-			var docRoot *yaml.Node
-			if len(pd.nodes) > 0 {
-				docRoot = pd.nodes[0]
-			}
 			for _, annNode := range []*yaml.Node{t.templateNode, docRoot} {
 				if annNode == nil {
 					continue
 				}
 				oldCurrent := getAnnotation(annNode, ports.AnnotationCurrentImage)
+				if oldCurrent == "" && (clusterState.Annotations != nil || len(clusterState.Containers) > 0) {
+					if clusterCurrent, ok := clusterState.Annotations[ports.AnnotationCurrentImage]; ok && clusterCurrent != "" {
+						oldCurrent = clusterCurrent
+					} else if len(clusterState.Containers) > 0 {
+						var cName string
+						if t.containerNode != nil {
+							if nNode, ok := mapGet(t.containerNode, "name"); ok && nNode.Kind == yaml.ScalarNode {
+								cName = nNode.Value
+							}
+						}
+						if cName != "" && clusterState.Containers[cName] != "" {
+							oldCurrent = clusterState.Containers[cName]
+						} else {
+							for _, img := range clusterState.Containers {
+								if img != "" {
+									oldCurrent = img
+									break
+								}
+							}
+						}
+					}
+					// Seed existing history from cluster if local template has none
+					if getAnnotation(annNode, ports.AnnotationImageHistory) == "" {
+						if hist, ok := clusterState.Annotations[ports.AnnotationImageHistory]; ok && hist != "" {
+							setAnnotation(annNode, ports.AnnotationImageHistory, hist)
+						}
+					}
+					if getAnnotation(annNode, ports.AnnotationPreviousImage) == "" {
+						if prev, ok := clusterState.Annotations[ports.AnnotationPreviousImage]; ok && prev != "" {
+							setAnnotation(annNode, ports.AnnotationPreviousImage, prev)
+						}
+					}
+				}
+
 				if oldCurrent != "" && oldCurrent != resolved {
 					updateImageHistory(annNode, oldCurrent)
 				}
