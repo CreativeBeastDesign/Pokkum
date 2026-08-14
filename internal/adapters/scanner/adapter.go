@@ -52,9 +52,16 @@ var embeddedAdvisories = []ports.Vulnerability{
 var _ ports.Scanner = (*Adapter)(nil)
 
 // Adapter implements ports.Scanner.
+const defaultOSVBaseURL = "https://api.osv.dev"
+
 type Adapter struct {
 	logger *slog.Logger
 	client *http.Client
+
+	// osvBaseURL is the OSV.dev API base, overridable in tests so
+	// queryOSVBatch can be exercised against a local mock server instead of
+	// the real network.
+	osvBaseURL string
 
 	mu    sync.Mutex
 	cache map[string][]ports.Vulnerability
@@ -66,9 +73,10 @@ func NewAdapter(logger *slog.Logger) *Adapter {
 		logger = slog.Default()
 	}
 	return &Adapter{
-		logger: logger,
-		client: &http.Client{Timeout: 10 * time.Second},
-		cache:  make(map[string][]ports.Vulnerability),
+		logger:     logger,
+		client:     &http.Client{Timeout: 10 * time.Second},
+		osvBaseURL: defaultOSVBaseURL,
+		cache:      make(map[string][]ports.Vulnerability),
 	}
 }
 
@@ -84,6 +92,8 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 	var (
 		vulnerabilities     []ports.Vulnerability
 		toolchainAdvisories []ports.Vulnerability
+		incomplete          bool
+		warnings            []string
 	)
 
 	target := strings.TrimSpace(req.Target)
@@ -97,22 +107,34 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 
 	if isDir {
 		// 1. Directory scan: toolchain and project dependencies
-		tAdvisories, err := s.scanProjectToolchain(ctx, target, req.Offline)
+		tAdvisories, toolchainIncomplete, err := s.scanProjectToolchain(ctx, target, req.Offline)
 		if err == nil {
 			toolchainAdvisories = append(toolchainAdvisories, tAdvisories...)
+		}
+		if toolchainIncomplete {
+			incomplete = true
+			warnings = append(warnings, "toolchain (@sveltejs/kit) OSV lookup failed, coverage reduced")
 		}
 
 		if !req.ToolchainOnly && !req.Offline {
 			dirVulns, err := s.scanProjectDependencies(ctx, target)
 			if err == nil {
 				vulnerabilities = append(vulnerabilities, dirVulns...)
+			} else {
+				incomplete = true
+				warnings = append(warnings, fmt.Sprintf("project dependency OSV lookup failed, coverage reduced: %v", err))
+				s.logger.WarnContext(ctx, "scanner: project dependency OSV lookup failed, scan is incomplete", "target", target, "err", err)
 			}
 		}
 	} else {
 		// 2. Container image or tarball scan
-		imgVulns, imgToolchain, err := s.scanImageOrTarball(ctx, target, req.Offline)
+		imgVulns, imgToolchain, imgIncomplete, err := s.scanImageOrTarball(ctx, target, req.Offline)
 		if err != nil {
 			s.logger.DebugContext(ctx, "scanner: fallback to embedded advisories", "target", target, "err", err)
+		}
+		if imgIncomplete {
+			incomplete = true
+			warnings = append(warnings, fmt.Sprintf("image/tarball OS-package OSV lookup failed, coverage reduced for %s", target))
 		}
 		vulnerabilities = append(vulnerabilities, imgVulns...)
 		toolchainAdvisories = append(toolchainAdvisories, imgToolchain...)
@@ -144,19 +166,32 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 		ToolchainAdvisories: toolchainAdvisories,
 		Passed:              !failed,
 		MaxSeverityFound:    maxSev,
+		Incomplete:          incomplete,
+		Warnings:            warnings,
 	}
 
 	if failed {
 		return res, fmt.Errorf("scanner: %d vulnerability(ies) exceed threshold %s: %w", len(allFound), req.FailOn, core.ErrVulnerabilityThresholdExceeded)
 	}
 
+	// A scan that silently degraded to "0 vulnerabilities" because a
+	// lookup failed, rather than because nothing was there, must not
+	// report Passed without qualification — that is a false clean bill of
+	// health. Fail closed unless the caller explicitly opted in to
+	// best-effort results, or this was an intentional --offline scan
+	// (where reduced coverage is expected, not a failure).
+	if incomplete && !req.Offline && !req.AllowIncomplete {
+		res.Passed = false
+		return res, fmt.Errorf("scanner: %s: %w", strings.Join(warnings, "; "), core.ErrScanIncomplete)
+	}
+
 	return res, nil
 }
 
-func (s *Adapter) scanProjectToolchain(ctx context.Context, projectDir string, offline bool) ([]ports.Vulnerability, error) {
+func (s *Adapter) scanProjectToolchain(ctx context.Context, projectDir string, offline bool) ([]ports.Vulnerability, bool, error) {
 	pkgJSON, err := sveltekitutils.ReadPackageJSON(projectDir)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	kitVer := sveltekitutils.ResolveVersion(projectDir, "@sveltejs/kit", pkgJSON)
@@ -165,13 +200,18 @@ func (s *Adapter) scanProjectToolchain(ctx context.Context, projectDir string, o
 	var advisories []ports.Vulnerability
 	advisories = append(advisories, s.checkEmbeddedAdvisories(bunVer, kitVer)...)
 
+	incomplete := false
 	if !offline {
-		if remote, err := s.queryOSV(ctx, "@sveltejs/kit", kitVer, "npm"); err == nil {
+		remote, err := s.queryOSV(ctx, "@sveltejs/kit", kitVer, "npm")
+		if err == nil {
 			advisories = append(advisories, remote...)
+		} else {
+			incomplete = true
+			s.logger.WarnContext(ctx, "scanner: toolchain OSV lookup failed, scan is incomplete", "err", err)
 		}
 	}
 
-	return advisories, nil
+	return advisories, incomplete, nil
 }
 
 func (s *Adapter) scanProjectDependencies(ctx context.Context, projectDir string) ([]ports.Vulnerability, error) {
@@ -207,17 +247,17 @@ func (s *Adapter) scanProjectDependencies(ctx context.Context, projectDir string
 	return s.queryOSVBatch(ctx, queries)
 }
 
-func (s *Adapter) scanImageOrTarball(ctx context.Context, target string, offline bool) ([]ports.Vulnerability, []ports.Vulnerability, error) {
+func (s *Adapter) scanImageOrTarball(ctx context.Context, target string, offline bool) ([]ports.Vulnerability, []ports.Vulnerability, bool, error) {
 	s.mu.Lock()
 	if cached, ok := s.cache[target]; ok {
 		s.mu.Unlock()
-		return cached, nil, nil
+		return cached, nil, false, nil
 	}
 	s.mu.Unlock()
 
 	src, err := syft.GetSource(ctx, target, syft.DefaultGetSourceConfig())
 	if err != nil {
-		return nil, nil, fmt.Errorf("syft source for %s: %w", target, err)
+		return nil, nil, false, fmt.Errorf("syft source for %s: %w", target, err)
 	}
 	defer src.Close()
 
@@ -227,7 +267,7 @@ func (s *Adapter) scanImageOrTarball(ctx context.Context, target string, offline
 
 	sDoc, err := syft.CreateSBOM(ctx, src, cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("syft sbom creation: %w", err)
+		return nil, nil, false, fmt.Errorf("syft sbom creation: %w", err)
 	}
 
 	packages := sDoc.Artifacts.Packages.Sorted()
@@ -252,12 +292,14 @@ func (s *Adapter) scanImageOrTarball(ctx context.Context, target string, offline
 	}
 
 	var vulns []ports.Vulnerability
+	incomplete := false
 	if !offline && len(queries) > 0 {
 		discovered, err := s.queryOSVBatch(ctx, queries)
 		if err == nil {
 			vulns = append(vulns, discovered...)
 		} else {
-			s.logger.WarnContext(ctx, "scanner: osv batch query failed", "err", err)
+			incomplete = true
+			s.logger.WarnContext(ctx, "scanner: osv batch query failed, scan is incomplete", "err", err)
 		}
 	}
 
@@ -269,11 +311,16 @@ func (s *Adapter) scanImageOrTarball(ctx context.Context, target string, offline
 		}
 	}
 
-	s.mu.Lock()
-	s.cache[target] = vulns
-	s.mu.Unlock()
+	// Only cache a complete result — caching an incomplete one would make a
+	// transient network failure permanently sticky for the process
+	// lifetime, silently hiding real findings from every scan after it.
+	if !incomplete {
+		s.mu.Lock()
+		s.cache[target] = vulns
+		s.mu.Unlock()
+	}
 
-	return vulns, toolchainAdvisories, nil
+	return vulns, toolchainAdvisories, incomplete, nil
 }
 
 func mapPackageEcosystem(p pkg.Package, distroName, distroVersion string) string {
@@ -405,7 +452,7 @@ func (s *Adapter) queryOSVBatch(ctx context.Context, queries []osvQueryItem) ([]
 			return nil, err
 		}
 
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.osv.dev/v1/querybatch", bytes.NewReader(body))
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", s.osvBaseURL+"/v1/querybatch", bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}

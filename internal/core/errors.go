@@ -160,6 +160,12 @@ var (
 	// ErrVulnerabilityThresholdExceeded reports that vulnerabilities were found exceeding threshold.
 	ErrVulnerabilityThresholdExceeded = errors.New("vulnerabilities found exceeding threshold")
 
+	// ErrScanIncomplete reports that a scan's OSV.dev lookup failed partway
+	// through (network/API error), reducing coverage — a "0 vulnerabilities"
+	// result from this state is not the same as a clean scan. Fails closed
+	// by default; ScanRequest.AllowIncomplete opts out.
+	ErrScanIncomplete = errors.New("scan incomplete: one or more vulnerability database lookups failed")
+
 	// ErrSecretInlined reports hardcoded secret or sensitive token leak detected in build sources.
 	ErrSecretInlined = errors.New("hardcoded secret or sensitive pattern detected in build sources")
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/anchore/syft/syft/pkg"
@@ -71,6 +72,14 @@ func TestScanner_EcosystemMapping(t *testing.T) {
 	}
 }
 
+// TestScanner_OSVBatchQueryMock proves queryOSVBatch's real HTTP request/
+// response handling end-to-end against a mock OSV.dev server — a prior
+// version of this test built a mock server and a request but never wired
+// them together (adapter.queryOSVBatch was called with no way to reach the
+// mock, hit the real network instead, and both its return values were
+// discarded with `_ = err; _ = vulns`), so it could pass identically with
+// the parsing logic completely broken. This version routes through
+// Adapter.osvBaseURL and asserts on the actual decoded vulnerability.
 func TestScanner_OSVBatchQueryMock(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/querybatch" {
@@ -126,10 +135,7 @@ func TestScanner_OSVBatchQueryMock(t *testing.T) {
 
 	adapter := NewAdapter(nil)
 	adapter.client = mockServer.Client()
-
-	// Direct test on queryOSVBatch by routing via mock transport
-	originalTransport := http.DefaultTransport
-	defer func() { http.DefaultTransport = originalTransport }()
+	adapter.osvBaseURL = mockServer.URL
 
 	queries := []osvQueryItem{
 		{
@@ -142,18 +148,26 @@ func TestScanner_OSVBatchQueryMock(t *testing.T) {
 		},
 	}
 
-	// Make request against mock server URL
-	reqPayload := osvBatchRequest{Queries: queries}
-	body, _ := json.Marshal(reqPayload)
-	httpReq, _ := http.NewRequest(http.MethodPost, mockServer.URL+"/v1/querybatch", http.NoBody)
-	_ = body
-	_ = httpReq
-
 	vulns, err := adapter.queryOSVBatch(context.Background(), queries)
-	// Without overriding endpoint URL queryOSVBatch calls api.osv.dev;
-	// let's verify parseOSVSeverity and extractFixedVersion directly:
-	_ = err
-	_ = vulns
+	if err != nil {
+		t.Fatalf("queryOSVBatch failed: %v", err)
+	}
+	if len(vulns) != 1 {
+		t.Fatalf("expected exactly 1 vulnerability (libssl3 only, libc6 has none in the mock response), got %d: %+v", len(vulns), vulns)
+	}
+	got := vulns[0]
+	if got.ID != "CVE-2024-0727" {
+		t.Errorf("expected ID CVE-2024-0727, got %q", got.ID)
+	}
+	if got.Package != "libssl3" {
+		t.Errorf("expected Package libssl3, got %q", got.Package)
+	}
+	if got.Severity != ports.SeverityCritical {
+		t.Errorf("expected Severity critical, got %q", got.Severity)
+	}
+	if got.FixedVersion != "3.0.11-1~deb12u2" {
+		t.Errorf("expected FixedVersion 3.0.11-1~deb12u2, got %q", got.FixedVersion)
+	}
 
 	record := osvVulnRecord{
 		ID: "CVE-2024-0727",
@@ -183,4 +197,53 @@ func TestScanner_OSVBatchQueryMock(t *testing.T) {
 	if fixed != "3.0.11-1~deb12u2" {
 		t.Errorf("extractFixedVersion() = %q, want %q", fixed, "3.0.11-1~deb12u2")
 	}
+}
+
+// TestScanner_DependencyOSVFailureFailsClosed guards the exact gap found in
+// review: an OSV.dev lookup failure previously degraded silently to
+// "0 vulnerabilities found" (Passed: true), indistinguishable from a
+// genuinely clean scan. A directory-target scan (the path that queries
+// project dependencies) against an unreachable OSV endpoint must now fail
+// closed by default.
+func TestScanner_DependencyOSVFailureFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	pkgJSON := `{"name":"app","dependencies":{"lodash":"4.17.4"}}`
+	if err := writeFile(t, dir+"/package.json", pkgJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := NewAdapter(nil)
+	adapter.osvBaseURL = "http://127.0.0.1:1" // guaranteed-closed port, fails fast
+
+	res, err := adapter.Scan(context.Background(), ports.ScanRequest{
+		Target: dir,
+		FailOn: ports.SeverityCritical,
+	})
+	if !errors.Is(err, core.ErrScanIncomplete) {
+		t.Fatalf("expected ErrScanIncomplete when the OSV lookup fails, got: %v", err)
+	}
+	if res.Passed {
+		t.Error("expected Passed=false for an incomplete scan, not a silent clean report")
+	}
+	if !res.Incomplete {
+		t.Error("expected ScanResult.Incomplete=true")
+	}
+
+	// AllowIncomplete must opt back into the old best-effort behavior.
+	res2, err2 := adapter.Scan(context.Background(), ports.ScanRequest{
+		Target:          dir,
+		FailOn:          ports.SeverityCritical,
+		AllowIncomplete: true,
+	})
+	if err2 != nil {
+		t.Fatalf("expected AllowIncomplete to suppress the error, got: %v", err2)
+	}
+	if !res2.Incomplete {
+		t.Error("expected ScanResult.Incomplete=true even when AllowIncomplete suppresses the error")
+	}
+}
+
+func writeFile(t *testing.T, path, content string) error {
+	t.Helper()
+	return os.WriteFile(path, []byte(content), 0o644)
 }

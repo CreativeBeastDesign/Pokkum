@@ -77,6 +77,15 @@ type ScanRequest struct {
 
 	// Offline disables remote vulnerability database lookups (OSV.dev).
 	Offline bool `json:"offline"`
+
+	// AllowIncomplete permits Scan to report success even when an OSV.dev
+	// lookup failed partway through (e.g. a network blip) and coverage is
+	// therefore reduced. Without it, Scan fails closed on incompleteness —
+	// a scan that silently degrades to "0 vulnerabilities found" because a
+	// query failed, rather than because nothing was there, is a false
+	// clean bill of health, worse than no scan at all. Not needed with
+	// Offline, which is an intentional, expected reduction in coverage.
+	AllowIncomplete bool `json:"allow_incomplete"`
 }
 
 // ScanResult contains the discovered security vulnerabilities.
@@ -86,6 +95,17 @@ type ScanResult struct {
 	ToolchainAdvisories []Vulnerability `json:"toolchain_advisories"`
 	Passed              bool            `json:"passed"`
 	MaxSeverityFound    Severity        `json:"max_severity_found"`
+
+	// Incomplete is true if one or more OSV.dev lookups failed partway
+	// through the scan (network error, API error), reducing real coverage
+	// below what a clean scan would have checked. See Warnings for which
+	// lookups failed. A Passed:true, Incomplete:true result must not be
+	// read the same as a genuinely clean scan.
+	Incomplete bool `json:"incomplete,omitempty"`
+
+	// Warnings lists non-fatal problems encountered during the scan (e.g.
+	// which specific OSV.dev query failed and why).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Scanner scans container images, tarballs, or toolchain versions for CVEs and advisories.

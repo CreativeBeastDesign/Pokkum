@@ -14,10 +14,11 @@ import (
 )
 
 type scanFlags struct {
-	failOn    string
-	toolchain bool
-	output    string
-	offline   bool
+	failOn          string
+	toolchain       bool
+	output          string
+	offline         bool
+	allowIncomplete bool
 }
 
 func newScanCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -39,6 +40,7 @@ and threshold enforcement via --fail-on.`,
 	cmd.Flags().BoolVar(&flags.toolchain, "toolchain", false, "Restrict scan to embedded runtime & toolchain advisories")
 	cmd.Flags().StringVar(&flags.output, "output", "text", "Output format (text or json)")
 	cmd.Flags().BoolVar(&flags.offline, "offline", false, "Disable remote vulnerability database queries")
+	cmd.Flags().BoolVar(&flags.allowIncomplete, "allow-incomplete", false, "Report success even if a vulnerability database lookup failed (default: fail closed on reduced coverage)")
 
 	return cmd
 }
@@ -56,10 +58,11 @@ func runScan(ctx context.Context, logger *slog.Logger, flags *scanFlags, args []
 
 	adapter := scanner.NewAdapter(logger)
 	req := ports.ScanRequest{
-		Target:        target,
-		FailOn:        sev,
-		ToolchainOnly: flags.toolchain,
-		Offline:       flags.offline,
+		Target:          target,
+		FailOn:          sev,
+		ToolchainOnly:   flags.toolchain,
+		Offline:         flags.offline,
+		AllowIncomplete: flags.allowIncomplete,
 	}
 
 	res, scanErr := adapter.Scan(ctx, req)
@@ -88,7 +91,14 @@ func runScan(ctx context.Context, logger *slog.Logger, flags *scanFlags, args []
 	fmt.Printf("===========================\n")
 	fmt.Printf("Target: %s\n", res.Target)
 	fmt.Printf("Status: %t\n", res.Passed)
-	fmt.Printf("Max Severity Found: %s\n\n", res.MaxSeverityFound)
+	fmt.Printf("Max Severity Found: %s\n", res.MaxSeverityFound)
+	if res.Incomplete {
+		fmt.Println("⚠ SCAN INCOMPLETE: one or more vulnerability database lookups failed — results below do not reflect full coverage.")
+		for _, w := range res.Warnings {
+			fmt.Printf("  - %s\n", w)
+		}
+	}
+	fmt.Println()
 
 	if len(res.Vulnerabilities) > 0 {
 		fmt.Printf("Image & OS Package Vulnerabilities (%d):\n", len(res.Vulnerabilities))

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scanner"
+	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
 )
@@ -280,6 +282,7 @@ func checkBaseImageSecurity(dir string, logger *slog.Logger) ports.DoctorCheck {
 
 	adapter := scanner.NewAdapter(logger)
 	var vulnerableBases []string
+	var incompleteBases []string
 
 	for name, entry := range lf.Bases {
 		target := entry.PinnedRef
@@ -295,17 +298,36 @@ func checkBaseImageSecurity(dir string, logger *slog.Logger) ports.DoctorCheck {
 			FailOn:  ports.SeverityCritical,
 			Offline: false,
 		})
-		if err != nil || !res.Passed {
+		switch {
+		case errors.Is(err, core.ErrScanIncomplete):
+			// A failed lookup is not a confirmed vulnerability — reporting
+			// it as one would be worse than not knowing, since it would
+			// get "fixed" by re-running rather than by actually checking.
+			incompleteBases = append(incompleteBases, fmt.Sprintf("%s (%s)", name, target))
+		case err != nil || !res.Passed:
 			vulnerableBases = append(vulnerableBases, fmt.Sprintf("%s (%s: %s)", name, target, res.MaxSeverityFound))
 		}
 	}
 
 	if len(vulnerableBases) > 0 {
+		msg := fmt.Sprintf("critical security vulnerabilities detected in locked base image(s): %s", strings.Join(vulnerableBases, ", "))
+		if len(incompleteBases) > 0 {
+			msg += fmt.Sprintf("; additionally, could not complete the check for: %s", strings.Join(incompleteBases, ", "))
+		}
 		return ports.DoctorCheck{
 			Name:        "Base Image Security & CVEs",
 			Passed:      false,
-			Message:     fmt.Sprintf("critical security vulnerabilities detected in locked base image(s): %s", strings.Join(vulnerableBases, ", ")),
+			Message:     msg,
 			Remediation: "Update base images via `pokkum base update` or choose a patched preset (e.g. chainguard)",
+		}
+	}
+
+	if len(incompleteBases) > 0 {
+		return ports.DoctorCheck{
+			Name:        "Base Image Security & CVEs",
+			Passed:      false,
+			Message:     fmt.Sprintf("could not complete the security check for locked base image(s), vulnerability database lookup failed: %s", strings.Join(incompleteBases, ", ")),
+			Remediation: "Check network connectivity to api.osv.dev and re-run `pokkum doctor`; this is not a confirmed vulnerability, just an incomplete check",
 		}
 	}
 
