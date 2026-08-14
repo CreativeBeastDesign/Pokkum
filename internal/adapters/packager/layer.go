@@ -14,9 +14,15 @@ import (
 	"strings"
 	"time"
 
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"runtime"
+
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/layercacheutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
@@ -150,31 +156,167 @@ func buildSupervisorLayer(ctx context.Context, req ports.PackageRequest, modTime
 	return layercacheutils.Put(cacheDir, cacheKey, layer, req.Compression)
 }
 
+// countWriter records the total bytes written to it.
+type countWriter struct {
+	count int64
+}
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	c.count += int64(n)
+	return n, nil
+}
+
+type readCloserWithUnderlying struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (r *readCloserWithUnderlying) Close() error {
+	if c, ok := r.Reader.(io.Closer); ok {
+		_ = c.Close()
+	}
+	return r.closer.Close()
+}
+
+// singlePassLayer implements v1.Layer with precomputed O(1) DiffID, Digest, and Size hashes,
+// streaming directly from a single-pass generated compressed layer artifact on disk.
+type singlePassLayer struct {
+	filePath    string
+	diffID      v1.Hash
+	digest      v1.Hash
+	size        int64
+	mediaType   types.MediaType
+	compression ports.CompressionAlgorithm
+}
+
+var _ v1.Layer = (*singlePassLayer)(nil)
+
+func (l *singlePassLayer) Digest() (v1.Hash, error) {
+	return l.digest, nil
+}
+
+func (l *singlePassLayer) DiffID() (v1.Hash, error) {
+	return l.diffID, nil
+}
+
+func (l *singlePassLayer) Size() (int64, error) {
+	return l.size, nil
+}
+
+func (l *singlePassLayer) MediaType() (types.MediaType, error) {
+	return l.mediaType, nil
+}
+
+func (l *singlePassLayer) Compressed() (io.ReadCloser, error) {
+	return os.Open(l.filePath)
+}
+
+func (l *singlePassLayer) Uncompressed() (io.ReadCloser, error) {
+	f, err := os.Open(l.filePath)
+	if err != nil {
+		return nil, err
+	}
+	if l.compression.Normalize() == ports.CompressionZstd {
+		r, err := zstd.NewReader(f)
+		if err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		return &readCloserWithUnderlying{Reader: r, closer: f}, nil
+	}
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return &readCloserWithUnderlying{Reader: gr, closer: f}, nil
+}
+
+// buildSinglePassLayer writes the uncompressed tar stream, compresses it, and calculates
+// both DiffID (uncompressed SHA256) and Digest (compressed SHA256) concurrently in one single pass.
+func buildSinglePassLayer(ctx context.Context, platform ports.Platform, entries []tarEntry, modTime time.Time, compression ports.CompressionAlgorithm) (v1.Layer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "pokkum-layer-*.tar")
+	if err != nil {
+		return nil, fmt.Errorf("packager: build %s: create temp layer file: %w: %w", platform, err, core.ErrPackageFailed)
+	}
+	tmpPath := tmpFile.Name()
+
+	diffIDHasher := sha256.New()
+	digestHasher := sha256.New()
+	sizeCounter := &countWriter{}
+
+	compressedWriter := io.MultiWriter(tmpFile, digestHasher, sizeCounter)
+
+	var compressor io.WriteCloser
+	mediaType := types.OCILayer
+	if compression.Normalize() == ports.CompressionZstd {
+		mediaType = types.OCILayerZStd
+		zw, err := zstd.NewWriter(compressedWriter)
+		if err != nil {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+			return nil, fmt.Errorf("packager: build %s: init zstd compressor: %w: %w", platform, err, core.ErrPackageFailed)
+		}
+		compressor = zw
+	} else {
+		gw, err := gzip.NewWriterLevel(compressedWriter, gzip.BestSpeed)
+		if err != nil {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+			return nil, fmt.Errorf("packager: build %s: init gzip compressor: %w: %w", platform, err, core.ErrPackageFailed)
+		}
+		compressor = gw
+	}
+
+	uncompressedWriter := io.MultiWriter(diffIDHasher, compressor)
+
+	if err := writeTar(uncompressedWriter, entries, modTime); err != nil {
+		_ = compressor.Close()
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return nil, fmt.Errorf("packager: build %s: write tar: %w: %w", platform, err, core.ErrPackageFailed)
+	}
+
+	if err := compressor.Close(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return nil, fmt.Errorf("packager: build %s: flush compressor: %w: %w", platform, err, core.ErrPackageFailed)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, fmt.Errorf("packager: build %s: close temp layer file: %w: %w", platform, err, core.ErrPackageFailed)
+	}
+
+	layer := &singlePassLayer{
+		filePath: tmpPath,
+		diffID: v1.Hash{
+			Algorithm: "sha256",
+			Hex:       hex.EncodeToString(diffIDHasher.Sum(nil)),
+		},
+		digest: v1.Hash{
+			Algorithm: "sha256",
+			Hex:       hex.EncodeToString(digestHasher.Sum(nil)),
+		},
+		size:        sizeCounter.count,
+		mediaType:   mediaType,
+		compression: compression,
+	}
+
+	runtime.SetFinalizer(layer, func(l *singlePassLayer) {
+		_ = os.Remove(l.filePath)
+	})
+
+	return layer, nil
+}
+
 // buildLayer wraps a single file (plus its parent directory entries) into one
-// deterministic OCI layer. It is shared by buildAppLayer and
-// buildSupervisorLayer so the tar-header pinning and streaming behaviour below
-// is written, and reasoned about, once.
-//
-// # Why the opener does not capture ctx
-//
-// tarball.LayerFromOpener calls the opener at least three times before it
-// returns — once to sniff whether the stream is already compressed, once to
-// compute the compressed digest, once to compute the diffID — and
-// go-containerregistry calls it again later, from whatever goroutine and
-// whatever context is pushing or writing the image. Binding the opener to the
-// build's context would therefore make a perfectly good layer unreadable the
-// moment the build context was cancelled, which for a caller that builds and
-// then pushes is a use-after-free in slow motion. ctx is instead honoured at
-// the step boundaries in Build, and only checked here up front.
-//
-// # Why the tar is streamed rather than buffered
-//
-// The application binary is around 90 MB. Buffering the finished tar in memory
-// so that the opener could hand out a bytes.Reader would cost that much
-// resident memory per platform for the whole build. Regenerating the tar from
-// the same source file (or the same in-memory buffer, for the supervisor) on
-// each call costs nothing but a re-read, and produces identical bytes because
-// every field in every header is pinned.
+// deterministic OCI layer in a single pass.
 func buildLayer(ctx context.Context, platform ports.Platform, file layerFile, modTime time.Time, compression ports.CompressionAlgorithm) (v1.Layer, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
@@ -185,16 +327,7 @@ func buildLayer(ctx context.Context, platform ports.Platform, file layerFile, mo
 		return nil, fmt.Errorf("packager: build %s: %w: %w", platform, err, core.ErrPackageFailed)
 	}
 
-	opts := layerOpenerOptions(compression)
-	layer, err := tarball.LayerFromOpener(
-		tarOpener(entries, modTime),
-		opts...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: build layer: %w: %w",
-			platform, err, core.ErrPackageFailed)
-	}
-	return layer, nil
+	return buildSinglePassLayer(ctx, platform, entries, modTime, compression)
 }
 
 func layerOpenerOptions(compression ports.CompressionAlgorithm) []tarball.LayerOption {
@@ -466,15 +599,7 @@ func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Plat
 		return nil, fmt.Errorf("packager: build %s: %w: %w", platform, err, core.ErrPackageFailed)
 	}
 
-	opts := layerOpenerOptions(compression)
-	layer, err := tarball.LayerFromOpener(
-		tarOpener(entries, modTime),
-		opts...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: build tree layer: %w: %w", platform, err, core.ErrPackageFailed)
-	}
-	return layer, nil
+	return buildSinglePassLayer(ctx, platform, entries, modTime, compression)
 }
 
 // BuildDirectoryTreeLayer builds an OCI layer from a directory tree on host disk with default options.

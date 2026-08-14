@@ -165,9 +165,10 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
 5. **Binary & Base Image Compatibility Inspection (`nativeinspect`)**:
    - Reads ELF `DT_NEEDED` dynamic links on built binaries to verify compatibility with glibc in the target base image.
 6. **OCI Layer Assembly (`packager`)**:
-   - Downloads/resolves the requested base image (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard).
-   - Appends **Supervisor Layer**: Adds `/pokkum/init` executable with pinned USTAR tar headers (`uid=65532`, `gid=65532`, `mode=0555`).
-   - Appends **Application Layer**: Adds `/app/server` binary with matching pinned headers.
+   - Resolves the requested base image (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard).
+   - Employs **Single-Pass Layer Hashing & Streaming** (`buildSinglePassLayer`): Simultaneously calculates uncompressed `DiffID` and compressed `Digest` while streaming tar archives into compressed temporary layers, eliminating multiple disk passes and answering `v1.Layer` queries in `O(1)` time.
+   - Appends **Supervisor Layer**: Adds `/pokkum/init` executable with pinned USTAR tar headers (`uid=65532`, `gid=65532`, `mode=0555`), leveraging `layercacheutils` on-disk caching.
+   - Appends **Application Layers**: Adds `/app/server`, `/app/client`, `/app/vendor` (with `pruneutils` junk stripping), `/app/native`, and `/usr/local/bin/bun`.
 7. **OCI Manifest & Index Generation**:
    - Generates OCI Schema 1 Manifest for each architecture.
    - Combines single-arch manifests into a multi-arch OCI Image Index.

@@ -7,6 +7,9 @@
   - `internal/core` imports `internal/ports` and standard library. It re-exports boundary vocabulary as type aliases (`core.Platform = ports.Platform`).
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
+- **Single-Pass Layer Hashing & Streaming (`internal/adapters/packager`)**:
+  - Computes uncompressed `DiffID` and compressed `Digest` concurrently during a single tar generation stream via `buildSinglePassLayer`.
+  - Eliminates 2-3 redundant disk reads and multiple compression passes, answering `v1.Layer` queries in `O(1)` time with byte-for-byte deterministic reproducibility.
 - **Pre-Calculated & Cached Immutable Layers (`internal/adapters/layercacheutils`)**:
   - `layercacheutils` caches compressed immutable layer blobs (`/usr/local/bin/bun`, `/pokkum/init`) in `~/.cache/pokkum/layers/` (or `$POKKUM_CACHE_DIR/layers`), saving ~100MB of tarring and gzip/zstd compression per build.
   - Cache keys are deterministically computed via `ComputeKey(targetPath, contentSHA256, platform, modTime, compression)`.

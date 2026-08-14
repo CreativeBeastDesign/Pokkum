@@ -122,7 +122,7 @@ The post-v1.0 milestones addressed critical supply chain verification, CVE gatin
 
 ### 1. Build Speed & Throughput
 - [x] **Pre-Calculated Immutable Layers**: Cache pre-compressed `bun` and `pokkum-init` blobs locally to skip ~100MB of tarring and compression per build.
-- [ ] **Single-Pass Layer Hashing & Streaming**: Compute uncompressed DiffID and compressed Digest simultaneously using multi-threaded compression (`pgzip` or `zstd`) to significantly speed up layer generation.
+- [x] **Single-Pass Layer Hashing & Streaming**: Compute uncompressed DiffID and compressed Digest simultaneously using multi-threaded compression (`pgzip` or `zstd`) to significantly speed up layer generation.
 - [ ] **Overlapped Async Pipeline Stages**: Run base image resolution, signature verification, and module inspection in parallel background goroutines during the SvelteKit build phase.
 - [ ] **Registry Push Optimizations**: Parallel layer uploads over HTTP/2 and cross-repository blob mounting (`mount=` query parameter) for zero-egress base layer copies.
 

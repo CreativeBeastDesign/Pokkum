@@ -4,7 +4,7 @@
 - **Application Framework**: SvelteKit 2.31+ (`@sveltejs/kit`)
 - **Runtime Compiler & Resolver**: Bun ≥ 1.2.0 (`internal/adapters/bunruntime` resolver, `--bun-binary`, `--bun-variant=standard|baseline`)
 - **Packaging Strategy & Adapter**: `--strategy=layered` (default, arch-independent layout via `@sveltejs/adapter-node`) / `--strategy=exe` (deprecated 2-layer single executable)
-- **Layer Compression**: `--compression=gzip|zstd` (default: `gzip`, `application/vnd.oci.image.layer.v1.tar+zstd` when `zstd`)
+- **Layer Assembly & Compression**: Single-pass streaming pipeline (`buildSinglePassLayer`) computing uncompressed `DiffID` and compressed `Digest` simultaneously; `--compression=gzip|zstd` (default: `gzip`, `application/vnd.oci.image.layer.v1.tar+zstd` when `zstd`).
 - **Layer Caching**: `layercacheutils` (`internal/adapters/layercacheutils/layercacheutils.go`) caches immutable compressed layer tarballs (`bun`, `supervisor`) in `~/.cache/pokkum/layers/`.
 - **Vendor Layer Optimization**: `pruneutils` (`internal/adapters/pruneutils/pruneutils.go`) automatically strips non-runtime files (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests) from `/app/vendor`, saving 15–35MB per image. Escape hatches: `--no-prune`, `--keep-vendor`.
 - **Native Addon Closure & Splitting**: `ClosuredNativeAdapter` (`internal/adapters/nativeinspect/closured.go`), ELF `.node` addon inspection, `/app/native` layer, and vendor chunking (`/app/vendor`).
