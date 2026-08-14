@@ -120,6 +120,7 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 	rootCmd.AddCommand(newApplyCommand(ctx, logger))
 	rootCmd.AddCommand(newDoctorCommand(ctx, logger))
 	rootCmd.AddCommand(newInitCommand(ctx, logger))
+	rootCmd.AddCommand(newAdoptCommand(ctx, logger))
 	rootCmd.AddCommand(newExplainCommand(ctx, logger))
 	rootCmd.AddCommand(newMetricsCommand(ctx, logger))
 	rootCmd.AddCommand(newScanCommand(ctx, logger))

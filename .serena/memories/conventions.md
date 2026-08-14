@@ -21,6 +21,8 @@
   - Base Image Escrow Mirroring: `pokkum base update --mirror-registry=<repo>` mirrors base images/indexes and their Cosign `.sig` tags to a project-controlled registry, saving `mirror_ref` in `pokkum.lock` with automatic fallback.
   - Base Image Cosign Signature Verification is enabled by default (`VerifySignature: true`); queries target container registry for signature tags (`<repo>:sha256-<hex>.sig`) and verifies cryptographic payload signatures via `ports.CosignSigner` (`cosign.Signer`); `--no-verify-base` provides opt-out.
   - Secret-Inlining Guard (`secretguard`) runs build-time entropy and pattern scanning across project sources during `pokkum build` before packaging layers, preventing hardcoded secret leaks (`core.ErrSecretInlined`). Pass `--allow-secret-pattern=<regex>` to bypass false positives.
+- **Migration & Adoption Tooling (`Tier 3 Post-v1.0`)**:
+  - `pokkum adopt [dir]` migrates existing SvelteKit repositories (configured for `@sveltejs/adapter-node`, `adapter-vercel`, `adapter-auto`, `adapter-cloudflare`, etc.) to Pokkum compilation defaults. Rewrites `svelte.config.js` and `package.json`, bootstraps `.pokkumignore`, and optionally deletes legacy container artifacts (`--remove-dockerfile`). Supports `--dry-run` and `--output=json`. Implemented in `internal/adapters/sveltekitutils.Adopt`.
 - **Structured JSON Schema Standard (`--output=json`)**:
   - Global `--output=text|json` flag standardizes CLI stdout into versioned `ports.JSONEnvelope` payloads (`schema_version: "1.0"`).
 - **Cluster Hardening & Manifest Defaults (`v1.0 MVP`)**:

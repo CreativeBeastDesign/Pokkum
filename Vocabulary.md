@@ -211,7 +211,20 @@ No flags.
 
 ---
 
-## 16. Environment Variables (Runtime, Read by Supervisor)
+## 16. `pokkum adopt [dir]`
+
+Migration codemod that inspects an existing SvelteKit repository (configured for `@sveltejs/adapter-node`, `adapter-vercel`, `adapter-auto`, `adapter-cloudflare`, etc.), updates `package.json` dependencies and `svelte.config.js` to Pokkum compilation defaults, generates `.pokkumignore`, and optionally removes legacy Dockerfile configurations.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--dir`, `-d` | `.` | Path to SvelteKit project directory. |
+| `--dry-run` | `false` | Report planned migration changes without writing to disk. |
+| `--remove-dockerfile` | `false` | Remove legacy Dockerfile, `.dockerignore`, and compose files. |
+| `--output` | `text` | Output serialization format (`text` or `json`). |
+
+---
+
+## 17. Environment Variables (Runtime, Read by Supervisor)
 
 These configure the image's *runtime* behavior inside the container (read by `/pokkum/init`), not the CLI:
 
@@ -223,13 +236,12 @@ These configure the image's *runtime* behavior inside the container (read by `/p
 
 ---
 
-## 17. Beyond v1.0 / Backlog
+## 18. Beyond v1.0 / Backlog
 
 Post-v1.0 items from [Roadmap.md](Roadmap.md):
 
 | Roadmap Item | Proposed Flag(s) | Notes |
 |---|---|---|
-| `pokkum adopt` | `pokkum adopt [dir]`, `--dry-run`, `--remove-dockerfile` | `--dry-run` reuses existing `build` semantics (report, don't write). |
 | Runtime Env Contract | `--require-env=KEY1,KEY2` on `build` | Build-time declaration; runtime validation enforced by supervisor at startup. |
 | Monorepo Affected-Detection | `--since=<git-ref>` on `resolve` | Skips unchanged `pokkum://` apps entirely based on git diffs. |
 | Static/Prerendered Page Optimization | `--static` on `build` | Builds a zero-JS-runtime Nginx-alpine image instead of Bun runtime image. |
@@ -244,6 +256,6 @@ Post-v1.0 items from [Roadmap.md](Roadmap.md):
 
 ---
 
-## 18. Open Naming Questions
+## 19. Open Naming Questions
 
 Two proposed backlog flags above collide with already-shipped flags of the same short name (`--telemetry`, `--env`) because backlog notes in `AdditionalFeatures.md` predate the OTel work landing in v0.2. Resolve these before implementing the corresponding backlog item — do not ship a second, differently-scoped `--telemetry` or `--env`.
