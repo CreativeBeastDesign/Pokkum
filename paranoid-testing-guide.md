@@ -157,6 +157,13 @@ all because it looks like coverage that isn't there.
 
 ## 8. SLSA provenance — verify with `cosign`, independent of `pokkum verify`
 
+**This is not just precaution — it's a confirmed finding.**
+`pokkum verify --no-rebuild`'s provenance summary currently comes from a
+stub that returns identical hardcoded data (signer identity, signature
+validity, SLSA presence) regardless of the image you point it at — see
+[Roadmap.md](Roadmap.md)'s Tier 0. Do not run `pokkum verify --no-rebuild`
+and trust its verdict for this step; use `cosign` directly as below.
+
 ```bash
 cosign verify-attestation --type slsaprovenance \
   --certificate-identity-regexp '.*' --certificate-oidc-issuer-regexp '.*' \
