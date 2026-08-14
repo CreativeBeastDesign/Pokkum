@@ -160,10 +160,14 @@ Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode) and `
 
 ## 11. `pokkum rollback`
 
+Updates image references in Kubernetes deployment manifests across multiple generations using `pokkum.dev/image-history` and `pokkum.dev/previous-image` annotations.
+
 | Flag | Shorthand | Default | Description |
 |---|---|---|---|
 | `--file` | `-f` | (required) | Manifest file to roll back. |
-| `--to` | — | (optional) | Target container image reference or digest to roll back to (defaults to `pokkum.dev/previous-image` annotation). |
+| `--to` | — | (optional) | Target container image reference or digest to roll back to (overrides generation index). |
+| `--generation` | `-g` | `1` | Number of generations back to roll back (default `1` = immediate previous image). |
+| `--list` | — | `false` | List available historical image generations recorded in manifest annotations. |
 | `--output` | — | `text` | Output format (`text` or `json`). |
 
 ---
@@ -225,7 +229,18 @@ Migration codemod that inspects an existing SvelteKit repository (configured for
 
 ---
 
-## 17. Environment Variables (Runtime, Read by Supervisor)
+## 17. `pokkum history <image>`
+
+Inspects build provenance timeline and CI metadata for an image reference, verifying SLSA v1.0 attestations, Cosign signatures, builder environment, and extracting links back to GitHub Actions CI workflow runs, Pull Requests, and commits.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--expect-source` | (none) | Expected git repository and ref source attestation (e.g. `github.com/org/repo@main`). |
+| `--output` | `text` | Output format (`text` or `json`). |
+
+---
+
+## 18. Environment Variables (Runtime, Read by Supervisor)
 
 These configure the image's *runtime* behavior inside the container (read by `/pokkum/init`), not the CLI:
 
@@ -238,7 +253,7 @@ These configure the image's *runtime* behavior inside the container (read by `/p
 
 ---
 
-## 18. Beyond v1.0 / Backlog
+## 19. Beyond v1.0 / Backlog
 
 Post-v1.0 items from [Roadmap.md](Roadmap.md):
 
@@ -257,6 +272,6 @@ Post-v1.0 items from [Roadmap.md](Roadmap.md):
 
 ---
 
-## 19. Open Naming Questions
+## 20. Open Naming Questions
 
 Two proposed backlog flags above collide with already-shipped flags of the same short name (`--telemetry`, `--env`) because backlog notes in `AdditionalFeatures.md` predate the OTel work landing in v0.2. Resolve these before implementing the corresponding backlog item — do not ship a second, differently-scoped `--telemetry` or `--env`.

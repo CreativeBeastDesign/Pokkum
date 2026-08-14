@@ -9,6 +9,13 @@
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
 - **Runtime Env Contract (`Tier 3 Post-v1.0`)**:
   - `--require-env=KEY1,KEY2` on `pokkum build` declares required runtime environment variables. Stamped in OCI manifest annotations (`pokkum.dev/required-env`), labels (`dev.pokkum.required-env`), and injected as `POKKUM_REQUIRED_ENV` in the container environment. The PID-1 supervisor (`/pokkum/init`) enforces presence at startup, failing fast before binding probe ports or starting the application.
+- **Fake Implementation Strict Verification & Documentation Policy (`AGENTS.md`)**:
+  - Fake, stub, or mock implementations must NEVER be assumed or reported as completed; any simulated logic must be explicitly flagged.
+  - Keep `Roadmap.md`, `ARCHITECTURE.md`, `Vocabulary.md` (human-readable), and Serena MCP (`mem:*` for agents) continuously in sync.
+  - Propose "Next Best Steps" after each completed implementation based on `Roadmap.md` / `AdditionalFeatures.md`.
+- **Image Provenance Timeline & Multi-Generation Rollback (`Tier 3 Post-v1.0`)**:
+  - `pokkum history <image>` inspects SLSA v1.0 attestations, Cosign signatures, and builder metadata, extracting links to GitHub Actions CI workflow runs, Pull Requests, and commits.
+  - `pokkum rollback` supports multi-generation rollback via `pokkum.dev/image-history` annotations in Kubernetes manifests with timeline listing (`--list`) and generation depth (`--generation=<n>`, `-g <n>`).
 - **Day-2 Operations & CI/CD Ecosystem (`v1.0 MVP Bundle 8`)**:
   - `pokkum rollback -f <manifest> [--to=<ref>]` rolls back image references in Kubernetes manifests using declarative `pokkum.dev/previous-image` annotations or an explicit target `--to` reference.
   - `pokkum upgrade [--check]` checks for new Pokkum CLI releases, verifies release `checksums.txt` and `checksums.txt.sig` via `ports.ReleaseVerifier` (implemented in `cosign.Signer`), and reports or applies binary self-updates. Supports `--version`, `--offline`, and `--key`.

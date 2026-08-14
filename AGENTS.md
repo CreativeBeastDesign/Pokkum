@@ -56,6 +56,10 @@ Use Serena's `write_memory` or `edit_memory` tools to keep memories concise, inv
 - **Error Handling**: Always wrap errors with clear context (`fmt.Errorf("sveltekitutils adapter: %w", err)`). Use sentinel errors defined in `internal/core` for domain error matching.
 - **Interface Segregation**: Define narrow interfaces in `internal/ports`. Keep adapter-internal helper structs unexported.
 - **Concurrency Safety**: Ensure layer tarball compression and multi-arch OCI image manifest assembly are safe for concurrent execution.
+- **Zero Fake Implementations (Verification of Real Code)**:
+  - Fake, mock, or placeholder implementations must **ALWAYS** be flagged explicitly and must **NEVER** be assumed or reported as fully implemented.
+  - Before claiming any step, service, adapter, CLI flag, or feature is completed, agents **MUST** inspect the underlying code to ensure it contains genuine, functional logic.
+  - If any mock, stub, simulated return value, or placeholder exists, it must be clearly and transparently flagged in the agent's final answer.
 
 ---
 
@@ -96,10 +100,19 @@ When code changes have occurred, agents **MUST** execute the following 4-step ve
 
 ---
 
-## 6. Roadmap Updates
+## 6. Keeping Documentation & Project State Up-to-Date
 
-Agents **MUST** update `Roadmap.md` whenever applicable:
-- A planned feature is completed or partially implemented.
-- A task's scope, timeline, or feasibility changes significantly.
-- Priorities shift based on new user instructions.
-- Ensure the roadmap reflects the current state of the project accurately.
+Agents **MUST** keep the project documentation and persistent knowledge graph synchronized whenever code, CLI flags, interfaces, or architectural patterns change:
+- **`Roadmap.md`**: Update task completion status (`[x]`), adjust scopes, or re-prioritize items.
+- **`ARCHITECTURE.md`**: Update architectural diagrams, adapter contracts, layer layouts, and boundary descriptions.
+- **`Vocabulary.md`**: Maintain the complete, human-readable reference of all CLI commands, subcommands, flags, defaults, and runtime environment variables.
+- **Serena MCP Memories (`mem:*`)**: Keep the machine-readable project memory graph for agents (`mem:core`, `mem:conventions`, `mem:tech_stack`, `mem:telemetry`, etc.) updated with latest invariants and decisions.
+
+---
+
+## 7. "Next Best Steps" Policy
+
+After finishing any implementation task, milestone, or phase, agents **MUST** include a **"Next Best Steps"** section in their final answer.
+- Base recommendations directly on remaining items in [`Roadmap.md`](Roadmap.md) and [`AdditionalFeatures.md`](AdditionalFeatures.md).
+- Highlight logical next features based on priority, developer experience impact, and architectural dependencies.
+
