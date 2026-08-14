@@ -143,8 +143,7 @@ Pokkum got picked up for evaluation in the first place.
    cron. `doctor`'s new "Base Image Security & CVEs" check is a start
    (queries locked bases via the now-real scanner) but only runs on-demand,
    not as part of `build` itself.
-3. **Base Image Escrow / Mirroring — still open.** See the dedicated note
-   below.
+3. **Base Image Escrow / Mirroring — done, verified.** Fail-closed mirror write error propagation and full test suite covering multi-arch index and single-image escrow, Cosign signature tag mirroring, lockfile integrity, mirror fallback, and air-gapped resolution. See the dedicated note below.
 
 ### Tier 2 — Close `--registry-config`'s cloud-provider gap — done, verified
 
@@ -222,19 +221,14 @@ modest `pokkum.lock` schema extension. This is exactly the class of problem
 [pokkum-lock-concept.md](pokkum-lock-concept.md)) — escrow closes the
 remaining gap between "pinned" and "durably fetchable."
 
-**Status: partially built, not verified working.** A `--mirror-registry`
-flag and the write path already exist in
-`internal/adapters/baseimage/resolver.go`, but a first read found the
-escrow write's errors are silently discarded — see the Backlog entry below
-for the exact bug and the fix it needs before this can be trusted. Fixing
-that is a smaller, more urgent task than building this from scratch.
+**Status: done, verified.** All mirror write errors (`remote.WriteIndex`, `remote.Write`, and Cosign `.sig` tag writes) are classified and fail-closed (`core.ErrPushFailed`/`core.ErrRegistryAuth`), preventing unwritten `MirrorRef` entries from being saved to `pokkum.lock`. Full test coverage in `internal/adapters/baseimage/resolver_test.go` verifies multi-platform indexes, single images, signature tag escrow, fail-closed write errors, graceful fallback to `PinnedRef` on mirror outage, air-gapped resolution from mirror, and stale mirror clearing on digest updates.
 
 ## Beyond v1.0 / Backlog
 
 _Features demoted or planned for later iterations._
 
 - [x] Real Image/OS Vulnerability Scanning: `pokkum scan <image>`/`<tarball>` now catalogs OS and toolchain packages using Syft and queries OSV.dev via batch API (`/v1/querybatch`) for ecosystem-aware CVE lookup with CVSS severity ranking and fixed-version extraction. (no new flag — fixes the existing `pokkum scan [target]` contract to match its own documented behavior)
-- [ ] Base Image Escrow / Mirroring: `--mirror-registry=<repo>` and the `MirrorRegistry`/mirror-write path exist (`internal/adapters/baseimage/resolver.go`), but on first read the escrow write is unverified and has a real, confirmed bug — **not corrected to `[x]` until fixed**. `remote.WriteIndex`/`remote.Write` errors are silently discarded (`_ = remote.Write(...)`) for both the image and its signature, yet `mirrorRef` is set and logged as "escrow mirrored base image and signatures" unconditionally, regardless of whether the write actually succeeded. `pokkum.lock` can end up recording a `MirrorRef` that was never actually written — the failure would only surface later, when the upstream is unavailable and the mirror fallback is tried for real, which is exactly the scenario escrow exists to protect against. Zero tests exist for this path (`internal/adapters/baseimage/resolver_test.go` has no `Mirror` references at all). Needs: propagate write errors instead of discarding them, decide fail-open-with-warning vs. fail-closed semantics for a failed mirror write, and add a test that a failed write does not get recorded as a usable `MirrorRef`.
+- [x] Base Image Escrow / Mirroring: `--mirror-registry=<repo>` mirrors base images/indexes and their Cosign `.sig` tags to a project-controlled registry, saving `mirror_ref` in `pokkum.lock` with automatic fallback. Mirror write errors are classified (`core.ErrPushFailed`/`core.ErrRegistryAuth`) and fail-closed so `pokkum.lock` never records unwritten mirror refs. (new flag: `--mirror-registry=<repo>` on `base update`)
 - [x] Registry Credential-Helper Invocation: `--registry-config` dynamically resolves credentials via `credHelpers` and `credsStore` by executing `docker-credential-*` binaries (e.g., ECR, GCR, OSXKeychain) with in-memory caching and fallback to static `auths` blocks, supporting cloud registries with zero new external SDK dependencies. (no new flag — extends existing `--registry-config=<path>` behavior)
 - [x] `pokkum adopt` (Migration Codemod): Auto-converts Vercel/Node/Cloudflare/Auto adapter projects to native Pokkum compilation defaults with AST/regex config rewrites, `.pokkumignore` bootstrapping, and optional legacy Dockerfile removal. (new subcommand: `pokkum adopt [dir]`, new flags: `--dry-run`, `--remove-dockerfile`)
 - [x] Runtime Env Contract: Declares required runtime environment variables in OCI image annotations (`pokkum.dev/required-env`) and embeds contract into runtime config, enforced by PID-1 supervisor (`/pokkum/init`) to fail-fast on startup if any are missing. (new flag: `--require-env=KEY1,KEY2` on `build`)

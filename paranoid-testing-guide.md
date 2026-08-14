@@ -479,24 +479,22 @@ build time (there shouldn't be a build-time value at all for this feature):
 docker inspect "$POKKUM_DOCKER_REPO@$DIGEST" | jq '.[0].Config.Env, .[0].Config.Labels'
 ```
 
-## 21. Base Image Escrow / Mirroring (`--mirror-registry`) — do not trust this yet
+## 21. Base Image Escrow / Mirroring (`--mirror-registry`)
 
-**Known, unresolved finding, not yet fixed as of this writing:** a review
-of `internal/adapters/baseimage/resolver.go` found that mirror-write
-errors are silently discarded — `pokkum.lock` can end up recording a
-`MirrorRef` that was never actually written, a failure that would only
-surface later when the upstream is gone and the fallback is tried for
-real. Zero automated tests exist for this path. If you test `--mirror-registry`
-at all, treat a "success" log line as unproven until you've independently
-confirmed the blob actually landed:
+Base Image Escrow mirrors upstream base images/indexes and their Cosign `.sig` tags
+to a project-controlled registry upon `pokkum base update`. All mirror write operations
+are verified and fail-closed: write failures immediately return errors and prevent
+recording unwritten `MirrorRef` entries in `pokkum.lock`.
+
+To verify manual mirroring against a live registry:
 ```bash
 ./pokkum-test base update --preset distroless --mirror-registry=ghcr.io/you/base-mirror
 crane manifest ghcr.io/you/base-mirror:sha256-<digest-from-pokkum.lock>
-# Don't trust "escrow mirrored base image and signatures" in the logs —
-# only trust this crane call actually succeeding.
+crane manifest ghcr.io/you/base-mirror:sha256-<digest-from-pokkum.lock>.sig
 ```
-See [Roadmap.md](Roadmap.md)'s Backlog entry for the exact bug and fix
-needed before this should be relied on.
+Automated unit tests in `internal/adapters/baseimage/resolver_test.go` (`TestResolve_EscrowMirror_*`)
+test multi-platform indexes, single images, signature tag mirroring, fail-closed write errors,
+and air-gapped resolution.
 
 ## 22. Cleanup
 

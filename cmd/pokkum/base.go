@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -96,6 +97,7 @@ func runBaseUpdate(ctx context.Context, logger *slog.Logger, flags *baseUpdateFl
 		presetsToUpdate = []ports.BaseImagePreset{p}
 	}
 
+	var errs []error
 	for _, preset := range presetsToUpdate {
 		if preset == ports.BaseImageCustom {
 			continue
@@ -110,9 +112,13 @@ func runBaseUpdate(ctx context.Context, logger *slog.Logger, flags *baseUpdateFl
 		})
 		if err != nil {
 			logger.Warn("failed to update base image preset", "preset", preset, "err", err)
+			errs = append(errs, fmt.Errorf("preset %s: %w", preset, err))
 			continue
 		}
 		fmt.Fprintf(os.Stdout, "Updated base preset %q -> %s\n", preset, res.PinnedRef)
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("base update: %w", errors.Join(errs...))
 	}
 
 	return nil

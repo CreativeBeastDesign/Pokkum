@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -28,6 +29,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/static"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -1046,5 +1048,413 @@ func TestResolve_KeylessMode_EmptyIdentityRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unconstrained identity") {
 		t.Errorf("error should mention refusing an unconstrained identity, got: %v", err)
+	}
+}
+
+// --- Escrow Mirroring Tests -----------------------------------------------
+
+func TestResolve_EscrowMirror_Success_Index(t *testing.T) {
+	sUpstream, _ := newTestRegistry(t)
+	sMirror, _ := newTestRegistry(t)
+
+	ref := pushIndex(t, sUpstream, "upstream/base:v1", []ports.Platform{ports.LinuxAMD64, ports.LinuxARM64})
+
+	parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference(%q): %v", ref, err)
+	}
+	desc, err := remote.Get(parsedRef)
+	if err != nil {
+		t.Fatalf("remote.Get: %v", err)
+	}
+
+	privPEM, _ := genECKeyPairPEM(t)
+	pushCosignSignature(t, sUpstream, parsedRef.Context().Name(), desc.Digest, privPEM, false)
+
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+
+	mirrorRepo := registryRef(t, sMirror, "mirror/base")
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	req := ports.BaseImageRequest{
+		Preset:         ports.BaseImageCustom,
+		Ref:            ref,
+		Platforms:      []ports.Platform{ports.LinuxAMD64, ports.LinuxARM64},
+		LockfilePath:   lockPath,
+		UpdateBase:     true,
+		MirrorRegistry: mirrorRepo,
+	}
+
+	res, err := r.Resolve(ctx, req)
+	if err != nil {
+		t.Fatalf("Resolve with escrow mirror failed: %v", err)
+	}
+
+	expectedMirrorRef := fmt.Sprintf("%s:sha256-%s", mirrorRepo, res.Digest.Hex)
+
+	// Check that lockfile recorded mirror_ref
+	lf, err := lockfileutils.LoadLockfile(lockPath)
+	if err != nil {
+		t.Fatalf("LoadLockfile: %v", err)
+	}
+	entry, ok := lockfileutils.GetLockedBase(lf, string(ports.BaseImageCustom))
+	if !ok {
+		t.Fatalf("lock entry not found for custom preset")
+	}
+	if entry.MirrorRef != expectedMirrorRef {
+		t.Fatalf("lock entry MirrorRef = %q, want %q", entry.MirrorRef, expectedMirrorRef)
+	}
+
+	// Verify the mirrored index actually exists on mirror registry
+	mTag, err := name.NewTag(expectedMirrorRef, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag: %v", err)
+	}
+	mDesc, err := remote.Get(mTag)
+	if err != nil {
+		t.Fatalf("remote.Get on mirror target %s: %v", expectedMirrorRef, err)
+	}
+	if mDesc.Digest != res.Digest {
+		t.Fatalf("mirror digest = %s, want %s", mDesc.Digest, res.Digest)
+	}
+
+	// Verify the Cosign signature tag was mirrored as well
+	sigTagRef := fmt.Sprintf("%s:sha256-%s.sig", mirrorRepo, res.Digest.Hex)
+	mSigTag, err := name.NewTag(sigTagRef, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag for sig: %v", err)
+	}
+	if _, err := remote.Get(mSigTag); err != nil {
+		t.Fatalf("remote.Get for mirrored signature %s: %v", sigTagRef, err)
+	}
+
+	// Now resolve using the lockfile to prove that it pulls from mirror
+	r2 := NewResolver(nil)
+	res2, err := r2.Resolve(ctx, ports.BaseImageRequest{
+		Preset:       ports.BaseImageCustom,
+		Ref:          ref,
+		Platforms:    []ports.Platform{ports.LinuxAMD64, ports.LinuxARM64},
+		LockfilePath: lockPath,
+	})
+	if err != nil {
+		t.Fatalf("Resolve using lockfile with mirror_ref failed: %v", err)
+	}
+	if res2.Digest != res.Digest {
+		t.Fatalf("res2.Digest = %s, want %s", res2.Digest, res.Digest)
+	}
+	if res2.Ref != expectedMirrorRef {
+		t.Fatalf("res2.Ref = %s, want %s (mirror ref)", res2.Ref, expectedMirrorRef)
+	}
+}
+
+func TestResolve_EscrowMirror_Success_SingleImage(t *testing.T) {
+	sUpstream, _ := newTestRegistry(t)
+	sMirror, _ := newTestRegistry(t)
+
+	ref := pushImage(t, sUpstream, "upstream/single:v1", ports.LinuxAMD64)
+	mirrorRepo := registryRef(t, sMirror, "mirror/single")
+
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	res, err := r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:         ports.BaseImageCustom,
+		Ref:            ref,
+		Platforms:      []ports.Platform{ports.LinuxAMD64},
+		LockfilePath:   lockPath,
+		UpdateBase:     true,
+		MirrorRegistry: mirrorRepo,
+	})
+	if err != nil {
+		t.Fatalf("Resolve with single image escrow failed: %v", err)
+	}
+
+	expectedMirrorRef := fmt.Sprintf("%s:sha256-%s", mirrorRepo, res.Digest.Hex)
+	lf, err := lockfileutils.LoadLockfile(lockPath)
+	if err != nil {
+		t.Fatalf("LoadLockfile: %v", err)
+	}
+	entry, ok := lockfileutils.GetLockedBase(lf, string(ports.BaseImageCustom))
+	if !ok || entry.MirrorRef != expectedMirrorRef {
+		t.Fatalf("expected MirrorRef = %q, got %+v", expectedMirrorRef, entry)
+	}
+
+	mTag, err := name.NewTag(expectedMirrorRef, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag: %v", err)
+	}
+	if _, err := remote.Get(mTag); err != nil {
+		t.Fatalf("remote.Get on mirror target %s: %v", expectedMirrorRef, err)
+	}
+}
+
+func TestResolve_EscrowMirror_WriteFailure_Image_FailsClosed(t *testing.T) {
+	sUpstream, _ := newTestRegistry(t)
+	ref := pushImage(t, sUpstream, "upstream/fail:v1", ports.LinuxAMD64)
+
+	// Unreachable mirror target on loopback port 1
+	unreachableMirror := "127.0.0.1:1/mirror/unreachable"
+
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	_, err := r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:         ports.BaseImageCustom,
+		Ref:            ref,
+		Platforms:      []ports.Platform{ports.LinuxAMD64},
+		LockfilePath:   lockPath,
+		UpdateBase:     true,
+		MirrorRegistry: unreachableMirror,
+	})
+	if err == nil {
+		t.Fatal("expected Resolve to fail closed when mirror write fails")
+	}
+	if !errors.Is(err, core.ErrPushFailed) {
+		t.Fatalf("expected error wrapping core.ErrPushFailed, got: %v", err)
+	}
+
+	// Verify pokkum.lock was NOT created with a phantom mirror
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("expected lockfile not to be created after failed mirror write")
+	}
+}
+
+func TestResolve_EscrowMirror_WriteFailure_Signature_FailsClosed(t *testing.T) {
+	sUpstream, _ := newTestRegistry(t)
+	ref := pushImage(t, sUpstream, "upstream/sigfail:v1", ports.LinuxAMD64)
+
+	parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	desc, err := remote.Get(parsedRef)
+	if err != nil {
+		t.Fatalf("remote.Get: %v", err)
+	}
+	privPEM, _ := genECKeyPairPEM(t)
+	pushCosignSignature(t, sUpstream, parsedRef.Context().Name(), desc.Digest, privPEM, false)
+
+	// Mirror server that accepts base image write but rejects signature writes (.sig) with HTTP 500
+	mirrorHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.Contains(req.URL.Path, ".sig") {
+			http.Error(w, "signature mirror store failure", http.StatusInternalServerError)
+			return
+		}
+		registry.New().ServeHTTP(w, req)
+	})
+	sMirror := httptest.NewServer(mirrorHandler)
+	t.Cleanup(sMirror.Close)
+
+	mirrorRepo := registryRef(t, sMirror, "mirror/sigfail")
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	_, err = r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:         ports.BaseImageCustom,
+		Ref:            ref,
+		Platforms:      []ports.Platform{ports.LinuxAMD64},
+		LockfilePath:   lockPath,
+		UpdateBase:     true,
+		MirrorRegistry: mirrorRepo,
+	})
+	if err == nil {
+		t.Fatal("expected Resolve to fail closed when signature mirror write fails")
+	}
+	if !errors.Is(err, core.ErrPushFailed) {
+		t.Fatalf("expected error wrapping core.ErrPushFailed, got: %v", err)
+	}
+
+	// Verify pokkum.lock was NOT created
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("expected lockfile not to be created after failed signature mirror write")
+	}
+}
+
+func TestResolve_EscrowMirror_FallbackToPinnedWhenMirrorUnreachable(t *testing.T) {
+	sUpstream, _ := newTestRegistry(t)
+	ref := pushImage(t, sUpstream, "upstream/fallback:v1", ports.LinuxAMD64)
+
+	parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	desc, err := remote.Get(parsedRef)
+	if err != nil {
+		t.Fatalf("remote.Get: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+
+	// Create a lockfile with an unreachable mirror ref, but a valid pinned ref
+	lf := &ports.PokkumLockfile{
+		Version:   lockfileutils.LockfileSchemaVersion,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Bases: map[string]ports.BaseLockEntry{
+			string(ports.BaseImageCustom): {
+				Ref:       ref,
+				Digest:    desc.Digest.String(),
+				PinnedRef: parsedRef.Context().Name() + "@" + desc.Digest.String(),
+				MirrorRef: "127.0.0.1:1/mirror/down:sha256-" + desc.Digest.Hex,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	}
+	if err := lockfileutils.SaveLockfile(lockPath, lf); err != nil {
+		t.Fatalf("SaveLockfile: %v", err)
+	}
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	res, err := r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:       ports.BaseImageCustom,
+		Ref:          ref,
+		Platforms:    []ports.Platform{ports.LinuxAMD64},
+		LockfilePath: lockPath,
+	})
+	if err != nil {
+		t.Fatalf("expected Resolve to fall back to PinnedRef when MirrorRef fails, got err: %v", err)
+	}
+	if res.Digest != desc.Digest {
+		t.Fatalf("expected digest %s, got %s", desc.Digest, res.Digest)
+	}
+	if !strings.Contains(res.Ref, parsedRef.Context().Name()) {
+		t.Fatalf("expected fallback to pinned ref, got ref: %s", res.Ref)
+	}
+}
+
+func TestResolve_EscrowMirror_OfflineUsesMirrorWhenUpstreamUnreachable(t *testing.T) {
+	sMirror, _ := newTestRegistry(t)
+	mirrorRefTag := pushImage(t, sMirror, "mirror/isolated:sha256-test", ports.LinuxAMD64)
+
+	mParsed, err := name.ParseReference(mirrorRefTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	desc, err := remote.Get(mParsed)
+	if err != nil {
+		t.Fatalf("remote.Get: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+
+	// PinnedRef points to an unreachable upstream server, MirrorRef points to reachable mirror
+	lf := &ports.PokkumLockfile{
+		Version:   lockfileutils.LockfileSchemaVersion,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Bases: map[string]ports.BaseLockEntry{
+			string(ports.BaseImageCustom): {
+				Ref:       "upstream.example.invalid/base:v1",
+				Digest:    desc.Digest.String(),
+				PinnedRef: "127.0.0.1:1/upstream/base@" + desc.Digest.String(),
+				MirrorRef: mirrorRefTag,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	}
+	if err := lockfileutils.SaveLockfile(lockPath, lf); err != nil {
+		t.Fatalf("SaveLockfile: %v", err)
+	}
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	res, err := r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:       ports.BaseImageCustom,
+		Ref:          "upstream.example.invalid/base:v1",
+		Platforms:    []ports.Platform{ports.LinuxAMD64},
+		LockfilePath: lockPath,
+	})
+	if err != nil {
+		t.Fatalf("expected Resolve to succeed using MirrorRef even when upstream PinnedRef is dead: %v", err)
+	}
+	if res.Digest != desc.Digest {
+		t.Fatalf("expected digest %s, got %s", desc.Digest, res.Digest)
+	}
+	if res.Ref != mirrorRefTag {
+		t.Fatalf("expected resolved ref %s, got %s", mirrorRefTag, res.Ref)
+	}
+}
+
+func TestResolve_UpdateBase_DoesNotPreserveStaleMirrorRefForNewDigest(t *testing.T) {
+	sUpstream, _ := newTestRegistry(t)
+	ref := pushImage(t, sUpstream, "upstream/stale:v2", ports.LinuxAMD64)
+
+	parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	desc, err := remote.Get(parsedRef)
+	if err != nil {
+		t.Fatalf("remote.Get: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+
+	oldDigest := "sha256:" + strings.Repeat("0", 64)
+	oldMirrorRef := "ghcr.io/myorg/base-mirror:sha256-" + strings.Repeat("0", 64)
+
+	lf := &ports.PokkumLockfile{
+		Version:   lockfileutils.LockfileSchemaVersion,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Bases: map[string]ports.BaseLockEntry{
+			string(ports.BaseImageCustom): {
+				Ref:       ref,
+				Digest:    oldDigest,
+				PinnedRef: parsedRef.Context().Name() + "@" + oldDigest,
+				MirrorRef: oldMirrorRef,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	}
+	if err := lockfileutils.SaveLockfile(lockPath, lf); err != nil {
+		t.Fatalf("SaveLockfile: %v", err)
+	}
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	// Update base WITHOUT --mirror-registry
+	res, err := r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:       ports.BaseImageCustom,
+		Ref:          ref,
+		Platforms:    []ports.Platform{ports.LinuxAMD64},
+		LockfilePath: lockPath,
+		UpdateBase:   true,
+	})
+	if err != nil {
+		t.Fatalf("Resolve update: %v", err)
+	}
+	if res.Digest == desc.Digest && desc.Digest.String() == oldDigest {
+		t.Fatal("test setup error: new digest matches old digest")
+	}
+
+	lfUpdated, err := lockfileutils.LoadLockfile(lockPath)
+	if err != nil {
+		t.Fatalf("LoadLockfile: %v", err)
+	}
+	entry, ok := lockfileutils.GetLockedBase(lfUpdated, string(ports.BaseImageCustom))
+	if !ok {
+		t.Fatalf("lock entry missing")
+	}
+	if entry.Digest != desc.Digest.String() {
+		t.Fatalf("expected updated digest %s, got %s", desc.Digest, entry.Digest)
+	}
+	if entry.MirrorRef != "" {
+		t.Fatalf("expected stale MirrorRef to be cleared on digest update without mirror-registry, got: %q", entry.MirrorRef)
 	}
 }

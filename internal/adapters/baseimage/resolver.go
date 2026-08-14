@@ -258,6 +258,8 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 						if _, mPullErr := r.pull(ctx, mParsed, entry.MirrorRef, req.Insecure, req.RegistryConfigPath); mPullErr == nil {
 							ref = entry.MirrorRef
 							r.logger().Info("using mirrored base image from escrow registry", "mirror_ref", ref)
+						} else {
+							r.logger().Warn("failed to pull base image from escrow mirror, falling back to locked pinned ref", "mirror_ref", entry.MirrorRef, "err", mPullErr)
 						}
 					}
 				}
@@ -315,27 +317,42 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 	if req.MirrorRegistry != "" {
 		mirrorTarget := fmt.Sprintf("%s:sha256-%s", strings.TrimRight(req.MirrorRegistry, "/"), pull.digest.Hex)
 		mirrorParsed, mErr := name.ParseReference(mirrorTarget, nameOpts...)
-		if mErr == nil {
-			remoteOpts, rErr := r.remoteOptions(ctx, req.Insecure, req.RegistryConfigPath)
-			if rErr == nil {
-				if pull.isIndex {
-					_ = remote.WriteIndex(mirrorParsed, pull.index, remoteOpts...)
-				} else {
-					_ = remote.Write(mirrorParsed, pull.image, remoteOpts...)
-				}
-				// Also mirror the Cosign signature tag if present
-				sigTag := fmt.Sprintf("sha256-%s.sig", pull.digest.Hex)
-				upstreamSigRef := parsedRef.Context().Tag(sigTag)
-				mirrorSigRef := mirrorParsed.Context().Tag(sigTag)
-				if sigDesc, sErr := remote.Get(upstreamSigRef, remoteOpts...); sErr == nil {
-					if sigImg, iErr := sigDesc.Image(); iErr == nil {
-						_ = remote.Write(mirrorSigRef, sigImg, remoteOpts...)
-					}
-				}
-				mirrorRef = mirrorTarget
-				r.logger().Info("escrow mirrored base image and signatures", "mirror_ref", mirrorRef)
+		if mErr != nil {
+			return nil, fmt.Errorf("baseimage: parse mirror reference %q: %w: %w", mirrorTarget, mErr, core.ErrInvalidBaseImage)
+		}
+
+		remoteOpts, rErr := r.remoteOptions(ctx, req.Insecure, req.RegistryConfigPath)
+		if rErr != nil {
+			return nil, fmt.Errorf("baseimage: resolve mirror remote options: %w", rErr)
+		}
+
+		if pull.isIndex {
+			if err := remote.WriteIndex(mirrorParsed, pull.index, remoteOpts...); err != nil {
+				return nil, classifyMirrorErr(mirrorTarget, err)
+			}
+		} else {
+			if err := remote.Write(mirrorParsed, pull.image, remoteOpts...); err != nil {
+				return nil, classifyMirrorErr(mirrorTarget, err)
 			}
 		}
+
+		// Also mirror the Cosign signature tag if present upstream
+		sigTag := fmt.Sprintf("sha256-%s.sig", pull.digest.Hex)
+		upstreamSigRef := parsedRef.Context().Tag(sigTag)
+		mirrorSigRef := mirrorParsed.Context().Tag(sigTag)
+		if sigDesc, sErr := remote.Get(upstreamSigRef, remoteOpts...); sErr == nil {
+			sigImg, iErr := sigDesc.Image()
+			if iErr != nil {
+				return nil, fmt.Errorf("baseimage: escrow mirror get signature image %s: %w: %w", upstreamSigRef.Name(), iErr, core.ErrPushFailed)
+			}
+			if wErr := remote.Write(mirrorSigRef, sigImg, remoteOpts...); wErr != nil {
+				return nil, classifyMirrorErr(mirrorSigRef.Name(), wErr)
+			}
+			r.logger().Info("escrow mirrored base image and signatures", "mirror_ref", mirrorTarget, "sig_ref", mirrorSigRef.Name())
+		} else {
+			r.logger().Info("escrow mirrored base image", "mirror_ref", mirrorTarget)
+		}
+		mirrorRef = mirrorTarget
 	}
 
 	// Update pokkum.lock if requested or if lockfile path specified and base was unpinned/newly resolved
@@ -359,7 +376,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		}
 		if existing, ok := lockfileutils.GetLockedBase(lf, lockKey); ok {
-			if mirrorRef == "" && existing.MirrorRef != "" {
+			if mirrorRef == "" && existing.MirrorRef != "" && existing.Digest == entry.Digest {
 				entry.MirrorRef = existing.MirrorRef
 			}
 			entry.LastScannedAt = existing.LastScannedAt
@@ -597,6 +614,22 @@ func classifyPullErr(rawRef string, err error) error {
 		}
 	}
 	return fmt.Errorf("baseimage: %s: pull failed: %w: %w", rawRef, err, core.ErrInvalidBaseImage)
+}
+
+// classifyMirrorErr maps a go-containerregistry transport or network error
+// encountered while writing to an escrow mirror registry onto a core sentinel.
+func classifyMirrorErr(target string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("baseimage: escrow mirror %s: %w", target, err)
+	}
+	var terr *transport.Error
+	if errors.As(err, &terr) {
+		switch terr.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return fmt.Errorf("baseimage: escrow mirror %s: registry rejected credentials: %w: %w", target, err, core.ErrRegistryAuth)
+		}
+	}
+	return fmt.Errorf("baseimage: escrow mirror write %s: %w: %w", target, err, core.ErrPushFailed)
 }
 
 // pinnedRef renders the "repo@sha256:…" form of parsedRef at digest d,
