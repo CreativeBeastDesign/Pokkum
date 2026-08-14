@@ -295,37 +295,208 @@ should equal what it was before the first one. If it doesn't round-trip,
 the annotation-writing logic has a bug — this is cheap to check and easy
 to get wrong.
 
-## 15. `pokkum scan` — know what it does and doesn't cover today
+## 15. `pokkum scan` — now real; verify it against a package you know is vulnerable
+
+`pokkum scan` was fixed to genuinely pull and inspect the target (real
+Syft-based enumeration + real OSV.dev queries) rather than return a
+hardcoded advisory list — but "believe nothing" applies to the fix itself
+just as much as to the original claim. Don't just run it and check the
+exit code; make it prove it against something you know the answer to.
 
 ```bash
 ./pokkum-test scan "$POKKUM_DOCKER_REPO@$DIGEST" --output=json | jq .
 ```
 
-**Important, verified fact about the current implementation:** as of this
-writing, `pokkum scan <image-or-tarball>` does **not** actually pull or
-inspect the image — it returns the same small, hardcoded Bun/SvelteKit
-advisory list regardless of what image you point it at. It does not catch
-OS-package CVEs (e.g. a `libssl3` CVE in the base image) — see
-[Roadmap.md](Roadmap.md)'s "Next Best Steps" section. **If OS-level CVEs
-in your base image are what you actually care about — and if that's why
-you're testing this, they probably are — don't rely on `pokkum scan` for
-that yet.** Cross-check independently instead:
-
+**Verify independently — package enumeration is real:**
 ```bash
-grype "$POKKUM_DOCKER_REPO@$DIGEST"          # if you installed it in step 0
-# or
-docker scout cves "$POKKUM_DOCKER_REPO@$DIGEST"   # Docker Desktop's built-in scanner
+jq '.data.vulnerabilities[].package' <(./pokkum-test scan "$POKKUM_DOCKER_REPO@$DIGEST" --output=json)
+# Cross-check the package LIST itself (not just CVE findings) against
+# what's actually in the image, independent of pokkum's own scanner:
+grype "$POKKUM_DOCKER_REPO@$DIGEST" -o json | jq '.matches[].artifact.name' 2>/dev/null
 ```
 
-`pokkum scan --toolchain` (Bun/SvelteKit version advisories via OSV.dev) is
-real and does work as documented — the gap is specifically the
-image/tarball OS-package path.
+**Verify independently — it actually catches a real CVE, not just a real
+package list.** Build a throwaway project with a known-vulnerable
+dependency and confirm `pokkum scan` catches it:
+```bash
+mkdir /tmp/scan-test && cd /tmp/scan-test
+echo '{"name":"scan-test","dependencies":{"lodash":"4.17.4"}}' > package.json
+../pokkum-test scan . --fail-on=low --output=json | jq '.data.vulnerabilities'
+# lodash 4.17.4 has real, long-published CVEs (prototype pollution, etc.) —
+# expect a non-empty list and a non-zero exit code.
+echo "exit code: $?"
+cd - && rm -rf /tmp/scan-test
+```
 
-## 16. Cleanup
+**Verify independently — it fails closed, not clean, when the CVE database
+is unreachable.** This was a real bug found in review: a failed OSV.dev
+lookup used to silently report "0 vulnerabilities found," indistinguishable
+from a genuinely clean scan.
+```bash
+# Point DNS/network somewhere broken (or just disconnect), then:
+./pokkum-test scan . --output=json | jq '.data.incomplete, .data.warnings'
+echo "exit code: $?"
+# Expect incomplete:true, a non-empty warnings array, and a NON-ZERO exit
+# code — not a clean pass. --allow-incomplete should be the only way to
+# get a 0 exit code in this state.
+./pokkum-test scan . --allow-incomplete --output=json | jq '.data.passed, .data.incomplete'
+```
+
+`pokkum scan --toolchain` (Bun/SvelteKit version advisories via OSV.dev)
+remains real and works as documented, same as before.
+
+## 16. `--registry-config` — verify the credential helper actually gets invoked
+
+```bash
+# A minimal docker-config.json using a credHelper (swap for your real registry/helper):
+cat > /tmp/regconfig.json <<'EOF'
+{"credHelpers": {"ghcr.io": "desktop"}}
+EOF
+./pokkum-test build . --registry-config=/tmp/regconfig.json --dry-run --log-level=DEBUG 2>&1 | grep -i "credential\|keychain\|helper"
+```
+
+**Verify independently:** temporarily rename/remove the named
+`docker-credential-<helper>` binary from `PATH` and re-run — confirm the
+build reports a clear error (or falls back to the default keychain) rather
+than hanging or silently using no auth at all. Don't just trust a
+successful run with the helper present; prove the failure mode is sane too.
+
+## 17. `pokkum adopt` — verify the detection gate and that nothing gets mutated you didn't ask for
+
+```bash
+# 1. Confirm it refuses a non-SvelteKit project
+mkdir /tmp/not-sveltekit && cd /tmp/not-sveltekit
+echo '{"name":"plain-app","dependencies":{"express":"^4.19.0"}}' > package.json
+../pokkum-test adopt . ; echo "exit: $?"
+# Expect a clear error and an UNCHANGED package.json — verify both:
+cat package.json
+cd - && rm -rf /tmp/not-sveltekit
+```
+
+```bash
+# 2. Against a real SvelteKit project using adapter-node/adapter-vercel:
+cp -r test-app /tmp/adopt-test && cd /tmp/adopt-test
+../pokkum-test adopt . --dry-run
+```
+
+**Verify independently:**
+- Diff `package.json` before/after a real (non-dry-run) run — confirm only
+  the adapter dependency and `pokkum:build` script actually changed, not
+  every key reordered. `git diff package.json` is the cleanest way to see
+  this if the test project is a git repo.
+- Without `--write-config`, confirm `svelte.config.js` is **byte-identical**
+  (`diff` it, don't just check the command's own "ConfigUpdated" claim):
+  ```bash
+  cp svelte.config.js /tmp/before.js
+  ../pokkum-test adopt .
+  diff /tmp/before.js svelte.config.js && echo "unchanged, as expected without --write-config"
+  ```
+- With `--write-config`, confirm it now DOES change and still contains a
+  valid, buildable config (`../pokkum-test build . --print-manifest` should
+  still succeed after).
+
+## 18. `pokkum history` — confirm it reports THIS image's real data, not a template
+
+```bash
+./pokkum-test history "$POKKUM_DOCKER_REPO@$DIGEST" --output=json | jq .
+```
+
+**Verify independently:** the single most important check here is that the
+output actually varies per image — a hardcoded stub would look identical
+for every ref. Build and push a second, distinguishable image (different
+commit, different tag) and confirm the two `history` outputs differ:
+```bash
+git commit --allow-empty -m "second commit for history diff test"
+DIGEST2=$(./pokkum-test build . --output=json | jq -r '.data.digest')
+diff <(./pokkum-test history "$POKKUM_DOCKER_REPO@$DIGEST" --output=json) \
+     <(./pokkum-test history "$POKKUM_DOCKER_REPO@$DIGEST2" --output=json)
+# Expect a real diff (different git_commit at minimum) — identical output
+# here would mean you're looking at a stub again.
+```
+Also confirm `git_commit`/`git_repo` in the output match your actual
+`git rev-parse HEAD`/`git remote get-url origin` at build time — not just
+that the fields are non-empty. `pokkum history` deliberately does **not**
+verify signatures or SLSA provenance — if its output claims otherwise,
+that's a regression; the real verdict on those comes from `pokkum verify`.
+
+## 19. Multi-generation rollback — prove it survives more than one hop
+
+```bash
+# Deploy three times in a row against the same manifest to build real history:
+for i in 1 2 3; do
+  ./pokkum-test resolve -f deployment.yaml > /tmp/resolved-$i.yaml
+  cp /tmp/resolved-$i.yaml deployment.yaml   # persist annotations forward, per fixes-to-v1.md's documented workflow requirement
+done
+./pokkum-test rollback -f deployment.yaml --list
+```
+
+**Verify independently:** `--list` should show (at least) two prior
+generations, not just one. Roll back two generations (`-g 2`) and confirm
+the resulting `image:` matches the digest from `/tmp/resolved-1.yaml`, not
+just "some earlier value":
+```bash
+grep "image:" /tmp/resolved-1.yaml
+./pokkum-test rollback -f deployment.yaml -g 2
+grep "image:" deployment.yaml
+# these two digests must match
+```
+Known, documented limitation worth confirming rather than assuming: this
+only works if annotations are carried forward between `resolve` calls (as
+above). If you instead re-resolve a **fresh copy** of the original
+`pokkum://`-templated source each time (Pokkum's own recommended default
+workflow — never mutating the tracked source), no history accumulates at
+all — confirm this too, so you know which regime you're actually in:
+```bash
+./pokkum-test resolve -f original-template.yaml > /tmp/fresh1.yaml
+./pokkum-test resolve -f original-template.yaml > /tmp/fresh2.yaml
+diff /tmp/fresh1.yaml /tmp/fresh2.yaml   # expect no history annotation difference — this is the known gap, not a new bug
+```
+
+## 20. Runtime Env Contract (`--require-env`) — confirm it actually fails fast at startup
+
+```bash
+./pokkum-test build . --require-env=DATABASE_URL,API_KEY
+docker run --rm "$POKKUM_DOCKER_REPO@$DIGEST"
+```
+**Verify independently:** the container must exit non-zero immediately,
+with `DATABASE_URL` and `API_KEY` named explicitly in the output — not a
+generic crash, and not a silent hang. Then confirm the positive case:
+```bash
+docker run --rm -e DATABASE_URL=postgres://x -e API_KEY=test "$POKKUM_DOCKER_REPO@$DIGEST"
+```
+This should start normally. Also confirm no *value* ever got baked into
+the image — inspect the pushed image's labels/env and confirm only the
+variable *names* appear, never `postgres://x` or any value you supplied at
+build time (there shouldn't be a build-time value at all for this feature):
+```bash
+docker inspect "$POKKUM_DOCKER_REPO@$DIGEST" | jq '.[0].Config.Env, .[0].Config.Labels'
+```
+
+## 21. Base Image Escrow / Mirroring (`--mirror-registry`) — do not trust this yet
+
+**Known, unresolved finding, not yet fixed as of this writing:** a review
+of `internal/adapters/baseimage/resolver.go` found that mirror-write
+errors are silently discarded — `pokkum.lock` can end up recording a
+`MirrorRef` that was never actually written, a failure that would only
+surface later when the upstream is gone and the fallback is tried for
+real. Zero automated tests exist for this path. If you test `--mirror-registry`
+at all, treat a "success" log line as unproven until you've independently
+confirmed the blob actually landed:
+```bash
+./pokkum-test base update --preset distroless --mirror-registry=ghcr.io/you/base-mirror
+crane manifest ghcr.io/you/base-mirror:sha256-<digest-from-pokkum.lock>
+# Don't trust "escrow mirrored base image and signatures" in the logs —
+# only trust this crane call actually succeeding.
+```
+See [Roadmap.md](Roadmap.md)'s Backlog entry for the exact bug and fix
+needed before this should be relied on.
+
+## 22. Cleanup
 
 ```bash
 docker rmi "$POKKUM_DOCKER_REPO@$DIGEST" 2>/dev/null
 rm -f /tmp/build1.tar /tmp/build2.tar /tmp/manifest.json build-result.json build.log resolved.yaml
+rm -f /tmp/regconfig.json /tmp/before.js /tmp/resolved-1.yaml /tmp/resolved-2.yaml /tmp/resolved-3.yaml /tmp/fresh1.yaml /tmp/fresh2.yaml
 rm -f ./pokkum-test
 ```
 
@@ -346,7 +517,13 @@ rm -f ./pokkum-test
 | Build is reproducible | manual two-build digest + tarball diff | 12 |
 | K8s manifests correct | read the YAML, `kubectl --dry-run` | 13 |
 | Rollback round-trips | manual toggle-twice check | 14 |
-| CVE scanning covers what you need | `grype`/`docker scout`, not `pokkum scan` alone (yet) | 15 |
+| CVE scan catches a real vulnerability, fails closed on DB outage | vulnerable-dependency fixture, network-outage test | 15 |
+| Registry credential helper actually invoked | remove the helper binary, confirm the failure mode | 16 |
+| `adopt` refuses non-SvelteKit projects, mutates only what's expected | `git diff`, byte-diff without `--write-config` | 17 |
+| `pokkum history` reflects the real image, not a template | two builds, diff their `history` output | 18 |
+| Multi-generation rollback survives >1 hop | `-g 2` lands on the right digest, not "some" digest | 19 |
+| Runtime Env Contract fails fast, bakes no values | container exit code + `docker inspect` | 20 |
+| Base image mirror actually wrote the blob | `crane manifest` against the mirror, not the log line | 21 |
 
 If every row above checks out via the independent tool, not just Pokkum's
 own exit code, you have real evidence — not just Pokkum's word for it.
