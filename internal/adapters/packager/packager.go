@@ -95,6 +95,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/precompressutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -201,6 +202,9 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 
 		if req.AppClientDir != "" {
 			if info, err := os.Stat(req.AppClientDir); err == nil && info.IsDir() {
+				if !req.NoPrecompress {
+					_ = precompressutils.PrecompressDirectory(req.AppClientDir, ts)
+				}
 				clientLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppClientDir, ports.AppClientDirPrefix, ts, req.Compression)
 				if err != nil {
 					return nil, fmt.Errorf("packager: build %s: client layer: %w", req.Platform, err)

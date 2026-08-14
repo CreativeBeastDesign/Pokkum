@@ -443,6 +443,9 @@ type CompileOptions struct {
 
 	// KeepVendor specifies custom glob patterns to preserve during vendor pruning.
 	KeepVendor []string
+
+	// NoPrecompress disables build-time static asset pre-compression (.gz, .br, .zst).
+	NoPrecompress bool
 }
 
 // BunRuntimeOptions configures Bun runtime resolution and caching for layer assembly.

@@ -444,6 +444,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		Hermetic:        req.Hermetic,
 		NoPrune:         req.Compile.NoPrune,
 		KeepVendor:      slices.Clone(req.Compile.KeepVendor),
+		NoPrecompress:   req.Compile.NoPrecompress,
 	})
 	if err != nil {
 		return BuildResult{}, err
@@ -710,20 +711,21 @@ func fanOut(
 			}
 
 			pkgReq := ports.PackageRequest{
-				Platform:    p,
-				Base:        baseImg,
-				Strategy:    req.Compile.Strategy,
-				Compression: req.Compile.Compression,
-				App:         art,
-				BunRuntime:  bunResult,
-				Supervisor:  sup,
-				Runtime:     req.Runtime,
-				CreatedAt:   req.SourceDateEpoch,
-				Labels:      labels,
-				Annotations: req.Annotations,
-				NoPrune:     req.Compile.NoPrune,
-				KeepVendor:  slices.Clone(req.Compile.KeepVendor),
-				Sourcemap:   req.Compile.Sourcemap,
+				Platform:      p,
+				Base:          baseImg,
+				Strategy:      req.Compile.Strategy,
+				Compression:   req.Compile.Compression,
+				App:           art,
+				BunRuntime:    bunResult,
+				Supervisor:    sup,
+				Runtime:       req.Runtime,
+				CreatedAt:     req.SourceDateEpoch,
+				Labels:        labels,
+				Annotations:   req.Annotations,
+				NoPrune:       req.Compile.NoPrune,
+				KeepVendor:    slices.Clone(req.Compile.KeepVendor),
+				Sourcemap:     req.Compile.Sourcemap,
+				NoPrecompress: req.Compile.NoPrecompress,
 			}
 
 			if req.Compile.Strategy == StrategyLayered {

@@ -7,6 +7,11 @@
   - `internal/core` imports `internal/ports` and standard library. It re-exports boundary vocabulary as type aliases (`core.Platform = ports.Platform`).
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
+- **Build-Time Static Asset Pre-Compression (`internal/adapters/precompressutils`)**:
+  - Automatically generates `.gz` (Gzip level 9), `.br` (Brotli quality 11), and `.zst` (Zstandard best compression) sidecars for compressible assets (`.js`, `.css`, `.html`, `.json`, `.svg`, `.wasm`, etc.) in `/app/client`.
+  - Pre-compression executes strictly inside the `.pokkum/` build sandbox (`OutputDir/client`), ensuring zero mutation of user source files.
+  - Sidecars inherit pinned `SOURCE_DATE_EPOCH` timestamps.
+  - Escape hatch: `--no-precompress` disables static pre-compression.
 - **Single-Pass Layer Hashing & Streaming (`internal/adapters/packager`)**:
   - Computes uncompressed `DiffID` and compressed `Digest` concurrently during a single tar generation stream via `buildSinglePassLayer`.
   - Eliminates 2-3 redundant disk reads and multiple compression passes, answering `v1.Layer` queries in `O(1)` time with byte-for-byte deterministic reproducibility.

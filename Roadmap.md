@@ -134,7 +134,7 @@ The post-v1.0 milestones addressed critical supply chain verification, CVE gatin
 ### 3. Container Image Size Reduction
 - [x] **Vendor Layer Pruning**: Automatically strip `*.map`, `*.d.ts`, and test/doc files from `node_modules` during bundling for a 15-35MB reduction. *(⚠️ Requires long-term maintenance: The exclusion rules must be continually updated as NPM ecosystem packaging norms and SvelteKit runtime dependencies evolve)*
 - [ ] **ELF Native Addon Stripping**: Run `strip --strip-unneeded` on native `.node` addons to discard debug symbols and unneeded relocations.
-- [ ] **Build-Time Static Asset Pre-Compression**: Pre-compress `/app/client` assets with Brotli (`.br`) and Zstandard (`.zst`) alongside `.gz` so the server serves them immediately without runtime CPU compression overhead.
+- [x] **Build-Time Static Asset Pre-Compression**: Pre-compress `/app/client` assets with Brotli (`.br`) and Zstandard (`.zst`) alongside `.gz` so the server serves them immediately without runtime CPU compression overhead.
 
 ### 4. System Efficiency & Remote Caching
 - [ ] **Composite Remote OCI Input Caching**: Skip builds entirely (sub-100ms) if an image already exists in the registry for a given hash of `(source + lockfile + baseDigest + bunVersion)`.

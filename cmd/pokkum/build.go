@@ -81,6 +81,7 @@ type buildFlags struct {
 	allowIncomplete     bool
 	noPrune             bool
 	keepVendor          []string
+	noPrecompress       bool
 }
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -196,6 +197,8 @@ The project directory defaults to the current working directory.`,
 		"Disable build-time stripping of non-runtime files (*.d.ts, *.map, tests, docs) from the vendor layer")
 	cmd.Flags().StringSliceVar(&flags.keepVendor, "keep-vendor", nil,
 		"Custom glob pattern(s) of vendor files to preserve during pruning, repeatable (e.g. --keep-vendor='*.md')")
+	cmd.Flags().BoolVar(&flags.noPrecompress, "no-precompress", false,
+		"Disable build-time static asset pre-compression (.gz, .br, .zst)")
 
 	return cmd
 }
@@ -280,11 +283,12 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		logger.Warn("packaging strategy 'exe' is deprecated and will be removed in a future release; migrate to '--strategy=layered' (default)")
 	}
 	req.Compile = core.CompileOptions{
-		Strategy:    core.BuildStrategy(flags.strategy),
-		Compression: core.CompressionAlgorithm(flags.compression),
-		NoInject:    flags.noInject || !flags.inject,
-		NoPrune:     flags.noPrune,
-		KeepVendor:  flags.keepVendor,
+		Strategy:      core.BuildStrategy(flags.strategy),
+		Compression:   core.CompressionAlgorithm(flags.compression),
+		NoInject:      flags.noInject || !flags.inject,
+		NoPrune:       flags.noPrune,
+		KeepVendor:    flags.keepVendor,
+		NoPrecompress: flags.noPrecompress,
 	}
 
 	// Runtime options

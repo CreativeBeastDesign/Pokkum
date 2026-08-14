@@ -317,6 +317,9 @@ type PrepareRequest struct {
 
 	// KeepVendor specifies custom glob patterns to preserve during vendor pruning.
 	KeepVendor []string
+
+	// NoPrecompress disables build-time static asset pre-compression (.gz, .br, .zst).
+	NoPrecompress bool
 }
 
 // TelemetryOptions configures OpenTelemetry auto-instrumentation and metrics collection.

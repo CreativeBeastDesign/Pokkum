@@ -260,6 +260,9 @@ type PackageRequest struct {
 	// Sourcemap indicates whether sourcemaps should be preserved during packaging.
 	Sourcemap bool
 
+	// NoPrecompress disables build-time static asset pre-compression (.gz, .br, .zst).
+	NoPrecompress bool
+
 	// Compression specifies the layer compression algorithm (CompressionGzip or CompressionZstd).
 	Compression CompressionAlgorithm
 
