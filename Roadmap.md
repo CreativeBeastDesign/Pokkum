@@ -137,7 +137,7 @@ The post-v1.0 milestones addressed critical supply chain verification, CVE gatin
 - [x] **Build-Time Static Asset Pre-Compression**: Pre-compress `/app/client` assets with Brotli (`.br`) and Zstandard (`.zst`) alongside `.gz` so the server serves them immediately without runtime CPU compression overhead.
 
 ### 4. System Efficiency & Remote Caching
-- [ ] **Composite Remote OCI Input Caching**: Skip builds entirely (sub-100ms) if an image already exists in the registry for a given hash of `(source + lockfile + baseDigest + bunVersion)`.
+- [x] **Composite Remote OCI Input Caching**: Skip builds entirely (sub-100ms) if an image already exists in the registry for a given hash of `(source + lockfile + baseDigest + bunVersion)`.
 - [ ] **`sync.Pool` Buffer Recycling**: Eliminate repetitive large slice allocations during tarball generation to reduce GC pressure and memory spikes.
 - [ ] **Fast Sub-Millisecond Supervisor Startup**: Parallelize Bun child process fork/exec with the `/healthz` HTTP probe binding in `pokkum-init`.
 

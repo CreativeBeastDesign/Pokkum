@@ -86,6 +86,9 @@ type Deps struct {
 	// SecretGuard performs build-time secret scanning on source files. Optional.
 	SecretGuard ports.SecretGuard
 
+	// RemoteCache queries and reconciles remote OCI input caches. Optional.
+	RemoteCache ports.RemoteCacher
+
 	// Logger receives every progress and diagnostic line. Nil means
 	// slog.Default(). Everything the pipeline logs is a log line, never
 	// program output; see Stdout.
@@ -418,6 +421,72 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		}
 		log.Info("dry run complete; nothing was built, written or pushed")
 		return res, nil
+	}
+
+	// Stage 4.5: Composite Remote OCI Input Caching check.
+	var compositeInputHash string
+	if deps.RemoteCache != nil && req.Output.Mode == OutputPush && !req.Compile.NoCache {
+		var pStrs []string
+		for _, p := range req.Platforms {
+			pStrs = append(pStrs, p.String())
+		}
+		inputHash, err := deps.RemoteCache.ComputeInputHash(ctx, ports.RemoteCacheInputRequest{
+			ProjectDir:      req.ProjectDir,
+			BaseImageDigest: base.Digest.String(),
+			BunVersion:      toolchain.BunVersion,
+			BunVariant:      string(req.BunRuntime.Variant),
+			Platforms:       pStrs,
+			Strategy:        string(req.Compile.Strategy),
+			Compression:     string(req.Compile.Compression),
+			NoPrune:         req.Compile.NoPrune,
+			KeepVendor:      slices.Clone(req.Compile.KeepVendor),
+			NoPrecompress:   req.Compile.NoPrecompress,
+			NoStrip:         req.Compile.NoStrip,
+			Sourcemap:       req.Compile.Sourcemap,
+			RequireEnv:      slices.Clone(req.Runtime.RequireEnv),
+		})
+		if err == nil && inputHash != "" {
+			compositeInputHash = inputHash
+			cacheRes, err := deps.RemoteCache.Check(ctx, ports.RemoteCacheRequest{
+				Repo:               req.Repo,
+				InputHash:          inputHash,
+				Tags:               req.Tags,
+				Insecure:           req.Insecure,
+				UserAgent:          deps.UserAgent,
+				RegistryConfigPath: req.RegistryConfigPath,
+			})
+			if err == nil && cacheRes.Hit {
+				log.Info("remote input cache hit; build skipped", "repo", req.Repo, "digest", cacheRes.Digest.String(), "inputHash", inputHash)
+				res := BuildResult{
+					Image: ImageResult{
+						Mode:      req.Output.Mode,
+						Ref:       cacheRes.Ref,
+						Digest:    cacheRes.Digest,
+						Tags:      slices.Clone(cacheRes.Tags),
+						Platforms: slices.Clone(req.Platforms),
+						IsIndex:   len(req.Platforms) > 1,
+						Cached:    true,
+					},
+					Cached:          true,
+					BaseImage:       baseInfo,
+					Toolchain:       toolchain,
+					SourceDateEpoch: req.SourceDateEpoch,
+					Duration:        time.Since(started),
+				}
+				if _, err := fmt.Fprintln(deps.stdout(), cacheRes.Ref); err != nil {
+					return res, fmt.Errorf("writing output reference: %w", err)
+				}
+				return res, nil
+			}
+		}
+	}
+
+	if compositeInputHash != "" {
+		if req.Annotations == nil {
+			req.Annotations = make(map[string]string)
+		}
+		req.Annotations["pokkum.dev/build-input-hash"] = compositeInputHash
+		req.Tags = append(req.Tags, "cache-"+compositeInputHash)
 	}
 
 	// The scratch directory for the compiled binaries. An explicit WorkDir is

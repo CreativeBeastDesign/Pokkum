@@ -449,6 +449,9 @@ type CompileOptions struct {
 
 	// NoStrip disables stripping unneeded debug symbols from native .node ELF addons.
 	NoStrip bool
+
+	// NoCache disables checking and publishing to the remote composite OCI input cache.
+	NoCache bool
 }
 
 // BunRuntimeOptions configures Bun runtime resolution and caching for layer assembly.
@@ -795,6 +798,9 @@ type ImageResult struct {
 
 	// Size is the transferred or written size in bytes, or zero if unknown.
 	Size int64
+
+	// Cached indicates whether the image build was skipped due to a remote cache hit.
+	Cached bool
 }
 
 // String returns Ref, so an ImageResult can be printed directly.
@@ -882,6 +888,9 @@ type Toolchain struct {
 type BuildResult struct {
 	// Image is where the finished image went.
 	Image ImageResult
+
+	// Cached indicates whether the build was satisfied from the remote input cache.
+	Cached bool
 
 	// Artifacts are the compiled binaries, one per platform, in the order the
 	// request listed the platforms. The files may already have been deleted if

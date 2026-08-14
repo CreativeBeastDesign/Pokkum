@@ -7,6 +7,11 @@
   - `internal/core` imports `internal/ports` and standard library. It re-exports boundary vocabulary as type aliases (`core.Platform = ports.Platform`).
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
+- **Composite Remote OCI Input Caching (`internal/adapters/remotecacheutils`, `ports.RemoteCacher`)**:
+  - Computes deterministic composite input hashes (`sha256(source + lockfile + baseDigest + bunVersion + platforms + flags)`).
+  - Queries target repository for `<repo>:cache-<input-hash>`. On hit, retags requested tags and returns `BuildResult{Cached: true}` in sub-100ms, completely skipping SvelteKit bundling and layer tarring.
+  - On miss, stamps `pokkum.dev/build-input-hash` annotation onto manifest and tags `cache-<input-hash>` in target repository.
+  - Escape hatch: `--no-cache` forces full rebuild.
 - **ELF Native Addon Stripping (`internal/adapters/striputils`)**:
   - Automatically strips unneeded debug symbols from native `.node` addons and `.so` shared libraries in `/app/native` and `/app/vendor`.
   - Stripping occurs strictly inside `.pokkum/` sandbox directories, preserving user workspace source code.

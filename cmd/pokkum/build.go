@@ -19,6 +19,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/remotecacheutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sbom"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scanner"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/secretguard"
@@ -83,6 +84,7 @@ type buildFlags struct {
 	keepVendor          []string
 	noPrecompress       bool
 	noStrip             bool
+	noCache             bool
 }
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -202,6 +204,8 @@ The project directory defaults to the current working directory.`,
 		"Disable build-time static asset pre-compression (.gz, .br, .zst)")
 	cmd.Flags().BoolVar(&flags.noStrip, "no-strip", false,
 		"Disable build-time stripping of unneeded debug symbols from native .node ELF addons")
+	cmd.Flags().BoolVar(&flags.noCache, "no-cache", false,
+		"Disable remote OCI composite input caching and force full rebuild")
 
 	return cmd
 }
@@ -293,6 +297,7 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		KeepVendor:    flags.keepVendor,
 		NoPrecompress: flags.noPrecompress,
 		NoStrip:       flags.noStrip,
+		NoCache:       flags.noCache,
 	}
 
 	// Runtime options
@@ -466,6 +471,7 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		DSSESigner:      dsse.NewSigner(logger),
 		Scanner:         scanner.NewAdapter(logger),
 		SecretGuard:     secretguard.NewAdapter(),
+		RemoteCache:     remotecacheutils.New(),
 
 		Logger:    logger,
 		Stdout:    stdout,

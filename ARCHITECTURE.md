@@ -84,6 +84,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `pruneutils`: Utility package providing junk-file blocklisting and directory pruning for `/app/vendor` layer optimization (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests).
    - `precompressutils`: Utility package providing build-time static asset pre-compression (`.gz`, `.br`, `.zst`) for `/app/client` web assets.
    - `striputils`: Utility package providing build-time stripping of unneeded debug symbols from native `.node` ELF addons and `.so` shared libraries in `/app/native` and `/app/vendor`.
+   - `remotecacheutils`: Utility package implementing `ports.RemoteCacher` for composite build input hashing (`sha256(source + lockfile + baseDigest + bunVersion + platforms + flags)`) and sub-100ms remote registry cache querying and tag reconciliation.
    - `layercacheutils`: Utility package managing local on-disk caching (`~/.cache/pokkum/layers/`) for immutable layer blobs (Bun runtime, `pokkum-init` supervisor) to skip tarring and compression.
    - `lockfileutils`: Utility package for loading, parsing, and saving `pokkum.lock` base image lockfiles, tracking `pinned_ref`, `mirror_ref`, `last_scanned_at`, `vulnerabilities_count`, and `max_severity`.
    - `jsonutils`: Utility package for structured, versioned JSON response formatting (`--output=json`).

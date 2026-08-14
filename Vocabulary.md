@@ -81,6 +81,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--keep-vendor` | — | — | (none) | Custom glob pattern(s) of vendor files to preserve during pruning, repeatable (e.g. `--keep-vendor='*.md'`). |
 | `--no-precompress` | — | — | `false` | Disable build-time static asset pre-compression (`.gz`, `.br`, `.zst`) for `/app/client`. |
 | `--no-strip` | — | — | `false` | Disable build-time stripping of unneeded debug symbols from native `.node` ELF addons. |
+| `--no-cache` | — | — | `false` | Disable checking and publishing to the remote composite OCI input cache. |
 
 Positional: `[dir]` — project directory, defaults to `.`.
 
