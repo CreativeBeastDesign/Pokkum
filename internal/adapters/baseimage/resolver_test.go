@@ -1390,6 +1390,136 @@ func TestResolve_EscrowMirror_OfflineUsesMirrorWhenUpstreamUnreachable(t *testin
 	}
 }
 
+// TestResolve_EscrowMirror_VerifySignature_DockerReferenceMismatch settles a
+// question raised in review, not previously tested either way: static-key
+// Cosign verification checks that the signature payload's embedded
+// docker-reference exactly matches the repo being verified
+// (cosign.Signer.Verify, internal/adapters/cosign/signer.go). A real
+// upstream signature is only ever made for the upstream repo name — it has
+// no way to know about a project's escrow mirror. Since mirror-resolve-first
+// (above) makes Resolve prefer entry.MirrorRef whenever it's reachable, not
+// just as an outage fallback, this means VerifySignature:true would run
+// routinely against the mirror's repo name, not just during an outage.
+//
+// This test proves the mismatch is real: it mirrors a genuinely-signed base
+// image exactly as the real escrow write path does (image + its .sig tag,
+// unmodified), then resolves with VerifySignature:true against a lockfile
+// whose MirrorRef points at that mirror. If this starts passing after a fix
+// that reconciles the two repo names (e.g. verifying against the upstream
+// Ref recorded in the lockfile rather than parsedRef's mirror-derived repo),
+// update this test's expectation rather than deleting it — the scenario
+// itself must stay covered either way.
+func TestResolve_EscrowMirror_VerifySignature_DockerReferenceMismatch(t *testing.T) {
+	sUpstream, _ := newTestRegistry(t)
+	sMirror, _ := newTestRegistry(t)
+
+	upstreamRef := pushImage(t, sUpstream, "upstream/signed-base:v1", ports.LinuxAMD64)
+	upstreamParsed, err := name.ParseReference(upstreamRef, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	upstreamDesc, err := remote.Get(upstreamParsed)
+	if err != nil {
+		t.Fatalf("remote.Get upstream: %v", err)
+	}
+	upstreamRepo := upstreamParsed.Context().Name()
+
+	// Sign for the UPSTREAM repo name — exactly what a real signer does; it
+	// has no concept of any mirror this image might later be copied to.
+	privPEM, pubPEM := genECKeyPairPEM(t)
+	pushCosignSignature(t, sUpstream, upstreamRepo, upstreamDesc.Digest, privPEM, false)
+
+	// Mirror both the image and its .sig tag unmodified, exactly as
+	// Resolve's real escrow-write path does (internal/adapters/baseimage/resolver.go,
+	// the MirrorRegistry block: copies the image, then separately copies
+	// "<repo>:<alg>-<hex>.sig" if present).
+	mirrorRepo := registryRef(t, sMirror, "mirror/signed-base")
+	mirrorImageRef := fmt.Sprintf("%s:sha256-%s", mirrorRepo, upstreamDesc.Digest.Hex)
+	img, err := upstreamDesc.Image()
+	if err != nil {
+		t.Fatalf("upstreamDesc.Image: %v", err)
+	}
+	mirrorImageTag, err := name.NewTag(mirrorImageRef, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(mirror image): %v", err)
+	}
+	if err := remote.Write(mirrorImageTag, img); err != nil {
+		t.Fatalf("mirror image write: %v", err)
+	}
+
+	sigTag := upstreamDesc.Digest.Algorithm + "-" + upstreamDesc.Digest.Hex + ".sig"
+	upstreamSigRef, _ := name.ParseReference(upstreamRepo+":"+sigTag, name.WeakValidation)
+	sigDesc, err := remote.Get(upstreamSigRef)
+	if err != nil {
+		t.Fatalf("remote.Get upstream sig: %v", err)
+	}
+	sigImg, err := sigDesc.Image()
+	if err != nil {
+		t.Fatalf("sigDesc.Image: %v", err)
+	}
+	mirrorSigTag, err := name.NewTag(mirrorRepo+":"+sigTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(mirror sig): %v", err)
+	}
+	if err := remote.Write(mirrorSigTag, sigImg); err != nil {
+		t.Fatalf("mirror sig write: %v", err)
+	}
+
+	// Lockfile as it would look after a real `pokkum base update --mirror-registry=...`:
+	// both PinnedRef (upstream) and MirrorRef are reachable and valid.
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+	lf := &ports.PokkumLockfile{
+		Version:   lockfileutils.LockfileSchemaVersion,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Bases: map[string]ports.BaseLockEntry{
+			string(ports.BaseImageCustom): {
+				Ref:       upstreamRef,
+				Digest:    upstreamDesc.Digest.String(),
+				PinnedRef: upstreamRepo + "@" + upstreamDesc.Digest.String(),
+				MirrorRef: mirrorImageRef,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	}
+	if err := lockfileutils.SaveLockfile(lockPath, lf); err != nil {
+		t.Fatalf("SaveLockfile: %v", err)
+	}
+
+	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
+
+	r := NewResolver(nil)
+	res, resolveErr := r.Resolve(context.Background(), ports.BaseImageRequest{
+		Preset:          ports.BaseImageCustom,
+		Ref:             upstreamRef,
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		LockfilePath:    lockPath,
+		VerifySignature: true,
+	})
+
+	// CONFIRMED (2026-08-14, empirically): this currently fails. Resolve
+	// prefers the mirror whenever it's reachable (see the log line "using
+	// mirrored base image from escrow registry" this test emits), so this
+	// is not a rare outage-only edge case — it fails on ordinary,
+	// successful resolution any time both --mirror-registry and
+	// VerifySignature are in play together, which is the expected
+	// combination for the distroless/chainguard presets escrow mirroring
+	// targets (they default VerifySignature to true). If this assertion
+	// ever needs to flip because the mismatch has been fixed (e.g. by
+	// verifying against the upstream repo recorded in the lockfile entry
+	// rather than the ref actually pulled from), that is good news — update
+	// this test to assert success instead of deleting the coverage.
+	if resolveErr == nil {
+		t.Fatalf("expected verification to fail with a docker-reference mismatch when resolving a genuinely-signed base image via its escrow mirror (this was previously unverified either way) — it unexpectedly succeeded with ref=%s; if this is now fixed, update this test's assertions accordingly rather than deleting it", res.Ref)
+	}
+	if !errors.Is(resolveErr, core.ErrBaseSignatureInvalid) {
+		t.Fatalf("expected the failure to be classified as core.ErrBaseSignatureInvalid (a docker-reference mismatch), got a different error: %v", resolveErr)
+	}
+	if !strings.Contains(resolveErr.Error(), "docker-reference") {
+		t.Errorf("expected the error to name the docker-reference mismatch specifically (so this test isn't accidentally passing for an unrelated verification failure), got: %v", resolveErr)
+	}
+}
+
 func TestResolve_UpdateBase_DoesNotPreserveStaleMirrorRefForNewDigest(t *testing.T) {
 	sUpstream, _ := newTestRegistry(t)
 	ref := pushImage(t, sUpstream, "upstream/stale:v2", ports.LinuxAMD64)
