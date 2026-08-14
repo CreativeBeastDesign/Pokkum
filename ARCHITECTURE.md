@@ -1,6 +1,6 @@
 # Pokkum Architecture & Technical Deep-Dive
 
-**Pokkum** is a Go-based zero-dependency OCI image builder and deployment pipeline tool specifically designed for SvelteKit applications adapted with `@jesterkit/exe-sveltekit`.
+**Pokkum** is a Go-based zero-dependency OCI image builder and deployment pipeline tool specifically designed for SvelteKit applications (using `--strategy=layered` N-layer layout by default, or `--strategy=exe`).
 
 It builds multi-architecture OCI images (`linux/amd64`, `linux/arm64`), embeds a PID-1 supervisor, generates Software Bills of Materials (SBOMs), and pushes reproducible container images directly to OCI registries — **without requiring Docker or a Docker daemon**.
 

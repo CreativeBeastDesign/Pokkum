@@ -1,6 +1,6 @@
 # Pokkum Core Architecture
 
-Pokkum is a Go-based zero-dependency OCI container image compiler for SvelteKit applications. It compiles multi-arch images (`linux/amd64`, `linux/arm64`) using `@jesterkit/exe-sveltekit` and `bun build --compile`, embedding a PID-1 supervisor (`/pokkum/init`), generating SBOMs, and pushing directly to registries without a Docker daemon.
+Pokkum is a Go-based zero-dependency OCI container image compiler for SvelteKit applications. It compiles multi-arch images (`linux/amd64`, `linux/arm64`) using `--strategy=layered` (N-layer layout with pinned Bun runtime by default) or `--strategy=exe`, embedding a PID-1 supervisor (`/pokkum/init`), generating SBOMs, and pushing directly to registries without a Docker daemon.
 
 ## Major Domains
 - Architecture & Ports: `mem:conventions`
@@ -15,4 +15,5 @@ Pokkum is a Go-based zero-dependency OCI container image compiler for SvelteKit 
 - Base Image Lockfile: `pokkum.lock` automatically resolves and pins base image digests to guarantee reproducible builds across machines and time (`--update-base`, `--offline`, `pokkum base update`).
 - Supply chain security: SLSA v1.0 provenance, Cosign digests, and DSSE envelopes are automatically generated and signed during `pokkum build` pipeline unless `--no-sign` is provided.
 - SBOM Attachment: SBOMs are attached by default as OCI 1.1 referrers (`--sbom-attach=referrer`), with legacy `.sbom` tag fallback (`--sbom-attach=tag`).
+- Keyless Sigstore Base Verification: Stock presets (`distroless`/`chainguard`) use keyless Sigstore verification (Fulcio+Rekor) against embedded trust roots by default, while custom bases use static-key Cosign verification (`--base-verify-mode`).
 - Hot-Reload Dev Environment: `pokkum dev` builds, loads into Docker daemon, runs, and watches source files for auto-rebuilding with interactive shell debugging (`--debug`).
