@@ -445,6 +445,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		NoPrune:         req.Compile.NoPrune,
 		KeepVendor:      slices.Clone(req.Compile.KeepVendor),
 		NoPrecompress:   req.Compile.NoPrecompress,
+		NoStrip:         req.Compile.NoStrip,
 	})
 	if err != nil {
 		return BuildResult{}, err
@@ -726,6 +727,7 @@ func fanOut(
 				KeepVendor:    slices.Clone(req.Compile.KeepVendor),
 				Sourcemap:     req.Compile.Sourcemap,
 				NoPrecompress: req.Compile.NoPrecompress,
+				NoStrip:       req.Compile.NoStrip,
 			}
 
 			if req.Compile.Strategy == StrategyLayered {

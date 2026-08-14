@@ -97,6 +97,7 @@ import (
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/precompressutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/striputils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -219,6 +220,9 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 
 		if req.AppVendorDir != "" {
 			if info, err := os.Stat(req.AppVendorDir); err == nil && info.IsDir() {
+				if !req.NoStrip {
+					_, _ = striputils.StripDirectory(ctx, req.AppVendorDir, ts)
+				}
 				pruneOpts := pruneutils.PruneOptions{
 					NoPrune:       req.NoPrune,
 					KeepSourcemap: req.Sourcemap,
@@ -238,6 +242,9 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 
 		if req.AppNativeDir != "" {
 			if info, err := os.Stat(req.AppNativeDir); err == nil && info.IsDir() {
+				if !req.NoStrip {
+					_, _ = striputils.StripDirectory(ctx, req.AppNativeDir, ts)
+				}
 				nativeLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppNativeDir, ports.AppNativeDirPrefix, ts, req.Compression)
 				if err != nil {
 					return nil, fmt.Errorf("packager: build %s: native layer: %w", req.Platform, err)

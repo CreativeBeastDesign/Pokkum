@@ -446,6 +446,9 @@ type CompileOptions struct {
 
 	// NoPrecompress disables build-time static asset pre-compression (.gz, .br, .zst).
 	NoPrecompress bool
+
+	// NoStrip disables stripping unneeded debug symbols from native .node ELF addons.
+	NoStrip bool
 }
 
 // BunRuntimeOptions configures Bun runtime resolution and caching for layer assembly.

@@ -7,6 +7,11 @@
   - `internal/core` imports `internal/ports` and standard library. It re-exports boundary vocabulary as type aliases (`core.Platform = ports.Platform`).
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
+- **ELF Native Addon Stripping (`internal/adapters/striputils`)**:
+  - Automatically strips unneeded debug symbols from native `.node` addons and `.so` shared libraries in `/app/native` and `/app/vendor`.
+  - Stripping occurs strictly inside `.pokkum/` sandbox directories, preserving user workspace source code.
+  - Sets pinned `SOURCE_DATE_EPOCH` timestamps on stripped files.
+  - Escape hatch: `--no-strip` disables native addon debug symbol stripping.
 - **Build-Time Static Asset Pre-Compression (`internal/adapters/precompressutils`)**:
   - Automatically generates `.gz` (Gzip level 9), `.br` (Brotli quality 11), and `.zst` (Zstandard best compression) sidecars for compressible assets (`.js`, `.css`, `.html`, `.json`, `.svg`, `.wasm`, etc.) in `/app/client`.
   - Pre-compression executes strictly inside the `.pokkum/` build sandbox (`OutputDir/client`), ensuring zero mutation of user source files.

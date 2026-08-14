@@ -82,6 +82,7 @@ type buildFlags struct {
 	noPrune             bool
 	keepVendor          []string
 	noPrecompress       bool
+	noStrip             bool
 }
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -199,6 +200,8 @@ The project directory defaults to the current working directory.`,
 		"Custom glob pattern(s) of vendor files to preserve during pruning, repeatable (e.g. --keep-vendor='*.md')")
 	cmd.Flags().BoolVar(&flags.noPrecompress, "no-precompress", false,
 		"Disable build-time static asset pre-compression (.gz, .br, .zst)")
+	cmd.Flags().BoolVar(&flags.noStrip, "no-strip", false,
+		"Disable build-time stripping of unneeded debug symbols from native .node ELF addons")
 
 	return cmd
 }
@@ -289,6 +292,7 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		NoPrune:       flags.noPrune,
 		KeepVendor:    flags.keepVendor,
 		NoPrecompress: flags.noPrecompress,
+		NoStrip:       flags.noStrip,
 	}
 
 	// Runtime options
