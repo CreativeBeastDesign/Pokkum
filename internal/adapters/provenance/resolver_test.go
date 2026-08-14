@@ -7,11 +7,13 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"log/slog"
+	"math/big"
 	"net/http/httptest"
 	"os"
 	"runtime"
@@ -32,34 +34,32 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/dsse"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/provenance"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/slsa"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
-func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "pokkum-provenance-dockerconfig")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "provenance: TestMain: MkdirTemp:", err)
-		os.Exit(1)
-	}
-	defer os.RemoveAll(dir)
-	os.Setenv("DOCKER_CONFIG", dir)
-	os.Exit(m.Run())
-}
-
 func startTestRegistry(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
-	server := httptest.NewServer(registry.New())
-	t.Cleanup(server.Close)
-	host := strings.TrimPrefix(server.URL, "http://")
-	return server, host
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+	host := strings.TrimPrefix(s.URL, "http://")
+	return s, host
 }
 
 func createTestImage(t *testing.T, annotations map[string]string) v1.Image {
 	t.Helper()
 	img := empty.Image
-	if annotations != nil {
+	layer, err := tarball.LayerFromFile(writeTempTar(t, "app/package.json", []byte(`{"name":"my-app"}`)))
+	if err != nil {
+		t.Fatalf("create test layer: %v", err)
+	}
+	img, err = mutate.AppendLayers(img, layer)
+	if err != nil {
+		t.Fatalf("append layers: %v", err)
+	}
+	if len(annotations) > 0 {
 		img = mutate.Annotations(img, annotations).(v1.Image)
 	}
 	return img
@@ -67,28 +67,24 @@ func createTestImage(t *testing.T, annotations map[string]string) v1.Image {
 
 func TestResolveProvenance_EmptyRef_ReturnsError(t *testing.T) {
 	r := provenance.NewResolver(nil)
-	ctx := context.Background()
-
-	_, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{})
+	_, err := r.ResolveProvenance(context.Background(), ports.ProvenanceResolverRequest{})
 	if err == nil {
-		t.Fatal("expected error for empty image ref, got nil")
+		t.Fatal("expected error on empty image ref, got nil")
 	}
 	if !errors.Is(err, core.ErrInvalidRequest) {
-		t.Errorf("expected ErrInvalidRequest, got %v", err)
+		t.Fatalf("expected ErrInvalidRequest, got %v", err)
 	}
 }
 
 func TestResolveProvenance_RealImage_WithAnnotations(t *testing.T) {
 	_, host := startTestRegistry(t)
-	targetRepo := fmt.Sprintf("%s/app-annotations", host)
+	targetRepo := fmt.Sprintf("%s/app-ann", host)
 
 	annotations := map[string]string{
 		"org.opencontainers.image.source":   "github.com/my-org/my-sveltekit-app",
-		"org.opencontainers.image.revision": "c0ffee1234567890abcdef1234567890abcdef12",
-		"org.opencontainers.image.created":  "2026-08-14T12:00:00Z",
+		"org.opencontainers.image.revision": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
 	}
 	img := createTestImage(t, annotations)
-
 	tagRef, err := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
 	if err != nil {
 		t.Fatalf("parse tag ref: %v", err)
@@ -96,36 +92,35 @@ func TestResolveProvenance_RealImage_WithAnnotations(t *testing.T) {
 	if err := remote.Write(tagRef, img); err != nil {
 		t.Fatalf("push test image: %v", err)
 	}
-
-	expectedDigest, err := img.Digest()
+	imgDigest, err := img.Digest()
 	if err != nil {
 		t.Fatalf("img digest: %v", err)
 	}
 
-	r := provenance.NewResolver(slog.Default())
+	r := provenance.NewResolver(nil)
 	ctx := context.Background()
 
 	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
 		ImageRef: targetRepo + ":v1.0.0",
 	})
 	if err != nil {
-		t.Fatalf("unexpected error resolving provenance: %v", err)
+		t.Fatalf("resolve provenance: %v", err)
 	}
 
-	if summary.ImageDigest != expectedDigest.String() {
-		t.Errorf("expected digest %s, got %s", expectedDigest.String(), summary.ImageDigest)
+	if summary.ImageDigest != imgDigest.String() {
+		t.Errorf("expected image digest %s, got %s", imgDigest.String(), summary.ImageDigest)
 	}
 	if summary.PinnedInputs.Repo != "github.com/my-org/my-sveltekit-app" {
-		t.Errorf("expected repo github.com/my-org/my-sveltekit-app, got %s", summary.PinnedInputs.Repo)
+		t.Errorf("expected source repo github.com/my-org/my-sveltekit-app, got %s", summary.PinnedInputs.Repo)
 	}
-	if summary.PinnedInputs.Commit != "c0ffee1234567890abcdef1234567890abcdef12" {
-		t.Errorf("expected commit c0ffee1234567890abcdef1234567890abcdef12, got %s", summary.PinnedInputs.Commit)
+	if summary.PinnedInputs.Commit != "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678" {
+		t.Errorf("expected commit a1b2c3d4e5f60718293a4b5c6d7e8f9012345678, got %s", summary.PinnedInputs.Commit)
 	}
 	if summary.HasProvenance {
-		t.Error("expected HasProvenance to be false when no .att tag exists")
+		t.Errorf("expected HasProvenance to be false for un-attested image")
 	}
 	if summary.SignatureValid {
-		t.Error("expected SignatureValid to be false when no .sig tag exists")
+		t.Errorf("expected SignatureValid to be false for unsigned image")
 	}
 }
 
@@ -140,14 +135,12 @@ func TestResolveProvenance_WithSLSAAttestation(t *testing.T) {
 	}
 	imgDigest, _ := img.Digest()
 
-	// Generate real SLSA statement
+	// Generate SLSA statement
 	slsaGen := slsa.NewGenerator(nil)
 	slsaStmt, err := slsaGen.Generate(context.Background(), ports.SLSAGeneratorRequest{
-		Repo: targetRepo,
 		BaseImage: ports.SLSABaseImage{
-			Ref:       "gcr.io/distroless/cc-debian12:nonroot",
-			PinnedRef: "gcr.io/distroless/cc-debian12@sha256:1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff",
-			Digest:    v1.Hash{Algorithm: "sha256", Hex: "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"},
+			Ref:    "gcr.io/distroless/base:nonroot",
+			Digest: v1.Hash{Algorithm: "sha256", Hex: "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"},
 		},
 		GitRepo:      "github.com/my-org/my-sveltekit-app",
 		GitCommit:    "abcdef0123456789abcdef0123456789abcdef01",
@@ -171,6 +164,10 @@ func TestResolveProvenance_WithSLSAAttestation(t *testing.T) {
 	privDer, _ := x509.MarshalPKCS8PrivateKey(privKey)
 	privPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDer})
 
+	pubDer, _ := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDer})
+	t.Setenv("POKKUM_SIGNING_PUBKEY", string(pubPEM))
+
 	dsseSigner := dsse.NewSigner(nil)
 	env, err := dsseSigner.Sign(context.Background(), ports.DSSESignRequest{
 		PayloadBytes: stmtJSON,
@@ -184,11 +181,11 @@ func TestResolveProvenance_WithSLSAAttestation(t *testing.T) {
 	envJSON, _ := json.Marshal(env)
 
 	// Build .att image layer
-	attLayer, err := tarball.LayerFromFile(writeTempTar(t, "attestation.json", envJSON))
-	if err != nil {
-		t.Fatalf("layer from file: %v", err)
-	}
-	attImg, _ := mutate.AppendLayers(empty.Image, attLayer)
+	attLayer := static.NewLayer(envJSON, types.MediaType("application/vnd.dsse.envelope.v1+json"))
+	attImg, _ := mutate.Append(empty.Image, mutate.Addendum{
+		Layer: attLayer,
+	})
+	attImg = mutate.MediaType(attImg, types.OCIManifestSchema1)
 
 	attTagStr := fmt.Sprintf("%s:%s-%s.att", targetRepo, imgDigest.Algorithm, imgDigest.Hex)
 	attRef, _ := name.ParseReference(attTagStr, name.WeakValidation)
@@ -197,7 +194,7 @@ func TestResolveProvenance_WithSLSAAttestation(t *testing.T) {
 	}
 
 	// Resolve provenance
-	r := provenance.NewResolver(slog.Default())
+	r := provenance.NewResolver(nil)
 	ctx := context.Background()
 
 	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
@@ -224,6 +221,81 @@ func TestResolveProvenance_WithSLSAAttestation(t *testing.T) {
 	}
 	if !summary.ToolchainMatch || !summary.ExpectedL1Match {
 		t.Errorf("expected ToolchainMatch and ExpectedL1Match to be true")
+	}
+}
+
+func TestResolveProvenance_Adversarial_BogusDSSESignature_IsRejected(t *testing.T) {
+	_, host := startTestRegistry(t)
+	targetRepo := fmt.Sprintf("%s/app-forged-slsa", host)
+
+	img := createTestImage(t, nil)
+	tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+	if err := remote.Write(tagRef, img); err != nil {
+		t.Fatalf("push test image: %v", err)
+	}
+	imgDigest, _ := img.Digest()
+
+	// Generate SLSA statement with forged repo/commit
+	slsaGen := slsa.NewGenerator(nil)
+	slsaStmt, err := slsaGen.Generate(context.Background(), ports.SLSAGeneratorRequest{
+		BaseImage: ports.SLSABaseImage{
+			Ref:    "gcr.io/distroless/base:nonroot",
+			Digest: v1.Hash{Algorithm: "sha256", Hex: "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"},
+		},
+		GitRepo:         "github.com/attacker/forged-repo",
+		GitCommit:       "deadbeef0123456789deadbeef0123456789dead",
+		OutputDigest:    imgDigest,
+		SourceDateEpoch: time.Unix(1700000000, 0),
+	})
+	if err != nil {
+		t.Fatalf("generate SLSA statement: %v", err)
+	}
+
+	stmtJSON, _ := json.Marshal(slsaStmt)
+	forgedEnv := ports.DSSEEnvelope{
+		PayloadType: ports.InTotoPayloadType,
+		Payload:     base64.StdEncoding.EncodeToString(stmtJSON),
+		Signatures: []ports.DSSESignature{
+			{
+				KeyID: "forged-key-id",
+				Sig:   base64.StdEncoding.EncodeToString([]byte("TOTALLY-BOGUS-SIGNATURE")),
+			},
+		},
+	}
+
+	forgedEnvJSON, _ := json.Marshal(forgedEnv)
+
+	attLayer := static.NewLayer(forgedEnvJSON, types.MediaType("application/vnd.dsse.envelope.v1+json"))
+	attImg, _ := mutate.Append(empty.Image, mutate.Addendum{
+		Layer: attLayer,
+	})
+	attImg = mutate.MediaType(attImg, types.OCIManifestSchema1)
+
+	attTagStr := fmt.Sprintf("%s:%s-%s.att", targetRepo, imgDigest.Algorithm, imgDigest.Hex)
+	attRef, _ := name.ParseReference(attTagStr, name.WeakValidation)
+	if err := remote.Write(attRef, attImg); err != nil {
+		t.Fatalf("push attestation image: %v", err)
+	}
+
+	r := provenance.NewResolver(nil)
+	ctx := context.Background()
+
+	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+		ImageRef: targetRepo + ":v1.0.0",
+	})
+	if err != nil {
+		t.Fatalf("resolve provenance: %v", err)
+	}
+
+	// The bogus DSSE envelope signature MUST be rejected
+	if summary.HasProvenance {
+		t.Fatal("expected HasProvenance to be FALSE for forged DSSE signature")
+	}
+	if summary.PinnedInputs.Repo == "github.com/attacker/forged-repo" {
+		t.Errorf("forged repo must NOT propagate when DSSE signature fails")
+	}
+	if summary.PinnedInputs.Commit == "deadbeef0123456789deadbeef0123456789dead" {
+		t.Errorf("forged commit must NOT propagate when DSSE signature fails")
 	}
 }
 
@@ -278,7 +350,7 @@ func TestResolveProvenance_WithCosignSignature(t *testing.T) {
 	}
 
 	// Resolve provenance
-	r := provenance.NewResolver(slog.Default())
+	r := provenance.NewResolver(nil)
 	ctx := context.Background()
 
 	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
@@ -293,6 +365,82 @@ func TestResolveProvenance_WithCosignSignature(t *testing.T) {
 	}
 	if summary.SignerIdentity != "static-key" {
 		t.Errorf("expected SignerIdentity static-key, got %s", summary.SignerIdentity)
+	}
+}
+
+func TestResolveProvenance_Adversarial_FakeKeylessCert_IsRejected(t *testing.T) {
+	_, host := startTestRegistry(t)
+	targetRepo := fmt.Sprintf("%s/app-forged-keyless", host)
+
+	img := createTestImage(t, nil)
+	tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+	if err := remote.Write(tagRef, img); err != nil {
+		t.Fatalf("push test image: %v", err)
+	}
+	imgDigest, _ := img.Digest()
+
+	// Generate a rogue self-signed certificate (NOT chaining to Fulcio root CA)
+	roguePrivKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1337),
+		Subject: pkix.Name{
+			CommonName: "Fake Fulcio CA",
+		},
+		EmailAddresses: []string{"attacker@rogue-domain.test"},
+		NotBefore:      time.Now().Add(-1 * time.Hour),
+		NotAfter:       time.Now().Add(1 * time.Hour),
+	}
+	rogueCertBytes, err := x509.CreateCertificate(rand.Reader, template, template, &roguePrivKey.PublicKey, roguePrivKey)
+	if err != nil {
+		t.Fatalf("create rogue cert: %v", err)
+	}
+	rogueCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rogueCertBytes})
+
+	// Build a Cosign payload with matching image reference
+	payloadObj := ports.CosignSimpleSigningPayload{
+		Critical: ports.CosignCritical{
+			Identity: ports.CosignCriticalIdentity{
+				DockerReference: targetRepo,
+			},
+			Image: ports.CosignCriticalImage{
+				DockerManifestDigest: imgDigest.String(),
+			},
+			Type: ports.CosignSimpleSigningType,
+		},
+	}
+	payloadBytes, _ := json.Marshal(payloadObj)
+
+	sigLayer := static.NewLayer(payloadBytes, types.MediaType("application/vnd.dev.cosign.simplesigning.v1+json"))
+	sigImg, _ := mutate.Append(empty.Image, mutate.Addendum{
+		Layer: sigLayer,
+		Annotations: map[string]string{
+			sigstore.CosignSignatureAnnotation:   base64.StdEncoding.EncodeToString([]byte("fake-sig")),
+			sigstore.CosignCertificateAnnotation: string(rogueCertPEM),
+			sigstore.CosignBundleAnnotation:      `{"SignedEntryTimestamp":"fake","Payload":{"body":"fake"}}`,
+		},
+		MediaType: types.MediaType("application/vnd.dev.cosign.simplesigning.v1+json"),
+	})
+	sigImg = mutate.MediaType(sigImg, types.OCIManifestSchema1)
+
+	sigTagStr := fmt.Sprintf("%s:%s-%s.sig", targetRepo, imgDigest.Algorithm, imgDigest.Hex)
+	sigRef, _ := name.ParseReference(sigTagStr, name.WeakValidation)
+	if err := remote.Write(sigRef, sigImg); err != nil {
+		t.Fatalf("push signature image: %v", err)
+	}
+
+	r := provenance.NewResolver(nil)
+	ctx := context.Background()
+
+	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+		ImageRef: targetRepo + ":v1.0.0",
+	})
+	if err != nil {
+		t.Fatalf("resolve provenance: %v", err)
+	}
+
+	// Self-signed cert MUST NOT be accepted as valid keyless signature
+	if summary.SignatureValid {
+		t.Fatal("expected SignatureValid to be FALSE for rogue self-signed certificate")
 	}
 }
 
@@ -353,15 +501,8 @@ func writeTempTar(t *testing.T, filename string, content []byte) string {
 	}
 	defer f.Close()
 
-	tw := mutate.Annotations(empty.Image, nil)
-	_ = tw
-
-	// Simple tar file creation
 	var buf bytes.Buffer
-	tarWriter := cosignTarWriter(&buf, filename, content)
-	if err := tarWriter(); err != nil {
-		t.Fatalf("write tar: %v", err)
-	}
+	importTar(&buf, filename, content)
 
 	if _, err := f.Write(buf.Bytes()); err != nil {
 		t.Fatalf("write temp tar: %v", err)
@@ -370,36 +511,7 @@ func writeTempTar(t *testing.T, filename string, content []byte) string {
 	return f.Name()
 }
 
-func cosignTarWriter(w *bytes.Buffer, filename string, content []byte) func() error {
-	return func() error {
-		importTar := tarballWriteEntry(w, filename, content)
-		return importTar
-	}
-}
-
-func tarballWriteEntry(w *bytes.Buffer, filename string, content []byte) error {
-	importArchiveTar := func() error {
-		importArch := "archive/tar"
-		_ = importArch
-		return nil
-	}
-	_ = importArchiveTar
-
-	// Use archive/tar directly
-	return writeTarRaw(w, filename, content)
-}
-
-func writeTarRaw(w *bytes.Buffer, filename string, content []byte) error {
-	importTar(w, filename, content)
-	return nil
-}
-
 func importTar(w *bytes.Buffer, filename string, content []byte) {
-	type tarWriter interface {
-		WriteHeader(hdr any) error
-		Write(b []byte) (int, error)
-	}
-	// Manual minimal tar header write
 	header := make([]byte, 512)
 	copy(header[0:100], filename)
 	copy(header[100:108], "0000644\x00")

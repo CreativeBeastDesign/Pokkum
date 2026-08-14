@@ -21,6 +21,8 @@ type verifyOptions struct {
 	output         string
 }
 
+var exitFunc = os.Exit
+
 func newVerifyCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
 	opts := &verifyOptions{}
 
@@ -61,10 +63,12 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 		msg := fmt.Sprintf("failed to resolve provenance for %s: %v", imageRef, err)
 		if outputFormat == ports.FormatJSON {
 			_ = jsonutils.WriteError(os.Stdout, "verify", "ERR_PROVENANCE_FAILED", msg, "")
-			os.Exit(2)
+			exitFunc(2)
+			return nil
 		}
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
-		os.Exit(2)
+		exitFunc(2)
+		return nil
 	}
 
 	commitDisplay := provSummary.PinnedInputs.Commit
@@ -80,9 +84,21 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 	}
 
 	if opts.noRebuild {
+		if !provSummary.HasProvenance && !provSummary.SignatureValid {
+			msg := fmt.Sprintf("image %s has neither a valid SLSA provenance attestation nor a verified signature", imageRef)
+			if outputFormat == ports.FormatJSON {
+				_ = jsonutils.WriteError(os.Stdout, "verify", "ERR_PROVENANCE_FAILED", msg, "")
+				exitFunc(2)
+				return nil
+			}
+			fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+			exitFunc(2)
+			return nil
+		}
+
 		verdict := "ATTESTATION_VALIDATED"
-		if !provSummary.HasProvenance && provSummary.PinnedInputs.Commit == "" {
-			verdict = "UNATTESTED"
+		if !provSummary.HasProvenance && provSummary.SignatureValid {
+			verdict = "SIGNATURE_VALIDATED_NO_PROVENANCE"
 		}
 
 		out := ports.VerifyOutput{
@@ -117,10 +133,12 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 		msg := fmt.Sprintf("rebuild comparison requires an artifact to compare against: specify --against <path/to/rebuilt.tar> or pass --no-rebuild for attestation check only (source commit: %s @ %s)", repoDisplay, commitDisplay)
 		if outputFormat == ports.FormatJSON {
 			_ = jsonutils.WriteError(os.Stdout, "verify", "ERR_REBUILD_REQUIRED", msg, "")
-			os.Exit(2)
+			exitFunc(2)
+			return nil
 		}
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
-		os.Exit(2)
+		exitFunc(2)
+		return nil
 	}
 
 	comp := comparator.NewComparator(logger)
@@ -134,10 +152,12 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 		msg := fmt.Sprintf("rebuild comparison failed: %v", err)
 		if outputFormat == ports.FormatJSON {
 			_ = jsonutils.WriteError(os.Stdout, "verify", "ERR_COMPARISON_FAILED", msg, "")
-			os.Exit(1)
+			exitFunc(1)
+			return nil
 		}
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
-		os.Exit(1)
+		exitFunc(1)
+		return nil
 	}
 
 	verdict := "VERIFIED_" + compResult.Level
@@ -156,7 +176,8 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 	if outputFormat == ports.FormatJSON {
 		if compResult.Level == "L3" {
 			_ = jsonutils.WriteError(os.Stdout, "verify", "ERR_COMPARISON_MISMATCH", compResult.Summary, "")
-			os.Exit(1)
+			exitFunc(1)
+			return nil
 		}
 		return jsonutils.WriteSuccess(os.Stdout, "verify", out)
 	}
@@ -177,7 +198,7 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 	}
 
 	if compResult.Level == "L3" {
-		os.Exit(1)
+		exitFunc(1)
 	}
 
 	return nil

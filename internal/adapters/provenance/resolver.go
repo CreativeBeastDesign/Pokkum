@@ -60,6 +60,15 @@ func WithKeylessVerifier(verifier ports.KeylessVerifier) Option {
 	}
 }
 
+// WithDSSESigner overrides the DSSE signer/verifier.
+func WithDSSESigner(signer ports.DSSESigner) Option {
+	return func(r *Resolver) {
+		if signer != nil {
+			r.dsse = signer
+		}
+	}
+}
+
 // NewResolver constructs a ProvenanceResolver instance.
 func NewResolver(log *slog.Logger, opts ...Option) *Resolver {
 	if log == nil {
@@ -131,11 +140,19 @@ func (r *Resolver) ResolveProvenance(ctx context.Context, req ports.ProvenanceRe
 
 	repo := parsedRef.Context().Name()
 
+	pubKeyPEM := []byte(os.Getenv("POKKUM_SIGNING_PUBKEY"))
+	if len(pubKeyPEM) == 0 {
+		pubKeyPEM = []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
+	}
+	if len(pubKeyPEM) == 0 {
+		pubKeyPEM = []byte(cosign.DefaultPublicKeyPEM)
+	}
+
 	// 1. Check for Cosign signature tag: <repo>:<alg>-<hex>.sig
 	sigTagStr := fmt.Sprintf("%s:%s-%s.sig", repo, desc.Digest.Algorithm, desc.Digest.Hex)
 	if sigRef, sErr := name.ParseReference(sigTagStr, nameOpts...); sErr == nil {
 		if sigImg, iErr := remote.Image(sigRef, opts...); iErr == nil {
-			valid, identity := r.verifyCosignSignature(ctx, repo, desc.Digest, sigImg)
+			valid, identity := r.verifyCosignSignature(ctx, repo, desc.Digest, sigImg, pubKeyPEM)
 			summary.SignatureValid = valid
 			summary.SignerIdentity = identity
 		}
@@ -145,7 +162,7 @@ func (r *Resolver) ResolveProvenance(ctx context.Context, req ports.ProvenanceRe
 	attTagStr := fmt.Sprintf("%s:%s-%s.att", repo, desc.Digest.Algorithm, desc.Digest.Hex)
 	if attRef, aErr := name.ParseReference(attTagStr, nameOpts...); aErr == nil {
 		if attImg, iErr := remote.Image(attRef, opts...); iErr == nil {
-			if stmt, serr := r.extractSLSAStatement(attImg, desc.Digest); serr == nil {
+			if stmt, serr := r.extractSLSAStatement(ctx, attImg, desc.Digest, pubKeyPEM); serr == nil {
 				summary.HasProvenance = true
 				r.populateInputsFromSLSA(&summary.PinnedInputs, stmt)
 			}
@@ -197,7 +214,7 @@ func (r *Resolver) remoteOptions(ctx context.Context, registryConfigPath string)
 	}, nil
 }
 
-func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, digest v1.Hash, sigImg v1.Image) (bool, string) {
+func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, digest v1.Hash, sigImg v1.Image, pubKeyPEM []byte) (bool, string) {
 	m, err := sigImg.Manifest()
 	if err != nil {
 		return false, ""
@@ -205,14 +222,6 @@ func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, diges
 	layers, err := sigImg.Layers()
 	if err != nil || len(layers) == 0 {
 		return false, ""
-	}
-
-	pubKeyPEM := []byte(os.Getenv("POKKUM_SIGNING_PUBKEY"))
-	if len(pubKeyPEM) == 0 {
-		pubKeyPEM = []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
-	}
-	if len(pubKeyPEM) == 0 {
-		pubKeyPEM = []byte(cosign.DefaultPublicKeyPEM)
 	}
 
 	for i, layer := range layers {
@@ -231,22 +240,41 @@ func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, diges
 
 		var sigStr string
 		var certPEM []byte
+		var chainPEM []byte
+		var bundleJSON []byte
+
 		if i < len(m.Layers) && m.Layers[i].Annotations != nil {
-			sigStr = m.Layers[i].Annotations["dev.cosignproject.cosign/signature"]
-			if certStr, ok := m.Layers[i].Annotations["dev.sigstore.cosign/certificate"]; ok {
-				certPEM = []byte(certStr)
+			ann := m.Layers[i].Annotations
+			sigStr = ann[sigstore.CosignSignatureAnnotation]
+			if sigStr == "" {
+				sigStr = ann["org.opencontainers.image.signature"]
+			}
+			if c, ok := ann[sigstore.CosignCertificateAnnotation]; ok {
+				certPEM = []byte(c)
+			}
+			if ch, ok := ann[sigstore.CosignChainAnnotation]; ok {
+				chainPEM = []byte(ch)
+			}
+			if b, ok := ann[sigstore.CosignBundleAnnotation]; ok {
+				bundleJSON = []byte(b)
 			}
 		}
 		if sigStr == "" && m.Annotations != nil {
-			sigStr = m.Annotations["dev.cosignproject.cosign/signature"]
-			if certStr, ok := m.Annotations["dev.sigstore.cosign/certificate"]; ok {
-				certPEM = []byte(certStr)
+			sigStr = m.Annotations[sigstore.CosignSignatureAnnotation]
+			if c, ok := m.Annotations[sigstore.CosignCertificateAnnotation]; ok {
+				certPEM = []byte(c)
+			}
+			if ch, ok := m.Annotations[sigstore.CosignChainAnnotation]; ok {
+				chainPEM = []byte(ch)
+			}
+			if b, ok := m.Annotations[sigstore.CosignBundleAnnotation]; ok {
+				bundleJSON = []byte(b)
 			}
 		}
 
-		// Try static-key verification if signature string is present
+		// 1. Try static-key verification if signature string is present
 		if sigStr != "" && len(pubKeyPEM) > 0 && r.signer != nil {
-			sigBytes, _ := base64.StdEncoding.DecodeString(sigStr)
+			sigBytes, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(sigStr))
 			bundle := ports.CosignSignatureBundle{
 				PayloadBytes:    payloadBytes,
 				Base64Signature: sigStr,
@@ -272,8 +300,8 @@ func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, diges
 			}
 		}
 
-		// Try keyless verification if certificate is present
-		if len(certPEM) > 0 && r.keyless != nil {
+		// 2. Try genuine keyless verification if certificate and Rekor bundle are present
+		if len(certPEM) > 0 && len(bundleJSON) > 0 && r.keyless != nil {
 			block, _ := pem.Decode(certPEM)
 			if block != nil {
 				if cert, cerr := x509.ParseCertificate(block.Bytes); cerr == nil {
@@ -285,7 +313,22 @@ func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, diges
 					} else if len(cert.URIs) > 0 {
 						identity.SAN = cert.URIs[0].String()
 					}
-					return true, fmt.Sprintf("keyless:%s", identity.SAN)
+					sigBytes, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(sigStr))
+					if len(sigBytes) > 0 && !identity.Empty() {
+						keylessRes, kerr := r.keyless.Verify(ctx, ports.KeylessVerifyRequest{
+							PayloadBytes:    payloadBytes,
+							SignatureBytes:  sigBytes,
+							CertificatePEM:  certPEM,
+							ChainPEM:        chainPEM,
+							RekorBundleJSON: bundleJSON,
+							Identity:        identity,
+						})
+						if kerr == nil {
+							if err := checkSimpleSigningClaims(payloadBytes, repo, digest); err == nil {
+								return true, fmt.Sprintf("keyless:%s", keylessRes.SAN)
+							}
+						}
+					}
 				}
 			}
 		}
@@ -294,7 +337,7 @@ func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, diges
 	return false, ""
 }
 
-func (r *Resolver) extractSLSAStatement(attImg v1.Image, digest v1.Hash) (ports.SLSAStatement, error) {
+func (r *Resolver) extractSLSAStatement(ctx context.Context, attImg v1.Image, digest v1.Hash, pubKeyPEM []byte) (ports.SLSAStatement, error) {
 	layers, err := attImg.Layers()
 	if err != nil {
 		return ports.SLSAStatement{}, err
@@ -314,8 +357,8 @@ func (r *Resolver) extractSLSAStatement(attImg v1.Image, digest v1.Hash) (ports.
 			continue
 		}
 
-		// 1. Try parsing directly as JSON
-		if stmt, ok := tryParseSLSAFromBytes(data, digest); ok {
+		// 1. Try parsing directly as JSON / DSSE
+		if stmt, ok := r.tryParseAndVerifySLSA(ctx, data, digest, pubKeyPEM); ok {
 			return stmt, nil
 		}
 
@@ -329,7 +372,7 @@ func (r *Resolver) extractSLSAStatement(attImg v1.Image, digest v1.Hash) (ports.
 			if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA || hdr.Typeflag == 0 {
 				entryData, err := io.ReadAll(tr)
 				if err == nil {
-					if stmt, ok := tryParseSLSAFromBytes(entryData, digest); ok {
+					if stmt, ok := r.tryParseAndVerifySLSA(ctx, entryData, digest, pubKeyPEM); ok {
 						return stmt, nil
 					}
 				}
@@ -337,22 +380,28 @@ func (r *Resolver) extractSLSAStatement(attImg v1.Image, digest v1.Hash) (ports.
 		}
 	}
 
-	return ports.SLSAStatement{}, errors.New("no matching SLSA statement found in attestation layers")
+	return ports.SLSAStatement{}, errors.New("no matching or verified SLSA statement found in attestation layers")
 }
 
-func tryParseSLSAFromBytes(data []byte, digest v1.Hash) (ports.SLSAStatement, bool) {
+func (r *Resolver) tryParseAndVerifySLSA(ctx context.Context, data []byte, digest v1.Hash, pubKeyPEM []byte) (ports.SLSAStatement, bool) {
 	// Try DSSE envelope
 	var env ports.DSSEEnvelope
-	if err := json.Unmarshal(data, &env); err == nil && env.Payload != "" {
-		payloadBytes, err := base64.StdEncoding.DecodeString(env.Payload)
-		if err == nil {
-			var stmt ports.SLSAStatement
-			if err := json.Unmarshal(payloadBytes, &stmt); err == nil {
-				if statementMatchesDigest(stmt, digest) {
-					return stmt, true
-				}
+	if err := json.Unmarshal(data, &env); err == nil && env.Payload != "" && len(env.Signatures) > 0 {
+		if r.dsse == nil || len(pubKeyPEM) == 0 {
+			return ports.SLSAStatement{}, false
+		}
+		payloadBytes, err := r.dsse.Verify(ctx, env, pubKeyPEM)
+		if err != nil {
+			r.log.DebugContext(ctx, "dsse signature verification failed", "err", err)
+			return ports.SLSAStatement{}, false
+		}
+		var stmt ports.SLSAStatement
+		if err := json.Unmarshal(payloadBytes, &stmt); err == nil {
+			if statementMatchesDigest(stmt, digest) {
+				return stmt, true
 			}
 		}
+		return ports.SLSAStatement{}, false
 	}
 
 	// Try direct in-toto statement
@@ -378,6 +427,24 @@ func statementMatchesDigest(stmt ports.SLSAStatement, digest v1.Hash) bool {
 		}
 	}
 	return false
+}
+
+func checkSimpleSigningClaims(payloadBytes []byte, repo string, digest v1.Hash) error {
+	var payload ports.CosignSimpleSigningPayload
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return fmt.Errorf("signed payload is not valid Simple Signing JSON: %w", err)
+	}
+
+	actualRepo := payload.Critical.Identity.DockerReference
+	if strings.TrimSpace(repo) != "" && actualRepo != strings.TrimSpace(repo) {
+		return fmt.Errorf("payload docker-reference %q != expected %q", actualRepo, repo)
+	}
+
+	actualDigest := payload.Critical.Image.DockerManifestDigest
+	if digest.Hex != "" && actualDigest != digest.String() {
+		return fmt.Errorf("payload docker-manifest-digest %q != expected %q", actualDigest, digest.String())
+	}
+	return nil
 }
 
 func (r *Resolver) populateInputsFromSLSA(inputs *ports.PinnedBuildInputs, stmt ports.SLSAStatement) {

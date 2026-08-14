@@ -1243,12 +1243,13 @@ func TestResolve_EscrowMirror_WriteFailure_Signature_FailsClosed(t *testing.T) {
 	pushCosignSignature(t, sUpstream, parsedRef.Context().Name(), desc.Digest, privPEM, false)
 
 	// Mirror server that accepts base image write but rejects signature writes (.sig) with HTTP 500
+	reg := registry.New()
 	mirrorHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if strings.Contains(req.URL.Path, ".sig") {
 			http.Error(w, "signature mirror store failure", http.StatusInternalServerError)
 			return
 		}
-		registry.New().ServeHTTP(w, req)
+		reg.ServeHTTP(w, req)
 	})
 	sMirror := httptest.NewServer(mirrorHandler)
 	t.Cleanup(sMirror.Close)
