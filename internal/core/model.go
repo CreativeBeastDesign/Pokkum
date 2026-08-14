@@ -154,10 +154,17 @@ const (
 	CompressionGzip = ports.CompressionGzip
 	// CompressionZstd applies zstd compression.
 	CompressionZstd = ports.CompressionZstd
+
+	// Re-exported severity constants
+	SeverityLow      = ports.SeverityLow
+	SeverityMedium   = ports.SeverityMedium
+	SeverityHigh     = ports.SeverityHigh
+	SeverityCritical = ports.SeverityCritical
 )
 
-// Re-exported platform values.
+// Re-exported functions and values.
 var (
+	ParseSeverity      = ports.ParseSeverity
 	LinuxAMD64         = ports.LinuxAMD64
 	LinuxARM64         = ports.LinuxARM64
 	SupportedPlatforms = ports.SupportedPlatforms
@@ -545,6 +552,13 @@ type BuildRequest struct {
 
 	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
 	RegistryConfigPath string
+
+	// FailOnCVE sets the minimum vulnerability severity threshold that causes build failure.
+	// Empty means warn-only unless POKKUM_FAIL_ON_CVE is set.
+	FailOnCVE Severity
+
+	// AllowIncompleteScan permits the build to succeed even if vulnerability database lookups fail.
+	AllowIncompleteScan bool
 }
 
 // Normalize fills in defaults in place. It is idempotent, it never fails, and
@@ -689,6 +703,10 @@ func (r BuildRequest) Validate() error {
 
 	if err := validateRuntime(r.Runtime); err != nil {
 		return err
+	}
+
+	if r.FailOnCVE != "" && !r.FailOnCVE.Valid() {
+		return fmt.Errorf("fail-on-cve severity %q: %w", r.FailOnCVE, ErrInvalidRequest)
 	}
 
 	if r.Concurrency < 0 {

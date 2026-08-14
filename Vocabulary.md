@@ -51,6 +51,8 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--no-verify-base` | — | — | `false` | Suppress base image signature verification entirely (both static-key and keyless). |
 | `--allow-secret-pattern` | — | — | (none) | Regex pattern to ignore during build-time secret scanning, repeatable. |
 | `--require-env` | — | — | (none) | Declare required runtime environment variables (comma-separated or repeatable). Stamped into image annotations (`pokkum.dev/required-env`) and validated by the supervisor on container boot. |
+| `--fail-on-cve` | — | `POKKUM_FAIL_ON_CVE` | (none) | Fail build if base image vulnerabilities exceed threshold (`low`, `medium`, `high`, `critical`; default warn-only). |
+| `--allow-incomplete` | — | — | `false` | Allow build to succeed even if base image vulnerability database lookups fail (default: fail closed when `--fail-on-cve` is active). |
 | `--hermetic` | — | — | `false` | Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required). |
 | `--registry-config` | — | — | (none) | Path to a `docker config.json`-style auth file, keyed by registry hostname (`"auths": {"<host>": {...}}`), with dynamic credential-helper execution (`credHelpers`, `credsStore`) shelling out to `docker-credential-*` binaries (e.g. ECR, GCR, OSXKeychain) and caching credentials in-memory, merged ahead of `authn.DefaultKeychain`. |
 | `--tarball` | — | — | (none) | Export as an OCI archive to the given path. Mutually exclusive with `--local`. |
@@ -155,6 +157,7 @@ Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode) and `
 | `--toolchain` | `false` | Restrict scan to embedded Bun and SvelteKit toolchain advisories. |
 | `--output` | `text` | Output serialization format (`text` or `json`). |
 | `--offline` | `false` | Disable remote vulnerability database queries and use embedded advisories. |
+| `--allow-incomplete` | `false` | Report success even if a vulnerability database lookup fails (default: fail closed on reduced coverage). |
 
 ---
 

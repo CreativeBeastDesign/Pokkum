@@ -4,6 +4,7 @@
 
 | Feature                                     | DX (1-10) | Security (1-10) | Cost (1-10) | Expected cost (explicit)                                                         | External Dependencies             | Priority |
 | ------------------------------------------- | --------- | --------------- | ----------- | -------------------------------------------------------------------------------- | --------------------------------- | -------- |
+| Live Cluster Annotation Inspection          | 8         | 2               | 4           | `kubectl get` pre-flight query in `pokkum apply` to seed deployment history      | `kubectl`                         | High     |
 | Monorepo Affected-Detection                 | 7         | 1               | 4           | Git-diff input tracking per `pokkum://` app                                      | None                              | Medium   |
 | Static/Prerendered Page Optimization        | 8         | 1               | 4           | Mostly free under layered design; `--static` nginx mode is separate & costlier   | Nginx (only for `--static`)       | Medium   |
 | Multi-Environment Management                | 7         | 3               | 5           | Config templating; secret-manager integrations                                   | Vault / AWS Secrets               | Medium   |
@@ -13,9 +14,13 @@
 | Progressive Deployment Strategies           | 6         | 2               | 9           | Massive maintenance burden; Argo/Flux own this space                             | Kubernetes (Argo/Flux)            | Low      |
 | Asset Optimization Pipeline                 | 8         | 1               | 8           | Massive build time increase; heavy deps (`libvips`)                              | `sharp`, `@sveltejs/enhanced-img` | Low      |
 | Plugin System                               | 8         | 1               | 9           | Extreme complexity; npm supply-chain risk undercuts Pokkum's own hardening story | npm                               | Low      |
+| Base Image CVE Build Gate                   | 8         | 9               | 3           | Build-time OSV.dev lookup & configurable `--fail-on-cve` threshold               | OSV.dev API                       | Done     |
+| Base Image Escrow / Mirroring               | 7         | 8               | 4           | Remote registry copy + signature verification against upstream repo              | Registry                          | Done     |
+| Registry Credential-Helper Invocation       | 8         | 6               | 3           | Execute `docker-credential-*` binaries via `credHelpers`/`credsStore`            | None                              | Done     |
+| Multi-Generation Rollback History           | 8         | 4               | 3           | `pokkum.dev/image-history` annotation parsing and generation selection           | None                              | Done     |
 | Secret-Inlining Guard                       | 6         | 9               | 2           | Slight build-time CPU (layer scan); forces `--env=disable` in bundling           | None                              | Done     |
 | `pokkum verify --rebuild`                   | 6         | 10              | 5           | One full rebuild per verification; requires pinned toolchain                     | None (git + registry)             | Done     |
-| CVE Scanning Integration (`pokkum scan`)    | 9         | 8               | 4           | Shell out to local Trivy/Grype (do NOT embed → no +20-30MB CLI); CI scan time    | Trivy / Grype                     | Done     |
+| CVE Scanning Integration (`pokkum scan`)    | 9         | 8               | 4           | Syft package cataloging + OSV.dev query batch API                                | Syft / OSV.dev                    | Done     |
 | Base Image Signature Verification           | 4         | 8               | 2           | +1 registry roundtrip per build; sigstore libs already vendored (cosign adapter) | None                              | Done     |
 | `pokkum repro doctor`                       | 9         | 6               | 4           | Double build + per-layer diff, on demand only                                    | None                              | Done     |
 | `pokkum doctor` (preflight)                 | 9         | 3               | 2           | <1MB CLI; low maintenance                                                        | None                              | Done     |
@@ -258,3 +263,23 @@ When the container exits with a non-zero status during local testing, automatica
 
 - `pokkum resolve` on a manifest with several `pokkum://` refs git-diffs each app's input tree and skips unchanged apps entirely
 - Stronger than digest-HEAD skipping: no build at all, not just no push
+
+### Live Cluster Annotation Inspection for `pokkum apply`
+
+- Performs a pre-flight `kubectl get` query on target workload resources before manifest resolution
+- Reads currently deployed `pokkum.dev/image-history` or active container images from the cluster
+- Seeds historical annotations so multi-generation rollback works reliably even when deploying from static, uncommitted `pokkum://` manifest templates across independent CLI runs
+
+### Base Image CVE Build Gate
+
+- Actively queries OSV.dev for vulnerabilities affecting the locked base image during `pokkum build`
+- Enables breaking CI/CD pipelines on discovered CVEs with `--fail-on-cve=critical|high|medium|low` or `POKKUM_FAIL_ON_CVE`
+- Fails closed on incomplete vulnerability database lookups (`--allow-incomplete` to opt out)
+- Automatically persists `last_scanned_at`, `vulnerabilities_count`, and `max_severity` into `pokkum.lock`
+
+### Base Image Escrow / Mirroring
+
+- `--mirror-registry=<repo>` on `pokkum base update` mirrors base image indexes and Cosign `.sig` tags to a project-controlled registry
+- Verifies Cosign signatures against canonical upstream repo references while pulling image blobs from mirrors
+- Guarantees long-term reproducibility against `:latest` tag drift and upstream registry image pruning
+

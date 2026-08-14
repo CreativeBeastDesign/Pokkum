@@ -77,6 +77,8 @@ type buildFlags struct {
 	hermetic            bool
 	registryConfig      string
 	requireEnv          []string
+	failOnCVE           string
+	allowIncomplete     bool
 }
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -184,6 +186,10 @@ The project directory defaults to the current working directory.`,
 		"Path to custom OCI registry auth config file (config.json)")
 	cmd.Flags().StringSliceVar(&flags.requireEnv, "require-env", nil,
 		"Declare required runtime environment variables (comma-separated or repeatable)")
+	cmd.Flags().StringVar(&flags.failOnCVE, "fail-on-cve", "",
+		"Fail build if base image vulnerabilities exceed threshold (low, medium, high, critical; default warn-only)")
+	cmd.Flags().BoolVar(&flags.allowIncomplete, "allow-incomplete", false,
+		"Allow build to succeed even if base image vulnerability database lookups fail (default: fail closed when --fail-on-cve is active)")
 
 	return cmd
 }
@@ -351,6 +357,27 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	req.AllowSecretPatterns = flags.allowSecretPatterns
 	req.Hermetic = flags.hermetic
 	req.RegistryConfigPath = flags.registryConfig
+
+	// FailOnCVE: flag > env > config
+	failOnCVESetting := flags.failOnCVE
+	if failOnCVESetting == "" {
+		failOnCVESetting = os.Getenv("POKKUM_FAIL_ON_CVE")
+	}
+	if failOnCVESetting == "" {
+		failOnCVESetting = cfg.GetString("security.fail_on_cve", "")
+	}
+	if failOnCVESetting != "" {
+		if failOnCVESetting == "1" || strings.EqualFold(failOnCVESetting, "true") || strings.EqualFold(failOnCVESetting, "yes") {
+			req.FailOnCVE = core.SeverityCritical
+		} else {
+			sev, err := core.ParseSeverity(failOnCVESetting)
+			if err != nil {
+				return fmt.Errorf("invalid fail-on-cve severity %q: %w", failOnCVESetting, err)
+			}
+			req.FailOnCVE = sev
+		}
+	}
+	req.AllowIncompleteScan = flags.allowIncomplete
 
 	// Execution-mode switches. They are not part of the request — both
 	// describe how far to get, not what to build — so they travel alongside it

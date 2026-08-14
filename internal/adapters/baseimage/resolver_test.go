@@ -1712,3 +1712,63 @@ func TestResolve_UpdateBase_DoesNotPreserveStaleMirrorRefForNewDigest(t *testing
 		t.Fatalf("expected stale MirrorRef to be cleared on digest update without mirror-registry, got: %q", entry.MirrorRef)
 	}
 }
+
+func TestResolver_RecordScanResult(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+
+	lf := &ports.PokkumLockfile{
+		Version:   lockfileutils.LockfileSchemaVersion,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Bases: map[string]ports.BaseLockEntry{
+			string(ports.BaseImageDistroless): {
+				Ref:       "gcr.io/distroless/cc-debian12:nonroot",
+				Digest:    "sha256:1111222233334444555566667777888811112222333344445555666677778888",
+				PinnedRef: "gcr.io/distroless/cc-debian12@sha256:1111222233334444555566667777888811112222333344445555666677778888",
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	}
+	if err := lockfileutils.SaveLockfile(lockPath, lf); err != nil {
+		t.Fatalf("SaveLockfile: %v", err)
+	}
+
+	r := NewResolver(nil)
+	scan := ports.ScanResult{
+		Target:           "gcr.io/distroless/cc-debian12@sha256:1111222233334444555566667777888811112222333344445555666677778888",
+		Passed:           false,
+		MaxSeverityFound: ports.SeverityCritical,
+		Vulnerabilities: []ports.Vulnerability{
+			{ID: "CVE-2026-0001", Severity: ports.SeverityCritical, Package: "libssl3"},
+			{ID: "CVE-2026-0002", Severity: ports.SeverityHigh, Package: "libc6"},
+		},
+		ToolchainAdvisories: []ports.Vulnerability{
+			{ID: "GHSA-bun-1.1.0", Severity: ports.SeverityHigh, Package: "bun"},
+		},
+	}
+
+	err := r.RecordScanResult(context.Background(), lockPath, ports.BaseImageDistroless, scan)
+	if err != nil {
+		t.Fatalf("RecordScanResult: %v", err)
+	}
+
+	updatedLF, err := lockfileutils.LoadLockfile(lockPath)
+	if err != nil {
+		t.Fatalf("LoadLockfile: %v", err)
+	}
+
+	entry, ok := lockfileutils.GetLockedBase(updatedLF, string(ports.BaseImageDistroless))
+	if !ok {
+		t.Fatalf("missing locked base entry")
+	}
+
+	if entry.LastScannedAt == "" {
+		t.Errorf("expected LastScannedAt to be populated")
+	}
+	if entry.VulnerabilitiesCount != 3 {
+		t.Errorf("VulnerabilitiesCount = %d, want 3", entry.VulnerabilitiesCount)
+	}
+	if entry.MaxSeverity != string(ports.SeverityCritical) {
+		t.Errorf("MaxSeverity = %s, want critical", entry.MaxSeverity)
+	}
+}

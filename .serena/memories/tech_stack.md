@@ -1,6 +1,6 @@
 # Technology Stack & Dependencies
 
-- **Language**: Go 1.22+
+- **Language**: Go 1.26+ (go directive 1.26.6 in `go.mod`)
 - **Application Framework**: SvelteKit 2.31+ (`@sveltejs/kit`)
 - **Runtime Compiler & Resolver**: Bun ≥ 1.2.0 (`internal/adapters/bunruntime` resolver, `--bun-binary`, `--bun-variant=standard|baseline`)
 - **Packaging Strategy & Adapter**: `--strategy=layered` (default, arch-independent layout via `@sveltejs/adapter-node`) / `--strategy=exe` (deprecated 2-layer single executable)
@@ -11,4 +11,4 @@
 - **Local Dev Engine**: `pokkum dev` (`cmd/pokkum/dev.go`) for local Docker daemon load, `--debug` interactive shell, and file watching.
 - **Base Images**: Distroless (`gcr.io/distroless/cc-debian12:nonroot`) or Chainguard (`ghcr.io/chainguard-images/glibc-dynamic:latest`)
 - **Observability**: Native OpenTelemetry Node SDK (`@opentelemetry/sdk-node`, `@opentelemetry/api`)
-- **Supply Chain Security**: Syft (SBOM attached via OCI 1.1 referrers by default `--sbom-attach=referrer` or tag `--sbom-attach=tag`), Cosign (ECDSA/Ed25519 image signing), SLSA v1.0 (in-toto provenance), DSSE envelopes.
+- **Supply Chain Security**: Syft (SBOM attached via OCI 1.1 referrers by default `--sbom-attach=referrer` or tag `--sbom-attach=tag`), Cosign (ECDSA/Ed25519 image signing), SLSA v1.0 (in-toto provenance with DSSE envelopes), Keyless Sigstore (Fulcio+Rekor).

@@ -358,4 +358,7 @@ type BaseImageResolver interface {
 	// Resolve pulls the base image and returns one v1.Image per requested
 	// platform. It must not mutate the returned images.
 	Resolve(ctx context.Context, req BaseImageRequest) (*BaseImage, error)
+
+	// RecordScanResult updates the locked base image entry in pokkum.lock with the latest scan findings.
+	RecordScanResult(ctx context.Context, lockfilePath string, preset BaseImagePreset, scan ScanResult) error
 }

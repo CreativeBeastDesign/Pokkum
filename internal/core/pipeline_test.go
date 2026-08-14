@@ -59,7 +59,8 @@ func (m *mockCompiler) Compile(ctx context.Context, req ports.CompileRequest) (p
 
 // Mock implementation of ports.BaseImageResolver
 type mockBaseImageResolver struct {
-	resolveFn func(ctx context.Context, req ports.BaseImageRequest) (*ports.BaseImage, error)
+	resolveFn          func(ctx context.Context, req ports.BaseImageRequest) (*ports.BaseImage, error)
+	recordScanResultFn func(ctx context.Context, lockfilePath string, preset ports.BaseImagePreset, scan ports.ScanResult) error
 }
 
 func (m *mockBaseImageResolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*ports.BaseImage, error) {
@@ -80,6 +81,29 @@ func (m *mockBaseImageResolver) Resolve(ctx context.Context, req ports.BaseImage
 		Digest:    v1.Hash{Algorithm: "sha256", Hex: "1111222233334444555566667777888811112222333344445555666677778888"},
 		Images:    images,
 		IsIndex:   true,
+	}, nil
+}
+
+func (m *mockBaseImageResolver) RecordScanResult(ctx context.Context, lockfilePath string, preset ports.BaseImagePreset, scan ports.ScanResult) error {
+	if m.recordScanResultFn != nil {
+		return m.recordScanResultFn(ctx, lockfilePath, preset, scan)
+	}
+	return nil
+}
+
+// Mock implementation of ports.Scanner
+type mockScanner struct {
+	scanFn func(ctx context.Context, req ports.ScanRequest) (ports.ScanResult, error)
+}
+
+func (m *mockScanner) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanResult, error) {
+	if m.scanFn != nil {
+		return m.scanFn(ctx, req)
+	}
+	return ports.ScanResult{
+		Target:           req.Target,
+		Passed:           true,
+		MaxSeverityFound: ports.SeverityLow,
 	}, nil
 }
 
@@ -289,6 +313,7 @@ func newFullDeps(stdout io.Writer) core.Deps {
 		SLSAGenerator:   &mockSLSAGenerator{},
 		CosignSigner:    &mockCosignSigner{},
 		DSSESigner:      &mockDSSESigner{},
+		Scanner:         &mockScanner{},
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Stdout:          stdout,
 		Version:         "v0.1.0-test",
@@ -611,6 +636,192 @@ func TestBuildErrorPropagation(t *testing.T) {
 		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
 		if !errors.Is(err, core.ErrBunResolutionFailed) {
 			t.Errorf("expected ErrBunResolutionFailed, got %v", err)
+		}
+	})
+}
+
+func TestPipeline_BaseImageCVE_Gating(t *testing.T) {
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+	}
+	req.Normalize()
+
+	t.Run("warn only when fail gate is inactive", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				return ports.ScanResult{
+					Passed:           false,
+					MaxSeverityFound: ports.SeverityCritical,
+					Vulnerabilities: []ports.Vulnerability{
+						{ID: "CVE-2026-1234", Severity: ports.SeverityCritical, Package: "libssl3"},
+					},
+				}, core.ErrVulnerabilityThresholdExceeded
+			},
+		}
+
+		res, err := core.Build(context.Background(), deps, req, core.BuildOptions{DryRun: true})
+		if err != nil {
+			t.Fatalf("expected build to succeed in warn-only mode, got: %v", err)
+		}
+		if res.BaseImage.Ref == "" {
+			t.Errorf("expected resolved base image in result")
+		}
+	})
+
+	t.Run("fail build when FailOnCVE flag threshold is exceeded", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				return ports.ScanResult{
+					Passed:           false,
+					MaxSeverityFound: ports.SeverityCritical,
+					Vulnerabilities: []ports.Vulnerability{
+						{ID: "CVE-2026-1234", Severity: ports.SeverityCritical, Package: "libssl3"},
+					},
+				}, core.ErrVulnerabilityThresholdExceeded
+			},
+		}
+
+		reqFlag := req
+		reqFlag.FailOnCVE = ports.SeverityCritical
+
+		_, err := core.Build(context.Background(), deps, reqFlag, core.BuildOptions{DryRun: true})
+		if err == nil || !errors.Is(err, core.ErrVulnerabilityThresholdExceeded) {
+			t.Fatalf("expected ErrVulnerabilityThresholdExceeded, got: %v", err)
+		}
+	})
+
+	t.Run("fail build when POKKUM_FAIL_ON_CVE env is set", func(t *testing.T) {
+		t.Setenv("POKKUM_FAIL_ON_CVE", "critical")
+		deps := newFullDeps(io.Discard)
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				return ports.ScanResult{
+					Passed:           false,
+					MaxSeverityFound: ports.SeverityCritical,
+					Vulnerabilities: []ports.Vulnerability{
+						{ID: "CVE-2026-1234", Severity: ports.SeverityCritical, Package: "libssl3"},
+					},
+				}, core.ErrVulnerabilityThresholdExceeded
+			},
+		}
+
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{DryRun: true})
+		if err == nil || !errors.Is(err, core.ErrVulnerabilityThresholdExceeded) {
+			t.Fatalf("expected ErrVulnerabilityThresholdExceeded from env gate, got: %v", err)
+		}
+	})
+
+	t.Run("clean base image passes scan", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				return ports.ScanResult{
+					Passed:           true,
+					MaxSeverityFound: ports.SeverityLow,
+					Vulnerabilities:  nil,
+				}, nil
+			},
+		}
+
+		reqFlag := req
+		reqFlag.FailOnCVE = ports.SeverityHigh
+
+		res, err := core.Build(context.Background(), deps, reqFlag, core.BuildOptions{DryRun: true})
+		if err != nil {
+			t.Fatalf("expected clean scan to pass build, got: %v", err)
+		}
+		if res.BaseImage.Ref == "" {
+			t.Errorf("expected resolved base image")
+		}
+	})
+
+	t.Run("incomplete scan fails closed when gate is active", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				return ports.ScanResult{
+					Passed:     false,
+					Incomplete: true,
+					Warnings:   []string{"vulnerability database lookup failed"},
+				}, core.ErrScanIncomplete
+			},
+		}
+
+		reqFlag := req
+		reqFlag.FailOnCVE = ports.SeverityCritical
+
+		_, err := core.Build(context.Background(), deps, reqFlag, core.BuildOptions{DryRun: true})
+		if err == nil || !errors.Is(err, core.ErrScanIncomplete) {
+			t.Fatalf("expected ErrScanIncomplete failure, got: %v", err)
+		}
+	})
+
+	t.Run("incomplete scan succeeds when AllowIncompleteScan is true", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, req ports.ScanRequest) (ports.ScanResult, error) {
+				if req.AllowIncomplete {
+					return ports.ScanResult{
+						Passed:     true,
+						Incomplete: true,
+					}, nil
+				}
+				return ports.ScanResult{}, core.ErrScanIncomplete
+			},
+		}
+
+		reqFlag := req
+		reqFlag.FailOnCVE = ports.SeverityCritical
+		reqFlag.AllowIncompleteScan = true
+
+		res, err := core.Build(context.Background(), deps, reqFlag, core.BuildOptions{DryRun: true})
+		if err != nil {
+			t.Fatalf("expected build to succeed with AllowIncompleteScan=true, got: %v", err)
+		}
+		if res.BaseImage.Ref == "" {
+			t.Errorf("expected resolved base image")
+		}
+	})
+
+	t.Run("records scan results into base image resolver / lockfile", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				return ports.ScanResult{
+					Passed:           true,
+					MaxSeverityFound: ports.SeverityMedium,
+					Vulnerabilities: []ports.Vulnerability{
+						{ID: "CVE-2026-9999", Severity: ports.SeverityMedium, Package: "libxyz"},
+					},
+				}, nil
+			},
+		}
+
+		recorded := false
+		var recordedScan ports.ScanResult
+		deps.BaseImages = &mockBaseImageResolver{
+			recordScanResultFn: func(_ context.Context, _ string, _ ports.BaseImagePreset, scan ports.ScanResult) error {
+				recorded = true
+				recordedScan = scan
+				return nil
+			},
+		}
+
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{DryRun: true})
+		if err != nil {
+			t.Fatalf("unexpected build error: %v", err)
+		}
+		if !recorded {
+			t.Errorf("expected RecordScanResult to be invoked on BaseImages resolver")
+		}
+		if recordedScan.MaxSeverityFound != ports.SeverityMedium {
+			t.Errorf("recorded max severity = %v, want medium", recordedScan.MaxSeverityFound)
+		}
+		if len(recordedScan.Vulnerabilities) != 1 {
+			t.Errorf("recorded vulns = %d, want 1", len(recordedScan.Vulnerabilities))
 		}
 	})
 }

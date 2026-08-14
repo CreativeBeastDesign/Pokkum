@@ -305,12 +305,13 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	// takes the whole platform set and returns one image per platform, so this
 	// is deliberately outside the per-platform fan-out — which is also what
 	// makes it reachable from --dry-run.
+	lockPath := filepath.Join(req.ProjectDir, ports.PokkumLockfileName)
 	base, err := deps.BaseImages.Resolve(ctx, ports.BaseImageRequest{
 		Preset:          req.BaseImage.Preset,
 		Ref:             req.BaseImage.Ref,
 		Platforms:       req.Platforms,
 		Insecure:        req.Insecure,
-		LockfilePath:    filepath.Join(req.ProjectDir, ports.PokkumLockfileName),
+		LockfilePath:    lockPath,
 		UpdateBase:      req.BaseImage.UpdateBase,
 		Offline:         req.BaseImage.Offline,
 		VerifySignature: !req.BaseImage.NoVerifyBase,
@@ -336,16 +337,45 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	log.Info("base image resolved", "ref", baseInfo.Ref, "pinned", baseInfo.PinnedRef, "isIndex", base.IsIndex)
 
 	if deps.Scanner != nil && !req.BaseImage.Offline && !req.Hermetic {
+		effectiveFailOn := req.FailOnCVE
+		failGateActive := effectiveFailOn != ""
+		if effectiveFailOn == "" {
+			if envVal := os.Getenv("POKKUM_FAIL_ON_CVE"); envVal != "" {
+				if envVal == "1" || strings.EqualFold(envVal, "true") || strings.EqualFold(envVal, "yes") {
+					effectiveFailOn = ports.SeverityCritical
+					failGateActive = true
+				} else if parsedSev, err := ports.ParseSeverity(envVal); err == nil {
+					effectiveFailOn = parsedSev
+					failGateActive = true
+				}
+			}
+		}
+		if effectiveFailOn == "" {
+			effectiveFailOn = ports.SeverityCritical
+		}
+
 		scanRes, scanErr := deps.Scanner.Scan(ctx, ports.ScanRequest{
-			Target: base.PinnedRef,
-			FailOn: ports.SeverityCritical,
+			Target:          base.PinnedRef,
+			FailOn:          effectiveFailOn,
+			AllowIncomplete: req.AllowIncompleteScan,
 		})
+
+		// Record scan result in pokkum.lock if lockfile tracking is available
+		if deps.BaseImages != nil {
+			_ = deps.BaseImages.RecordScanResult(ctx, lockPath, req.BaseImage.Preset, scanRes)
+		}
+
 		if scanErr != nil {
 			if errors.Is(scanErr, ErrVulnerabilityThresholdExceeded) {
-				if os.Getenv("POKKUM_FAIL_ON_CVE") == "1" || os.Getenv("POKKUM_FAIL_ON_CVE") == "true" {
+				if failGateActive {
 					return BuildResult{}, fmt.Errorf("base image vulnerability scan failed: %w", scanErr)
 				}
 				log.Warn("base image contains vulnerabilities exceeding threshold", "pinned", base.PinnedRef, "vulns", len(scanRes.Vulnerabilities), "maxSeverity", scanRes.MaxSeverityFound)
+			} else if errors.Is(scanErr, ErrScanIncomplete) {
+				if failGateActive && !req.AllowIncompleteScan {
+					return BuildResult{}, fmt.Errorf("base image vulnerability scan incomplete: %w", scanErr)
+				}
+				log.Warn("base image vulnerability scan incomplete: vulnerability database lookup failed", "err", scanErr)
 			} else {
 				log.Debug("base image vulnerability scan warning", "err", scanErr)
 			}

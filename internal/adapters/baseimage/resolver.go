@@ -1164,3 +1164,35 @@ func fingerprint(b []byte) string {
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
+
+// RecordScanResult updates the locked base image entry in pokkum.lock with the latest scan findings.
+func (r *Resolver) RecordScanResult(_ context.Context, lockfilePath string, preset ports.BaseImagePreset, scan ports.ScanResult) error {
+	if lockfilePath == "" {
+		return nil
+	}
+	lf, err := lockfileutils.LoadLockfile(lockfilePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("baseimage: record scan load lockfile %s: %w", lockfilePath, err)
+	}
+
+	lockKey := string(preset)
+	entry, ok := lockfileutils.GetLockedBase(lf, lockKey)
+	if !ok {
+		return nil
+	}
+
+	entry.LastScannedAt = time.Now().UTC().Format(time.RFC3339)
+	entry.VulnerabilitiesCount = len(scan.Vulnerabilities) + len(scan.ToolchainAdvisories)
+	entry.MaxSeverity = string(scan.MaxSeverityFound)
+	lockfileutils.SetLockedBase(lf, lockKey, entry)
+
+	if err := lockfileutils.SaveLockfile(lockfilePath, lf); err != nil {
+		r.logger().Warn("failed to save lockfile with scan results", "path", lockfilePath, "err", err)
+		return fmt.Errorf("baseimage: save lockfile %s: %w", lockfilePath, err)
+	}
+	r.logger().Debug("recorded scan results in lockfile", "path", lockfilePath, "preset", preset, "vulns", entry.VulnerabilitiesCount, "max_severity", entry.MaxSeverity)
+	return nil
+}
