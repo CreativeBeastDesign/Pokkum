@@ -260,7 +260,7 @@ func newImageBuilder(logger *slog.Logger, baseDir, dockerRepo string) ports.Imag
 
 		// Stdout is nil (discarded): the build's own "repo@sha256:…" line
 		// must not land on the same stream as the rewritten manifest.
-		res, err := core.Build(ctx, buildDeps(logger, nil), req, core.BuildOptions{})
+		res, err := runCoreBuild(ctx, buildDeps(logger, nil), req, core.BuildOptions{})
 		if err != nil {
 			return "", fmt.Errorf("build pokkum://%s: %w", path, err)
 		}

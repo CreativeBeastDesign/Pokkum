@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"compress/gzip"
@@ -173,9 +174,25 @@ type readCloserWithUnderlying struct {
 	closer io.Closer
 }
 
+// Close releases both the decompression reader and the underlying file.
+//
+// The decompression reader needs a type switch rather than a single
+// io.Closer assertion: *gzip.Reader satisfies io.Closer (Close() error) and
+// the assertion catches it, but *zstd.Decoder's Close method is Close()
+// with no return value, which does NOT satisfy io.Closer. The assertion
+// silently failing for zstd — no compile error, no panic, just a Close that
+// quietly does nothing — is exactly what let the zstd decoder's internal
+// goroutines and buffers leak on every call: see
+// TestUncompressed_ZstdDecoderClosed for the regression this guards.
 func (r *readCloserWithUnderlying) Close() error {
-	if c, ok := r.Reader.(io.Closer); ok {
-		_ = c.Close()
+	switch rd := r.Reader.(type) {
+	case *zstd.Decoder:
+		// *zstd.Decoder.Close() returns no error, so it can never satisfy an
+		// io.Closer type assertion — it must be called explicitly, not found
+		// via interface matching.
+		rd.Close()
+	case io.Closer:
+		_ = rd.Close()
 	}
 	return r.closer.Close()
 }
@@ -241,11 +258,18 @@ func buildSinglePassLayer(ctx context.Context, platform ports.Platform, entries 
 		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
 	}
 
-	tmpFile, err := os.CreateTemp("", "pokkum-layer-*.tar")
+	// The suffix names the file's actual contents (gzip- or zstd-compressed
+	// tar), not a bare tarball, which is what it was named before and what a
+	// human inspecting a leaked temp file would have wrongly assumed.
+	tmpFile, err := os.CreateTemp("", "pokkum-layer-*"+tempLayerSuffix(compression))
 	if err != nil {
 		return nil, fmt.Errorf("packager: build %s: create temp layer file: %w: %w", platform, err, core.ErrPackageFailed)
 	}
 	tmpPath := tmpFile.Name()
+	// Registered as soon as the file exists so it is cleaned up even on an
+	// error path below that doesn't already os.Remove it explicitly; see
+	// trackTempFile's doc comment for who actually calls Remove and when.
+	trackTempFile(ctx, tmpPath)
 
 	diffIDHasher := sha256.New()
 	digestHasher := sha256.New()
@@ -309,11 +333,103 @@ func buildSinglePassLayer(ctx context.Context, platform ports.Platform, entries 
 		compression: compression,
 	}
 
+	// Defensive backstop only: a CLI process normally exits before the
+	// garbage collector ever runs this finalizer, so it must not be the
+	// primary cleanup mechanism. The primary mechanism is trackTempFile
+	// above plus the caller-owned cleanup func from NewBuildContext, which
+	// runs deterministically once the whole build (through registry push,
+	// daemon load, or tarball write) is done. This finalizer only helps a
+	// long-lived process (e.g. `pokkum dev`'s watch loop) that leaks a
+	// layer value without ever calling that cleanup func.
 	runtime.SetFinalizer(layer, func(l *singlePassLayer) {
 		_ = os.Remove(l.filePath)
 	})
 
 	return layer, nil
+}
+
+// tempLayerSuffix names a layer temp file after what it actually contains —
+// a gzip- or zstd-compressed tar stream, never a bare tar — so a file found
+// on disk (mid-build, or leaked) is identifiable by extension alone.
+func tempLayerSuffix(compression ports.CompressionAlgorithm) string {
+	if compression.Normalize() == ports.CompressionZstd {
+		return ".tar.zst"
+	}
+	return ".tar.gz"
+}
+
+// buildContextKey is the context.Context key packager uses to find the
+// current build's temp-file tracker, if the caller installed one via
+// NewBuildContext.
+type buildContextKey struct{}
+
+// tempFileTracker collects every intermediate layer temp file created while
+// building through a context returned by NewBuildContext, so they can all be
+// removed in one deterministic pass by the tracked context's cleanup func.
+//
+// A slice guarded by a mutex, not a sync.Map or similar: Packager.Build is
+// called concurrently, one goroutine per platform (see fanOut in
+// internal/core/pipeline.go), and every one of them can be creating a temp
+// file through the same tracker at once.
+type tempFileTracker struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (t *tempFileTracker) add(path string) {
+	t.mu.Lock()
+	t.paths = append(t.paths, path)
+	t.mu.Unlock()
+}
+
+// cleanup removes every tracked file. It is safe to call more than once —
+// a second call finds nothing left to remove — and safe to call even if no
+// file was ever tracked.
+func (t *tempFileTracker) cleanup() {
+	t.mu.Lock()
+	paths := t.paths
+	t.paths = nil
+	t.mu.Unlock()
+	for _, p := range paths {
+		_ = os.Remove(p)
+	}
+}
+
+// NewBuildContext returns a context that collects every intermediate layer
+// temp file created by packager functions called with it, plus a cleanup
+// func the caller must invoke — typically via defer — once every image built
+// from that context has been fully consumed by its destination (a registry
+// push, a daemon load, or a tarball write).
+//
+// That timing matters and is not merely "call it whenever": a
+// singlePassLayer's Compressed()/Uncompressed() readers stream directly from
+// the temp file on disk for as long as the returned v1.Image is in use, so
+// cleaning up right after Packager.Build returns — before the image has
+// actually been pushed, loaded, or written out — would remove a file the
+// publish step still needs to read from. The composition root (cmd/pokkum)
+// is the one place that knows when that has finished, since it is the code
+// that calls core.Build and only that caller sees both the image-build and
+// the publish step complete.
+//
+// A context not created this way still works: every layer temp file falls
+// back to the runtime.SetFinalizer backstop on singlePassLayer, which is not
+// guaranteed to run before a short-lived CLI process exits and is therefore
+// not sufficient on its own — see buildSinglePassLayer's SetFinalizer
+// comment. Composition roots that build and then publish an image should
+// always wrap their context with this.
+func NewBuildContext(ctx context.Context) (context.Context, func()) {
+	tracker := &tempFileTracker{}
+	return context.WithValue(ctx, buildContextKey{}, tracker), tracker.cleanup
+}
+
+// trackTempFile registers path with ctx's tempFileTracker, if any. It is a
+// no-op when ctx was not produced by NewBuildContext, which keeps every
+// existing caller (tests included) working unchanged and relying solely on
+// the SetFinalizer backstop.
+func trackTempFile(ctx context.Context, path string) {
+	if t, ok := ctx.Value(buildContextKey{}).(*tempFileTracker); ok {
+		t.add(path)
+	}
 }
 
 // buildLayer wraps a single file (plus its parent directory entries) into one
@@ -329,17 +445,6 @@ func buildLayer(ctx context.Context, platform ports.Platform, file layerFile, mo
 	}
 
 	return buildSinglePassLayer(ctx, platform, entries, modTime, compression)
-}
-
-func layerOpenerOptions(compression ports.CompressionAlgorithm) []tarball.LayerOption {
-	if compression.Normalize() == ports.CompressionZstd {
-		return []tarball.LayerOption{
-			tarball.WithMediaType(types.OCILayerZStd),
-		}
-	}
-	return []tarball.LayerOption{
-		tarball.WithMediaType(types.OCILayer),
-	}
 }
 
 // tarEntries turns a set of in-image file paths into the complete, ordered list
@@ -550,20 +655,27 @@ func BuildCustomFileLayer(ctx context.Context, platform ports.Platform, targetPa
 
 // BuildDirectoryTreeLayerWithPruning builds an OCI layer from a directory tree on host disk,
 // mounting it under targetPrefix in the image, applying pruneOptions to skip junk files.
-func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time, compression ports.CompressionAlgorithm, pruneOpts pruneutils.PruneOptions) (v1.Layer, error) {
+//
+// The returned pruneutils.PruneResult accounts for every file excluded from the layer by
+// pruneOpts, so callers can report what was left out of the image (see Packager.Build,
+// which logs a summary). Pruning here never touches the host filesystem — a junk file is
+// simply omitted from the tar stream being built, unlike pruneutils' own on-disk deletion
+// helpers.
+func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time, compression ports.CompressionAlgorithm, pruneOpts pruneutils.PruneOptions) (v1.Layer, pruneutils.PruneResult, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
+		return nil, pruneutils.PruneResult{}, fmt.Errorf("packager: build %s: %w", platform, err)
 	}
 
 	info, err := os.Stat(hostDir)
 	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: stat directory %q: %w: %w", platform, hostDir, err, core.ErrPackageFailed)
+		return nil, pruneutils.PruneResult{}, fmt.Errorf("packager: build %s: stat directory %q: %w: %w", platform, hostDir, err, core.ErrPackageFailed)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("packager: build %s: source path %q is not a directory: %w", platform, hostDir, core.ErrPackageFailed)
+		return nil, pruneutils.PruneResult{}, fmt.Errorf("packager: build %s: source path %q is not a directory: %w", platform, hostDir, core.ErrPackageFailed)
 	}
 
 	var files []layerFile
+	var pruned pruneutils.PruneResult
 	err = filepath.WalkDir(hostDir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -575,8 +687,14 @@ func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Plat
 		if err != nil {
 			return err
 		}
+		relSlash := filepath.ToSlash(rel)
 
 		if pruneutils.IsJunk(rel, false, pruneOpts) {
+			pruned.FilesPruned++
+			pruned.PrunedPaths = append(pruned.PrunedPaths, relSlash)
+			if fi, fiErr := d.Info(); fiErr == nil {
+				pruned.BytesSaved += fi.Size()
+			}
 			return nil
 		}
 
@@ -585,7 +703,7 @@ func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Plat
 			return err
 		}
 
-		inImagePath := path.Join(targetPrefix, filepath.ToSlash(rel))
+		inImagePath := path.Join(targetPrefix, relSlash)
 		files = append(files, layerFile{
 			path: inImagePath,
 			size: fi.Size(),
@@ -595,18 +713,23 @@ func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Plat
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: walk directory %q: %w: %w", platform, hostDir, err, core.ErrPackageFailed)
+		return nil, pruneutils.PruneResult{}, fmt.Errorf("packager: build %s: walk directory %q: %w: %w", platform, hostDir, err, core.ErrPackageFailed)
 	}
 
 	entries, err := tarEntries(files)
 	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: %w: %w", platform, err, core.ErrPackageFailed)
+		return nil, pruneutils.PruneResult{}, fmt.Errorf("packager: build %s: %w: %w", platform, err, core.ErrPackageFailed)
 	}
 
-	return buildSinglePassLayer(ctx, platform, entries, modTime, compression)
+	layer, err := buildSinglePassLayer(ctx, platform, entries, modTime, compression)
+	if err != nil {
+		return nil, pruneutils.PruneResult{}, err
+	}
+	return layer, pruned, nil
 }
 
 // BuildDirectoryTreeLayer builds an OCI layer from a directory tree on host disk with default options.
 func BuildDirectoryTreeLayer(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time, compression ports.CompressionAlgorithm) (v1.Layer, error) {
-	return BuildDirectoryTreeLayerWithPruning(ctx, platform, hostDir, targetPrefix, modTime, compression, pruneutils.PruneOptions{NoPrune: true})
+	layer, _, err := BuildDirectoryTreeLayerWithPruning(ctx, platform, hostDir, targetPrefix, modTime, compression, pruneutils.PruneOptions{NoPrune: true})
+	return layer, err
 }

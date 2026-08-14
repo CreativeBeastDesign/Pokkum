@@ -135,7 +135,7 @@ func buildAndLoadDevContainer(ctx context.Context, logger *slog.Logger, flags *d
 	}
 
 	opts := core.BuildOptions{}
-	res, err := core.Build(ctx, buildDeps(logger, os.Stdout), req, opts)
+	res, err := runCoreBuild(ctx, buildDeps(logger, os.Stdout), req, opts)
 	if err != nil {
 		return err
 	}

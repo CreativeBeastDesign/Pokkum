@@ -421,7 +421,7 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 
 	// The result carries the full summary, but the reference has already gone
 	// to stdout by the time Build returns; everything here is a log line.
-	res, err := core.Build(ctx, buildDeps(logger, os.Stdout), req, opts)
+	res, err := runCoreBuild(ctx, buildDeps(logger, os.Stdout), req, opts)
 	if err != nil {
 		return err
 	}
@@ -433,6 +433,27 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		"base", res.BaseImage.PinnedRef,
 		"duration", res.Duration.String())
 	return nil
+}
+
+// runCoreBuild calls core.Build wrapped in a packager.NewBuildContext, so
+// every intermediate layer temp file the packager adapter creates for this
+// one build is removed deterministically once Build returns — success or
+// error — rather than left for the packager's runtime.SetFinalizer backstop,
+// which a normal process exit does not reliably run. This is the only place
+// that call belongs: it is the one composition-root site that calls
+// core.Build and therefore the one place that knows the entire build,
+// including publish (registry push, daemon load, or tarball write), has
+// finished — core.Build itself must not know about packager's temp files,
+// and Packager.Build returning is not that point, since the returned
+// v1.Image's layers still read from those files until publish drains them.
+//
+// Every cmd/pokkum call site that invokes core.Build must go through this
+// wrapper rather than calling it directly, or its build leaks the packager's
+// temp files exactly as before.
+func runCoreBuild(ctx context.Context, deps core.Deps, req core.BuildRequest, opts core.BuildOptions) (core.BuildResult, error) {
+	bctx, cleanup := packager.NewBuildContext(ctx)
+	defer cleanup()
+	return core.Build(bctx, deps, req, opts)
 }
 
 // buildDeps is the composition root: the one place in the program where the
