@@ -79,6 +79,8 @@ type buildFlags struct {
 	requireEnv          []string
 	failOnCVE           string
 	allowIncomplete     bool
+	noPrune             bool
+	keepVendor          []string
 }
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -190,6 +192,10 @@ The project directory defaults to the current working directory.`,
 		"Fail build if base image vulnerabilities exceed threshold (low, medium, high, critical; default warn-only)")
 	cmd.Flags().BoolVar(&flags.allowIncomplete, "allow-incomplete", false,
 		"Allow build to succeed even if base image vulnerability database lookups fail (default: fail closed when --fail-on-cve is active)")
+	cmd.Flags().BoolVar(&flags.noPrune, "no-prune", false,
+		"Disable build-time stripping of non-runtime files (*.d.ts, *.map, tests, docs) from the vendor layer")
+	cmd.Flags().StringSliceVar(&flags.keepVendor, "keep-vendor", nil,
+		"Custom glob pattern(s) of vendor files to preserve during pruning, repeatable (e.g. --keep-vendor='*.md')")
 
 	return cmd
 }
@@ -277,6 +283,8 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		Strategy:    core.BuildStrategy(flags.strategy),
 		Compression: core.CompressionAlgorithm(flags.compression),
 		NoInject:    flags.noInject || !flags.inject,
+		NoPrune:     flags.noPrune,
+		KeepVendor:  flags.keepVendor,
 	}
 
 	// Runtime options

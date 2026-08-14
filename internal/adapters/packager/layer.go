@@ -18,6 +18,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -377,10 +378,9 @@ func BuildCustomFileLayer(ctx context.Context, platform ports.Platform, targetPa
 	return buildLayer(ctx, platform, file, modTime, compression)
 }
 
-// BuildDirectoryTreeLayer builds an OCI layer from a directory tree on host disk,
-// mounting it under targetPrefix in the image (e.g., hostDir="build/client", targetPrefix="/app/client").
-// All entries are explicitly sorted and pinned to modTime and nonroot ownership.
-func BuildDirectoryTreeLayer(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time, compression ports.CompressionAlgorithm) (v1.Layer, error) {
+// BuildDirectoryTreeLayerWithPruning builds an OCI layer from a directory tree on host disk,
+// mounting it under targetPrefix in the image, applying pruneOptions to skip junk files.
+func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time, compression ports.CompressionAlgorithm, pruneOpts pruneutils.PruneOptions) (v1.Layer, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
 	}
@@ -405,6 +405,11 @@ func BuildDirectoryTreeLayer(ctx context.Context, platform ports.Platform, hostD
 		if err != nil {
 			return err
 		}
+
+		if pruneutils.IsJunk(rel, false, pruneOpts) {
+			return nil
+		}
+
 		fi, err := d.Info()
 		if err != nil {
 			return err
@@ -437,4 +442,9 @@ func BuildDirectoryTreeLayer(ctx context.Context, platform ports.Platform, hostD
 		return nil, fmt.Errorf("packager: build %s: build tree layer: %w: %w", platform, err, core.ErrPackageFailed)
 	}
 	return layer, nil
+}
+
+// BuildDirectoryTreeLayer builds an OCI layer from a directory tree on host disk with default options.
+func BuildDirectoryTreeLayer(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time, compression ports.CompressionAlgorithm) (v1.Layer, error) {
+	return BuildDirectoryTreeLayerWithPruning(ctx, platform, hostDir, targetPrefix, modTime, compression, pruneutils.PruneOptions{NoPrune: true})
 }

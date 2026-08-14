@@ -251,6 +251,15 @@ type PackageRequest struct {
 	// AppNativeDir is the host directory containing native .node modules and dynamic .so libraries to package at /app/native (StrategyLayered).
 	AppNativeDir string
 
+	// NoPrune disables vendor layer file pruning when building AppVendorDir layer.
+	NoPrune bool
+
+	// KeepVendor specifies custom glob patterns to preserve during vendor pruning.
+	KeepVendor []string
+
+	// Sourcemap indicates whether sourcemaps should be preserved during packaging.
+	Sourcemap bool
+
 	// Compression specifies the layer compression algorithm (CompressionGzip or CompressionZstd).
 	Compression CompressionAlgorithm
 

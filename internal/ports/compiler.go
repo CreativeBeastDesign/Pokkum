@@ -311,6 +311,12 @@ type PrepareRequest struct {
 
 	// NoInject suppresses the zero-config auto-injection for svelte.config.js.
 	NoInject bool
+
+	// NoPrune disables build-time vendor layer file pruning.
+	NoPrune bool
+
+	// KeepVendor specifies custom glob patterns to preserve during vendor pruning.
+	KeepVendor []string
 }
 
 // TelemetryOptions configures OpenTelemetry auto-instrumentation and metrics collection.

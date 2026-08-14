@@ -442,6 +442,8 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		Platforms:       slices.Clone(req.Platforms),
 		NoInject:        req.Compile.NoInject,
 		Hermetic:        req.Hermetic,
+		NoPrune:         req.Compile.NoPrune,
+		KeepVendor:      slices.Clone(req.Compile.KeepVendor),
 	})
 	if err != nil {
 		return BuildResult{}, err
@@ -719,6 +721,9 @@ func fanOut(
 				CreatedAt:   req.SourceDateEpoch,
 				Labels:      labels,
 				Annotations: req.Annotations,
+				NoPrune:     req.Compile.NoPrune,
+				KeepVendor:  slices.Clone(req.Compile.KeepVendor),
+				Sourcemap:   req.Compile.Sourcemap,
 			}
 
 			if req.Compile.Strategy == StrategyLayered {

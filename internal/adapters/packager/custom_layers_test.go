@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
@@ -119,5 +120,58 @@ func TestBuildDirectoryTreeLayer(t *testing.T) {
 		if !entries[e] {
 			t.Errorf("expected entry %s missing in layer tar", e)
 		}
+	}
+}
+
+func TestBuildDirectoryTreeLayerWithPruning(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	_ = os.WriteFile(filepath.Join(tmpDir, "index.js"), []byte("console.log(1)"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "index.d.ts"), []byte("declare const a: number"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "index.js.map"), []byte("{}"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# Readme"), 0644)
+
+	modTime := time.Unix(1700000000, 0)
+	pruneOpts := pruneutils.PruneOptions{
+		NoPrune:       false,
+		KeepSourcemap: false,
+	}
+
+	layer, err := BuildDirectoryTreeLayerWithPruning(ctx, ports.LinuxAMD64, tmpDir, "/app/vendor", modTime, ports.CompressionGzip, pruneOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rc, err := layer.Uncompressed()
+	if err != nil {
+		t.Fatalf("failed to open uncompressed layer stream: %v", err)
+	}
+	defer rc.Close()
+
+	tr := tar.NewReader(rc)
+	entries := make(map[string]bool)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar read error: %v", err)
+		}
+		entries[hdr.Name] = true
+	}
+
+	if !entries["app/vendor/index.js"] {
+		t.Errorf("expected app/vendor/index.js in layer tar")
+	}
+	if entries["app/vendor/index.d.ts"] {
+		t.Errorf("index.d.ts was not pruned from layer tar")
+	}
+	if entries["app/vendor/index.js.map"] {
+		t.Errorf("index.js.map was not pruned from layer tar")
+	}
+	if entries["app/vendor/README.md"] {
+		t.Errorf("README.md was not pruned from layer tar")
 	}
 }

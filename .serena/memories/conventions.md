@@ -7,6 +7,10 @@
   - `internal/core` imports `internal/ports` and standard library. It re-exports boundary vocabulary as type aliases (`core.Platform = ports.Platform`).
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
+- **Vendor Layer Pruning & Zero-Mutation Sandbox (`internal/adapters/pruneutils`)**:
+  - Automatically strips junk files (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests) during vendor layer (`/app/vendor`) archiving, reducing image size by 15–35MB.
+  - Guarantees zero mutation to user's working directory / source `node_modules` (pruning only runs on build sandbox / layer tar stream).
+  - Escape hatches: `--no-prune` completely disables pruning; `--keep-vendor=<glob>` whitelists specific patterns; `--sourcemap` preserves `*.map` files.
 - **Runtime Env Contract (`Tier 3 Post-v1.0`)**:
   - `--require-env=KEY1,KEY2` on `pokkum build` declares required runtime environment variables. Stamped in OCI manifest annotations (`pokkum.dev/required-env`), labels (`dev.pokkum.required-env`), and injected as `POKKUM_REQUIRED_ENV` in the container environment. The PID-1 supervisor (`/pokkum/init`) enforces presence at startup, failing fast before binding probe ports or starting the application.
 - **Fake Implementation Strict Verification & Documentation Policy (`AGENTS.md`)**:

@@ -95,6 +95,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -214,7 +215,12 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 
 		if req.AppVendorDir != "" {
 			if info, err := os.Stat(req.AppVendorDir); err == nil && info.IsDir() {
-				vendorLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppVendorDir, ports.AppVendorDirPrefix, ts, req.Compression)
+				pruneOpts := pruneutils.PruneOptions{
+					NoPrune:       req.NoPrune,
+					KeepSourcemap: req.Sourcemap,
+					KeepPatterns:  req.KeepVendor,
+				}
+				vendorLayer, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppVendorDir, ports.AppVendorDirPrefix, ts, req.Compression, pruneOpts)
 				if err != nil {
 					return nil, fmt.Errorf("packager: build %s: vendor layer: %w", req.Platform, err)
 				}

@@ -77,6 +77,8 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--bun-variant` | — | — | `standard` | Bun CPU variant (`standard` [AVX2 required on x86-64] or `baseline`). |
 | `--strategy` | — | — | `layered` | Packaging strategy (`layered` [5-layer layout] or `exe` [single executable]). |
 | `--compression` | — | — | `gzip` | Layer compression algorithm (`gzip` or `zstd`). |
+| `--no-prune` | — | — | `false` | Disable build-time stripping of non-runtime files (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests) from `/app/vendor`. |
+| `--keep-vendor` | — | — | (none) | Custom glob pattern(s) of vendor files to preserve during pruning, repeatable (e.g. `--keep-vendor='*.md'`). |
 
 Positional: `[dir]` — project directory, defaults to `.`.
 
