@@ -151,9 +151,33 @@ type ClusterWorkloadState struct {
 
 // ClusterInspector queries a live Kubernetes cluster for a workload's current state.
 // It receives the resource kind (e.g. "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod"),
-// resource name, and namespace. It returns the active annotations and container images, or empty state
-// if the workload does not exist in the cluster.
+// resource name, and namespace.
+//
+// It returns empty state and a nil error when the workload genuinely does not
+// exist in the cluster yet — the expected, unremarkable case for a
+// first-ever deployment. Any other failure (cluster unreachable, expired or
+// invalid credentials, RBAC denial, malformed kubeconfig, or a response the
+// implementation cannot parse) must be returned as a non-nil error rather
+// than folded into empty state: callers rely on this distinction to tell
+// "there is no history because this is new" apart from "there is no history
+// because we could not check", which matters because the latter means
+// rollback history may silently regress to empty.
 type ClusterInspector func(ctx context.Context, kind, name, namespace string) (ClusterWorkloadState, error)
+
+// ClusterInspectionWarning records a non-nil error returned by
+// ClusterInspector for one workload during Resolve. Resolve does not fail
+// the whole call on an inspection error — cluster-history enrichment is
+// best-effort and must not block `apply` from working when the cluster is
+// merely unreachable or the caller's credentials are insufficient — but it
+// surfaces every such failure here so the command layer can report it
+// loudly (e.g. a Warn-level log line) instead of silently proceeding as if
+// the workload were freshly created.
+type ClusterInspectionWarning struct {
+	Kind      string
+	Name      string
+	Namespace string
+	Err       error
+}
 
 // ResolveResult carries the rewritten manifests.
 type ResolveResult struct {
@@ -169,6 +193,14 @@ type ResolveResult struct {
 	// digest reference. Used for the build summary and for --dry-run output.
 	// Empty when the input contained none, which is not an error.
 	References []Reference
+
+	// ClusterInspectionWarnings lists every workload for which
+	// ResolveRequest.ClusterInspector returned a non-nil error. Empty when
+	// cluster inspection was disabled, or succeeded (or found nothing) for
+	// every workload. Never causes Resolve to fail — see ClusterInspector's
+	// doc comment — but the command layer should report these, since each
+	// one means rollback history for that workload may be incomplete.
+	ClusterInspectionWarnings []ClusterInspectionWarning
 }
 
 // Resolver rewrites pokkum:// image references in Kubernetes manifests to

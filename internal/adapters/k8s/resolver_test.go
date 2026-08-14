@@ -1215,6 +1215,64 @@ spec:
 	}
 }
 
+// TestResolver_ClusterInspector_ErrorSurfacedAsWarning pins the distinction
+// this fix introduces at the resolver level: a ClusterInspector error is
+// never silently dropped. Resolve still succeeds (cluster-history
+// enrichment is best-effort and must not block resolving/applying), but the
+// failure is now reported back via ClusterInspectionWarnings so a caller
+// like resolveManifests can warn the operator instead of proceeding as if
+// the workload were freshly created. This is what a real
+// connectivity/RBAC/kubeconfig failure from newKubectlClusterInspector
+// (cmd/pokkum/k8s.go) now looks like once it stops being folded into
+// (empty state, nil error).
+func TestResolver_ClusterInspector_ErrorSurfacedAsWarning(t *testing.T) {
+	r := k8s.NewResolver()
+	ctx := context.Background()
+
+	doc := ports.Document{
+		Name: "deploy.yaml",
+		Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  namespace: prod
+spec:
+  template:
+    spec:
+      containers:
+      - name: web
+        image: pokkum://./src/web
+`),
+	}
+
+	inspectErr := errors.New("Unable to connect to the server: dial tcp 10.0.0.1:6443: i/o timeout")
+	inspector := func(_ context.Context, kind, name, ns string) (ports.ClusterWorkloadState, error) {
+		return ports.ClusterWorkloadState{}, fmt.Errorf("inspect cluster workload %s/%s: %w", strings.ToLower(kind), name, inspectErr)
+	}
+
+	res, err := r.Resolve(ctx, ports.ResolveRequest{
+		Documents:        []ports.Document{doc},
+		ClusterInspector: inspector,
+		Build: func(_ context.Context, _ string) (string, error) {
+			return "ghcr.io/acme/web@sha256:4444444444444444444444444444444444444444444444444444444444444444", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected resolve to succeed despite a cluster inspection failure (best-effort enrichment): %v", err)
+	}
+
+	if len(res.ClusterInspectionWarnings) != 1 {
+		t.Fatalf("expected exactly 1 cluster inspection warning, got %d: %+v", len(res.ClusterInspectionWarnings), res.ClusterInspectionWarnings)
+	}
+	w := res.ClusterInspectionWarnings[0]
+	if w.Kind != "Deployment" || w.Name != "web-app" || w.Namespace != "prod" {
+		t.Errorf("unexpected warning identity: %+v", w)
+	}
+	if w.Err == nil || !errors.Is(w.Err, inspectErr) {
+		t.Errorf("expected warning to wrap the inspector's error, got: %v", w.Err)
+	}
+}
+
 func TestResolver_ClusterInspector_LocalAnnotationsTakePrecedence(t *testing.T) {
 	r := k8s.NewResolver()
 	ctx := context.Background()

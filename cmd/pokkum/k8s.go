@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -81,6 +82,16 @@ func resolveManifests(ctx context.Context, logger *slog.Logger, opts resolveMani
 		return nil, err
 	}
 
+	// Cluster inspection is best-effort history enrichment: it never fails
+	// resolveManifests, but a failure here means a workload's rollback
+	// history may now be incomplete rather than genuinely fresh, and that
+	// distinction is invisible to the operator unless we say so at a log
+	// level that is on by default.
+	for _, w := range res.ClusterInspectionWarnings {
+		logger.Warn("cluster inspection failed; proceeding without live cluster state for this workload (rollback history may be incomplete)",
+			"kind", w.Kind, "name", w.Name, "namespace", w.Namespace, "error", w.Err)
+	}
+
 	logger.Info("manifests resolved", "documents", len(res.Documents), "references", len(res.References))
 	for _, ref := range res.References {
 		logger.Info("resolved image reference", "document", ref.Document, "path", ref.Path, "resolved", ref.Resolved)
@@ -105,9 +116,21 @@ func newKubectlClusterInspector(logger *slog.Logger, kubectlPath string) ports.C
 		cmd := exec.CommandContext(ctx, kubectlPath, args...)
 		out, err := cmd.Output()
 		if err != nil {
-			// Workload not found or cluster unreachable — return empty state gracefully
-			logger.DebugContext(ctx, "cluster workload inspection returned error (treating as fresh workload)", "workload", target, "error", err)
-			return ports.ClusterWorkloadState{}, nil
+			if isKubectlNotFoundErr(err) {
+				// Genuine "no such resource" — the expected, unremarkable
+				// case for a first-ever deployment. Empty state, no error.
+				logger.DebugContext(ctx, "workload not found in cluster (treating as fresh workload)", "workload", target, "namespace", namespace)
+				return ports.ClusterWorkloadState{}, nil
+			}
+			// Every other failure — unreachable cluster, expired/invalid
+			// credentials, RBAC denial, malformed kubeconfig, kubectl itself
+			// missing or crashing — is NOT the same thing as "this workload
+			// is new", and must not be silently folded into empty state:
+			// that would quietly reset a workload's rollback history on
+			// every apply for as long as the cluster stays unreachable. Make
+			// it a real error so the caller can decide how loudly to
+			// surface it.
+			return ports.ClusterWorkloadState{}, fmt.Errorf("inspect cluster workload %s: %w", target, describeKubectlErr(err))
 		}
 
 		var obj struct {
@@ -134,8 +157,11 @@ func newKubectlClusterInspector(logger *slog.Logger, kubectlPath string) ports.C
 		}
 
 		if jerr := json.Unmarshal(out, &obj); jerr != nil {
-			logger.DebugContext(ctx, "failed to unmarshal live workload json", "workload", target, "error", jerr)
-			return ports.ClusterWorkloadState{}, nil
+			// kubectl exited 0 but produced something we can't parse as the
+			// workload object we expect. That is not "no history" either —
+			// it means we genuinely don't know the cluster's state — so
+			// surface it rather than silently treating it as fresh.
+			return ports.ClusterWorkloadState{}, fmt.Errorf("unmarshal live workload json for %s: %w", target, jerr)
 		}
 
 		ann := make(map[string]string)
@@ -165,6 +191,44 @@ func newKubectlClusterInspector(logger *slog.Logger, kubectlPath string) ports.C
 			Containers:  containers,
 		}, nil
 	}
+}
+
+// isKubectlNotFoundErr reports whether err is kubectl exiting because the
+// requested resource genuinely does not exist in the cluster, as opposed to
+// any other failure (connectivity, auth, RBAC, a malformed kubeconfig, or
+// kubectl failing to even run).
+//
+// `kubectl get <kind>/<name> -o json` reports a missing resource as an API
+// server error wrapped by kubectl's own error printer in the form
+// "Error from server (NotFound): <resource> \"<name>\" not found" — the
+// "(NotFound)" parenthetical is the Kubernetes API's machine-readable
+// StatusReason and is stable across kubectl versions and server
+// implementations, unlike the free-text message around it. Any other
+// exec failure — including one where kubectl produced no stderr at all,
+// e.g. because it could not be executed — is treated as NOT a not-found and
+// must be surfaced to the caller as a real error.
+func isKubectlNotFoundErr(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		// Not a process exit at all (e.g. kubectl binary missing, context
+		// cancelled) — definitely not "resource not found".
+		return false
+	}
+	return strings.Contains(string(exitErr.Stderr), "(NotFound)")
+}
+
+// describeKubectlErr enriches err with kubectl's stderr, when available, so
+// that a warning or error surfaced further up the stack tells the operator
+// *why* cluster inspection failed (unreachable server, RBAC denial,
+// malformed kubeconfig, ...) instead of just "exit status 1".
+func describeKubectlErr(err error) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			return fmt.Errorf("%s: %w", stderr, err)
+		}
+	}
+	return err
 }
 
 // newImageBuilder returns the ports.ImageBuilder that turns a pokkum://<path>

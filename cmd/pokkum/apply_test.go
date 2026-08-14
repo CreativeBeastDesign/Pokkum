@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -172,5 +173,109 @@ exit 1
 	}
 	if len(state.Annotations) != 0 || len(state.Containers) != 0 {
 		t.Errorf("expected empty state on not found, got: %v", state)
+	}
+}
+
+// TestKubectlClusterInspector_UnreachableSurfacesError pins the fix for the
+// confirmed bug: an unreachable cluster (flaky VPN, DNS down, ...) must not
+// be folded into the same "empty state, nil error" outcome as a genuine
+// not-found. Before the fix, this fake kubectl produced output
+// indistinguishable from TestKubectlClusterInspector_NotFoundGraceful above,
+// which is exactly what let rollback history quietly reset to "fresh
+// deployment" on a flaky connection.
+func TestKubectlClusterInspector_UnreachableSurfacesError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping shell script test on windows")
+	}
+
+	dir := t.TempDir()
+	kubectlPath := filepath.Join(dir, "kubectl")
+	script := `#!/bin/sh
+echo "Unable to connect to the server: dial tcp 10.0.0.1:6443: i/o timeout" >&2
+exit 1
+`
+	if err := os.WriteFile(kubectlPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake kubectl: %v", err)
+	}
+
+	inspector := newKubectlClusterInspector(discardLogger(), kubectlPath)
+	state, err := inspector(context.Background(), "Deployment", "web-app", "prod")
+	if err == nil {
+		t.Fatal("expected a non-nil error when the cluster is unreachable, got nil (would be indistinguishable from a fresh deployment)")
+	}
+	if !strings.Contains(err.Error(), "Unable to connect to the server") {
+		t.Errorf("expected error to carry kubectl's stderr for diagnosis, got: %v", err)
+	}
+	if len(state.Annotations) != 0 || len(state.Containers) != 0 {
+		t.Errorf("expected empty state alongside the error, got: %v", state)
+	}
+}
+
+// TestKubectlClusterInspector_ForbiddenSurfacesError does the same for an
+// RBAC denial: insufficient permissions must not read as "no history
+// because this is new" either.
+func TestKubectlClusterInspector_ForbiddenSurfacesError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping shell script test on windows")
+	}
+
+	dir := t.TempDir()
+	kubectlPath := filepath.Join(dir, "kubectl")
+	script := `#!/bin/sh
+echo 'Error from server (Forbidden): deployments.apps "web-app" is forbidden: User "ci" cannot get resource "deployments" in API group "apps" in the namespace "prod"' >&2
+exit 1
+`
+	if err := os.WriteFile(kubectlPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake kubectl: %v", err)
+	}
+
+	inspector := newKubectlClusterInspector(discardLogger(), kubectlPath)
+	state, err := inspector(context.Background(), "Deployment", "web-app", "prod")
+	if err == nil {
+		t.Fatal("expected a non-nil error on RBAC Forbidden, got nil (would be indistinguishable from a fresh deployment)")
+	}
+	if !strings.Contains(err.Error(), "Forbidden") {
+		t.Errorf("expected error to carry kubectl's Forbidden stderr for diagnosis, got: %v", err)
+	}
+	if len(state.Annotations) != 0 || len(state.Containers) != 0 {
+		t.Errorf("expected empty state alongside the error, got: %v", state)
+	}
+}
+
+// TestKubectlClusterInspector_NotFoundVsUnreachable_Distinguishable is the
+// direct empirical check the audit demanded: NotFound and Unreachable must
+// no longer produce the same (state, err) pair.
+func TestKubectlClusterInspector_NotFoundVsUnreachable_Distinguishable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping shell script test on windows")
+	}
+
+	newFakeKubectl := func(t *testing.T, stderr string) string {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "kubectl")
+		script := "#!/bin/sh\necho " + strconv.Quote(stderr) + " >&2\nexit 1\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatalf("write fake kubectl: %v", err)
+		}
+		return path
+	}
+
+	notFound := newKubectlClusterInspector(discardLogger(), newFakeKubectl(t, `Error from server (NotFound): deployments.apps "missing" not found`))
+	unreachable := newKubectlClusterInspector(discardLogger(), newFakeKubectl(t, "Unable to connect to the server: dial tcp 10.0.0.1:6443: i/o timeout"))
+	forbidden := newKubectlClusterInspector(discardLogger(), newFakeKubectl(t, `Error from server (Forbidden): deployments.apps "x" is forbidden`))
+
+	_, notFoundErr := notFound(context.Background(), "Deployment", "missing", "default")
+	_, unreachableErr := unreachable(context.Background(), "Deployment", "web-app", "prod")
+	_, forbiddenErr := forbidden(context.Background(), "Deployment", "web-app", "prod")
+
+	if notFoundErr != nil {
+		t.Errorf("expected NotFound to remain graceful (nil error), got %v", notFoundErr)
+	}
+	if unreachableErr == nil {
+		t.Error("expected Unreachable to produce a non-nil error")
+	}
+	if forbiddenErr == nil {
+		t.Error("expected Forbidden to produce a non-nil error")
 	}
 }

@@ -561,6 +561,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 
 	resultDocs := make([]ports.Document, len(req.Documents))
 	var references []ports.Reference
+	var clusterWarnings []ports.ClusterInspectionWarning
 
 	for i, pd := range parsedDocs {
 		if !pd.hasPokkum {
@@ -579,7 +580,22 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 		if req.ClusterInspector != nil && docRoot != nil {
 			kind, name, ns := getDocKindAndMeta(docRoot)
 			if kind != "" && name != "" {
-				if st, err := req.ClusterInspector(ctx, kind, name, ns); err == nil {
+				st, err := req.ClusterInspector(ctx, kind, name, ns)
+				if err != nil {
+					// Best-effort: cluster-history enrichment must never
+					// block apply, so an inspection failure here does not
+					// fail Resolve. It is still surfaced — never silently
+					// dropped — via ClusterInspectionWarnings so the command
+					// layer can warn the operator that rollback history for
+					// this workload may now be incomplete rather than
+					// genuinely empty.
+					clusterWarnings = append(clusterWarnings, ports.ClusterInspectionWarning{
+						Kind:      kind,
+						Name:      name,
+						Namespace: ns,
+						Err:       err,
+					})
+				} else {
 					clusterState = st
 				}
 			}
@@ -701,8 +717,9 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 	}
 
 	return ports.ResolveResult{
-		Documents:  resultDocs,
-		References: references,
+		Documents:                 resultDocs,
+		References:                references,
+		ClusterInspectionWarnings: clusterWarnings,
 	}, nil
 }
 

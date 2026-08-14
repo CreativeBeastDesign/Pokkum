@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -247,6 +249,65 @@ spec:
 	wantImage := "image: ghcr.io/test/repo/src@sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	if !strings.Contains(outStr, wantImage) {
 		t.Errorf("expected resolved manifest to contain %q, got:\n%s", wantImage, outStr)
+	}
+}
+
+// TestResolveManifests_ClusterInspectionWarningIsLogged confirms the visible
+// half of the fix: when the resolver reports a ClusterInspectionWarning
+// (i.e. ports.ClusterInspector returned a real error, not a graceful
+// not-found), resolveManifests logs it at Warn level — visible at the
+// default --log-level=INFO — instead of the previous behaviour where the
+// only trace of the failure was a Debug line nobody sees by default.
+func TestResolveManifests_ClusterInspectionWarningIsLogged(t *testing.T) {
+	t.Setenv("POKKUM_DOCKER_REPO", "ghcr.io/test/repo")
+
+	manifestDir := t.TempDir()
+	manifestPath := filepath.Join(manifestDir, "test.yaml")
+	writeFile(t, manifestPath, `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  namespace: prod
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: pokkum://./src
+`)
+
+	mockBuilder := func(_ context.Context, _ string) (string, error) {
+		return "ghcr.io/test/repo/src@sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
+	}
+	failingInspector := func(_ context.Context, kind, name, ns string) (ports.ClusterWorkloadState, error) {
+		return ports.ClusterWorkloadState{}, fmt.Errorf("inspect cluster workload %s/%s in %s: Unable to connect to the server: dial tcp: i/o timeout", kind, name, ns)
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	out, err := resolveManifests(context.Background(), logger, resolveManifestsOptions{
+		File:             manifestPath,
+		ImageBuilder:     mockBuilder,
+		ClusterInspector: failingInspector,
+	})
+	if err != nil {
+		t.Fatalf("resolveManifests: expected success despite the cluster inspection failure (best-effort), got: %v", err)
+	}
+	if !strings.Contains(string(out), "sha256:1111111111111111111111111111111111111111111111111111111111111111") {
+		t.Fatalf("expected the manifest to still be resolved, got:\n%s", out)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "level=WARN") {
+		t.Errorf("expected a Warn-level log line (visible at the default INFO log level) for the cluster inspection failure, got log output:\n%s", logged)
+	}
+	if !strings.Contains(logged, "cluster inspection failed") {
+		t.Errorf("expected the warning to explain that cluster inspection failed, got log output:\n%s", logged)
+	}
+	if !strings.Contains(logged, "web-app") || !strings.Contains(logged, "prod") {
+		t.Errorf("expected the warning to identify the affected workload, got log output:\n%s", logged)
 	}
 }
 
