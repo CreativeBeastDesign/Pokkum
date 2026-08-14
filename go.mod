@@ -1,11 +1,12 @@
 module github.com/CreativeBeastDesign/pokkum
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/anchore/syft v1.50.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/docker/cli v29.6.2+incompatible
+	github.com/docker/docker-credential-helpers v0.9.5
 	github.com/google/go-containerregistry v0.21.9
 	github.com/google/uuid v1.6.0
 	github.com/moby/moby/client v0.5.1
@@ -119,7 +120,6 @@ require (
 	github.com/digitorus/timestamp v0.0.0-20231217203849-220c5c2851b7 // indirect
 	github.com/diskfs/go-diskfs v1.9.3 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/docker-credential-helpers v0.9.5 // indirect
 	github.com/docker/go-connections v0.7.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
