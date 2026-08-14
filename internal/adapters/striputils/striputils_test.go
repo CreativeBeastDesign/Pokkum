@@ -65,20 +65,26 @@ func TestStripDirectory(t *testing.T) {
 	ctx := context.Background()
 	modTime := time.Unix(1700000000, 0)
 
-	count, err := striputils.StripDirectory(ctx, nativeDir, modTime)
+	count, skipped, err := striputils.StripDirectory(ctx, nativeDir, modTime)
 	if err != nil {
 		t.Fatalf("StripDirectory failed: %v", err)
 	}
 	if count != 0 {
 		t.Errorf("expected count=0, got %d", count)
 	}
+	if len(skipped) != 0 {
+		t.Errorf("expected no skipped files for a directory with no ELF binaries, got %v", skipped)
+	}
 
 	// Non-existent directory
-	count, err = striputils.StripDirectory(ctx, filepath.Join(tmpDir, "nonexistent"), modTime)
+	count, skipped, err = striputils.StripDirectory(ctx, filepath.Join(tmpDir, "nonexistent"), modTime)
 	if err != nil {
 		t.Fatalf("unexpected error on missing dir: %v", err)
 	}
 	if count != 0 {
 		t.Errorf("expected count=0 on missing dir")
+	}
+	if len(skipped) != 0 {
+		t.Errorf("expected no skipped files on missing dir, got %v", skipped)
 	}
 }

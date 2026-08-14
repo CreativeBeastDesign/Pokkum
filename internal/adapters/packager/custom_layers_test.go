@@ -138,7 +138,7 @@ func TestBuildDirectoryTreeLayerWithPruning(t *testing.T) {
 		KeepSourcemap: false,
 	}
 
-	layer, err := BuildDirectoryTreeLayerWithPruning(ctx, ports.LinuxAMD64, tmpDir, "/app/vendor", modTime, ports.CompressionGzip, pruneOpts)
+	layer, pruned, err := BuildDirectoryTreeLayerWithPruning(ctx, ports.LinuxAMD64, tmpDir, "/app/vendor", modTime, ports.CompressionGzip, pruneOpts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -173,6 +173,28 @@ func TestBuildDirectoryTreeLayerWithPruning(t *testing.T) {
 	}
 	if entries["app/vendor/README.md"] {
 		t.Errorf("README.md was not pruned from layer tar")
+	}
+
+	// PruneResult must account for exactly the three junk files above: this is
+	// the only production code path that runs pruning (see BuildDirectoryTreeLayerWithPruning's
+	// doc comment), so if this accounting is wrong, the build-log summary in
+	// Packager.Build silently lies about what was removed from the image.
+	if pruned.FilesPruned != 3 {
+		t.Errorf("expected 3 files pruned, got %d (%v)", pruned.FilesPruned, pruned.PrunedPaths)
+	}
+	wantPruned := map[string]bool{"index.d.ts": true, "index.js.map": true, "README.md": true}
+	for _, p := range pruned.PrunedPaths {
+		if !wantPruned[p] {
+			t.Errorf("unexpected path in PrunedPaths: %q", p)
+		}
+		delete(wantPruned, p)
+	}
+	if len(wantPruned) != 0 {
+		t.Errorf("PrunedPaths missing expected entries: %v", wantPruned)
+	}
+	wantBytes := int64(len("declare const a: number") + len("{}") + len("# Readme"))
+	if pruned.BytesSaved != wantBytes {
+		t.Errorf("expected BytesSaved %d, got %d", wantBytes, pruned.BytesSaved)
 	}
 }
 

@@ -1,8 +1,6 @@
 package pruneutils
 
 import (
-	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -14,6 +12,10 @@ const IsUtilityPackage = true
 
 // DefaultJunkPatterns defines default patterns for files in node_modules/vendor directories
 // that are not needed at production runtime.
+//
+// Documentation/metadata files (README, LICENSE, CHANGELOG, ...) are deliberately NOT
+// listed here as wildcard prefixes: see docBaseNames/isDocFile below for why, and for
+// how they are matched instead.
 var DefaultJunkPatterns = []string{
 	// TypeScript definitions and configs
 	"**/*.d.ts",
@@ -28,24 +30,27 @@ var DefaultJunkPatterns = []string{
 	// Source maps (pruned unless KeepSourcemap is true)
 	"**/*.map",
 
-	// Documentation and project metadata
-	"**/README*",
-	"**/readme*",
-	"**/Readme*",
-	"**/CHANGELOG*",
-	"**/changelog*",
-	"**/CHANGES*",
-	"**/HISTORY*",
-	"**/LICENSE*",
-	"**/license*",
-	"**/LICENCE*",
-	"**/licence*",
-	"**/AUTHORS*",
-	"**/CONTRIBUTORS*",
+	// Project metadata that isn't a "doc file" in the README/LICENSE sense but is
+	// still never needed at runtime.
 	"**/.npmignore",
 	"**/.eslintrc*",
 	"**/.prettierrc*",
 	"**/.editorconfig",
+	"**/CODEOWNERS",
+
+	// OS/editor cruft, VCS files and lockfiles: never read at runtime, and their
+	// names don't collide with real module names, so a plain wildcard is safe here.
+	"**/.DS_Store",
+	"**/.gitignore",
+	"**/.gitattributes",
+	"**/.npmrc",
+	"**/yarn.lock",
+	"**/package-lock.json",
+	"**/pnpm-lock.yaml",
+	"**/.vscode/**",
+	"**/.idea/**",
+	"**/.yarn/cache/**",
+	"**/*.log",
 
 	// Tests and tooling
 	"**/__tests__/**",
@@ -69,6 +74,59 @@ var DefaultJunkPatterns = []string{
 	"**/docker-compose*.yml",
 }
 
+// docBaseNames are the canonical, lowercase basenames of common documentation and
+// project-metadata files. isDocFile compares a file's basename against these
+// case-insensitively, so README/Readme/readme/ReadMe are all treated alike.
+var docBaseNames = []string{
+	"readme",
+	"changelog",
+	"changes",
+	"history",
+	"license",
+	"licence",
+	"authors",
+	"contributors",
+	"notice",
+}
+
+// docExtensions are the file extensions (including the leading dot) recognized as
+// documentation/text formats when appended to a docBaseNames entry. The empty
+// string matches the bare name (e.g. "LICENSE" with no extension at all, which is
+// the most common real-world convention).
+var docExtensions = []string{
+	"",
+	".md", ".markdown", ".mdown", ".mkd", ".mkdn",
+	".txt", ".text",
+	".rst", ".adoc", ".asciidoc", ".textile", ".rdoc", ".org", ".creole", ".pod",
+	".wiki", ".1st", ".rtf",
+}
+
+// isDocFile reports whether base (a bare filename, no directory component) is a
+// documentation/metadata file such as README.md or LICENSE.
+//
+// This is deliberately NOT a "**/README*" style wildcard prefix match: that
+// pattern also matches real runtime source files that merely start with the same
+// word, e.g. "readme.js" or "license-checker.js", and would silently delete them
+// from the vendor layer. Instead this requires the basename (case-insensitively)
+// to be exactly one of the known words, optionally followed by a recognized
+// documentation extension — so "README", "README.md" and "readme.txt" match, but
+// "readme.js" and "license-checker.js" do not.
+func isDocFile(base string) bool {
+	lower := strings.ToLower(base)
+	for _, name := range docBaseNames {
+		if !strings.HasPrefix(lower, name) {
+			continue
+		}
+		suffix := lower[len(name):]
+		for _, ext := range docExtensions {
+			if suffix == ext {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // PruneOptions configures vendor pruning behaviour.
 type PruneOptions struct {
 	NoPrune       bool     // Disable pruning entirely
@@ -76,7 +134,14 @@ type PruneOptions struct {
 	KeepPatterns  []string // Additional glob patterns to keep/whitelist
 }
 
-// PruneResult records what was removed during a prune run.
+// PruneResult records what was pruned from a vendor directory tree: how many
+// files were excluded from the packaged layer, how many bytes that saved, and
+// (for callers that want the detail) which relative paths were excluded.
+//
+// This is populated by packager.BuildDirectoryTreeLayerWithPruning as it walks
+// the tree deciding, file by file, what to include in the layer — pruning here
+// never touches the host filesystem, it only omits junk files from the tar
+// stream being built.
 type PruneResult struct {
 	FilesPruned int
 	BytesSaved  int64
@@ -84,8 +149,11 @@ type PruneResult struct {
 }
 
 // IsJunk returns true if relPath (slash-separated relative path) matches junk blocklists
-// and is not exempted by KeepPatterns or KeepSourcemap.
-func IsJunk(relPath string, isDir bool, opts PruneOptions) bool {
+// and is not exempted by KeepPatterns or KeepSourcemap. The isDir flag is accepted for
+// parity with callers that already know whether relPath is a directory (matching itself
+// is path/pattern based and works the same for files and directories), but is not
+// currently needed to decide the match.
+func IsJunk(relPath string, _ bool, opts PruneOptions) bool {
 	if opts.NoPrune {
 		return false
 	}
@@ -111,6 +179,10 @@ func IsJunk(relPath string, isDir bool, opts PruneOptions) bool {
 		return false
 	}
 
+	if isDocFile(base) {
+		return true
+	}
+
 	for _, pattern := range DefaultJunkPatterns {
 		if !opts.KeepSourcemap && pattern == "**/*.map" && strings.HasSuffix(normPath, ".map") {
 			return true
@@ -124,93 +196,4 @@ func IsJunk(relPath string, isDir bool, opts PruneOptions) bool {
 	}
 
 	return false
-}
-
-// PruneDirectory walks dir and deletes any files matching junk patterns.
-// Empty directories resulting from pruned files are also cleaned up.
-// It returns a PruneResult summarizing files removed and bytes saved.
-func PruneDirectory(dir string, opts PruneOptions) (PruneResult, error) {
-	if opts.NoPrune {
-		return PruneResult{}, nil
-	}
-
-	info, err := os.Stat(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return PruneResult{}, nil
-		}
-		return PruneResult{}, fmt.Errorf("pruneutils: stat %s: %w", dir, err)
-	}
-	if !info.IsDir() {
-		return PruneResult{}, fmt.Errorf("pruneutils: %s is not a directory", dir)
-	}
-
-	var res PruneResult
-	var dirsToClean []string
-
-	err = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if p == dir {
-			return nil
-		}
-
-		rel, err := filepath.Rel(dir, p)
-		if err != nil {
-			return err
-		}
-
-		isDir := d.IsDir()
-		if IsJunk(rel, isDir, opts) {
-			if isDir {
-				// Remove entire directory and track
-				var dirSize int64
-				_ = filepath.WalkDir(p, func(_ string, subD os.DirEntry, _ error) error {
-					if subD != nil && !subD.IsDir() {
-						if fi, err := subD.Info(); err == nil {
-							dirSize += fi.Size()
-							res.FilesPruned++
-						}
-					}
-					return nil
-				})
-				if rmErr := os.RemoveAll(p); rmErr == nil {
-					res.BytesSaved += dirSize
-					res.PrunedPaths = append(res.PrunedPaths, rel)
-				}
-				return filepath.SkipDir
-			}
-
-			// Single regular file
-			if fi, fiErr := d.Info(); fiErr == nil {
-				res.BytesSaved += fi.Size()
-			}
-			if rmErr := os.Remove(p); rmErr == nil {
-				res.FilesPruned++
-				res.PrunedPaths = append(res.PrunedPaths, rel)
-			}
-			return nil
-		}
-
-		if isDir {
-			dirsToClean = append(dirsToClean, p)
-		}
-		return nil
-	})
-
-	if err != nil {
-		return res, fmt.Errorf("pruneutils: walk %s: %w", dir, err)
-	}
-
-	// Clean up empty directories from deepest to shallowest
-	for i := len(dirsToClean) - 1; i >= 0; i-- {
-		d := dirsToClean[i]
-		entries, err := os.ReadDir(d)
-		if err == nil && len(entries) == 0 {
-			_ = os.Remove(d)
-		}
-	}
-
-	return res, nil
 }

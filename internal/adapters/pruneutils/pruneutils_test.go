@@ -1,8 +1,6 @@
 package pruneutils_test
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
@@ -100,82 +98,97 @@ func TestIsJunk_NoPrune(t *testing.T) {
 	}
 }
 
-func TestPruneDirectory_RealFilesystem(t *testing.T) {
-	dir := t.TempDir()
+// TestIsJunk_DocFilesNotFalsePositive pins the fix for a false-positive bug: the old
+// "**/README*"-style wildcard prefixes matched any file whose name merely started with
+// a doc word, so real runtime source files like readme.js or license-checker.js were
+// silently deleted from the vendor layer (surfacing as a require()/import
+// module-not-found crash at container startup). Genuine doc files must still be pruned.
+func TestIsJunk_DocFilesNotFalsePositive(t *testing.T) {
+	opts := pruneutils.PruneOptions{}
 
-	files := map[string]string{
-		"index.js":                       "console.log('hello');",
-		"index.d.ts":                     "export declare function hello(): void;",
-		"index.js.map":                   "{\"version\":3}",
-		"README.md":                      "# Package README",
-		"LICENSE":                        "MIT License",
-		"__tests__/helper.test.js":       "test('ok', () => {});",
-		"sub/nested.js":                  "module.exports = {};",
-		"sub/nested.d.ts":                "export declare const nested: any;",
-		"empty_after_prune/spec.test.js": "test()",
+	notJunk := []string{
+		"src/readme.js",
+		"readme.js",
+		"lib/license-checker.js",
+		"license-checker.js",
+		"authors.ts",
+		"contributors-list.mjs",
+		"changelogger.js",
+		"historybook.js",
+		"noticeboard.js",
 	}
-
-	for rel, content := range files {
-		fullPath := filepath.Join(dir, rel)
-		_ = os.MkdirAll(filepath.Dir(fullPath), 0o755)
-		_ = os.WriteFile(fullPath, []byte(content), 0o644)
-	}
-
-	res, err := pruneutils.PruneDirectory(dir, pruneutils.PruneOptions{})
-	if err != nil {
-		t.Fatalf("PruneDirectory failed: %v", err)
-	}
-
-	if res.FilesPruned < 6 {
-		t.Errorf("expected at least 6 files pruned, got %d", res.FilesPruned)
-	}
-	if res.BytesSaved <= 0 {
-		t.Errorf("expected BytesSaved > 0, got %d", res.BytesSaved)
+	for _, p := range notJunk {
+		if pruneutils.IsJunk(p, false, opts) {
+			t.Errorf("IsJunk(%q) = true; want false (runtime source file, not a doc file)", p)
+		}
 	}
 
-	// Ensure runtime files exist
-	if _, err := os.Stat(filepath.Join(dir, "index.js")); err != nil {
-		t.Errorf("index.js was deleted unexpectedly: %v", err)
+	stillJunk := []string{
+		"README.md",
+		"README",
+		"readme.txt",
+		"Readme.markdown",
+		"ReadMe.md", // mixed case (finding 4)
+		"LICENSE",
+		"LICENSE.txt",
+		"license",
+		"LICENCE",
+		"CHANGELOG.md",
+		"CHANGES",
+		"HISTORY.md",
+		"AUTHORS",
+		"CONTRIBUTORS.md",
+		"NOTICE",
+		"lib/README.md",
 	}
-	if _, err := os.Stat(filepath.Join(dir, "sub", "nested.js")); err != nil {
-		t.Errorf("sub/nested.js was deleted unexpectedly: %v", err)
-	}
-
-	// Ensure junk files were removed
-	if _, err := os.Stat(filepath.Join(dir, "index.d.ts")); !os.IsNotExist(err) {
-		t.Errorf("index.d.ts was not pruned")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "index.js.map")); !os.IsNotExist(err) {
-		t.Errorf("index.js.map was not pruned")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "README.md")); !os.IsNotExist(err) {
-		t.Errorf("README.md was not pruned")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "__tests__")); !os.IsNotExist(err) {
-		t.Errorf("__tests__ directory was not pruned")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "empty_after_prune")); !os.IsNotExist(err) {
-		t.Errorf("empty_after_prune folder was not cleaned up")
+	for _, p := range stillJunk {
+		if !pruneutils.IsJunk(p, false, opts) {
+			t.Errorf("IsJunk(%q) = false; want true (genuine doc file)", p)
+		}
 	}
 }
 
-func TestPruneDirectory_KeepSourcemap(t *testing.T) {
-	dir := t.TempDir()
+// TestIsJunk_NewJunkPatterns pins finding 2: common junk that DefaultJunkPatterns
+// previously missed entirely (.DS_Store, lockfiles, editor directories, log files, ...).
+// Each new pattern is also checked against a lookalike runtime filename to confirm it
+// doesn't over-match.
+func TestIsJunk_NewJunkPatterns(t *testing.T) {
+	opts := pruneutils.PruneOptions{}
 
-	_ = os.WriteFile(filepath.Join(dir, "app.js"), []byte("runtime"), 0o644)
-	_ = os.WriteFile(filepath.Join(dir, "app.js.map"), []byte("{\"version\":3}"), 0o644)
-	_ = os.WriteFile(filepath.Join(dir, "app.d.ts"), []byte("declare const a: number;"), 0o644)
+	cases := []struct {
+		path  string
+		isDir bool
+		want  bool
+	}{
+		{".DS_Store", false, true},
+		{"sub/.DS_Store", false, true},
+		{".gitignore", false, true},
+		{".gitattributes", false, true},
+		{".npmrc", false, true},
+		{"yarn.lock", false, true},
+		{"package-lock.json", false, true},
+		{"pnpm-lock.yaml", false, true},
+		{".vscode/settings.json", false, true},
+		{".vscode", true, true},
+		{".idea/workspace.xml", false, true},
+		{".idea", true, true},
+		{".yarn/cache/foo-1.0.0.zip", false, true},
+		{"npm-debug.log", false, true},
+		{"yarn-error.log", false, true},
+		{"CODEOWNERS", false, true},
+		{".github/CODEOWNERS", false, true},
 
-	res, err := pruneutils.PruneDirectory(dir, pruneutils.PruneOptions{KeepSourcemap: true})
-	if err != nil {
-		t.Fatalf("PruneDirectory failed: %v", err)
+		// Lookalikes that must NOT be over-matched by the new patterns.
+		{"dialogHandler.js", false, false},
+		{"catalog.js", false, false},
+		{"lockfile.js", false, false},
+		{"vscode-languageclient.js", false, false},
 	}
 
-	if res.FilesPruned != 1 {
-		t.Errorf("expected 1 file pruned (app.d.ts), got %d", res.FilesPruned)
-	}
-
-	if _, err := os.Stat(filepath.Join(dir, "app.js.map")); err != nil {
-		t.Errorf("app.js.map was deleted despite KeepSourcemap: %v", err)
+	for _, tc := range cases {
+		got := pruneutils.IsJunk(tc.path, tc.isDir, opts)
+		if got != tc.want {
+			t.Errorf("IsJunk(%q, isDir=%v) = %v; want %v", tc.path, tc.isDir, got, tc.want)
+		}
 	}
 }

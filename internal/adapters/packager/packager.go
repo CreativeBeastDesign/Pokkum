@@ -221,16 +221,23 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		if req.AppVendorDir != "" {
 			if info, err := os.Stat(req.AppVendorDir); err == nil && info.IsDir() {
 				if !req.NoStrip {
-					_, _ = striputils.StripDirectory(ctx, req.AppVendorDir, ts)
+					stripped, skipped, stripErr := striputils.StripDirectory(ctx, req.AppVendorDir, ts)
+					p.warnUnstripped(req.AppVendorDir, stripped, skipped, stripErr)
 				}
 				pruneOpts := pruneutils.PruneOptions{
 					NoPrune:       req.NoPrune,
 					KeepSourcemap: req.Sourcemap,
 					KeepPatterns:  req.KeepVendor,
 				}
-				vendorLayer, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppVendorDir, ports.AppVendorDirPrefix, ts, req.Compression, pruneOpts)
+				vendorLayer, pruned, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppVendorDir, ports.AppVendorDirPrefix, ts, req.Compression, pruneOpts)
 				if err != nil {
 					return nil, fmt.Errorf("packager: build %s: vendor layer: %w", req.Platform, err)
+				}
+				if pruned.FilesPruned > 0 {
+					p.logger().Info("pruned vendor layer junk files",
+						"platform", req.Platform.String(),
+						"files_pruned", pruned.FilesPruned,
+						"bytes_saved", pruned.BytesSaved)
 				}
 				addenda = append(addenda, mutate.Addendum{
 					Layer:     vendorLayer,
@@ -243,7 +250,8 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		if req.AppNativeDir != "" {
 			if info, err := os.Stat(req.AppNativeDir); err == nil && info.IsDir() {
 				if !req.NoStrip {
-					_, _ = striputils.StripDirectory(ctx, req.AppNativeDir, ts)
+					stripped, skipped, stripErr := striputils.StripDirectory(ctx, req.AppNativeDir, ts)
+					p.warnUnstripped(req.AppNativeDir, stripped, skipped, stripErr)
 				}
 				nativeLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppNativeDir, ports.AppNativeDirPrefix, ts, req.Compression)
 				if err != nil {
@@ -456,4 +464,28 @@ func (p *Packager) logger() *slog.Logger {
 		return slog.Default()
 	}
 	return p.log
+}
+
+// warnUnstripped surfaces the result of a striputils.StripDirectory call.
+// Stripping is a best-effort size optimization, not a correctness or
+// security gate, so a host without a working ELF strip tool (e.g. plain
+// macOS, where the built-in `strip` is Mach-O-only) must not fail the
+// build — but it must not fail *silently* either, which is what happened
+// before this warning existed: the caller discarded both the count and the
+// error, so native addons were shipped completely unstripped with no
+// signal that the feature had quietly done nothing.
+func (p *Packager) warnUnstripped(dir string, stripped int, skipped []string, err error) {
+	if len(skipped) > 0 {
+		p.logger().Warn("native binaries left unstripped: no working ELF strip tool found",
+			"dir", dir,
+			"strippedCount", stripped,
+			"skippedCount", len(skipped),
+			"skipped", skipped,
+			"reason", err,
+		)
+		return
+	}
+	if err != nil {
+		p.logger().Warn("strip directory walk failed", "dir", dir, "err", err)
+	}
 }
