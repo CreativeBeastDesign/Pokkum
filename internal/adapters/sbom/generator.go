@@ -282,8 +282,30 @@ func (g *Generator) buildMatcher(req ports.SBOMRequest) (*ignoreutils.Matcher, e
 }
 
 func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage) ([]byte, error) {
-	spdxPackages := make([]map[string]any, 0, len(packages))
-	relationships := make([]map[string]any, 0, len(packages))
+	spdxPackages := make([]map[string]any, 0, len(packages)+1)
+	relationships := make([]map[string]any, 0, len(packages)+1)
+
+	// The root package describes the project/application itself (its own name and
+	// version), distinct from its dependencies below. SPDX documents are expected to
+	// DESCRIBES a single top-level element, with that element's dependencies attached
+	// via DEPENDS_ON -- so the document version isn't lost and each dependency package
+	// still carries its own versionInfo.
+	rootSPDXID := fmt.Sprintf("SPDXRef-RootPackage-%s-%s", sanitizeSPDXID(name), sanitizeSPDXID(version))
+	spdxPackages = append(spdxPackages, map[string]any{
+		"SPDXID":           rootSPDXID,
+		"name":             name,
+		"versionInfo":      version,
+		"downloadLocation": "NOASSERTION",
+		"filesAnalyzed":    false,
+		"licenseConcluded": "NOASSERTION",
+		"licenseDeclared":  "NOASSERTION",
+		"copyrightText":    "NOASSERTION",
+	})
+	relationships = append(relationships, map[string]any{
+		"spdxElementId":      "SPDXRef-DOCUMENT",
+		"relatedSpdxElement": rootSPDXID,
+		"relationshipType":   "DESCRIBES",
+	})
 
 	for _, p := range packages {
 		pkgSPDXID := fmt.Sprintf("SPDXRef-Package-%s-%s", sanitizeSPDXID(p.Name), sanitizeSPDXID(p.Version))
@@ -308,9 +330,9 @@ func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages
 		})
 
 		relationships = append(relationships, map[string]any{
-			"spdxElementId":      "SPDXRef-DOCUMENT",
+			"spdxElementId":      rootSPDXID,
 			"relatedSpdxElement": pkgSPDXID,
-			"relationshipType":   "DESCRIBES",
+			"relationshipType":   "DEPENDS_ON",
 		})
 	}
 

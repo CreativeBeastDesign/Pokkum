@@ -1,13 +1,15 @@
 module github.com/CreativeBeastDesign/pokkum
 
-go 1.26.5
+go 1.26.6
 
 require (
+	github.com/andybalholm/brotli v1.2.2
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/docker/cli v29.6.2+incompatible
 	github.com/docker/docker-credential-helpers v0.9.5
 	github.com/google/go-containerregistry v0.21.9
 	github.com/google/uuid v1.6.0
+	github.com/klauspost/compress v1.19.2
 	github.com/moby/moby/client v0.5.1
 	github.com/sigstore/protobuf-specs v0.5.1
 	github.com/sigstore/sigstore-go v1.3.0
@@ -19,7 +21,6 @@ require (
 
 require (
 	github.com/Microsoft/go-winio v0.6.3-0.20251027160822-ad3df93bed29 // indirect
-	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
@@ -65,7 +66,6 @@ require (
 	github.com/in-toto/attestation v1.2.0 // indirect
 	github.com/in-toto/in-toto-golang v0.11.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/moby/api v1.55.0 // indirect
 	github.com/oklog/ulid/v2 v2.1.1 // indirect
