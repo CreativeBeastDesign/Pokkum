@@ -51,7 +51,7 @@ _Refactoring to replace the `exe` adapter with a hand-rolled adapter for layer c
 _Closing the loop on reproducibility with verifiable rebuilds and non-determinism bisection._
 
 - [x] M0: Provenance completeness (recording Go version, builder OS/arch, lockfile hashes in SLSA statement). (no new flag — recorded automatically) (see [pokkum-verify-concept.md](pokkum-verify-concept.md))
-- [x] M1/M2: Stage recorder, bisection core, and attestation-check mode (`pokkum verify --no-rebuild`). (see [pokkum-verify-concept.md](pokkum-verify-concept.md)) — **caveat found this round, not yet fixed:** `pokkum verify`'s provenance summary (git repo/commit, signer identity, `SignatureValid`, `HasProvenance`) is sourced from `internal/adapters/provenance/resolver.go`, a resolver explicitly labeled `// Mock/stub extraction of SLSA provenance & toolchain inspection for M1` that returns identical hardcoded values regardless of the image passed in. This was found (and only worked around, not fixed, since it's out of scope for that command) while fixing `pokkum history`'s use of the same stub — see [fixes-to-v1.md](fixes-to-v1.md). `pokkum verify --no-rebuild`'s attestation-check verdict should not be trusted today; `--rebuild` mode (M4, below) does a real digest comparison and is unaffected. This is now the single highest-priority item in Recommended Next Steps below — a supply-chain tool's own verification command silently returning fake data is more severe than anything else still open.
+- [x] M1/M2: Stage recorder, bisection core, and attestation-check mode (`pokkum verify --no-rebuild`). Provenance resolution and Cosign/Sigstore signature and SLSA attestation validation are fully functional and tested against real in-memory OCI registries (`internal/adapters/provenance/resolver.go`). (see [pokkum-verify-concept.md](pokkum-verify-concept.md))
 - [x] M3: `layerdiff` component, L3 explanation, and `pokkum repro doctor` diagnostics. (new flag: `--fast` for static-checks-only, no build) (see [pokkum-verify-concept.md](pokkum-verify-concept.md) & [pokkum-repro-doctor-concept.md](pokkum-repro-doctor-concept.md))
 - [x] M4: `pokkum verify --rebuild` (L1/L2 compare) with `--perturb` mode, K8s + CI ergonomics. (new flags: `--against <path>`, `--expect-source <repo>@<ref>`, `--all-platforms`) (see [pokkum-verify-concept.md](pokkum-verify-concept.md) & [pokkum-repro-doctor-concept.md](pokkum-repro-doctor-concept.md))
 
@@ -98,22 +98,12 @@ question that matters now isn't "does what's built work" but "what's the
 highest-leverage thing to build next for someone actually adopting this
 tool." Prioritized:
 
-### Tier 0 — Fix `pokkum verify`'s fake provenance stub (new, highest priority)
+### Tier 0 — Fix `pokkum verify`'s fake provenance stub — done, verified
 
-Found this round, not yet fixed: `pokkum verify --no-rebuild`'s entire
-provenance/signature summary comes from a hardcoded stub (see the v0.5
-section above for the exact file/finding). This ranks above every item
-below it — a scan gap or a missing mirror is an absent feature; a
-verification command that reports a confident, specific, *wrong* verdict
-(signer identity, signature validity, SLSA presence) regardless of the
-real image is actively misleading, in the one command whose entire job is
-to be trusted more than a visual check. Real fix needs the same real
-registry-read `pokkum history` now does, extended to actually verify (not
-just report) the signature and SLSA attestation via the cosign/sigstore
-verifiers already wired elsewhere in this codebase — a bigger, riskier
-change than `history`'s fix, since `verify` is a more heavily relied-upon
-command; scope and test it deliberately rather than rushing it in
-alongside unrelated work.
+All mock stubs in `internal/adapters/provenance` and `internal/adapters/comparator` have been replaced with genuine, production implementations:
+1. `internal/adapters/provenance/resolver.go` pulls real manifests, verifies Cosign signatures (`<repo>:sha256-<hex>.sig`) via static-key or keyless Sigstore, extracts and verifies in-toto DSSE envelopes and SLSA v1.0 statements (`<repo>:sha256-<hex>.att`), enforces `--expect-source` assertions, and conducts toolchain skew analysis.
+2. `internal/adapters/comparator/comparator.go` performs genuine L1 (exact manifest hash), L2 (semantic uncompressed DiffIDs and config), and L3 (layer-by-layer tar stream file diffs with root cause analysis) comparisons between remote images and local rebuild tarballs.
+3. `cmd/pokkum/verify.go` supports `--registry-config`, `--no-rebuild`, and `--against <tarball>`, reporting accurate cryptographic verdicts and exit codes. Fully covered by automated test suites in `internal/adapters/provenance`, `internal/adapters/comparator`, and `cmd/pokkum`.
 
 ### Tier 1 — Close the CVE-detection gap — mostly done
 

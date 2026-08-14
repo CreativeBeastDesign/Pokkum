@@ -4,8 +4,9 @@ import "context"
 
 // ImageComparatorRequest represents a request to compare a remote registry image against a locally built OCI tarball.
 type ImageComparatorRequest struct {
-	RemoteImageRef string
-	LocalTarball   string
+	RemoteImageRef     string
+	LocalTarball       string
+	RegistryConfigPath string
 }
 
 // ImageComparatorResult holds the multi-level L1/L2/L3 comparison output.

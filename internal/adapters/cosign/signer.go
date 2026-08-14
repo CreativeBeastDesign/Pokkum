@@ -27,6 +27,12 @@ var (
 	_ ports.ReleaseVerifier = (*Signer)(nil)
 )
 
+// DefaultPublicKeyPEM is the fallback Cosign public key for verifying signatures.
+const DefaultPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbCr5pcxh+/q57RngLq9ycZmUDjZd
+3KhRlVmB3LMAG1HtAwVdDIsKATtrP020TSVXeBVvOy1TntoxpA3ijNvHcA==
+-----END PUBLIC KEY-----`
+
 // Signer implements ports.CosignSigner.
 type Signer struct {
 	log *slog.Logger
@@ -91,6 +97,11 @@ func (s *Signer) Sign(ctx context.Context, req ports.CosignSignRequest) (ports.C
 func (s *Signer) Verify(ctx context.Context, bundle ports.CosignSignatureBundle, pubKeyPEM []byte, expectedRepo string, expectedDigest v1.Hash) error {
 	if len(pubKeyPEM) == 0 {
 		return fmt.Errorf("cosign: public key PEM is required: %w", core.ErrInvalidRequest)
+	}
+	if len(bundle.SignatureBytes) == 0 && bundle.Base64Signature != "" {
+		if decoded, err := base64.StdEncoding.DecodeString(bundle.Base64Signature); err == nil {
+			bundle.SignatureBytes = decoded
+		}
 	}
 	if len(bundle.PayloadBytes) == 0 || len(bundle.SignatureBytes) == 0 {
 		return fmt.Errorf("cosign: empty signature bundle payload or signature: %w", core.ErrInvalidRequest)

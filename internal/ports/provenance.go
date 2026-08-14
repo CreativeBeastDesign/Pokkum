@@ -35,8 +35,9 @@ type ProvenanceSummary struct {
 
 // ProvenanceResolverRequest represents a request to fetch and validate provenance for an image.
 type ProvenanceResolverRequest struct {
-	ImageRef     string
-	ExpectSource string // Optional repo@commit filter
+	ImageRef           string
+	ExpectSource       string // Optional repo@commit filter
+	RegistryConfigPath string // Optional custom docker config.json path
 }
 
 // ProvenanceResolver defines the port for fetching and verifying image attestations and provenance.
