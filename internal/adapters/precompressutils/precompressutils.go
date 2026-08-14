@@ -76,6 +76,11 @@ func PrecompressFile(srcPath string, modTime time.Time) error {
 		return nil
 	}
 
+	srcInfo, err := os.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("stat static file %q: %w", srcPath, err)
+	}
+
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
 		return fmt.Errorf("reading static file %q: %w", srcPath, err)
@@ -90,7 +95,7 @@ func PrecompressFile(srcPath string, modTime time.Time) error {
 
 	// 1. Gzip (.gz)
 	gzPath := srcPath + ".gz"
-	if _, err := os.Stat(gzPath); os.IsNotExist(err) {
+	if isStale(srcInfo, gzPath) {
 		buf := poolutils.GetByteBuffer()
 		gw, err := gzip.NewWriterLevel(buf, gzip.BestCompression)
 		if err == nil {
@@ -107,7 +112,7 @@ func PrecompressFile(srcPath string, modTime time.Time) error {
 
 	// 2. Brotli (.br)
 	brPath := srcPath + ".br"
-	if _, err := os.Stat(brPath); os.IsNotExist(err) {
+	if isStale(srcInfo, brPath) {
 		buf := poolutils.GetByteBuffer()
 		bw := brotli.NewWriterLevel(buf, brotli.BestCompression)
 		_, _ = bw.Write(data)
@@ -122,7 +127,7 @@ func PrecompressFile(srcPath string, modTime time.Time) error {
 
 	// 3. Zstandard (.zst)
 	zstPath := srcPath + ".zst"
-	if _, err := os.Stat(zstPath); os.IsNotExist(err) {
+	if isStale(srcInfo, zstPath) {
 		buf := poolutils.GetByteBuffer()
 		zw, err := zstd.NewWriter(buf, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
 		if err == nil {
@@ -138,4 +143,24 @@ func PrecompressFile(srcPath string, modTime time.Time) error {
 	}
 
 	return nil
+}
+
+// isStale reports whether the sidecar at sidecarPath needs to be (re)generated
+// because it is missing or no longer reflects the current contents of the
+// source file described by srcInfo.
+//
+// Existence alone is not a valid freshness signal: a sidecar written for an
+// earlier version of the source file survives untouched if the source is
+// later overwritten in place (e.g. an incremental rebuild that reuses the
+// output directory without a full clean), leaving compressed clients served
+// stale, mismatched bytes while uncompressed clients see the new content.
+// Comparing mtimes closes that gap: a source file that changed after its
+// sidecar was written is, by definition, newer than that sidecar.
+func isStale(srcInfo os.FileInfo, sidecarPath string) bool {
+	sidecarInfo, err := os.Stat(sidecarPath)
+	if err != nil {
+		// Missing (or unreadable) sidecar: nothing to reuse.
+		return true
+	}
+	return sidecarInfo.ModTime().Before(srcInfo.ModTime())
 }
