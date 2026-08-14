@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -905,42 +906,146 @@ spec:
 	}
 }
 
-func TestResolver_PreviousImageAnnotation(t *testing.T) {
+// TestResolver_PreviousImageAnnotation_RealRedeploy exercises the real
+// writer path for AnnotationCurrentImage/AnnotationPreviousImage/
+// AnnotationImageHistory: each resolve call's OUTPUT annotations get
+// spliced onto a FRESH copy of the pokkum://-templated source for the next
+// call, simulating the one workflow shape that can actually carry this
+// state forward — annotations persisted by the caller (e.g. read back from
+// the live cluster before an apply, or carried in a tracked deployed-state
+// file) — while image: itself stays pokkum:// in the tracked source, per
+// Vocabulary.md's documented convention.
+//
+// A prior version of this test seeded pokkum.dev/previous-image directly
+// in the input and only checked it survived round-tripping unchanged —
+// that passed even when Resolve's writer was unreachable dead code (see
+// AnnotationCurrentImage's doc comment in internal/ports/k8s.go). This
+// version proves the writer itself accumulates real history across calls.
+//
+// IMPORTANT LIMITATION this test also documents: feeding resolve's own
+// output (image: now a concrete digest) straight back in as the next
+// call's input does NOT work — hasPokkum goes false once image: is no
+// longer pokkum://, so the whole document is passed through untouched on
+// every subsequent call (see TestResolver_ReResolvingOwnOutputIsANoOp
+// below). Resolve alone, run repeatedly against Pokkum's own recommended
+// permanent-template workflow with no external state, cannot accumulate
+// multi-generation history — only something that separately persists and
+// re-supplies annotations (a future apply-time kubectl-get, or a
+// caller-managed deployed-state file) can. Tracked as a Roadmap next step.
+func TestResolver_PreviousImageAnnotation_RealRedeploy(t *testing.T) {
 	r := k8s.NewResolver()
 	ctx := context.Background()
 
-	doc := ports.Document{
-		Name: "deploy.yaml",
-		Content: []byte(`apiVersion: apps/v1
+	template := func(annotationsBlock string) []byte {
+		return []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app` + annotationsBlock + `
+spec:
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      containers:
+      - name: main
+        image: pokkum://./src/app
+`)
+	}
+
+	digests := []string{
+		"ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		"ghcr.io/acme/app@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+		"ghcr.io/acme/app@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+	}
+
+	annotationsBlock := ""
+	var lastOut string
+	for _, digest := range digests {
+		d := digest
+		res, err := r.Resolve(ctx, ports.ResolveRequest{
+			Documents: []ports.Document{{Name: "deploy.yaml", Content: template(annotationsBlock)}},
+			Build: func(_ context.Context, _ string) (string, error) {
+				return d, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("resolve to %s: unexpected error: %v", d, err)
+		}
+		lastOut = string(res.Documents[0].Content)
+
+		// Carry only the top-level annotations block forward to the next
+		// iteration's source, simulating a caller that persists annotations
+		// (e.g. from the live cluster) but keeps image: as pokkum:// in the
+		// tracked template.
+		ann := regexp.MustCompile(`(?s)\n  annotations:\n(?:    .*\n)+`)
+		if m := ann.FindString(lastOut); m != "" {
+			annotationsBlock = m[strings.Index(m, "\n"):]
+		}
+	}
+
+	if !strings.Contains(lastOut, "image: "+digests[2]) {
+		t.Fatalf("expected image: to be the most recent digest %s, got:\n%s", digests[2], lastOut)
+	}
+	if !strings.Contains(lastOut, "pokkum.dev/current-image:") || !strings.Contains(lastOut, digests[2]) {
+		t.Errorf("expected pokkum.dev/current-image to record the latest digest, got:\n%s", lastOut)
+	}
+	if !strings.Contains(lastOut, "pokkum.dev/previous-image:") || !strings.Contains(lastOut, digests[1]) {
+		t.Errorf("expected pokkum.dev/previous-image to record %s (the one just displaced), got:\n%s", digests[1], lastOut)
+	}
+	if !strings.Contains(lastOut, "pokkum.dev/image-history:") || !strings.Contains(lastOut, digests[0]) {
+		t.Errorf("expected pokkum.dev/image-history to contain %s (the redeploy before that), got:\n%s", digests[0], lastOut)
+	}
+}
+
+// TestResolver_ReResolvingOwnOutputIsANoOp documents (see the long comment
+// on the test above) that feeding a resolve call's own output — where
+// image: is now a concrete digest, not pokkum:// — back in as the next
+// call's input is a silent no-op: the document has no pokkum:// refs left,
+// so hasPokkum is false and it passes through byte-identical. This is
+// existing, correct behavior (Resolve must not touch a document it finds
+// no pokkum:// references in), pinned here specifically so it isn't
+// mistaken for a bug, and so a future change to make repeated resolves
+// self-accumulate history doesn't silently break the invariant it depends on
+// today: only a pokkum://-templated image: field is ever rewritten.
+func TestResolver_ReResolvingOwnOutputIsANoOp(t *testing.T) {
+	r := k8s.NewResolver()
+	ctx := context.Background()
+
+	doc := ports.Document{Name: "deploy.yaml", Content: []byte(`apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: web-app
-  annotations:
-    pokkum.dev/previous-image: "ghcr.io/acme/app@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 spec:
   template:
     spec:
       containers:
       - name: main
         image: pokkum://./src/app
-`),
-	}
+`)}
 
-	res, err := r.Resolve(ctx, ports.ResolveRequest{
+	first, err := r.Resolve(ctx, ports.ResolveRequest{
 		Documents: []ports.Document{doc},
 		Build: func(_ context.Context, _ string) (string, error) {
 			return "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
 		},
 	})
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("first resolve: unexpected error: %v", err)
 	}
 
-	out := string(res.Documents[0].Content)
-	if !strings.Contains(out, "pokkum.dev/previous-image:") {
-		t.Fatalf("expected pokkum.dev/previous-image annotation in resolved document, got:\n%s", out)
+	second, err := r.Resolve(ctx, ports.ResolveRequest{
+		Documents: []ports.Document{{Name: "deploy.yaml", Content: first.Documents[0].Content}},
+		Build: func(_ context.Context, _ string) (string, error) {
+			return "ghcr.io/acme/app@sha256:2222222222222222222222222222222222222222222222222222222222222222", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("second resolve: unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "ghcr.io/acme/app@sha256:0000000000000000000000000000000000000000000000000000000000000000") {
-		t.Errorf("expected previous image digest preserved in annotation, got:\n%s", out)
+
+	if string(second.Documents[0].Content) != string(first.Documents[0].Content) {
+		t.Errorf("expected re-resolving an already-concrete-image document to be a no-op, but content changed:\nfirst:\n%s\nsecond:\n%s",
+			first.Documents[0].Content, second.Documents[0].Content)
 	}
 }

@@ -313,6 +313,62 @@ func setAnnotation(parent *yaml.Node, key, val string) {
 	setMappingKey(ann, key, val)
 }
 
+// getAnnotation returns the string annotation value under parent's metadata.annotations mapping, or "".
+func getAnnotation(parent *yaml.Node, key string) string {
+	if parent == nil {
+		return ""
+	}
+	target := parent
+	if parent.Kind == yaml.DocumentNode {
+		for _, item := range parent.Content {
+			if item.Kind == yaml.MappingNode {
+				target = item
+				break
+			}
+		}
+	}
+	if target == nil || target.Kind != yaml.MappingNode {
+		return ""
+	}
+	metaNode, ok := mapGet(target, "metadata")
+	if !ok || metaNode.Kind != yaml.MappingNode {
+		return ""
+	}
+	annNode, ok := mapGet(metaNode, "annotations")
+	if !ok || annNode.Kind != yaml.MappingNode {
+		return ""
+	}
+	valNode, ok := mapGet(annNode, key)
+	if !ok {
+		return ""
+	}
+	return valNode.Value
+}
+
+// updateImageHistory tracks multi-generation previous image history in annotations.
+func updateImageHistory(parent *yaml.Node, newDisplaced string) {
+	if parent == nil || newDisplaced == "" {
+		return
+	}
+	setAnnotation(parent, ports.AnnotationPreviousImage, newDisplaced)
+
+	existing := getAnnotation(parent, ports.AnnotationImageHistory)
+	var history []string
+	if existing != "" {
+		for _, entry := range strings.Split(existing, ",") {
+			e := strings.TrimSpace(entry)
+			if e != "" && e != newDisplaced {
+				history = append(history, e)
+			}
+		}
+	}
+	history = append([]string{newDisplaced}, history...)
+	if len(history) > 20 {
+		history = history[:20]
+	}
+	setAnnotation(parent, ports.AnnotationImageHistory, strings.Join(history, ","))
+}
+
 // injectPodSecurityDefaults fills in the pod-level hardened defaults on
 // podSpec: runAsNonRoot and the RuntimeDefault seccomp profile. It never
 // injects runAsUser — Pokkum images already run as UID 65532 baked into the
@@ -496,14 +552,26 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 			path, _, _ := parsePokkumRef(val, false)
 			resolved := resolvedMap[path]
 
-			// Preserve displaced concrete image into pokkum.dev/previous-image annotation
-			if val != "" && !strings.HasPrefix(val, ports.Scheme) {
-				if t.templateNode != nil {
-					setAnnotation(t.templateNode, ports.AnnotationPreviousImage, val)
+			// val is always a pokkum:// reference here — targets only ever
+			// reach this loop via the isRef branch above — so it can never
+			// be the displaced concrete image the way it would be if this
+			// document had been hand-edited to a real ref. The only place a
+			// prior resolved digest survives between runs is
+			// AnnotationCurrentImage, written by the previous Resolve call
+			// on this same file; compare against that instead.
+			var docRoot *yaml.Node
+			if len(pd.nodes) > 0 {
+				docRoot = pd.nodes[0]
+			}
+			for _, annNode := range []*yaml.Node{t.templateNode, docRoot} {
+				if annNode == nil {
+					continue
 				}
-				if len(pd.nodes) > 0 {
-					setAnnotation(pd.nodes[0], ports.AnnotationPreviousImage, val)
+				oldCurrent := getAnnotation(annNode, ports.AnnotationCurrentImage)
+				if oldCurrent != "" && oldCurrent != resolved {
+					updateImageHistory(annNode, oldCurrent)
 				}
+				setAnnotation(annNode, ports.AnnotationCurrentImage, resolved)
 			}
 
 			t.valNode.Value = resolved

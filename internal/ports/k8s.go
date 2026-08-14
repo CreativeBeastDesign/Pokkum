@@ -20,7 +20,21 @@ const Scheme = "pokkum://"
 
 // AnnotationPreviousImage is the Kubernetes annotation key used to store
 // the displaced image reference prior to an image update or rollback.
-const AnnotationPreviousImage = "pokkum.dev/previous-image"
+const (
+	AnnotationPreviousImage = "pokkum.dev/previous-image"
+	AnnotationImageHistory  = "pokkum.dev/image-history"
+
+	// AnnotationCurrentImage records the digest Resolve last wrote into this
+	// document's image: field, independent of that field's own current
+	// value. It exists because a pokkum:// source template's image: field
+	// never becomes a concrete ref between runs — Resolve only ever
+	// rewrites a pokkum:// value back to a (possibly different) digest, so
+	// there is nothing in the field itself to diff a re-resolve against.
+	// Comparing this annotation's old value to the freshly-resolved digest
+	// is what lets Resolve detect "this redeploy actually changed the
+	// image" and push the old digest into AnnotationImageHistory.
+	AnnotationCurrentImage = "pokkum.dev/current-image"
+)
 
 // ImageBuilder builds and publishes the project at path and returns the
 // resulting immutable reference, in "repo@sha256:…" form.
