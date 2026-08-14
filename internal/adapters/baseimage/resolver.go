@@ -26,10 +26,11 @@
 //
 // # Caching
 //
-// A Resolver also caches successful signature verifications per (ref, digest,
-// mode, identity, trusted root, key fingerprint, insecure, registry config),
-// so re-resolving the same image does not re-fetch and re-verify signature
-// material it has already proved. Failures are never cached.
+// A Resolver also caches successful signature verifications per (ref,
+// upstreamRef, digest, mode, identity, trusted root, key fingerprint,
+// insecure, registry config), so re-resolving the same image does not
+// re-fetch and re-verify signature material it has already proved. Failures
+// are never cached.
 //
 // A Resolver caches its network round-trips per (ref, insecure) for the
 // top-level pull (index or single image plus its digest), and per (ref,
@@ -160,6 +161,7 @@ type imageEntry struct {
 // proved against the previous key.
 type verifyKey struct {
 	ref                string
+	upstreamRef        string
 	digest             string
 	mode               ports.BaseImageVerifyMode
 	identity           ports.KeylessIdentity
@@ -234,6 +236,17 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		return nil, err
 	}
 
+	// upstreamRef is the pristine reference naming the image's true upstream
+	// repository. It starts equal to ref, but — unlike ref — is never rebound
+	// to a mirror or a locked pinned-digest form; the only thing allowed to
+	// update it below is a lockfile's entry.Ref, which is always the upstream
+	// reference, never entry.MirrorRef or entry.PinnedRef. It exists for
+	// exactly one purpose: the docker-reference claims check in the
+	// signature-verification path, which must always be evaluated against the
+	// name a real upstream signature actually embeds, never against whatever
+	// mirror the bytes happened to be fetched through.
+	upstreamRef := ref
+
 	nameOpts := []name.Option{name.WeakValidation}
 	if req.Insecure {
 		nameOpts = append(nameOpts, name.Insecure)
@@ -252,6 +265,9 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 			lf = loaded
 			if entry, ok := lockfileutils.GetLockedBase(lf, lockKey); ok && !req.UpdateBase {
 				lockedFound = true
+				if entry.Ref != "" {
+					upstreamRef = entry.Ref
+				}
 				if entry.MirrorRef != "" {
 					// Attempt to resolve from mirrored escrow registry first
 					if mParsed, mErr := name.ParseReference(entry.MirrorRef, nameOpts...); mErr == nil {
@@ -364,12 +380,8 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 				Bases:     make(map[string]ports.BaseLockEntry),
 			}
 		}
-		origRef, _ := req.Preset.DefaultRef()
-		if req.Ref != "" {
-			origRef = req.Ref
-		}
 		entry := ports.BaseLockEntry{
-			Ref:       origRef,
+			Ref:       upstreamRef,
 			Digest:    pull.digest.String(),
 			PinnedRef: out.PinnedRef,
 			MirrorRef: mirrorRef,
@@ -392,7 +404,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 	}
 
 	if req.VerifySignature {
-		if err := r.verifyBaseImage(ctx, ref, pull, req); err != nil {
+		if err := r.verifyBaseImage(ctx, ref, upstreamRef, pull, req); err != nil {
 			return nil, err
 		}
 	}
@@ -638,6 +650,23 @@ func pinnedRef(parsedRef name.Reference, d v1.Hash) string {
 	return parsedRef.Context().Name() + "@" + d.String()
 }
 
+// repoName parses rawRef and returns its repository name (registry/repo, no
+// tag or digest), using the same name.Option set every pull in this file
+// uses. Centralising this means every place that needs "the repo a ref
+// names" — fetch location or claims-check identity — derives it through one
+// code path, never two subtly different ones.
+func repoName(rawRef string, insecure bool) (string, error) {
+	nameOpts := []name.Option{name.WeakValidation}
+	if insecure {
+		nameOpts = append(nameOpts, name.Insecure)
+	}
+	parsed, err := name.ParseReference(rawRef, nameOpts...)
+	if err != nil {
+		return "", err
+	}
+	return parsed.Context().Name(), nil
+}
+
 // platformList renders platforms for a single log field, avoiding a slice
 // value (which slog would print via %v rather than a stable delimited form).
 func platformList(ps []ports.Platform) string {
@@ -698,7 +727,7 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbCr5pcxh+/q57RngLq9ycZmUDjZd
 // something the weaker path would accept. So: decide the mode, then fetch,
 // then dispatch. There is deliberately no fallback from one path to the other
 // for a given Resolve call.
-func (r *Resolver) verifyBaseImage(ctx context.Context, ref string, pull *pulledManifest, req ports.BaseImageRequest) error {
+func (r *Resolver) verifyBaseImage(ctx context.Context, ref, upstreamRef string, pull *pulledManifest, req ports.BaseImageRequest) error {
 	mode := req.VerifyMode
 	if !mode.Valid() {
 		return fmt.Errorf("baseimage: %s: unknown verify mode %q for preset %q: %w", ref, mode, req.Preset, core.ErrBaseSignatureInvalid)
@@ -769,6 +798,7 @@ func (r *Resolver) verifyBaseImage(ctx context.Context, ref string, pull *pulled
 
 	key := verifyKey{
 		ref:                ref,
+		upstreamRef:        upstreamRef,
 		digest:             pull.digest.String(),
 		mode:               mode,
 		identity:           identity,
@@ -785,7 +815,7 @@ func (r *Resolver) verifyBaseImage(ctx context.Context, ref string, pull *pulled
 		return nil
 	}
 
-	if err := r.runVerification(ctx, ref, pull, req, mode, identity, trustedRootJSON, pubKeyPEM); err != nil {
+	if err := r.runVerification(ctx, ref, upstreamRef, pull, req, mode, identity, trustedRootJSON, pubKeyPEM); err != nil {
 		// Only successes are cached. A failure aborts the build anyway, so
 		// there is nothing to save by remembering it, and caching it would
 		// mean caching transient causes (a registry timeout mid-fetch) as if
@@ -803,7 +833,7 @@ func (r *Resolver) verifyBaseImage(ctx context.Context, ref string, pull *pulled
 // after the mode and all of its inputs have been settled.
 func (r *Resolver) runVerification(
 	ctx context.Context,
-	ref string,
+	ref, upstreamRef string,
 	pull *pulledManifest,
 	req ports.BaseImageRequest,
 	mode ports.BaseImageVerifyMode,
@@ -816,11 +846,22 @@ func (r *Resolver) runVerification(
 		return err
 	}
 
+	// upstreamRepo is the repository name a real signature's docker-reference
+	// claim actually names. It is deliberately kept separate from repo (the
+	// possibly-mirror repo bytes/tags were fetched from, computed above by
+	// fetchCosignSigLayers): fetching must follow wherever the signature
+	// material actually lives, but the identity claim it makes must always be
+	// checked against the true upstream repo, never the mirror.
+	upstreamRepo, err := repoName(upstreamRef, req.Insecure)
+	if err != nil {
+		return fmt.Errorf("baseimage: parse upstream reference %s: %w: %w", upstreamRef, err, core.ErrBaseSignatureInvalid)
+	}
+
 	switch mode {
 	case ports.BaseImageVerifyStaticKey:
-		return r.verifyStaticKeySignature(ctx, ref, repo, sigRefStr, layers, pull.digest, pubKeyPEM)
+		return r.verifyStaticKeySignature(ctx, ref, repo, upstreamRepo, sigRefStr, layers, pull.digest, pubKeyPEM)
 	case ports.BaseImageVerifyKeyless:
-		return r.verifyKeylessSignature(ctx, ref, repo, sigRefStr, layers, pull.digest, identity, trustedRootJSON)
+		return r.verifyKeylessSignature(ctx, ref, upstreamRepo, sigRefStr, layers, pull.digest, identity, trustedRootJSON)
 	default:
 		return fmt.Errorf("baseimage: %s: verify mode %q not implemented: %w", ref, mode, core.ErrBaseSignatureInvalid)
 	}
@@ -857,11 +898,10 @@ func (r *Resolver) fetchCosignSigLayers(ctx context.Context, ref string, pull *p
 		nameOpts = append(nameOpts, name.Insecure)
 	}
 
-	parsedRef, err := name.ParseReference(ref, nameOpts...)
+	repo, err = repoName(ref, insecure)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("baseimage: parse reference %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
 	}
-	repo = parsedRef.Context().Name()
 	digest := pull.digest
 
 	// Cosign signature tag convention: <digest-alg>-<digest-hex>.sig
@@ -957,9 +997,11 @@ func annotationBytes(ann map[string]string, key string) []byte {
 // public key. Any one layer verifying is enough — a signature tag carrying
 // several layers is signed several times, and one good signature by the
 // expected key is proof. cosign.Signer.Verify checks the payload's
-// docker-reference and docker-manifest-digest claims against repo/digest, so
+// docker-reference and docker-manifest-digest claims against
+// upstreamRepo/digest — the true upstream repo, not repo (which names
+// wherever the bytes were actually fetched from, e.g. an escrow mirror) — so
 // a valid signature over some *other* image is not accepted here.
-func (r *Resolver) verifyStaticKeySignature(ctx context.Context, ref, repo, sigRefStr string, layers []cosignSigLayer, digest v1.Hash, pubKeyPEM []byte) error {
+func (r *Resolver) verifyStaticKeySignature(ctx context.Context, ref, repo, upstreamRepo, sigRefStr string, layers []cosignSigLayer, digest v1.Hash, pubKeyPEM []byte) error {
 	var errs []error
 
 	for _, l := range layers {
@@ -980,7 +1022,7 @@ func (r *Resolver) verifyStaticKeySignature(ctx context.Context, ref, repo, sigR
 			Repo:            repo,
 			Digest:          digest,
 		}
-		if err := r.signer.Verify(ctx, bundle, pubKeyPEM, repo, digest); err != nil {
+		if err := r.signer.Verify(ctx, bundle, pubKeyPEM, upstreamRepo, digest); err != nil {
 			errs = append(errs, fmt.Errorf("layer %d: %w", l.index, err))
 			continue
 		}
@@ -1013,7 +1055,7 @@ func (r *Resolver) verifyStaticKeySignature(ctx context.Context, ref, repo, sigR
 //     distroless digest would satisfy this function.
 func (r *Resolver) verifyKeylessSignature(
 	ctx context.Context,
-	ref, repo, sigRefStr string,
+	ref, upstreamRepo, sigRefStr string,
 	layers []cosignSigLayer,
 	digest v1.Hash,
 	identity ports.KeylessIdentity,
@@ -1056,7 +1098,7 @@ func (r *Resolver) verifyKeylessSignature(
 			continue
 		}
 
-		if err := checkSimpleSigningClaims(l.payloadBytes, repo, digest); err != nil {
+		if err := checkSimpleSigningClaims(l.payloadBytes, upstreamRepo, digest); err != nil {
 			errs = append(errs, fmt.Errorf("layer %d: keyless signature is valid but %w", l.index, err))
 			continue
 		}

@@ -1390,26 +1390,31 @@ func TestResolve_EscrowMirror_OfflineUsesMirrorWhenUpstreamUnreachable(t *testin
 	}
 }
 
-// TestResolve_EscrowMirror_VerifySignature_DockerReferenceMismatch settles a
-// question raised in review, not previously tested either way: static-key
-// Cosign verification checks that the signature payload's embedded
-// docker-reference exactly matches the repo being verified
-// (cosign.Signer.Verify, internal/adapters/cosign/signer.go). A real
-// upstream signature is only ever made for the upstream repo name — it has
-// no way to know about a project's escrow mirror. Since mirror-resolve-first
-// (above) makes Resolve prefer entry.MirrorRef whenever it's reachable, not
-// just as an outage fallback, this means VerifySignature:true would run
-// routinely against the mirror's repo name, not just during an outage.
+// TestResolve_EscrowMirror_VerifySignature_SucceedsAgainstUpstreamRepo used
+// to be TestResolve_EscrowMirror_VerifySignature_DockerReferenceMismatch,
+// which empirically CONFIRMED (2026-08-14) a real bug: static-key Cosign
+// verification checked the signature payload's embedded docker-reference
+// against the repo bytes were actually fetched from, which — because
+// mirror-resolve-first makes Resolve prefer entry.MirrorRef whenever it's
+// reachable, not just as an outage fallback — was routinely the escrow
+// mirror's repo name, not the upstream repo the signature was actually made
+// for. That failed ordinary, successful resolution any time both
+// --mirror-registry and VerifySignature were in play together (the default
+// combination for the distroless/chainguard presets).
 //
-// This test proves the mismatch is real: it mirrors a genuinely-signed base
-// image exactly as the real escrow write path does (image + its .sig tag,
-// unmodified), then resolves with VerifySignature:true against a lockfile
-// whose MirrorRef points at that mirror. If this starts passing after a fix
-// that reconciles the two repo names (e.g. verifying against the upstream
-// Ref recorded in the lockfile rather than parsedRef's mirror-derived repo),
-// update this test's expectation rather than deleting it — the scenario
-// itself must stay covered either way.
-func TestResolve_EscrowMirror_VerifySignature_DockerReferenceMismatch(t *testing.T) {
+// Fixed by threading a second value, upstreamRef (sourced from the
+// lockfile's entry.Ref, which is always the true upstream reference), through
+// Resolve -> verifyBaseImage -> runVerification -> verifyStaticKeySignature /
+// verifyKeylessSignature, so the docker-reference claims check always runs
+// against the upstream repo while byte/tag fetching stays keyed on wherever
+// the image actually lives (the mirror, when reachable).
+//
+// This test mirrors a genuinely-signed base image exactly as the real
+// escrow write path does (image + its .sig tag, unmodified), then resolves
+// with VerifySignature:true against a lockfile whose MirrorRef points at
+// that mirror, and now asserts success with the security-relevant fields
+// checked explicitly — not just "no error".
+func TestResolve_EscrowMirror_VerifySignature_SucceedsAgainstUpstreamRepo(t *testing.T) {
 	sUpstream, _ := newTestRegistry(t)
 	sMirror, _ := newTestRegistry(t)
 
@@ -1497,26 +1502,144 @@ func TestResolve_EscrowMirror_VerifySignature_DockerReferenceMismatch(t *testing
 		VerifySignature: true,
 	})
 
-	// CONFIRMED (2026-08-14, empirically): this currently fails. Resolve
-	// prefers the mirror whenever it's reachable (see the log line "using
-	// mirrored base image from escrow registry" this test emits), so this
-	// is not a rare outage-only edge case — it fails on ordinary,
-	// successful resolution any time both --mirror-registry and
-	// VerifySignature are in play together, which is the expected
-	// combination for the distroless/chainguard presets escrow mirroring
-	// targets (they default VerifySignature to true). If this assertion
-	// ever needs to flip because the mismatch has been fixed (e.g. by
-	// verifying against the upstream repo recorded in the lockfile entry
-	// rather than the ref actually pulled from), that is good news — update
-	// this test to assert success instead of deleting the coverage.
+	// Fixed: claims are now checked against upstreamRepo (from entry.Ref),
+	// not the mirror-derived repo the bytes were actually fetched from, so
+	// this resolves cleanly even though the mirror was preferred.
+	if resolveErr != nil {
+		t.Fatalf("expected verification to succeed against the mirrored image once claims are checked against the upstream repo (entry.Ref), got: %v", resolveErr)
+	}
+	if res.Digest != upstreamDesc.Digest {
+		t.Fatalf("res.Digest = %s, want %s (the digest of the actually-signed upstream image)", res.Digest, upstreamDesc.Digest)
+	}
+	if res.Ref != mirrorImageRef {
+		t.Fatalf("res.Ref = %s, want %s (mirror is still preferred when reachable)", res.Ref, mirrorImageRef)
+	}
+	wantPinnedRef := mirrorRepo + "@" + upstreamDesc.Digest.String()
+	if res.PinnedRef != wantPinnedRef {
+		t.Fatalf("res.PinnedRef = %s, want %s", res.PinnedRef, wantPinnedRef)
+	}
+}
+
+// TestResolve_EscrowMirror_VerifySignature_TamperedMirrorDigestFailsClosed
+// proves the fix above didn't create a fail-open: checking the
+// docker-reference claim against the upstream repo instead of the mirror
+// must not weaken digest integrity. It constructs a genuine upstream image +
+// signature (digest DA), then has the mirror serve *different* content
+// (digest DB) while replaying the genuine, unmodified upstream signature
+// payload — which still claims DA — under the .sig tag name the resolver
+// will look for once it discovers the pulled digest is DB. This makes the
+// repo-name claim match (proving the fix works and isn't accidentally what
+// fails here), isolating digest integrity as the only thing left that can
+// fail: it must, since nothing about this fix touches the independent
+// DockerManifestDigest comparison in cosign.Signer.Verify.
+func TestResolve_EscrowMirror_VerifySignature_TamperedMirrorDigestFailsClosed(t *testing.T) {
+	sUpstream, _ := newTestRegistry(t)
+	sMirror, _ := newTestRegistry(t)
+
+	// Genuine upstream image + genuine static-key signature over it (digest DA).
+	upstreamRef := pushImage(t, sUpstream, "upstream/tamper:v1", ports.LinuxAMD64)
+	upstreamParsed, err := name.ParseReference(upstreamRef, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	upstreamDesc, err := remote.Get(upstreamParsed)
+	if err != nil {
+		t.Fatalf("remote.Get upstream: %v", err)
+	}
+	upstreamRepo := upstreamParsed.Context().Name()
+
+	privPEM, pubPEM := genECKeyPairPEM(t)
+	pushCosignSignature(t, sUpstream, upstreamRepo, upstreamDesc.Digest, privPEM, false)
+
+	// Fetch the genuine signature image bytes verbatim, so they can be
+	// replayed unmodified under a different tag below — the payload still
+	// claims digest DA (the real, signed digest), unmodified.
+	sigTag := upstreamDesc.Digest.Algorithm + "-" + upstreamDesc.Digest.Hex + ".sig"
+	upstreamSigRef, err := name.ParseReference(upstreamRepo+":"+sigTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference(sig): %v", err)
+	}
+	sigDesc, err := remote.Get(upstreamSigRef)
+	if err != nil {
+		t.Fatalf("remote.Get upstream sig: %v", err)
+	}
+	sigImg, err := sigDesc.Image()
+	if err != nil {
+		t.Fatalf("sigDesc.Image: %v", err)
+	}
+
+	// Mirror serves TAMPERED bytes: a different random image (digest DB != DA).
+	mirrorImageRef := pushImage(t, sMirror, "mirror/tamper:v1", ports.LinuxAMD64)
+	mirrorParsed, err := name.ParseReference(mirrorImageRef, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference(mirror): %v", err)
+	}
+	mirrorDesc, err := remote.Get(mirrorParsed)
+	if err != nil {
+		t.Fatalf("remote.Get mirror: %v", err)
+	}
+	if mirrorDesc.Digest == upstreamDesc.Digest {
+		t.Fatalf("test setup bug: mirror image accidentally has the same digest as upstream")
+	}
+	mirrorRepo := mirrorParsed.Context().Name()
+
+	// Attacker replays the genuine upstream signature — unmodified, still
+	// claiming DA — under the .sig tag name the resolver will actually look
+	// for once it discovers the pulled digest is DB.
+	mirrorSigRefStr := mirrorRepo + ":" + mirrorDesc.Digest.Algorithm + "-" + mirrorDesc.Digest.Hex + ".sig"
+	mirrorSigTag, err := name.NewTag(mirrorSigRefStr, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(mirror sig): %v", err)
+	}
+	if err := remote.Write(mirrorSigTag, sigImg); err != nil {
+		t.Fatalf("mirror sig write: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+	lf := &ports.PokkumLockfile{
+		Version:   lockfileutils.LockfileSchemaVersion,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Bases: map[string]ports.BaseLockEntry{
+			string(ports.BaseImageCustom): {
+				Ref:       upstreamRef,
+				Digest:    upstreamDesc.Digest.String(),
+				PinnedRef: upstreamRepo + "@" + upstreamDesc.Digest.String(),
+				MirrorRef: mirrorImageRef,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	}
+	if err := lockfileutils.SaveLockfile(lockPath, lf); err != nil {
+		t.Fatalf("SaveLockfile: %v", err)
+	}
+
+	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
+
+	r := NewResolver(nil)
+	_, resolveErr := r.Resolve(context.Background(), ports.BaseImageRequest{
+		Preset:          ports.BaseImageCustom,
+		Ref:             upstreamRef,
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		LockfilePath:    lockPath,
+		VerifySignature: true,
+	})
+
+	// The repo-name claim now matches (upstreamRepo, from entry.Ref — the fix
+	// under test), so if digest integrity were NOT independently enforced,
+	// this would incorrectly succeed against tampered mirror content. It must
+	// fail closed on the digest claim specifically.
 	if resolveErr == nil {
-		t.Fatalf("expected verification to fail with a docker-reference mismatch when resolving a genuinely-signed base image via its escrow mirror (this was previously unverified either way) — it unexpectedly succeeded with ref=%s; if this is now fixed, update this test's assertions accordingly rather than deleting it", res.Ref)
+		t.Fatal("expected Resolve to fail closed: the mirror served different bytes than what was actually signed upstream")
 	}
 	if !errors.Is(resolveErr, core.ErrBaseSignatureInvalid) {
-		t.Fatalf("expected the failure to be classified as core.ErrBaseSignatureInvalid (a docker-reference mismatch), got a different error: %v", resolveErr)
+		t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", resolveErr)
 	}
-	if !strings.Contains(resolveErr.Error(), "docker-reference") {
-		t.Errorf("expected the error to name the docker-reference mismatch specifically (so this test isn't accidentally passing for an unrelated verification failure), got: %v", resolveErr)
+	if !strings.Contains(resolveErr.Error(), "docker-manifest-digest") {
+		t.Fatalf("expected failure to name the digest-claim mismatch specifically (proving digest integrity, not repo-name, is what fails here), got: %v", resolveErr)
+	}
+	if strings.Contains(resolveErr.Error(), "docker-reference") {
+		t.Fatalf("did not expect a docker-reference (repo-name) mismatch — that claim should now pass since it's checked against the upstream repo: %v", resolveErr)
 	}
 }
 

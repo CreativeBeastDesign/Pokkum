@@ -496,6 +496,21 @@ Automated unit tests in `internal/adapters/baseimage/resolver_test.go` (`TestRes
 test multi-platform indexes, single images, signature tag mirroring, fail-closed write errors,
 and air-gapped resolution.
 
+**Mirror + signature verification interaction:** combining `--mirror-registry` with
+`VerifySignature: true` (the default for `distroless`/`chainguard`) used to fail on ordinary,
+successful resolution — the signature's docker-reference claim was checked against the
+mirror's repo name instead of the true upstream repo. This is now fixed: the claim is checked
+against the upstream repo recorded in the lockfile entry (`entry.Ref`), independent of wherever
+the bytes were actually fetched from. Covered by
+`TestResolve_EscrowMirror_VerifySignature_SucceedsAgainstUpstreamRepo` (the mirror-preferred
+success case, asserted on real digest/ref/pinned-ref fields) and
+`TestResolve_EscrowMirror_VerifySignature_TamperedMirrorDigestFailsClosed` (an adversarial test
+proving a mirror serving different content under a replayed genuine signature still fails
+closed on the independent digest claim). If a future paranoid pass wants to re-check this by
+hand: mirror a signed base, then resolve with both flags and confirm it succeeds; separately,
+hand-edit a mirrored `.sig` tag to reference a different digest than the mirror actually serves
+and confirm resolution still fails closed.
+
 ## 22. Cleanup
 
 ```bash
