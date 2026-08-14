@@ -116,6 +116,33 @@ The post-v1.0 milestones addressed critical supply chain verification, CVE gatin
 
 ---
 
+## Architectural & Performance Optimizations
+
+*Focusing on build speed, CLI footprint, and container image size reduction.*
+
+### 1. Build Speed & Throughput
+- [ ] **Pre-Calculated Immutable Layers**: Cache pre-compressed `bun` and `pokkum-init` blobs locally to skip ~100MB of tarring and compression per build.
+- [ ] **Single-Pass Layer Hashing & Streaming**: Compute uncompressed DiffID and compressed Digest simultaneously using multi-threaded compression (`pgzip` or `zstd`) to significantly speed up layer generation.
+- [ ] **Overlapped Async Pipeline Stages**: Run base image resolution, signature verification, and module inspection in parallel background goroutines during the SvelteKit build phase.
+- [ ] **Registry Push Optimizations**: Parallel layer uploads over HTTP/2 and cross-repository blob mounting (`mount=` query parameter) for zero-egress base layer copies.
+
+### 2. CLI Binary & Footprint Reduction
+- [x] **Targeted Scanner vs Monolithic Syft**: Replace the monolithic `anchore/syft` dependency with lightweight, zero-dependency parsers for `dpkg`, `apk`, and `package.json` to cut CLI binary size by ~50MB. *(⚠️ Requires long-term maintenance: Must track changes in Debian/Alpine package database formats and NPM ecosystem lockfile specs)*
+- [ ] **Compressed Embedded Supervisor Binaries**: Pre-compress `pokkum-init` binaries with `zstd` before `go:embed` and decompress on-the-fly, saving ~8MB.
+- [ ] **Compiler Build Optimization Flags**: Enforce `-trimpath -ldflags="-s -w"` in release pipelines for significant binary size reduction.
+
+### 3. Container Image Size Reduction
+- [ ] **Vendor Layer Pruning**: Automatically strip `*.map`, `*.d.ts`, and test/doc files from `node_modules` during bundling for a 15-35MB reduction. *(⚠️ Requires long-term maintenance: The exclusion rules must be continually updated as NPM ecosystem packaging norms and SvelteKit runtime dependencies evolve)*
+- [ ] **ELF Native Addon Stripping**: Run `strip --strip-unneeded` on native `.node` addons to discard debug symbols and unneeded relocations.
+- [ ] **Build-Time Static Asset Pre-Compression**: Pre-compress `/app/client` assets with Brotli (`.br`) and Zstandard (`.zst`) alongside `.gz` so the server serves them immediately without runtime CPU compression overhead.
+
+### 4. System Efficiency & Remote Caching
+- [ ] **Composite Remote OCI Input Caching**: Skip builds entirely (sub-100ms) if an image already exists in the registry for a given hash of `(source + lockfile + baseDigest + bunVersion)`.
+- [ ] **`sync.Pool` Buffer Recycling**: Eliminate repetitive large slice allocations during tarball generation to reduce GC pressure and memory spikes.
+- [ ] **Fast Sub-Millisecond Supervisor Startup**: Parallelize Bun child process fork/exec with the `/healthz` HTTP probe binding in `pokkum-init`.
+
+---
+
 ## Recommended Next Steps (Prioritized)
 
 Prioritized backlog for ongoing development:

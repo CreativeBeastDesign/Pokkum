@@ -9,8 +9,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/anchore/syft/syft/pkg"
-
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scannerutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -48,38 +47,30 @@ func TestScanner_FailsWhenThresholdExceeded(t *testing.T) {
 
 func TestScanner_EcosystemMapping(t *testing.T) {
 	tests := []struct {
-		pkgType       pkg.Type
+		pkgType       scannerutils.PackageType
 		distroName    string
 		distroVersion string
 		want          string
 	}{
-		{pkg.DebPkg, "debian", "12.5", "Debian:12"},
-		{pkg.DebPkg, "ubuntu", "22.04", "Ubuntu:22.04"},
-		{pkg.ApkPkg, "alpine", "3.19.1", "Alpine:v3.19"},
-		{pkg.ApkPkg, "wolfi", "20240101", "Wolfi"},
-		{pkg.ApkPkg, "chainguard", "20240101", "Chainguard"},
-		{pkg.NpmPkg, "", "", "npm"},
-		{pkg.GoModulePkg, "", "", "Go"},
-		{pkg.PythonPkg, "", "", "PyPI"},
-		{pkg.RustPkg, "", "", "crates.io"},
+		{scannerutils.PkgTypeDeb, "debian", "12.5", "Debian:12"},
+		{scannerutils.PkgTypeDeb, "ubuntu", "22.04", "Ubuntu:22.04"},
+		{scannerutils.PkgTypeApk, "alpine", "3.19.1", "Alpine:v3.19"},
+		{scannerutils.PkgTypeApk, "wolfi", "20240101", "Wolfi"},
+		{scannerutils.PkgTypeApk, "chainguard", "20240101", "Chainguard"},
+		{scannerutils.PkgTypeNpm, "", "", "npm"},
 	}
 
 	for _, tt := range tests {
-		got := mapPackageEcosystem(pkg.Package{Type: tt.pkgType}, tt.distroName, tt.distroVersion)
+		got := scannerutils.MapDistroEcosystem(scannerutils.DistroInfo{
+			ID:        tt.distroName,
+			VersionID: tt.distroVersion,
+		}, tt.pkgType)
 		if got != tt.want {
-			t.Errorf("mapPackageEcosystem(%v, %s, %s) = %q, want %q", tt.pkgType, tt.distroName, tt.distroVersion, got, tt.want)
+			t.Errorf("MapDistroEcosystem(%v, %s, %s) = %q, want %q", tt.pkgType, tt.distroName, tt.distroVersion, got, tt.want)
 		}
 	}
 }
 
-// TestScanner_OSVBatchQueryMock proves queryOSVBatch's real HTTP request/
-// response handling end-to-end against a mock OSV.dev server — a prior
-// version of this test built a mock server and a request but never wired
-// them together (adapter.queryOSVBatch was called with no way to reach the
-// mock, hit the real network instead, and both its return values were
-// discarded with `_ = err; _ = vulns`), so it could pass identically with
-// the parsing logic completely broken. This version routes through
-// Adapter.osvBaseURL and asserts on the actual decoded vulnerability.
 func TestScanner_OSVBatchQueryMock(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/querybatch" {
@@ -199,12 +190,6 @@ func TestScanner_OSVBatchQueryMock(t *testing.T) {
 	}
 }
 
-// TestScanner_DependencyOSVFailureFailsClosed guards the exact gap found in
-// review: an OSV.dev lookup failure previously degraded silently to
-// "0 vulnerabilities found" (Passed: true), indistinguishable from a
-// genuinely clean scan. A directory-target scan (the path that queries
-// project dependencies) against an unreachable OSV endpoint must now fail
-// closed by default.
 func TestScanner_DependencyOSVFailureFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	pkgJSON := `{"name":"app","dependencies":{"lodash":"4.17.4"}}`

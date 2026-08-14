@@ -13,11 +13,7 @@ import (
 )
 
 // fixtureDir is testdata/fixtures/sveltekit-basic: a real SvelteKit project
-// with a committed bun.lock and package.json. Only the two tests in this
-// file run a real syft scan against it — syft's own initialization is slow
-// enough (per the W12 brief) that every other case in this package is a
-// pure-Go unit test against buildExcludePatterns/makeDeterministic/etc.
-// directly, not a full Generate call.
+// with a committed bun.lock and package.json.
 func fixtureDir(t *testing.T) string {
 	t.Helper()
 	dir, err := filepath.Abs(filepath.Join("..", "..", "..", "testdata", "fixtures", "sveltekit-basic"))
@@ -30,15 +26,10 @@ func fixtureDir(t *testing.T) string {
 	return dir
 }
 
-// TestGenerator_SPDX_ReproducibilityAndPackages is the headline test W12
-// asks for: generating the same SBOM twice must produce byte-identical
-// output, and the document must actually list dependencies read from the
-// fixture's committed bun.lock -- not a silently empty catalog.
+// TestGenerator_SPDX_ReproducibilityAndPackages verifies that generating the same SBOM
+// twice produces byte-identical output, and the document actually lists dependencies read
+// from the fixture's committed bun.lock / package.json.
 func TestGenerator_SPDX_ReproducibilityAndPackages(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping real syft scan in -short mode")
-	}
-
 	g := NewGenerator(nil)
 	req := ports.SBOMRequest{
 		ProjectDir: fixtureDir(t),
@@ -98,13 +89,8 @@ func TestGenerator_SPDX_ReproducibilityAndPackages(t *testing.T) {
 }
 
 // TestGenerator_CycloneDX_ValidAndListsPackages covers the CycloneDX-JSON
-// path against the same fixture: valid output, and the same fixture
-// packages present.
+// path against the same fixture: valid output, and the same fixture packages present.
 func TestGenerator_CycloneDX_ValidAndListsPackages(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping real syft scan in -short mode")
-	}
-
 	g := NewGenerator(nil)
 	req := ports.SBOMRequest{
 		ProjectDir: fixtureDir(t),
@@ -143,12 +129,9 @@ func TestGenerator_CycloneDX_ValidAndListsPackages(t *testing.T) {
 }
 
 // TestGenerator_DisabledFormatIsSkippedByCallers documents the "disabled
-// mode produces nothing and no error" contract from the W12 brief at the
+// mode produces nothing and no error" contract from the brief at the
 // level it actually applies: a caller must check Format.Enabled() before
-// ever calling Generate. See TestGenerate_RejectsDisabledFormat in
-// generator_unit_test.go for what Generate itself does if that check is
-// skipped -- it fails loudly, per the ports.SBOMGenerator doc's explicit
-// "core.ErrInvalidSBOMFormat ... if Format ... is SBOMFormatNone".
+// ever calling Generate.
 func TestGenerator_DisabledFormatIsSkippedByCallers(t *testing.T) {
 	req := ports.SBOMRequest{
 		ProjectDir: fixtureDir(t),
@@ -158,10 +141,6 @@ func TestGenerator_DisabledFormatIsSkippedByCallers(t *testing.T) {
 	if req.Format.Enabled() {
 		t.Fatal("SBOMFormatNone must report Enabled() == false")
 	}
-	// A caller that honours Enabled() never calls Generate at all, so no
-	// SBOM and no error is exactly what happens -- nothing to assert
-	// beyond the Enabled() gate itself, since there is nothing left to
-	// call.
 }
 
 // TestGenerator_PokkumIgnore_ExcludesFile proves an excluded file genuinely
@@ -169,18 +148,6 @@ func TestGenerator_DisabledFormatIsSkippedByCallers(t *testing.T) {
 // project's own .pokkumignore excludes must not produce a cataloged
 // package, while a sibling that is not excluded must.
 func TestGenerator_PokkumIgnore_ExcludesFile(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping real syft scan in -short mode")
-	}
-
-	// syft's default cataloger selection for a plain directory source
-	// catalogs packages from LOCKFILES (javascript-lock-cataloger, tagged
-	// pkgcataloging.DirectoryTag), not from bare package.json files
-	// (javascript-package-cataloger is tagged installed/image only, i.e.
-	// it activates for a container image scan, not a directory one) --
-	// confirmed by reading internal/task/package_tasks.go. So the fixture
-	// for this test needs a lockfile in each subtree, matching how a real
-	// project's dependencies actually get catalogued.
 	bunLock := func(pkgName string) string {
 		return `{"lockfileVersion":1,"packages":{"` + pkgName + `":["` + pkgName + `@1.0.0","",{},"sha512-x"]}}`
 	}

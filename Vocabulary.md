@@ -151,7 +151,7 @@ Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode) and `
 
 ## 10. `pokkum scan [target]`
 
-`pokkum scan` inspects project directories, container images (e.g. `gcr.io/distroless/cc-debian12:nonroot`), or OCI tarballs (`image.tar`). For images and tarballs, it enumerates OS packages (Debian, Ubuntu, Alpine, Wolfi, Chainguard) and toolchain packages using Syft, querying OSV.dev via batch API (`/v1/querybatch`) for CVE lookups and CVSS severity scoring.
+`pokkum scan` inspects project directories, container images (e.g. `gcr.io/distroless/cc-debian12:nonroot`), or OCI tarballs (`image.tar`). For images and tarballs, it enumerates OS packages (Debian, Ubuntu, Alpine, Wolfi, Chainguard) and toolchain packages using native zero-dependency targeted parsers (`scannerutils`), querying OSV.dev via batch API (`/v1/querybatch`) for CVE lookups and CVSS severity scoring.
 
 | Flag | Default | Description |
 |---|---|---|

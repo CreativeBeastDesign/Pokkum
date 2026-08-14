@@ -79,7 +79,8 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `packager`: Constructs reproducible OCI tarballs, custom single-binary layers (`BuildCustomFileLayer`), directory tree layers (`BuildDirectoryTreeLayer`), and multi-arch index manifests using `github.com/google/go-containerregistry`.
    - `baseimage`: Resolves base image layers (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard `glibc-dynamic`), verifies base image signatures (static-key via `ports.CosignSigner` for custom/self-signed bases, or keyless Sigstore via `ports.KeylessVerifier` for stock presets), and maintains `pokkum.lock` digest locks. Supports base image escrow mirroring via `--mirror-registry` on `pokkum base update`, copying base images/indexes and their associated Cosign `.sig` tags with automated `MirrorRef` fallback in `pokkum.lock`.
    - `sigstore`: Implements `ports.KeylessVerifier` to verify Sigstore keyless signatures (Fulcio certificate chain + Rekor transparency log inclusion) using `github.com/sigstore/sigstore-go`, against an embedded public-good trust root snapshot. Fully offline (no live TUF fetch), enabling verification in `--offline`/`--hermetic` builds.
-   - `scanner`: Implements `ports.Scanner` for security vulnerability scanning (`pokkum scan`). Catalogs container images, tarballs, and project workspaces using Syft, queries OSV.dev in high-performance batches (`/v1/querybatch`) for ecosystem-aware OS package CVE lookup (Debian, Ubuntu, Alpine, Wolfi, Chainguard, npm), and enforces severity thresholds (`--fail-on`).
+   - `scanner`: Implements `ports.Scanner` for security vulnerability scanning (`pokkum scan`). Catalogs container images, tarballs, and project workspaces using lightweight zero-dependency native parsers (`scannerutils`), queries OSV.dev in high-performance batches (`/v1/querybatch`) for ecosystem-aware OS package CVE lookup (Debian, Ubuntu, Alpine, Wolfi, Chainguard, npm), and enforces severity thresholds (`--fail-on`).
+   - `scannerutils`: Utility package providing zero-dependency native parsers for Debian `dpkg/status`, Alpine `apk/db/installed`, `os-release`, and Node.js lockfiles (`bun.lock`, `package-lock.json`, `pnpm-lock.yaml`).
    - `lockfileutils`: Utility package for loading, parsing, and saving `pokkum.lock` base image lockfiles, tracking `pinned_ref`, `mirror_ref`, `last_scanned_at`, `vulnerabilities_count`, and `max_severity`.
    - `jsonutils`: Utility package for structured, versioned JSON response formatting (`--output=json`).
    - `diagnosticsutils`: Utility package for container exit failure analysis and log tracing.
@@ -88,7 +89,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `comparator`: Adapter performing L1/L2/L3 multi-level image digest and file diff comparisons.
    - `registry`: Handles OCI registry authentication (including per-registry auth chains from a `docker config.json`-style file via `--registry-config`), blob uploads, and index pushes.
    - `registryutils`: Utility package for resolving Docker `config.json` auth keychains, executing dynamic credential helpers (`credHelpers`, `credsStore`), and caching credentials in-memory.
-   - `sbom`: Generates SPDX or CycloneDX SBOMs using `github.com/anchore/syft`.
+   - `sbom`: Generates deterministic SPDX 2.3 or CycloneDX 1.5 SBOMs natively without external cataloger dependencies.
    - `supervisor`: Embedded supervisor binary assets (`/pokkum/init`).
    - `k8s`: Kubernetes manifest inspection, document rewriting, and `pokkum://` schema resolution.
    - `sveltekit`: Checks `@jesterkit/exe-sveltekit` adapter installation in target projects.
@@ -169,7 +170,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - Generates OCI Schema 1 Manifest for each architecture.
    - Combines single-arch manifests into a multi-arch OCI Image Index.
 8. **Supply Chain Attestation & Signing**:
-   - Generates SPDX/CycloneDX SBOM via `syft`.
+   - Generates deterministic SPDX/CycloneDX SBOM natively via `sbom` adapter.
    - Generates SLSA v1.0 provenance attestations wrapped in DSSE envelopes.
    - Signs images using Cosign if configured.
 9. **Publishing / Exporting**:

@@ -1,0 +1,24 @@
+name: Scanner Format Tripwire
+
+on:
+  schedule:
+    # Run every Monday at 06:00 UTC
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  tripwire:
+    name: Upstream Package Format Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Run Tripwire Integration Tests
+        run: go test -v ./internal/adapters/scanner -run TestTripwire_

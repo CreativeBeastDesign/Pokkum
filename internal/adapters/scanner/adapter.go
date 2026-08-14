@@ -14,10 +14,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anchore/syft/syft"
-	"github.com/anchore/syft/syft/cataloging"
-	"github.com/anchore/syft/syft/pkg"
+	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scannerutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekitutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -215,26 +218,17 @@ func (s *Adapter) scanProjectToolchain(ctx context.Context, projectDir string, o
 }
 
 func (s *Adapter) scanProjectDependencies(ctx context.Context, projectDir string) ([]ports.Vulnerability, error) {
-	pkgJSON, err := sveltekitutils.ReadPackageJSON(projectDir)
+	pkgs, err := scannerutils.ExtractProjectDependencies(projectDir)
 	if err != nil {
 		return nil, err
 	}
 
 	var queries []osvQueryItem
-	for name, ver := range pkgJSON.Dependencies {
-		v := cleanVersion(ver)
+	for _, p := range pkgs {
+		v := cleanVersion(p.Version)
 		if v != "" {
 			queries = append(queries, osvQueryItem{
-				Package: osvPackageItem{Name: name, Ecosystem: "npm"},
-				Version: v,
-			})
-		}
-	}
-	for name, ver := range pkgJSON.DevDependencies {
-		v := cleanVersion(ver)
-		if v != "" {
-			queries = append(queries, osvQueryItem{
-				Package: osvPackageItem{Name: name, Ecosystem: "npm"},
+				Package: osvPackageItem{Name: p.Name, Ecosystem: "npm"},
 				Version: v,
 			})
 		}
@@ -255,37 +249,45 @@ func (s *Adapter) scanImageOrTarball(ctx context.Context, target string, offline
 	}
 	s.mu.Unlock()
 
-	src, err := syft.GetSource(ctx, target, syft.DefaultGetSourceConfig())
-	if err != nil {
-		return nil, nil, false, fmt.Errorf("syft source for %s: %w", target, err)
-	}
-	defer src.Close()
-
-	cfg := syft.DefaultCreateSBOMConfig().WithCatalogerSelection(
-		cataloging.NewSelectionRequest().WithRemovals("rpm-db-cataloger"),
-	)
-
-	sDoc, err := syft.CreateSBOM(ctx, src, cfg)
-	if err != nil {
-		return nil, nil, false, fmt.Errorf("syft sbom creation: %w", err)
-	}
-
-	packages := sDoc.Artifacts.Packages.Sorted()
 	var (
-		distroName    string
-		distroVersion string
+		img v1.Image
+		err error
 	)
-	if sDoc.Artifacts.LinuxDistribution != nil {
-		distroName = strings.ToLower(sDoc.Artifacts.LinuxDistribution.ID)
-		distroVersion = sDoc.Artifacts.LinuxDistribution.VersionID
+
+	if _, statErr := os.Stat(target); statErr == nil || strings.HasSuffix(target, ".tar") {
+		img, err = tarball.ImageFromPath(target, nil)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("loading tarball %s: %w", target, err)
+		}
+	} else {
+		ref, parseErr := name.ParseReference(target, name.WeakValidation)
+		if parseErr != nil {
+			return nil, nil, false, fmt.Errorf("parsing image reference %s: %w", target, parseErr)
+		}
+		kc, kerr := registryutils.ResolveKeychain("")
+		if kerr != nil {
+			return nil, nil, false, fmt.Errorf("resolving registry auth: %w", kerr)
+		}
+		desc, getErr := remote.Get(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(kc))
+		if getErr != nil {
+			return nil, nil, false, fmt.Errorf("fetching remote image %s: %w", target, getErr)
+		}
+		img, err = desc.Image()
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("resolving image from descriptor for %s: %w", target, err)
+		}
+	}
+
+	packages, _, err := scannerutils.ExtractImagePackages(ctx, img)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("extracting packages from image %s: %w", target, err)
 	}
 
 	var queries []osvQueryItem
 	for _, p := range packages {
-		ecosystem := mapPackageEcosystem(p, distroName, distroVersion)
-		if ecosystem != "" && p.Version != "" {
+		if p.Ecosystem != "" && p.Version != "" {
 			queries = append(queries, osvQueryItem{
-				Package: osvPackageItem{Name: p.Name, Ecosystem: ecosystem},
+				Package: osvPackageItem{Name: p.Name, Ecosystem: p.Ecosystem},
 				Version: p.Version,
 			})
 		}
@@ -321,50 +323,6 @@ func (s *Adapter) scanImageOrTarball(ctx context.Context, target string, offline
 	}
 
 	return vulns, toolchainAdvisories, incomplete, nil
-}
-
-func mapPackageEcosystem(p pkg.Package, distroName, distroVersion string) string {
-	switch p.Type {
-	case pkg.DebPkg:
-		if distroName == "ubuntu" {
-			if distroVersion != "" {
-				return "Ubuntu:" + distroVersion
-			}
-			return "Ubuntu"
-		}
-		// Default to Debian
-		if distroVersion != "" {
-			major := strings.Split(distroVersion, ".")[0]
-			return "Debian:" + major
-		}
-		return "Debian"
-	case pkg.ApkPkg:
-		if distroName == "wolfi" {
-			return "Wolfi"
-		}
-		if distroName == "chainguard" {
-			return "Chainguard"
-		}
-		if distroVersion != "" {
-			parts := strings.Split(distroVersion, ".")
-			if len(parts) >= 2 {
-				return "Alpine:v" + parts[0] + "." + parts[1]
-			}
-		}
-		return "Alpine"
-	case pkg.NpmPkg:
-		return "npm"
-	case pkg.GoModulePkg:
-		return "Go"
-	case pkg.PythonPkg:
-		return "PyPI"
-	case pkg.RustPkg:
-		return "crates.io"
-	case pkg.RpmPkg:
-		return "Red Hat"
-	default:
-		return ""
-	}
 }
 
 func (s *Adapter) checkEmbeddedAdvisories(bunVer, kitVer string) []ports.Vulnerability {
