@@ -63,8 +63,8 @@ CMD ["node", "build"]
 	if !res.DryRun || res.Status != "dry_run" {
 		t.Errorf("expected dry_run status, got %+v", res)
 	}
-	if !res.PackageJSONUpdated || !res.ConfigUpdated || !res.IgnoreCreated {
-		t.Errorf("expected updates detected in dry-run, got %+v", res)
+	if !res.PackageJSONUpdated || res.ConfigUpdated || !res.IgnoreCreated {
+		t.Errorf("expected package.json + .pokkumignore updates but NOT svelte.config.js (WriteConfig defaults false), got %+v", res)
 	}
 	if len(res.RemovedFiles) != 2 {
 		t.Errorf("expected 2 removed files in dry-run, got %v", res.RemovedFiles)
@@ -83,6 +83,7 @@ CMD ["node", "build"]
 		Dir:              tmpDir,
 		DryRun:           false,
 		RemoveDockerfile: true,
+		WriteConfig:      true,
 	})
 	if err != nil {
 		t.Fatalf("Adopt real run failed: %v", err)
@@ -131,6 +132,101 @@ CMD ["node", "build"]
 	}
 	if !strings.Contains(cfgStr, "SOURCE_DATE_EPOCH") {
 		t.Errorf("svelte.config.js missing SOURCE_DATE_EPOCH pin: %s", cfgStr)
+	}
+}
+
+// TestAdoptWithoutWriteConfig_LeavesSvelteConfigUntouched confirms
+// WriteConfig's default (false) genuinely leaves svelte.config.js
+// byte-identical, not just that the ConfigUpdated flag reads false.
+func TestAdoptWithoutWriteConfig_LeavesSvelteConfigUntouched(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	packageJSON := `{"name": "my-app", "devDependencies": {"@sveltejs/adapter-vercel": "^5.0.0", "@sveltejs/kit": "^2.31.0"}}`
+	svelteConfig := `import adapter from '@sveltejs/adapter-vercel';
+
+const config = { kit: { adapter: adapter() } };
+export default config;
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(packageJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "svelte.config.js"), []byte(svelteConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Adopt(AdoptOptions{Dir: tmpDir}); err != nil {
+		t.Fatalf("Adopt failed: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(tmpDir, "svelte.config.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != svelteConfig {
+		t.Errorf("expected svelte.config.js byte-identical without --write-config, got:\n%s", got)
+	}
+}
+
+// TestAdoptRejectsNonSvelteKitProject reproduces the exact gap found in
+// review: without a detection gate, adopt would happily mutate an
+// arbitrary Node project (e.g. a plain Express app) that was never
+// SvelteKit, injecting a bogus @jesterkit/exe-sveltekit dependency.
+func TestAdoptRejectsNonSvelteKitProject(t *testing.T) {
+	tmpDir := t.TempDir()
+	pkg := `{"name": "plain-express-app", "dependencies": {"express": "^4.19.0"}}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Adopt(AdoptOptions{Dir: tmpDir}); err == nil {
+		t.Fatal("expected Adopt to reject a project with no @sveltejs/kit dependency, got nil error")
+	}
+
+	got, err := os.ReadFile(filepath.Join(tmpDir, "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != pkg {
+		t.Errorf("expected package.json untouched after rejection, got:\n%s", got)
+	}
+}
+
+// TestAdoptPreservesPackageJSONTopLevelKeyOrder guards against a codemod
+// that alphabetizes every top-level key on write, which turns a one-line
+// real change into a full-file reordering diff.
+func TestAdoptPreservesPackageJSONTopLevelKeyOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	packageJSON := `{
+  "name": "my-app",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "@sveltejs/kit": "^2.31.0"
+  }
+}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(packageJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Adopt(AdoptOptions{Dir: tmpDir}); err != nil {
+		t.Fatalf("Adopt failed: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(tmpDir, "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nameIdx := strings.Index(string(got), `"name"`)
+	versionIdx := strings.Index(string(got), `"version"`)
+	typeIdx := strings.Index(string(got), `"type"`)
+	scriptsIdx := strings.Index(string(got), `"scripts"`)
+	devDepsIdx := strings.Index(string(got), `"devDependencies"`)
+	if !(nameIdx < versionIdx && versionIdx < typeIdx && typeIdx < scriptsIdx && scriptsIdx < devDepsIdx) {
+		t.Errorf("expected original top-level key order (name, version, type, scripts, devDependencies) preserved, got:\n%s", got)
 	}
 }
 

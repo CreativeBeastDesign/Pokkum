@@ -17,7 +17,7 @@ import (
 func TestAdoptCommand(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	pkg := `{"name": "test-app", "devDependencies": {"@sveltejs/adapter-node": "^2.0.0"}}`
+	pkg := `{"name": "test-app", "devDependencies": {"@sveltejs/adapter-node": "^2.0.0", "@sveltejs/kit": "^2.31.0"}}`
 	cfg := `import adapter from '@sveltejs/adapter-node'; export default { kit: { adapter: adapter() } };`
 
 	if err := os.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(pkg), 0o644); err != nil {
@@ -42,7 +42,7 @@ func TestAdoptCommand(t *testing.T) {
 func TestAdoptCommandJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	pkg := `{"name": "test-app", "devDependencies": {"@sveltejs/adapter-node": "^2.0.0"}}`
+	pkg := `{"name": "test-app", "devDependencies": {"@sveltejs/adapter-node": "^2.0.0", "@sveltejs/kit": "^2.31.0"}}`
 	if err := os.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(pkg), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -88,5 +88,40 @@ func TestAdoptCommandJSON(t *testing.T) {
 
 	if !res.DryRun {
 		t.Errorf("expected dry run in result")
+	}
+}
+
+// TestAdoptCommand_RejectsNonSvelteKitProject guards against the exact
+// failure mode found in review: adopt previously had no SvelteKit detection
+// at all and would "successfully" adopt an arbitrary Node project (e.g. a
+// plain Express app), injecting a bogus @jesterkit/exe-sveltekit dependency
+// and pokkum:build script into something that was never SvelteKit.
+func TestAdoptCommand_RejectsNonSvelteKitProject(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	pkg := `{"name": "plain-express-app", "dependencies": {"express": "^4.19.0"}}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cmd := newAdoptCommand(context.Background(), logger)
+	cmd.SetArgs([]string{tmpDir})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected adopt to refuse a non-SvelteKit project, got nil error")
+	}
+
+	// Confirm nothing was actually written — a rejected adopt must not
+	// mutate the project at all.
+	pkgData, err := os.ReadFile(filepath.Join(tmpDir, "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pkgData) != pkg {
+		t.Errorf("expected package.json untouched after rejection, got:\n%s", pkgData)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, ".pokkumignore")); !os.IsNotExist(err) {
+		t.Error(".pokkumignore should not have been created for a rejected project")
 	}
 }

@@ -16,6 +16,7 @@ type adoptCmdOptions struct {
 	dir              string
 	dryRun           bool
 	removeDockerfile bool
+	writeConfig      bool
 	output           string
 }
 
@@ -27,8 +28,15 @@ func newAdoptCommand(_ context.Context, logger *slog.Logger) *cobra.Command {
 		Short: "Auto-convert Vercel/Node adapter projects to Pokkum",
 		Long: `Adopt is a migration codemod that inspects an existing SvelteKit repository
 (configured for @sveltejs/adapter-node, adapter-vercel, adapter-auto, etc.),
-migrates package.json dependencies and svelte.config.js to Pokkum compilation defaults,
-generates .pokkumignore, and optionally removes legacy Dockerfile configurations.`,
+adds @jesterkit/exe-sveltekit to package.json, generates .pokkumignore, and
+optionally removes legacy Dockerfile configurations. It refuses to run
+against a project with no @sveltejs/kit dependency.
+
+svelte.config.js is NOT rewritten by default: pokkum build already injects
+the adapter and SOURCE_DATE_EPOCH pin into a virtual copy at build time (see
+ARCHITECTURE.md's Zero-Mutation Build Sandbox), so no on-disk edit is
+actually required. Pass --write-config if you want the adapter swap made
+permanent and visible in the file itself anyway (e.g. for editor tooling).`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
@@ -48,6 +56,7 @@ generates .pokkumignore, and optionally removes legacy Dockerfile configurations
 	cmd.Flags().StringVarP(&opts.dir, "dir", "d", ".", "Path to SvelteKit project directory")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Report planned migration changes without writing to disk")
 	cmd.Flags().BoolVar(&opts.removeDockerfile, "remove-dockerfile", false, "Remove legacy Dockerfile, .dockerignore, and compose files")
+	cmd.Flags().BoolVar(&opts.writeConfig, "write-config", false, "Also permanently rewrite svelte.config.js (not required for pokkum build, which injects this virtually at build time)")
 
 	return cmd
 }
@@ -59,6 +68,7 @@ func runAdopt(logger *slog.Logger, opts *adoptCmdOptions) error {
 		Dir:              opts.dir,
 		DryRun:           opts.dryRun,
 		RemoveDockerfile: opts.removeDockerfile,
+		WriteConfig:      opts.writeConfig,
 	})
 	if err != nil {
 		msg := fmt.Sprintf("failed to adopt project: %v", err)
