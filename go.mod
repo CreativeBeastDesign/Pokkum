@@ -1,6 +1,6 @@
 module github.com/CreativeBeastDesign/pokkum
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/anchore/syft v1.50.0
