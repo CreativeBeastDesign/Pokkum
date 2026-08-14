@@ -82,7 +82,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 
 Positional: `[dir]` — project directory, defaults to `.`.
 
-Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode) and `SOURCE_DATE_EPOCH` (reproducible build timestamp).
+Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode), `SOURCE_DATE_EPOCH` (reproducible build timestamp), and `POKKUM_CACHE_DIR` (custom base cache directory for layers and runtime binaries; defaults to `~/.cache/pokkum`).
 
 ---
 

@@ -175,3 +175,47 @@ func TestBuildDirectoryTreeLayerWithPruning(t *testing.T) {
 		t.Errorf("README.md was not pruned from layer tar")
 	}
 }
+
+func TestBuildCustomFileLayer_LayerCaching(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	cacheDir := t.TempDir()
+	t.Setenv("POKKUM_CACHE_DIR", cacheDir)
+
+	sourceFile := filepath.Join(tmpDir, "bun")
+	if err := os.WriteFile(sourceFile, []byte("#!/bin/sh\necho 'cached bun'"), 0755); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	modTime := time.Unix(1700000000, 0)
+
+	// First call builds and caches
+	layer1, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/usr/local/bin/bun", sourceFile, modTime, ports.CompressionGzip)
+	if err != nil {
+		t.Fatalf("first BuildCustomFileLayer failed: %v", err)
+	}
+	digest1, err := layer1.Digest()
+	if err != nil {
+		t.Fatalf("layer1.Digest() failed: %v", err)
+	}
+
+	// Second call should hit the cache and return identical layer digest & diffID
+	layer2, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/usr/local/bin/bun", sourceFile, modTime, ports.CompressionGzip)
+	if err != nil {
+		t.Fatalf("second BuildCustomFileLayer failed: %v", err)
+	}
+	digest2, err := layer2.Digest()
+	if err != nil {
+		t.Fatalf("layer2.Digest() failed: %v", err)
+	}
+
+	if digest1 != digest2 {
+		t.Errorf("expected cached layer digest %s to equal %s", digest2, digest1)
+	}
+
+	diffID1, _ := layer1.DiffID()
+	diffID2, _ := layer2.DiffID()
+	if diffID1 != diffID2 {
+		t.Errorf("expected cached layer diffID %s to equal %s", diffID2, diffID1)
+	}
+}

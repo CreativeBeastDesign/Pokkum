@@ -7,6 +7,10 @@
   - `internal/core` imports `internal/ports` and standard library. It re-exports boundary vocabulary as type aliases (`core.Platform = ports.Platform`).
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
+- **Pre-Calculated & Cached Immutable Layers (`internal/adapters/layercacheutils`)**:
+  - `layercacheutils` caches compressed immutable layer blobs (`/usr/local/bin/bun`, `/pokkum/init`) in `~/.cache/pokkum/layers/` (or `$POKKUM_CACHE_DIR/layers`), saving ~100MB of tarring and gzip/zstd compression per build.
+  - Cache keys are deterministically computed via `ComputeKey(targetPath, contentSHA256, platform, modTime, compression)`.
+  - Automatic fallback to temp directories or in-memory layer generation if disk cache is unwritable.
 - **Vendor Layer Pruning & Zero-Mutation Sandbox (`internal/adapters/pruneutils`)**:
   - Automatically strips junk files (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests) during vendor layer (`/app/vendor`) archiving, reducing image size by 15–35MB.
   - Guarantees zero mutation to user's working directory / source `node_modules` (pruning only runs on build sandbox / layer tar stream).

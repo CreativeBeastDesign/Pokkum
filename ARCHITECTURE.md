@@ -82,6 +82,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `scanner`: Implements `ports.Scanner` for security vulnerability scanning (`pokkum scan`). Catalogs container images, tarballs, and project workspaces using lightweight zero-dependency native parsers (`scannerutils`), queries OSV.dev in high-performance batches (`/v1/querybatch`) for ecosystem-aware OS package CVE lookup (Debian, Ubuntu, Alpine, Wolfi, Chainguard, npm), and enforces severity thresholds (`--fail-on`).
    - `scannerutils`: Utility package providing zero-dependency native parsers for Debian `dpkg/status`, Alpine `apk/db/installed`, `os-release`, and Node.js lockfiles (`bun.lock`, `package-lock.json`, `pnpm-lock.yaml`).
    - `pruneutils`: Utility package providing junk-file blocklisting and directory pruning for `/app/vendor` layer optimization (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests).
+   - `layercacheutils`: Utility package managing local on-disk caching (`~/.cache/pokkum/layers/`) for immutable layer blobs (Bun runtime, `pokkum-init` supervisor) to skip tarring and compression.
    - `lockfileutils`: Utility package for loading, parsing, and saving `pokkum.lock` base image lockfiles, tracking `pinned_ref`, `mirror_ref`, `last_scanned_at`, `vulnerabilities_count`, and `max_severity`.
    - `jsonutils`: Utility package for structured, versioned JSON response formatting (`--output=json`).
    - `diagnosticsutils`: Utility package for container exit failure analysis and log tracing.

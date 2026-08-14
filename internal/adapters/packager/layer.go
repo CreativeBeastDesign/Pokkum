@@ -18,6 +18,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/layercacheutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -128,12 +129,25 @@ func buildSupervisorLayer(ctx context.Context, req ports.PackageRequest, modTime
 		return nil, fmt.Errorf("packager: build %s: %w", req.Platform, err)
 	}
 
+	cacheDir := layercacheutils.ResolveCacheDir()
+	contentHash := layercacheutils.ComputeBytesSHA256(req.Supervisor)
+	cacheKey := layercacheutils.ComputeKey(ports.SupervisorPath, contentHash, req.Platform, modTime, req.Compression)
+
+	if cached, ok := layercacheutils.Get(cacheDir, cacheKey, req.Compression); ok {
+		return cached, nil
+	}
+
 	file := layerFile{
 		path: ports.SupervisorPath,
 		size: int64(len(req.Supervisor)),
 		open: bytesOpener(req.Supervisor),
 	}
-	return buildLayer(ctx, req.Platform, file, modTime, req.Compression)
+	layer, err := buildLayer(ctx, req.Platform, file, modTime, req.Compression)
+	if err != nil {
+		return nil, err
+	}
+
+	return layercacheutils.Put(cacheDir, cacheKey, layer, req.Compression)
 }
 
 // buildLayer wraps a single file (plus its parent directory entries) into one
@@ -357,6 +371,7 @@ func bytesOpener(b []byte) func() (io.ReadCloser, error) {
 
 // BuildCustomFileLayer builds a single-file layer at targetPath (e.g. "/usr/local/bin/bun")
 // from sourcePath on host disk, pinned to modTime and nonroot ownership.
+// It leverages on-disk caching via layercacheutils to skip re-compressing identical immutable binaries.
 func BuildCustomFileLayer(ctx context.Context, platform ports.Platform, targetPath string, sourcePath string, modTime time.Time, compression ports.CompressionAlgorithm) (v1.Layer, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("packager: build %s: %w", platform, err)
@@ -370,12 +385,30 @@ func BuildCustomFileLayer(ctx context.Context, platform ports.Platform, targetPa
 		return nil, fmt.Errorf("packager: build %s: source path %q is a directory: %w", platform, sourcePath, core.ErrPackageFailed)
 	}
 
+	cacheDir := layercacheutils.ResolveCacheDir()
+	contentHash, hashErr := layercacheutils.ComputeFileSHA256(sourcePath)
+	var cacheKey string
+	if hashErr == nil {
+		cacheKey = layercacheutils.ComputeKey(targetPath, contentHash, platform, modTime, compression)
+		if cached, ok := layercacheutils.Get(cacheDir, cacheKey, compression); ok {
+			return cached, nil
+		}
+	}
+
 	file := layerFile{
 		path: targetPath,
 		size: info.Size(),
 		open: fileOpener(sourcePath),
 	}
-	return buildLayer(ctx, platform, file, modTime, compression)
+	layer, err := buildLayer(ctx, platform, file, modTime, compression)
+	if err != nil {
+		return nil, err
+	}
+
+	if cacheKey != "" {
+		return layercacheutils.Put(cacheDir, cacheKey, layer, compression)
+	}
+	return layer, nil
 }
 
 // BuildDirectoryTreeLayerWithPruning builds an OCI layer from a directory tree on host disk,
