@@ -53,3 +53,19 @@ type VerifyOutput struct {
 	RebuildDuration string            `json:"rebuild_duration,omitempty"`
 	MismatchDetails []string          `json:"mismatch_details,omitempty"`
 }
+
+// HistoryOutput represents the structured JSON output payload for
+// `pokkum history <image>`. Every field here is read directly off the
+// image's real, pulled manifest — deliberately no builder/signer/SLSA
+// fields that this command doesn't actually verify: a bool field that's
+// always false because nothing checked it reads identically to "checked
+// and failed," which is worse than not having the field at all. Use
+// `pokkum verify <ref>` for an actual cryptographic verdict.
+type HistoryOutput struct {
+	ImageRef       string            `json:"image_ref"`
+	ImageDigest    string            `json:"image_digest"`
+	BuildTimestamp string            `json:"build_timestamp,omitempty"`
+	GitRepo        string            `json:"git_repo,omitempty"`
+	GitCommit      string            `json:"git_commit,omitempty"`
+	Annotations    map[string]string `json:"annotations,omitempty"`
+}

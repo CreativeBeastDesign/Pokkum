@@ -124,6 +124,7 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 	rootCmd.AddCommand(newExplainCommand(ctx, logger))
 	rootCmd.AddCommand(newMetricsCommand(ctx, logger))
 	rootCmd.AddCommand(newScanCommand(ctx, logger))
+	rootCmd.AddCommand(newHistoryCommand(ctx, logger))
 	rootCmd.AddCommand(newRollbackCommand(ctx, logger))
 	rootCmd.AddCommand(newUpgradeCommand(ctx, logger, cosign.NewSigner(logger)))
 	rootCmd.AddCommand(newVerifyCommand(ctx, logger))
