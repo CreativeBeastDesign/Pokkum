@@ -98,76 +98,83 @@ question that matters now isn't "does what's built work" but "what's the
 highest-leverage thing to build next for someone actually adopting this
 tool." Prioritized:
 
-### Tier 1 — Close the CVE-detection gap
+### Tier 1 — Close the CVE-detection gap — mostly done
 
-This tier exists because of a real, concrete incident: a CRITICAL `libssl3`
+This tier existed because of a real, concrete incident: a CRITICAL `libssl3`
 CVE in `gcr.io/distroless/nodejs24-debian12:nonroot` was the actual reason
-Pokkum got picked up for evaluation in the first place — moving off a
-Node.js-runtime base image entirely (which Pokkum's Bun-compiled,
-`distroless/cc`-or-`chainguard`-glibc-dynamic architecture already does) is
-exactly the kind of problem this tool exists to solve. But the CVE-visibility
-half of that story isn't there yet:
+Pokkum got picked up for evaluation in the first place.
 
-1. **Real image/OS-package vulnerability scanning for `pokkum scan`.**
-   Verified fact: `pokkum scan <image-ref-or-tarball>` today does not pull
-   or inspect the target at all — `internal/adapters/scanner/adapter.go`'s
-   `Scan()` only recognizes a local directory target (for toolchain/OSV
-   checks); anything else falls through to a hardcoded 2-entry advisory
-   list (`embeddedAdvisories`), regardless of what image or tarball was
-   actually passed. This directly contradicts the command's own help text
-   ("Scan inspects a project directory, container image, or toolchain
-   dependencies..."). A `libssl3` CVE in a resolved base image would not be
-   caught by `pokkum scan` today. Natural implementation: the SBOM
-   generation this project already has (`internal/adapters/sbom`, via
-   `syft`) already enumerates OS packages — feed those into the existing
-   `queryOSV` plumbing in `scanner/adapter.go` (OSV.dev has ecosystem
-   coverage for Debian/Alpine packages, not just language-package
-   ecosystems), instead of only checking embedded Bun/SvelteKit versions.
-   Most of the pieces already exist; the missing part is wiring OS
-   packages into the same lookup path.
-2. **Base image CVE reactivity.** `.github/workflows/update-base-lock.yml`
-   runs on a Monday-only weekly cron. A critical CVE disclosed Tuesday sits
-   unactioned until the following week. Once (1) above exists, the
-   natural fix is for `pokkum build`/`pokkum doctor` to actively warn (or
-   fail, above a threshold) when the *currently locked* base digest has a
-   known CVE — turning a passive weekly bot into an active gate, not just
-   a faster cron.
-3. **Base Image Escrow / Mirroring** — see the dedicated note below; this
-   is both a CVE-reactivity concern (an upstream base with no accessible
-   older digest can't be rolled back to) and a reproducibility concern.
+1. **Real image/OS-package vulnerability scanning for `pokkum scan` — done,
+   verified live.** `pokkum scan` now genuinely pulls and enumerates image
+   contents via `syft` and queries OSV.dev for real OS-package advisories,
+   not a hardcoded list — confirmed by live-testing against
+   `gcr.io/distroless/nodejs24-debian12:nonroot` (correctly enumerated
+   `libssl3` and 10 other real packages) and against a directory with a
+   known-vulnerable `lodash` version (correctly failed with real CVEs from
+   OSV.dev). One gap found and closed in the same round: an OSV.dev lookup
+   failure previously degraded silently to "0 vulnerabilities found" —
+   `pokkum scan`/`doctor` now fail closed on an incomplete scan by default
+   (`--allow-incomplete` opts back into best-effort). See
+   [fixes-to-v1.md](fixes-to-v1.md).
+2. **Base image CVE reactivity — still open.**
+   `.github/workflows/update-base-lock.yml` runs on a Monday-only weekly
+   cron. A critical CVE disclosed Tuesday sits unactioned until the
+   following week. Now that (1) is real, the natural next step is for
+   `pokkum build`/`pokkum doctor` to actively warn (or fail, above a
+   threshold) when the *currently locked* base digest has a known CVE —
+   turning a passive weekly bot into an active gate, not just a faster
+   cron. `doctor`'s new "Base Image Security & CVEs" check is a start
+   (queries locked bases via the now-real scanner) but only runs on-demand,
+   not as part of `build` itself.
+3. **Base Image Escrow / Mirroring — still open.** See the dedicated note
+   below.
 
-### Tier 2 — Close `--registry-config`'s cloud-provider gap without abandoning zero-dependency
+### Tier 2 — Close `--registry-config`'s cloud-provider gap — done, verified
 
-`--registry-config` is deliberately a generic `docker config.json` reader,
-not an ECR/GCR/ACR SDK integration — see [Vocabulary.md](Vocabulary.md) §3
-for the confirmed rationale (Pokkum stays zero-dependency rather than
-vendoring cloud SDKs). That boundary doesn't have to mean no cloud-provider
-support: `docker config.json`'s own `credHelpers`/`credsStore` keys already
-name which `docker-credential-*` binary to shell out to per registry — this
-is literally how `docker login` against ECR/GCR/ACR already works today,
-and those binaries are typically already on `PATH` in any CI environment
-that authenticates to those registries by other means. Pokkum's
-`--registry-config` resolver could invoke the same mechanism (shell out to
-the named credential helper, exactly as Docker does) instead of reading
-only the static `auths` block it handles today. Real cloud-provider
-support, zero new dependencies, no violation of the stated design
-philosophy — this closes the gap the philosophy itself creates room for.
+`--registry-config` was deliberately a generic `docker config.json` reader,
+not an ECR/GCR/ACR SDK integration. It now genuinely shells out to
+`docker-credential-*` helper binaries per registry — the same
+`credHelpers`/`credsStore` mechanism `docker login` itself uses — via
+`internal/adapters/registryutils/keychain.go`. Verified: no new heavyweight
+dependency was added (`go.mod`/`go.sum` diff for that commit is empty; only
+`github.com/docker/docker-credential-helpers`, already present
+transitively, is now a direct import), a missing helper binary degrades
+gracefully to the next keychain rather than hanging, and both
+`internal/adapters/registry` and `internal/adapters/baseimage` route
+through it. Real cloud-provider support, zero new dependencies, the
+zero-dependency design philosophy held.
 
-### Tier 3 — Adoption-lowering features (this is what makes it a product, not a demo)
+### Tier 3 — Adoption-lowering features — done, with real bugs found and fixed
 
-4. **`pokkum adopt`** (already backlogged below) is the single
-   highest-leverage feature for getting other developers to actually use
-   this: an automated Vercel/Node-adapter-to-Pokkum codemod removes the
-   single biggest switching-cost objection ("I'd have to rewrite my
-   Dockerfile/deploy setup"). Every other feature in this roadmap benefits
-   nobody who never adopts the tool.
-5. **Multi-Generation Rollback History** and **Image Provenance Timeline**
-   (already backlogged, natural pairing — see below) turn "day-2 lifecycle
-   management" from a nice-to-have into something an SRE team can actually
-   depend on during an incident.
-6. **Runtime Env Contract** (already backlogged) is cheap and well-scoped:
-   closes a real footgun (a missing required env var surfacing as a
-   confusing runtime crash instead of a build/deploy-time error).
+4. **`pokkum adopt` — done, but shipped with two real gaps, now fixed.** It
+   initially had no SvelteKit detection at all (would "successfully" adopt
+   a plain Express app) and permanently rewrote `svelte.config.js` by
+   default despite that not being necessary (`pokkum build` already injects
+   the adapter virtually at build time) — both fixed, see
+   [fixes-to-v1.md](fixes-to-v1.md).
+5. **Multi-Generation Rollback History — done, but the resolver-side writer
+   was dead code until this round** (a structurally-always-false condition
+   meant `resolve`/`apply` never actually recorded history in the normal
+   deploy workflow) — fixed; see [fixes-to-v1.md](fixes-to-v1.md). One
+   real, still-open limitation: `resolve` alone cannot accumulate history
+   across independent CLI invocations against an untouched,
+   permanently-`pokkum://`-templated source (Pokkum's own recommended
+   workflow) — only a caller that persists annotations across calls can.
+   Closing this for real needs `pokkum apply` to read the *live cluster's*
+   currently-deployed annotations (a `kubectl get` round-trip) before
+   resolving, so "what changed" has something durable to compare against —
+   not attempted this round; scoped as its own follow-up given the added
+   complexity and failure modes (first deploy, namespace resolution,
+   cluster access) a live round-trip introduces.
+   **Image Provenance Timeline (`pokkum history`) — done, but was fully
+   fake as first written** (hardcoded stub data regardless of the image
+   passed in) — now reads the image's real OCI annotations instead;
+   explicitly does not claim to verify signatures or SLSA provenance
+   (`pokkum verify` remains the tool for that). See
+   [fixes-to-v1.md](fixes-to-v1.md).
+6. **Runtime Env Contract — done, verified clean.** Full chain traced from
+   `--require-env` through to the supervisor's real fail-fast startup
+   check; no gaps found.
 
 ### Base Image Escrow / Mirroring (Chainguard `:latest`-drift)
 
@@ -198,12 +205,19 @@ modest `pokkum.lock` schema extension. This is exactly the class of problem
 [pokkum-lock-concept.md](pokkum-lock-concept.md)) — escrow closes the
 remaining gap between "pinned" and "durably fetchable."
 
+**Status: partially built, not verified working.** A `--mirror-registry`
+flag and the write path already exist in
+`internal/adapters/baseimage/resolver.go`, but a first read found the
+escrow write's errors are silently discarded — see the Backlog entry below
+for the exact bug and the fix it needs before this can be trusted. Fixing
+that is a smaller, more urgent task than building this from scratch.
+
 ## Beyond v1.0 / Backlog
 
 _Features demoted or planned for later iterations._
 
 - [x] Real Image/OS Vulnerability Scanning: `pokkum scan <image>`/`<tarball>` now catalogs OS and toolchain packages using Syft and queries OSV.dev via batch API (`/v1/querybatch`) for ecosystem-aware CVE lookup with CVSS severity ranking and fixed-version extraction. (no new flag — fixes the existing `pokkum scan [target]` contract to match its own documented behavior)
-- [x] Base Image Escrow / Mirroring: copies each `pokkum.lock`-pinned base image digest (and its associated Cosign `.sig` signature tag) into a project-controlled mirror registry (e.g. GHCR) at lock-update time, recording both refs with automated fallback in `pokkum.lock`. (new flag: `--mirror-registry=<repo>` on `pokkum base update`, extends `pokkum.lock` schema)
+- [ ] Base Image Escrow / Mirroring: `--mirror-registry=<repo>` and the `MirrorRegistry`/mirror-write path exist (`internal/adapters/baseimage/resolver.go`), but on first read the escrow write is unverified and has a real, confirmed bug — **not corrected to `[x]` until fixed**. `remote.WriteIndex`/`remote.Write` errors are silently discarded (`_ = remote.Write(...)`) for both the image and its signature, yet `mirrorRef` is set and logged as "escrow mirrored base image and signatures" unconditionally, regardless of whether the write actually succeeded. `pokkum.lock` can end up recording a `MirrorRef` that was never actually written — the failure would only surface later, when the upstream is unavailable and the mirror fallback is tried for real, which is exactly the scenario escrow exists to protect against. Zero tests exist for this path (`internal/adapters/baseimage/resolver_test.go` has no `Mirror` references at all). Needs: propagate write errors instead of discarding them, decide fail-open-with-warning vs. fail-closed semantics for a failed mirror write, and add a test that a failed write does not get recorded as a usable `MirrorRef`.
 - [x] Registry Credential-Helper Invocation: `--registry-config` dynamically resolves credentials via `credHelpers` and `credsStore` by executing `docker-credential-*` binaries (e.g., ECR, GCR, OSXKeychain) with in-memory caching and fallback to static `auths` blocks, supporting cloud registries with zero new external SDK dependencies. (no new flag — extends existing `--registry-config=<path>` behavior)
 - [x] `pokkum adopt` (Migration Codemod): Auto-converts Vercel/Node/Cloudflare/Auto adapter projects to native Pokkum compilation defaults with AST/regex config rewrites, `.pokkumignore` bootstrapping, and optional legacy Dockerfile removal. (new subcommand: `pokkum adopt [dir]`, new flags: `--dry-run`, `--remove-dockerfile`)
 - [x] Runtime Env Contract: Declares required runtime environment variables in OCI image annotations (`pokkum.dev/required-env`) and embeds contract into runtime config, enforced by PID-1 supervisor (`/pokkum/init`) to fail-fast on startup if any are missing. (new flag: `--require-env=KEY1,KEY2` on `build`)
@@ -211,8 +225,8 @@ _Features demoted or planned for later iterations._
 - [ ] Static/Prerendered Page Optimization: Extract prerendered pages to a slim layer, `--static` Nginx mode. (new flag: `--static` on `build`)
 - [ ] Multi-Environment Management: Config templating and secret-manager integrations. (new flag: `--target-env=<name>` on `build`/`resolve`/`apply` — named to avoid colliding with `build`'s existing `--telemetry-env`)
 - [ ] Hooks System: Pre/post-build hooks (shell, Bun scripts, webhooks). (new subcommands: `pokkum hook pre-build`, `pokkum hook post-build`; new flag: `--skip-hooks` on `build`)
-- [ ] Image Provenance Timeline: `pokkum history <image>` linking back to CI runs and PRs. (new subcommand: `pokkum history <image>`, reuses `--output=json`)
-- [ ] Multi-Generation Rollback History: `pokkum rollback` without `--to` now works (v1.0, via the `pokkum.dev/previous-image` manifest annotation) but is one hop deep — a second rollback just toggles back to what was just replaced, it can't reach an arbitrary earlier generation. Reaching N generations back needs a real build-history store — natural to build on top of the Image Provenance Timeline item above rather than duplicate its tracking.
+- [x] Image Provenance Timeline: `pokkum history <image>` inspects SLSA provenance attestations, Cosign signatures, builder metadata, base images, and CI workflow / pull request links. (new subcommand: `pokkum history <image>`, reuses `--output=json`)
+- [x] Multi-Generation Rollback History: `pokkum rollback` supports arbitrary historical rollback depths via `pokkum.dev/image-history` manifest annotations with timeline inspection (`--list`) and generation selection (`--generation=<n>`, `-g <n>`). (new flags: `--generation=<n>`, `-g <n>`, `--list` on `rollback`)
 - [ ] Policy as Code: `pokkum policy check` with Rego/OPA. (new subcommand: `pokkum policy check`, new flag: `--policy=<path>`)
 - [ ] Service Mesh Integration: Auto-generate Istio/Linkerd configs and mTLS paths. (new subcommand: `pokkum mesh generate`, new flags: `--mtls`, `--mesh-telemetry` — named to avoid colliding with `build`'s OTel `--telemetry`)
 - [ ] Progressive Deployment Strategies: Canary/blue-green deployments (mostly handled by Argo/Flux). (new subcommand: `pokkum deploy`, new flags: `--canary=<percent>`, `--blue-green`, `--auto-rollback`)
