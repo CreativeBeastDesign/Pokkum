@@ -4,6 +4,7 @@
 - **Application Framework**: SvelteKit 2.31+ (`@sveltejs/kit`)
 - **Runtime Compiler & Resolver**: Bun ≥ 1.2.0 (`internal/adapters/bunruntime` resolver, `--bun-binary`, `--bun-variant=standard|baseline`)
 - **Packaging Strategy & Adapter**: `--strategy=layered` (default, arch-independent layout via `@sveltejs/adapter-node`) / `--strategy=exe` (deprecated 2-layer single executable)
+- **`sync.Pool` Buffer Recycling**: `poolutils` (`internal/adapters/poolutils/poolutils.go`) recycles 64KB I/O copy buffers and bounded `bytes.Buffer` instances across tar archiving, layer streaming, hashing, and pre-compression.
 - **Composite Remote OCI Input Caching**: `remotecacheutils` (`internal/adapters/remotecacheutils/remotecacheutils.go`) calculates composite input digests to achieve sub-100ms build avoidance against remote registries. Escape hatch: `--no-cache`.
 - **Static Asset Pre-Compression**: `precompressutils` (`internal/adapters/precompressutils/precompressutils.go`) pre-compresses `/app/client` assets using pure-Go Brotli (`github.com/andybalholm/brotli`), Zstandard (`github.com/klauspost/compress/zstd`), and Gzip. Escape hatch: `--no-precompress`.
 - **ELF Native Addon Stripping**: `striputils` (`internal/adapters/striputils/striputils.go`) strips unneeded debug symbols from native `.node` modules and `.so` libraries in `/app/native` and `/app/vendor`. Escape hatch: `--no-strip`.

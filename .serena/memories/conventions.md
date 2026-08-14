@@ -7,6 +7,9 @@
   - `internal/core` imports `internal/ports` and standard library. It re-exports boundary vocabulary as type aliases (`core.Platform = ports.Platform`).
   - `internal/adapters/*` import `internal/ports` and `internal/core` (for sentinel errors).
   - `cmd/pokkum` is the composition root where concrete adapters are instantiated.
+- **`sync.Pool` Buffer Recycling (`internal/adapters/poolutils`)**:
+  - Manages `sync.Pool` allocation recycling for 64KB I/O copy buffers (`GetCopyBuffer`, `PutCopyBuffer`, `Copy`) and bounded `bytes.Buffer` instances (`GetByteBuffer`, `PutByteBuffer` capped at 1MB).
+  - Eliminates heap allocation churn across tar archiving (`packager`), layer caching (`layercacheutils`), input hashing (`remotecacheutils`), and static asset pre-compression (`precompressutils`).
 - **Composite Remote OCI Input Caching (`internal/adapters/remotecacheutils`, `ports.RemoteCacher`)**:
   - Computes deterministic composite input hashes (`sha256(source + lockfile + baseDigest + bunVersion + platforms + flags)`).
   - Queries target repository for `<repo>:cache-<input-hash>`. On hit, retags requested tags and returns `BuildResult{Cached: true}` in sub-100ms, completely skipping SvelteKit bundling and layer tarring.

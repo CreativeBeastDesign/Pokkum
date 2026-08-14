@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +13,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/poolutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
@@ -56,7 +56,7 @@ func ComputeFileSHA256(path string) (string, error) {
 	defer f.Close() //nolint:errcheck // read-only
 
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := poolutils.Copy(h, f); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
@@ -160,7 +160,7 @@ func Put(cacheDir string, key string, layer v1.Layer, compression ports.Compress
 		return layer, fmt.Errorf("reading compressed layer: %w", err)
 	}
 
-	_, copyErr := io.Copy(tmpFile, rc)
+	_, copyErr := poolutils.Copy(tmpFile, rc)
 	_ = rc.Close()
 	closeErr := tmpFile.Close()
 

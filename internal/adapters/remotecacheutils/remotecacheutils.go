@@ -20,6 +20,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/ignoreutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/poolutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -103,6 +104,9 @@ func ComputeSourceTreeHash(projectDir string) (string, error) {
 
 	slices.Sort(files)
 
+	copyBuf := poolutils.GetCopyBuffer()
+	defer poolutils.PutCopyBuffer(copyBuf)
+
 	h := sha256.New()
 	for _, rel := range files {
 		h.Write([]byte(filepath.ToSlash(rel)))
@@ -112,7 +116,7 @@ func ComputeSourceTreeHash(projectDir string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("reading project file %q: %w", rel, err)
 		}
-		if _, err := io.Copy(h, f); err != nil {
+		if _, err := io.CopyBuffer(h, f, *copyBuf); err != nil {
 			f.Close()
 			return "", fmt.Errorf("hashing project file %q: %w", rel, err)
 		}

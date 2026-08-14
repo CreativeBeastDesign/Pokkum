@@ -25,6 +25,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/layercacheutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/poolutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -425,16 +426,19 @@ func tarOpener(entries []tarEntry, modTime time.Time) tarball.Opener {
 // os.FileInfo, which is what keeps the host's umask, uid, atime and filesystem
 // out of the layer digest.
 func writeTar(w io.Writer, entries []tarEntry, modTime time.Time) error {
+	copyBuf := poolutils.GetCopyBuffer()
+	defer poolutils.PutCopyBuffer(copyBuf)
+
 	tw := tar.NewWriter(w)
 	for _, e := range entries {
-		if err := writeEntry(tw, e, modTime); err != nil {
+		if err := writeEntry(tw, e, modTime, *copyBuf); err != nil {
 			return err
 		}
 	}
 	return tw.Close()
 }
 
-func writeEntry(tw *tar.Writer, e tarEntry, modTime time.Time) error {
+func writeEntry(tw *tar.Writer, e tarEntry, modTime time.Time, buf []byte) error {
 	hdr := &tar.Header{
 		Typeflag: e.typeflag,
 		Name:     e.name,
@@ -471,7 +475,7 @@ func writeEntry(tw *tar.Writer, e tarEntry, modTime time.Time) error {
 	}
 	defer rc.Close() //nolint:errcheck // read-only
 
-	n, err := io.Copy(tw, rc)
+	n, err := io.CopyBuffer(tw, rc, buf)
 	if err != nil {
 		return fmt.Errorf("write tar entry %q: %w", e.name, err)
 	}
