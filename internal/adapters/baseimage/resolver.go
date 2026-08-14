@@ -72,9 +72,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/cli/cli/config"
-	"github.com/docker/cli/cli/config/configfile"
-	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -82,6 +79,7 @@ import (
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -562,54 +560,10 @@ func staticBaseReason(ref string) (string, bool) {
 	return "", false
 }
 
-type customConfigFileKeychain struct {
-	cf *configfile.ConfigFile
-}
-
-func (k *customConfigFileKeychain) Resolve(target authn.Resource) (authn.Authenticator, error) {
-	if k.cf == nil {
-		return authn.Anonymous, nil
-	}
-	reg := target.RegistryStr()
-	cfg, err := k.cf.GetAuthConfig(reg)
-	if err != nil {
-		return authn.Anonymous, nil
-	}
-	if cfg.Username != "" || cfg.Password != "" || cfg.Auth != "" || cfg.IdentityToken != "" || cfg.RegistryToken != "" {
-		return authn.FromConfig(authn.AuthConfig{
-			Username:      cfg.Username,
-			Password:      cfg.Password,
-			Auth:          cfg.Auth,
-			IdentityToken: cfg.IdentityToken,
-			RegistryToken: cfg.RegistryToken,
-		}), nil
-	}
-	return authn.Anonymous, nil
-}
-
-func resolveKeychain(configPath string) (authn.Keychain, error) {
-	if configPath == "" {
-		return authn.DefaultKeychain, nil
-	}
-
-	f, err := os.Open(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("baseimage: open auth config %s: %w: %w", configPath, err, core.ErrRegistryAuth)
-	}
-	defer f.Close()
-
-	cf, err := config.LoadFromReader(f)
-	if err != nil {
-		return nil, fmt.Errorf("baseimage: load auth config %s: %w: %w", configPath, err, core.ErrRegistryAuth)
-	}
-
-	return authn.NewMultiKeychain(&customConfigFileKeychain{cf: cf}, authn.DefaultKeychain), nil
-}
-
 // remoteOptions builds the go-containerregistry options common to every pull:
 // context threading (so a cancelled build stops pulling mid-transfer) and keychain resolution.
 func (r *Resolver) remoteOptions(ctx context.Context, insecure bool, registryConfigPath string) ([]remote.Option, error) {
-	kc, err := resolveKeychain(registryConfigPath)
+	kc, err := registryutils.ResolveKeychain(registryConfigPath)
 	if err != nil {
 		return nil, err
 	}

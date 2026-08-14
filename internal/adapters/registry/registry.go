@@ -50,16 +50,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 
-	"github.com/docker/cli/cli/config"
-	"github.com/docker/cli/cli/config/configfile"
-	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
-	"github.com/CreativeBeastDesign/pokkum/internal/core"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
@@ -116,55 +112,11 @@ func nameOptions(insecure bool) []name.Option {
 	return opts
 }
 
-type customConfigFileKeychain struct {
-	cf *configfile.ConfigFile
-}
-
-func (k *customConfigFileKeychain) Resolve(target authn.Resource) (authn.Authenticator, error) {
-	if k.cf == nil {
-		return authn.Anonymous, nil
-	}
-	reg := target.RegistryStr()
-	cfg, err := k.cf.GetAuthConfig(reg)
-	if err != nil {
-		return authn.Anonymous, nil
-	}
-	if cfg.Username != "" || cfg.Password != "" || cfg.Auth != "" || cfg.IdentityToken != "" || cfg.RegistryToken != "" {
-		return authn.FromConfig(authn.AuthConfig{
-			Username:      cfg.Username,
-			Password:      cfg.Password,
-			Auth:          cfg.Auth,
-			IdentityToken: cfg.IdentityToken,
-			RegistryToken: cfg.RegistryToken,
-		}), nil
-	}
-	return authn.Anonymous, nil
-}
-
-func resolveKeychain(configPath string) (authn.Keychain, error) {
-	if configPath == "" {
-		return authn.DefaultKeychain, nil
-	}
-
-	f, err := os.Open(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("registry: open auth config %s: %w: %w", configPath, err, core.ErrRegistryAuth)
-	}
-	defer f.Close()
-
-	cf, err := config.LoadFromReader(f)
-	if err != nil {
-		return nil, fmt.Errorf("registry: load auth config %s: %w: %w", configPath, err, core.ErrRegistryAuth)
-	}
-
-	return authn.NewMultiKeychain(&customConfigFileKeychain{cf: cf}, authn.DefaultKeychain), nil
-}
-
 // remoteOptions builds the remote.Option set common to every registry
 // operation: context threading (so a cancelled build aborts a 90MB upload
 // rather than leaking it into the background) and keychain resolution (supporting custom config.json).
 func remoteOptions(ctx context.Context, insecure bool, userAgent string, registryConfigPath string) ([]remote.Option, error) {
-	kc, err := resolveKeychain(registryConfigPath)
+	kc, err := registryutils.ResolveKeychain(registryConfigPath)
 	if err != nil {
 		return nil, err
 	}

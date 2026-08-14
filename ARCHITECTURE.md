@@ -85,6 +85,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `provenance`: Adapter resolving remote SLSA provenance statements and Cosign attestations.
    - `comparator`: Adapter performing L1/L2/L3 multi-level image digest and file diff comparisons.
    - `registry`: Handles OCI registry authentication (including per-registry auth chains from a `docker config.json`-style file via `--registry-config`), blob uploads, and index pushes.
+   - `registryutils`: Utility package for resolving Docker `config.json` auth keychains, executing dynamic credential helpers (`credHelpers`, `credsStore`), and caching credentials in-memory.
    - `sbom`: Generates SPDX or CycloneDX SBOMs using `github.com/anchore/syft`.
    - `supervisor`: Embedded supervisor binary assets (`/pokkum/init`).
    - `k8s`: Kubernetes manifest inspection, document rewriting, and `pokkum://` schema resolution.

@@ -51,7 +51,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--no-verify-base` | — | — | `false` | Suppress base image signature verification entirely (both static-key and keyless). |
 | `--allow-secret-pattern` | — | — | (none) | Regex pattern to ignore during build-time secret scanning, repeatable. |
 | `--hermetic` | — | — | `false` | Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required). |
-| `--registry-config` | — | — | (none) | Path to a `docker config.json`-style auth file, keyed by registry hostname (`"auths": {"<host>": {...}}`), merged ahead of `authn.DefaultKeychain`. Deliberately not cloud-provider-specific — no ECR/GCR/ACR credential-helper invocation, just static per-registry credentials from the file, to keep Pokkum's zero-dependency design invariant rather than vendoring cloud SDKs. |
+| `--registry-config` | — | — | (none) | Path to a `docker config.json`-style auth file, keyed by registry hostname (`"auths": {"<host>": {...}}`), with dynamic credential-helper execution (`credHelpers`, `credsStore`) shelling out to `docker-credential-*` binaries (e.g. ECR, GCR, OSXKeychain) and caching credentials in-memory, merged ahead of `authn.DefaultKeychain`. |
 | `--tarball` | — | — | (none) | Export as an OCI archive to the given path. Mutually exclusive with `--local`. |
 | `--dry-run` | — | — | `false` | Resolve and report; perform no writes. Mutually exclusive with `--print-manifest`. |
 | `--print-manifest` | — | — | `false` | Emit the computed OCI manifest/config without pushing. Mutually exclusive with `--dry-run`. |
