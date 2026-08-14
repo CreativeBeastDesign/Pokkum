@@ -299,6 +299,89 @@ func TestResolveProvenance_Adversarial_BogusDSSESignature_IsRejected(t *testing.
 	}
 }
 
+// TestResolveProvenance_Adversarial_BareUnsignedStatement_IsRejected pins the
+// fix for a second, easier way to forge provenance than a bogus DSSE
+// signature: tryParseAndVerifySLSA used to have a "Try direct in-toto
+// statement" fallback that accepted a bare, entirely unsigned in-toto
+// statement — no envelope, no signature, nothing to verify at all — as long
+// as its subject digest matched. An attacker didn't even need to forge a
+// signature; dropping the envelope was enough. Confirmed exploitable before
+// this test existed: HasProvenance came back true with a fully
+// attacker-controlled repo/commit, and that forged data satisfied
+// --expect-source too, from a one-line unsigned JSON blob.
+func TestResolveProvenance_Adversarial_BareUnsignedStatement_IsRejected(t *testing.T) {
+	_, host := startTestRegistry(t)
+	targetRepo := fmt.Sprintf("%s/app-bare-statement", host)
+
+	img := createTestImage(t, nil)
+	tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+	if err := remote.Write(tagRef, img); err != nil {
+		t.Fatalf("push test image: %v", err)
+	}
+	imgDigest, _ := img.Digest()
+
+	slsaGen := slsa.NewGenerator(nil)
+	slsaStmt, err := slsaGen.Generate(context.Background(), ports.SLSAGeneratorRequest{
+		BaseImage: ports.SLSABaseImage{
+			Ref:    "gcr.io/distroless/base:nonroot",
+			Digest: v1.Hash{Algorithm: "sha256", Hex: "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"},
+		},
+		GitRepo:         "github.com/attacker/forged-repo",
+		GitCommit:       "deadbeef0123456789deadbeef0123456789dead",
+		OutputDigest:    imgDigest,
+		SourceDateEpoch: time.Unix(1700000000, 0),
+	})
+	if err != nil {
+		t.Fatalf("generate SLSA statement: %v", err)
+	}
+
+	// The attack: push the bare statement with NO DSSE envelope and NO
+	// signature whatsoever, exactly the shape the old fallback accepted.
+	stmtJSON, _ := json.Marshal(slsaStmt)
+
+	attLayer := static.NewLayer(stmtJSON, types.MediaType("application/vnd.in-toto+json"))
+	attImg, _ := mutate.Append(empty.Image, mutate.Addendum{
+		Layer: attLayer,
+	})
+	attImg = mutate.MediaType(attImg, types.OCIManifestSchema1)
+
+	attTagStr := fmt.Sprintf("%s:%s-%s.att", targetRepo, imgDigest.Algorithm, imgDigest.Hex)
+	attRef, _ := name.ParseReference(attTagStr, name.WeakValidation)
+	if err := remote.Write(attRef, attImg); err != nil {
+		t.Fatalf("push attestation image: %v", err)
+	}
+
+	r := provenance.NewResolver(nil)
+	ctx := context.Background()
+
+	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+		ImageRef: targetRepo + ":v1.0.0",
+	})
+	if err != nil {
+		t.Fatalf("resolve provenance: %v", err)
+	}
+
+	if summary.HasProvenance {
+		t.Fatal("expected HasProvenance to be FALSE for a bare, unsigned in-toto statement with no DSSE envelope")
+	}
+	if summary.PinnedInputs.Repo == "github.com/attacker/forged-repo" {
+		t.Errorf("forged repo must NOT propagate from an unsigned bare statement")
+	}
+	if summary.PinnedInputs.Commit == "deadbeef0123456789deadbeef0123456789dead" {
+		t.Errorf("forged commit must NOT propagate from an unsigned bare statement")
+	}
+
+	// --expect-source must also reject it, not just HasProvenance — this is
+	// exactly what made the original hole worse than a missing feature.
+	_, err = r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+		ImageRef:     targetRepo + ":v1.0.0",
+		ExpectSource: "github.com/attacker/forged-repo@deadbeef0123456789deadbeef0123456789dead",
+	})
+	if err == nil {
+		t.Fatal("expected --expect-source to fail against an unsigned, forged bare statement, got nil error")
+	}
+}
+
 func TestResolveProvenance_WithCosignSignature(t *testing.T) {
 	_, host := startTestRegistry(t)
 	targetRepo := fmt.Sprintf("%s/app-cosign", host)
