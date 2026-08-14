@@ -290,7 +290,7 @@ func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, diges
 				if err != nil {
 					break
 				}
-				if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA || hdr.Typeflag == 0 {
+				if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == 0 {
 					innerBytes, _ := io.ReadAll(tr)
 					bundle.PayloadBytes = innerBytes
 					if err := r.signer.Verify(ctx, bundle, pubKeyPEM, repo, digest); err == nil {
@@ -369,7 +369,7 @@ func (r *Resolver) extractSLSAStatement(ctx context.Context, attImg v1.Image, di
 			if err != nil {
 				break
 			}
-			if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA || hdr.Typeflag == 0 {
+			if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == 0 {
 				entryData, err := io.ReadAll(tr)
 				if err == nil {
 					if stmt, ok := r.tryParseAndVerifySLSA(ctx, entryData, digest, pubKeyPEM); ok {
@@ -402,14 +402,6 @@ func (r *Resolver) tryParseAndVerifySLSA(ctx context.Context, data []byte, diges
 			}
 		}
 		return ports.SLSAStatement{}, false
-	}
-
-	// Try direct in-toto statement
-	var stmt ports.SLSAStatement
-	if err := json.Unmarshal(data, &stmt); err == nil && len(stmt.Subject) > 0 {
-		if statementMatchesDigest(stmt, digest) {
-			return stmt, true
-		}
 	}
 
 	return ports.SLSAStatement{}, false

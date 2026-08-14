@@ -40,6 +40,27 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+// TestMain isolates every test in this package from the host's real Docker
+// credential configuration, matching internal/adapters/baseimage/resolver_test.go's
+// TestMain (same rationale: DefaultKeychain reads $DOCKER_CONFIG/config.json,
+// and a machine configured with a credential store can shell out to a
+// helper binary that blocks on an OS auth prompt or a Docker Desktop socket
+// that isn't there in CI). This was present when the DSSE/keyless
+// verification fixes landed (commit 83d4bac) but was dropped without
+// replacement in the immediate follow-up commit (a2a335b) — restored here
+// so this package's tests don't silently start depending on whatever
+// credentials happen to be configured on the machine running them.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "pokkum-provenance-dockerconfig")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "provenance: TestMain: MkdirTemp:", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(dir)
+	os.Setenv("DOCKER_CONFIG", dir)
+	os.Exit(m.Run())
+}
+
 func startTestRegistry(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
 	s := httptest.NewServer(registry.New())
