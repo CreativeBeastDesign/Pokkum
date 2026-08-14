@@ -510,12 +510,27 @@ func ExtractImagePackages(ctx context.Context, img v1.Image) ([]CatalogPackage, 
 	}
 
 	var (
-		distroInfo     DistroInfo
-		osPackages     []CatalogPackage
-		appPackages    []CatalogPackage
-		dpkgStatusData []byte
-		apkData        []byte
-		osReleaseData  []byte
+		distroInfo DistroInfo
+		osPackages []CatalogPackage
+		// vendorPackages holds each vendored dependency's own declared identity
+		// (name+version read from *its own* package.json, e.g.
+		// /app/vendor/express/package.json), keyed by name. This is the
+		// ground truth for what is actually installed in the image — see
+		// ports.AppVendorDirPrefix ("/app/vendor") and how the packager lays
+		// out one directory per vendored npm package.
+		vendorPackages = make(map[string]CatalogPackage)
+		// otherAppPackages holds packages discovered indirectly: declared
+		// dependency ranges from non-vendor package.json files (e.g. the
+		// app's own /app/package.json, or an image not built by Pokkum) and
+		// resolved entries from bun.lock files found under app/. These are a
+		// fallback for when we have no installed-version ground truth, and
+		// are dropped in favor of a vendorPackages entry of the same name to
+		// avoid double-counting/overriding an exact installed version with an
+		// unresolved semver range.
+		otherAppPackages []CatalogPackage
+		dpkgStatusData   []byte
+		apkData          []byte
+		osReleaseData    []byte
 	)
 
 	// Scan layers from bottom to top
@@ -567,18 +582,28 @@ func ExtractImagePackages(ctx context.Context, img v1.Image) ([]CatalogPackage, 
 			case strings.HasSuffix(cleanName, "package.json") && strings.Contains(cleanName, "app/"):
 				data, _ := io.ReadAll(tr)
 				var p struct {
+					Name            string            `json:"name"`
+					Version         string            `json:"version"`
 					Dependencies    map[string]string `json:"dependencies"`
 					DevDependencies map[string]string `json:"devDependencies"`
 				}
 				if json.Unmarshal(data, &p) == nil {
-					for k, v := range p.Dependencies {
-						appPackages = append(appPackages, CatalogPackage{Name: k, Version: v, Type: PkgTypeNpm, Ecosystem: "npm"})
+					if p.Name != "" && p.Version != "" && strings.Contains(cleanName, "vendor/") {
+						// This package.json belongs to a vendored dependency
+						// itself (e.g. app/vendor/express/package.json) — its
+						// own name+version is the actual installed identity,
+						// not just a range someone else declared.
+						vendorPackages[p.Name] = CatalogPackage{Name: p.Name, Version: p.Version, Type: PkgTypeNpm, Ecosystem: "npm"}
+					} else {
+						for k, v := range p.Dependencies {
+							otherAppPackages = append(otherAppPackages, CatalogPackage{Name: k, Version: v, Type: PkgTypeNpm, Ecosystem: "npm"})
+						}
 					}
 				}
 			case strings.HasSuffix(cleanName, "bun.lock") && strings.Contains(cleanName, "app/"):
 				data, _ := io.ReadAll(tr)
 				if pkgs, err := ParseBunLock(data); err == nil {
-					appPackages = append(appPackages, pkgs...)
+					otherAppPackages = append(otherAppPackages, pkgs...)
 				}
 			}
 		}
@@ -608,6 +633,25 @@ func ExtractImagePackages(ctx context.Context, img v1.Image) ([]CatalogPackage, 
 			osPackages = append(osPackages, pkgs...)
 		}
 	}
+
+	appPackages := make([]CatalogPackage, 0, len(vendorPackages)+len(otherAppPackages))
+	for _, pkg := range vendorPackages {
+		appPackages = append(appPackages, pkg)
+	}
+	for _, pkg := range otherAppPackages {
+		if _, ok := vendorPackages[pkg.Name]; ok {
+			// Already recorded with its exact installed version from its own
+			// vendored package.json; skip the declared-range/lockfile dup.
+			continue
+		}
+		appPackages = append(appPackages, pkg)
+	}
+	sort.Slice(appPackages, func(i, j int) bool {
+		if appPackages[i].Name == appPackages[j].Name {
+			return appPackages[i].Version < appPackages[j].Version
+		}
+		return appPackages[i].Name < appPackages[j].Name
+	})
 
 	all := append(osPackages, appPackages...)
 	return all, distroInfo, nil

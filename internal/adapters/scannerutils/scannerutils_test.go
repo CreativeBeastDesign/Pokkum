@@ -1,10 +1,19 @@
 package scannerutils
 
 import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 )
 
 func TestParseOSRelease(t *testing.T) {
@@ -257,6 +266,121 @@ func TestExtractProjectDependencies(t *testing.T) {
 
 	if len(pkgs) != 2 {
 		t.Fatalf("expected 2 packages, got %d", len(pkgs))
+	}
+}
+
+// buildTestImage constructs a single-layer OCI image containing the given
+// files (path -> content), for exercising ExtractImagePackages against a
+// synthetic tar layout without touching a real registry or daemon.
+func buildTestImage(t *testing.T, files map[string]string) v1.Image {
+	t.Helper()
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for name, content := range files {
+		hdr := &tar.Header{
+			Name: name,
+			Mode: 0o644,
+			Size: int64(len(content)),
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("tar WriteHeader(%s): %v", name, err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatalf("tar Write(%s): %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar Close: %v", err)
+	}
+	tarBytes := buf.Bytes()
+
+	layer, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(tarBytes)), nil
+	})
+	if err != nil {
+		t.Fatalf("tarball.LayerFromOpener: %v", err)
+	}
+
+	img, err := mutate.AppendLayers(empty.Image, layer)
+	if err != nil {
+		t.Fatalf("mutate.AppendLayers: %v", err)
+	}
+	return img
+}
+
+// TestExtractImagePackages_VendoredPackageJSON is a regression test for a bug
+// where ExtractImagePackages only read the dependencies/devDependencies maps
+// out of any package.json under an "app/" path, and never the package.json's
+// own name+version fields. Pokkum's own image layout (see
+// ports.AppVendorDirPrefix = "/app/vendor" and packager.go) ships each
+// vendored npm package's own package.json at /app/vendor/<pkg>/package.json.
+// So for a real Pokkum-built image, the old code produced a catalog of
+// unresolved semver ranges declared by dependents (e.g. "body-parser": a
+// dependency range from express's package.json) and never contained the
+// actual installed packages (lodash, express) themselves — making CVE
+// lookups against real vendored packages non-functional.
+func TestExtractImagePackages_VendoredPackageJSON(t *testing.T) {
+	files := map[string]string{
+		// The app's own manifest declares its direct dependencies as ranges —
+		// this should NOT clobber or duplicate the exact installed versions
+		// recorded from each package's own vendored package.json below.
+		"app/package.json": `{
+			"name": "my-app",
+			"version": "1.0.0",
+			"dependencies": {
+				"lodash": "^4.17.0",
+				"express": "^4.18.0"
+			}
+		}`,
+		// lodash has no runtime dependencies of its own.
+		"app/vendor/lodash/package.json": `{
+			"name": "lodash",
+			"version": "4.17.21"
+		}`,
+		// express declares transitive dependencies that are NOT independently
+		// vendored in this image (no app/vendor/body-parser, no
+		// app/vendor/cookie) — those unresolved ranges must not appear in the
+		// final catalog as if they were installed packages.
+		"app/vendor/express/package.json": `{
+			"name": "express",
+			"version": "4.18.2",
+			"dependencies": {
+				"body-parser": "1.20.1",
+				"cookie": "0.5.0"
+			}
+		}`,
+	}
+
+	img := buildTestImage(t, files)
+
+	pkgs, _, err := ExtractImagePackages(context.Background(), img)
+	if err != nil {
+		t.Fatalf("ExtractImagePackages error: %v", err)
+	}
+
+	want := []CatalogPackage{
+		{Name: "express", Version: "4.18.2", Type: PkgTypeNpm, Ecosystem: "npm"},
+		{Name: "lodash", Version: "4.17.21", Type: PkgTypeNpm, Ecosystem: "npm"},
+	}
+
+	if len(pkgs) != len(want) {
+		t.Fatalf("ExtractImagePackages() = %+v, want %+v (length mismatch: got %d, want %d)", pkgs, want, len(pkgs), len(want))
+	}
+	for i := range want {
+		if pkgs[i] != want[i] {
+			t.Errorf("pkgs[%d] = %+v, want %+v", i, pkgs[i], want[i])
+		}
+	}
+
+	// Explicitly confirm the bug scenario: the unresolved dependency ranges
+	// from express's own package.json (body-parser, cookie) must NOT be
+	// reported as installed packages, since they aren't independently
+	// vendored in this image.
+	for _, p := range pkgs {
+		if p.Name == "body-parser" || p.Name == "cookie" {
+			t.Errorf("unexpected unresolved transitive dependency reported as installed package: %+v", p)
+		}
 	}
 }
 
