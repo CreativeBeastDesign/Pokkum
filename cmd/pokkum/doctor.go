@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scanner"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
 )
@@ -43,7 +45,7 @@ func newDoctorCommand(_ context.Context, logger *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func runDoctor(_ *slog.Logger, opts *doctorOptions) error {
+func runDoctor(logger *slog.Logger, opts *doctorOptions) error {
 	outputFormat := ports.OutputFormat(opts.output)
 	checks := []ports.DoctorCheck{}
 	allPassed := true
@@ -73,6 +75,13 @@ func runDoctor(_ *slog.Logger, opts *doctorOptions) error {
 	ignoreCheck := checkPokkumIgnore(opts.dir, opts.fix)
 	checks = append(checks, ignoreCheck)
 	if !ignoreCheck.Passed {
+		allPassed = false
+	}
+
+	// Check 5: Base image security & CVEs
+	baseCheck := checkBaseImageSecurity(opts.dir, logger)
+	checks = append(checks, baseCheck)
+	if !baseCheck.Passed {
 		allPassed = false
 	}
 
@@ -247,5 +256,62 @@ func checkPokkumIgnore(dir string, fix bool) ports.DoctorCheck {
 		Name:    ".pokkumignore Exclude List",
 		Passed:  true,
 		Message: ".pokkumignore file present",
+	}
+}
+
+func checkBaseImageSecurity(dir string, logger *slog.Logger) ports.DoctorCheck {
+	lockPath := filepath.Join(dir, ports.PokkumLockfileName)
+	lf, err := lockfileutils.LoadLockfile(lockPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ports.DoctorCheck{
+				Name:    "Base Image Security & CVEs",
+				Passed:  true,
+				Message: "no pokkum.lock present (will be pinned and verified on first build)",
+			}
+		}
+		return ports.DoctorCheck{
+			Name:        "Base Image Security & CVEs",
+			Passed:      false,
+			Message:     fmt.Sprintf("failed to parse %s: %v", lockPath, err),
+			Remediation: "Re-generate lockfile with `pokkum base update`",
+		}
+	}
+
+	adapter := scanner.NewAdapter(logger)
+	var vulnerableBases []string
+
+	for name, entry := range lf.Bases {
+		target := entry.PinnedRef
+		if target == "" {
+			target = entry.Ref
+		}
+		if target == "" {
+			continue
+		}
+
+		res, err := adapter.Scan(context.Background(), ports.ScanRequest{
+			Target:  target,
+			FailOn:  ports.SeverityCritical,
+			Offline: false,
+		})
+		if err != nil || !res.Passed {
+			vulnerableBases = append(vulnerableBases, fmt.Sprintf("%s (%s: %s)", name, target, res.MaxSeverityFound))
+		}
+	}
+
+	if len(vulnerableBases) > 0 {
+		return ports.DoctorCheck{
+			Name:        "Base Image Security & CVEs",
+			Passed:      false,
+			Message:     fmt.Sprintf("critical security vulnerabilities detected in locked base image(s): %s", strings.Join(vulnerableBases, ", ")),
+			Remediation: "Update base images via `pokkum base update` or choose a patched preset (e.g. chainguard)",
+		}
+	}
+
+	return ports.DoctorCheck{
+		Name:    "Base Image Security & CVEs",
+		Passed:  true,
+		Message: fmt.Sprintf("all %d locked base images passed security vulnerability checks", len(lf.Bases)),
 	}
 }

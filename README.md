@@ -78,8 +78,8 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum resolve -f deployment.yaml \
   4. Vendor `node_modules` Layer
   5. SvelteKit App & Asset Layer
 - **Bit-for-Bit OCI Reproducibility**: All timestamps and tar headers derive deterministically from `SOURCE_DATE_EPOCH` / git commit metadata.
-- **Security Scanning & Guardrails**: Integrated `pokkum scan` vulnerability auditing (OSV advisory lookups) and build-time secret leak prevention.
-- **Base Image Signature Verification by Default**: Real keyless Sigstore verification (Fulcio certificate chain + Rekor transparency log) runs automatically against the live `distroless`/`chainguard` base image signatures — no configuration required. Custom/self-signed bases are covered too, via a static public key.
+- **Security Scanning & Guardrails**: Integrated `pokkum scan` vulnerability auditing with Syft OS package enumeration and OSV.dev batch queries (Debian, Ubuntu, Alpine, Wolfi, Chainguard), build-time secret leak prevention, and base image CVE reactivity.
+- **Base Image Signature Verification & Escrow Mirroring**: Real keyless Sigstore verification (Fulcio certificate chain + Rekor transparency log) runs automatically against live `distroless`/`chainguard` base image signatures. Base image escrow mirroring (`pokkum base update --mirror-registry`) copies base images and Cosign `.sig` tags to project-controlled registries with automated lockfile fallback.
 - **Built-In Observability**: Zero-config OpenTelemetry tracing and Prometheus metrics auto-instrumentation.
 - **Day-2 Lifecycle Management**: Annotation-based manifest rollbacks (`pokkum rollback`, no `--to` needed for the last change) and signed CLI self-upgrades (`pokkum upgrade`).
 

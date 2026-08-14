@@ -236,6 +236,11 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		return nil, err
 	}
 
+	nameOpts := []name.Option{name.WeakValidation}
+	if req.Insecure {
+		nameOpts = append(nameOpts, name.Insecure)
+	}
+
 	// Handle pokkum.lock lookup
 	var (
 		lf          *ports.PokkumLockfile
@@ -249,10 +254,19 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 			lf = loaded
 			if entry, ok := lockfileutils.GetLockedBase(lf, lockKey); ok && !req.UpdateBase {
 				lockedFound = true
-				if entry.PinnedRef != "" {
-					ref = entry.PinnedRef
+				if entry.MirrorRef != "" {
+					// Attempt to resolve from mirrored escrow registry first
+					if mParsed, mErr := name.ParseReference(entry.MirrorRef, nameOpts...); mErr == nil {
+						if _, mPullErr := r.pull(ctx, mParsed, entry.MirrorRef, req.Insecure, req.RegistryConfigPath); mPullErr == nil {
+							ref = entry.MirrorRef
+							r.logger().Info("using mirrored base image from escrow registry", "mirror_ref", ref)
+						}
+					}
 				}
-				r.logger().Info("using locked base image from lockfile", "lockfile", req.LockfilePath, "key", lockKey, "ref", ref)
+				if ref != entry.MirrorRef && entry.PinnedRef != "" {
+					ref = entry.PinnedRef
+					r.logger().Info("using locked base image from lockfile", "lockfile", req.LockfilePath, "key", lockKey, "ref", ref)
+				}
 			}
 		} else if !os.IsNotExist(lerr) {
 			r.logger().Warn("failed to load base image lockfile", "path", req.LockfilePath, "err", lerr)
@@ -267,10 +281,6 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		return nil, fmt.Errorf("baseimage: %s: %s: %w", ref, reason, core.ErrBaseImageIncompatible)
 	}
 
-	nameOpts := []name.Option{name.WeakValidation}
-	if req.Insecure {
-		nameOpts = append(nameOpts, name.Insecure)
-	}
 	parsedRef, err := name.ParseReference(ref, nameOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("baseimage: parse %q: %w: %w", ref, err, core.ErrInvalidBaseImage)
@@ -302,6 +312,34 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 			"ref", ref, "pinned_ref", out.PinnedRef)
 	}
 
+	// Escrow mirroring: if MirrorRegistry is requested, copy the image and signature to mirror
+	var mirrorRef string
+	if req.MirrorRegistry != "" {
+		mirrorTarget := fmt.Sprintf("%s:sha256-%s", strings.TrimRight(req.MirrorRegistry, "/"), pull.digest.Hex)
+		mirrorParsed, mErr := name.ParseReference(mirrorTarget, nameOpts...)
+		if mErr == nil {
+			remoteOpts, rErr := r.remoteOptions(ctx, req.Insecure, req.RegistryConfigPath)
+			if rErr == nil {
+				if pull.isIndex {
+					_ = remote.WriteIndex(mirrorParsed, pull.index, remoteOpts...)
+				} else {
+					_ = remote.Write(mirrorParsed, pull.image, remoteOpts...)
+				}
+				// Also mirror the Cosign signature tag if present
+				sigTag := fmt.Sprintf("sha256-%s.sig", pull.digest.Hex)
+				upstreamSigRef := parsedRef.Context().Tag(sigTag)
+				mirrorSigRef := mirrorParsed.Context().Tag(sigTag)
+				if sigDesc, sErr := remote.Get(upstreamSigRef, remoteOpts...); sErr == nil {
+					if sigImg, iErr := sigDesc.Image(); iErr == nil {
+						_ = remote.Write(mirrorSigRef, sigImg, remoteOpts...)
+					}
+				}
+				mirrorRef = mirrorTarget
+				r.logger().Info("escrow mirrored base image and signatures", "mirror_ref", mirrorRef)
+			}
+		}
+	}
+
 	// Update pokkum.lock if requested or if lockfile path specified and base was unpinned/newly resolved
 	if req.LockfilePath != "" && (!lockedFound || req.UpdateBase) {
 		if lf == nil {
@@ -315,12 +353,22 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		if req.Ref != "" {
 			origRef = req.Ref
 		}
-		lockfileutils.SetLockedBase(lf, lockKey, ports.BaseLockEntry{
+		entry := ports.BaseLockEntry{
 			Ref:       origRef,
 			Digest:    pull.digest.String(),
 			PinnedRef: out.PinnedRef,
+			MirrorRef: mirrorRef,
 			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-		})
+		}
+		if existing, ok := lockfileutils.GetLockedBase(lf, lockKey); ok {
+			if mirrorRef == "" && existing.MirrorRef != "" {
+				entry.MirrorRef = existing.MirrorRef
+			}
+			entry.LastScannedAt = existing.LastScannedAt
+			entry.VulnerabilitiesCount = existing.VulnerabilitiesCount
+			entry.MaxSeverity = existing.MaxSeverity
+		}
+		lockfileutils.SetLockedBase(lf, lockKey, entry)
 		if serr := lockfileutils.SaveLockfile(req.LockfilePath, lf); serr != nil {
 			r.logger().Warn("failed to save updated base image lockfile", "path", req.LockfilePath, "err", serr)
 		} else {

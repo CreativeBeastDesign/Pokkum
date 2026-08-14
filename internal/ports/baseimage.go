@@ -285,6 +285,9 @@ type BaseImageRequest struct {
 
 	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
 	RegistryConfigPath string
+
+	// MirrorRegistry is the optional mirror registry repository for base image escrow (e.g. ghcr.io/myorg/base-mirror).
+	MirrorRegistry string
 }
 
 // PokkumLockfileName is the canonical lockfile name.
@@ -292,10 +295,14 @@ const PokkumLockfileName = "pokkum.lock"
 
 // BaseLockEntry records a locked base image digest in pokkum.lock.
 type BaseLockEntry struct {
-	Ref       string `json:"ref"`
-	Digest    string `json:"digest"`
-	PinnedRef string `json:"pinned_ref"`
-	UpdatedAt string `json:"updated_at"`
+	Ref                  string `json:"ref"`
+	Digest               string `json:"digest"`
+	PinnedRef            string `json:"pinned_ref"`
+	MirrorRef            string `json:"mirror_ref,omitempty"`
+	UpdatedAt            string `json:"updated_at"`
+	LastScannedAt        string `json:"last_scanned_at,omitempty"`
+	VulnerabilitiesCount int    `json:"vulnerabilities_count,omitempty"`
+	MaxSeverity          string `json:"max_severity,omitempty"`
 }
 
 // PokkumLockfile represents the structure of pokkum.lock files.

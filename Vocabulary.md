@@ -146,6 +146,8 @@ Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode) and `
 
 ## 10. `pokkum scan [target]`
 
+`pokkum scan` inspects project directories, container images (e.g. `gcr.io/distroless/cc-debian12:nonroot`), or OCI tarballs (`image.tar`). For images and tarballs, it enumerates OS packages (Debian, Ubuntu, Alpine, Wolfi, Chainguard) and toolchain packages using Syft, querying OSV.dev via batch API (`/v1/querybatch`) for CVE lookups and CVSS severity scoring.
+
 | Flag | Default | Description |
 |---|---|---|
 | `--fail-on` | `critical` | Minimum vulnerability severity threshold causing scan failure (`low`, `medium`, `high`, `critical`). |
@@ -198,7 +200,7 @@ Without `--check`, `pokkum upgrade` refuses to install anything if it cannot ver
 
 | Subcommand / Flag | Default | Description |
 |---|---|---|
-| `pokkum base update --preset <name>` | — | Re-resolve upstream base image tags against remote registry and update `pokkum.lock`. Does **not** run signature verification (static-key or keyless) — the resolved digest is pinned on trust-on-first-use. `pokkum build` re-verifies the locked digest against the live signature at build time regardless, so this is not a verification bypass, but a compromised/mistyped tag could get pinned into the lockfile unverified. |
+| `pokkum base update [--preset <name>] [--mirror-registry <repo>]` | — | Re-resolve upstream base image tags against remote registry and update `pokkum.lock`. If `--mirror-registry=<repo>` is supplied, copies the base image/index and its Cosign `.sig` tag into the project-controlled mirror repo, recording `mirror_ref` in `pokkum.lock`. Does **not** run signature verification during update — the resolved digest is pinned on trust-on-first-use; `pokkum build` re-verifies the locked digest against the live signature at build time regardless. |
 | `pokkum base check` | — | Inspect current base image lockfile status and digest pinning. Same no-verification caveat as `base update` above. |
 
 ---

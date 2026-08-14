@@ -12,7 +12,8 @@ Pokkum is a Go-based zero-dependency OCI container image compiler for SvelteKit 
 - Hexagonal architecture: `internal/ports` is the leaf dependency graph node; core never imports adapters.
 - Bit-for-Bit reproducibility: Timestamps, tar headers, base image digests (`pokkum.lock`), and `kit.version.name` are pinned to `SOURCE_DATE_EPOCH`.
 - Zero-config auto-injection: `svelte.config.js` and `instrumentation.server.ts` transforms happen in virtual memory sandboxes without mutating disk sources.
-- Base Image Lockfile: `pokkum.lock` automatically resolves and pins base image digests to guarantee reproducible builds across machines and time (`--update-base`, `--offline`, `pokkum base update`).
+- Base Image Lockfile & Escrow: `pokkum.lock` automatically resolves and pins base image digests to guarantee reproducible builds across machines and time (`--update-base`, `--offline`, `pokkum base update`). Supports escrow mirroring (`--mirror-registry`) of base images and Cosign `.sig` tags to project registries with automatic lockfile fallback.
+- Vulnerability Scanning & Reactivity: `pokkum scan` performs Syft-driven OS package and toolchain CVE audits against OSV.dev batch API; `pokkum build` actively warns/fails on vulnerable base image digests (`POKKUM_FAIL_ON_CVE`).
 - Supply chain security: SLSA v1.0 provenance, Cosign digests, and DSSE envelopes are automatically generated and signed during `pokkum build` pipeline unless `--no-sign` is provided.
 - SBOM Attachment: SBOMs are attached by default as OCI 1.1 referrers (`--sbom-attach=referrer`), with legacy `.sbom` tag fallback (`--sbom-attach=tag`).
 - Keyless Sigstore Base Verification: Stock presets (`distroless`/`chainguard`) use keyless Sigstore verification (Fulcio+Rekor) against embedded trust roots by default, while custom bases use static-key Cosign verification (`--base-verify-mode`).

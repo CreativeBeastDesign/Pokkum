@@ -335,6 +335,25 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 	log.Info("base image resolved", "ref", baseInfo.Ref, "pinned", baseInfo.PinnedRef, "isIndex", base.IsIndex)
 
+	if deps.Scanner != nil && !req.BaseImage.Offline && !req.Hermetic {
+		scanRes, scanErr := deps.Scanner.Scan(ctx, ports.ScanRequest{
+			Target: base.PinnedRef,
+			FailOn: ports.SeverityCritical,
+		})
+		if scanErr != nil {
+			if errors.Is(scanErr, ErrVulnerabilityThresholdExceeded) {
+				if os.Getenv("POKKUM_FAIL_ON_CVE") == "1" || os.Getenv("POKKUM_FAIL_ON_CVE") == "true" {
+					return BuildResult{}, fmt.Errorf("base image vulnerability scan failed: %w", scanErr)
+				}
+				log.Warn("base image contains vulnerabilities exceeding threshold", "pinned", base.PinnedRef, "vulns", len(scanRes.Vulnerabilities), "maxSeverity", scanRes.MaxSeverityFound)
+			} else {
+				log.Debug("base image vulnerability scan warning", "err", scanErr)
+			}
+		} else if len(scanRes.Vulnerabilities) > 0 {
+			log.Info("base image vulnerability scan passed", "pinned", base.PinnedRef, "vulns", len(scanRes.Vulnerabilities), "maxSeverity", scanRes.MaxSeverityFound)
+		}
+	}
+
 	if deps.SecretGuard != nil {
 		secretRes, err := deps.SecretGuard.ScanDirectory(ctx, ports.SecretScanRequest{
 			ProjectDir:    req.ProjectDir,

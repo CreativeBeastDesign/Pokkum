@@ -61,6 +61,7 @@ type Vulnerability struct {
 	Title        string   `json:"title"`
 	Description  string   `json:"description,omitempty"`
 	URL          string   `json:"url,omitempty"`
+	Ecosystem    string   `json:"ecosystem,omitempty"`
 }
 
 // ScanRequest specifies parameters for vulnerability scanning.

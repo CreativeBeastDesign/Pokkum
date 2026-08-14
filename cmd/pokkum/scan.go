@@ -90,13 +90,32 @@ func runScan(ctx context.Context, logger *slog.Logger, flags *scanFlags, args []
 	fmt.Printf("Status: %t\n", res.Passed)
 	fmt.Printf("Max Severity Found: %s\n\n", res.MaxSeverityFound)
 
-	if len(res.ToolchainAdvisories) > 0 {
-		fmt.Printf("Toolchain & Dependency Advisories (%d):\n", len(res.ToolchainAdvisories))
-		for _, adv := range res.ToolchainAdvisories {
-			fmt.Printf(" - [%s] %s %s: %s (Fix: %s)\n", adv.Severity, adv.Package, adv.Version, adv.Title, adv.FixedVersion)
+	if len(res.Vulnerabilities) > 0 {
+		fmt.Printf("Image & OS Package Vulnerabilities (%d):\n", len(res.Vulnerabilities))
+		for _, v := range res.Vulnerabilities {
+			fixStr := v.FixedVersion
+			if fixStr == "" {
+				fixStr = "N/A"
+			}
+			fmt.Printf(" - [%s] %s (%s) %s: %s (Fix: %s)\n", v.Severity, v.Package, v.Ecosystem, v.Version, v.Title, fixStr)
 		}
-	} else {
-		fmt.Println("No vulnerabilities found exceeding threshold.")
+		fmt.Println()
+	}
+
+	if len(res.ToolchainAdvisories) > 0 {
+		fmt.Printf("Toolchain & Runtime Advisories (%d):\n", len(res.ToolchainAdvisories))
+		for _, adv := range res.ToolchainAdvisories {
+			fixStr := adv.FixedVersion
+			if fixStr == "" {
+				fixStr = "N/A"
+			}
+			fmt.Printf(" - [%s] %s %s: %s (Fix: %s)\n", adv.Severity, adv.Package, adv.Version, adv.Title, fixStr)
+		}
+		fmt.Println()
+	}
+
+	if len(res.Vulnerabilities) == 0 && len(res.ToolchainAdvisories) == 0 {
+		fmt.Println("No vulnerabilities or advisories found exceeding threshold.")
 	}
 
 	return scanErr

@@ -16,7 +16,8 @@ import (
 )
 
 type baseUpdateFlags struct {
-	preset string
+	preset         string
+	mirrorRegistry string
 }
 
 func newBaseCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -48,6 +49,7 @@ func newBaseUpdateCommand(ctx context.Context, logger *slog.Logger) *cobra.Comma
 	}
 
 	cmd.Flags().StringVar(&flags.preset, "preset", "", "Preset to update (distroless, chainguard, or empty for all)")
+	cmd.Flags().StringVar(&flags.mirrorRegistry, "mirror-registry", "", "Mirror repository for base image escrow (e.g. ghcr.io/myorg/base-mirror)")
 
 	return cmd
 }
@@ -100,10 +102,11 @@ func runBaseUpdate(ctx context.Context, logger *slog.Logger, flags *baseUpdateFl
 		}
 		logger.Info("updating base image lock", "preset", preset)
 		res, err := resolver.Resolve(ctx, ports.BaseImageRequest{
-			Preset:       preset,
-			Platforms:    core.SupportedPlatforms,
-			LockfilePath: lockPath,
-			UpdateBase:   true,
+			Preset:         preset,
+			Platforms:      core.SupportedPlatforms,
+			LockfilePath:   lockPath,
+			UpdateBase:     true,
+			MirrorRegistry: flags.mirrorRegistry,
 		})
 		if err != nil {
 			logger.Warn("failed to update base image preset", "preset", preset, "err", err)
