@@ -298,6 +298,28 @@ func (m *mockBunRuntimeResolver) Resolve(ctx context.Context, req ports.BunResol
 	}, nil
 }
 
+// mockRemoteCacher records whether ComputeInputHash/Check were invoked, so
+// tests can prove the remote build-skip cache is (or isn't) consulted for a
+// given build, without needing a real registry.
+type mockRemoteCacher struct {
+	computeInputHashCalled bool
+	checkCalled            bool
+	hit                    bool
+}
+
+func (m *mockRemoteCacher) ComputeInputHash(context.Context, ports.RemoteCacheInputRequest) (string, error) {
+	m.computeInputHashCalled = true
+	return "deadbeef", nil
+}
+
+func (m *mockRemoteCacher) Check(context.Context, ports.RemoteCacheRequest) (ports.RemoteCacheResult, error) {
+	m.checkCalled = true
+	if m.hit {
+		return ports.RemoteCacheResult{Hit: true, Ref: "ghcr.io/example/app@sha256:cachedcachedcachedcachedcachedcachedcachedcachedcachedcachedcach"}, nil
+	}
+	return ports.RemoteCacheResult{Hit: false}, nil
+}
+
 func newFullDeps(stdout io.Writer) core.Deps {
 	return core.Deps{
 		Compiler:        &mockCompiler{},
@@ -502,6 +524,102 @@ func TestBuildPushSuccess(t *testing.T) {
 	outStr := buf.String()
 	if !strings.Contains(outStr, expectedRef) {
 		t.Errorf("expected stdout to contain ref line %q, got %q", expectedRef, outStr)
+	}
+}
+
+// TestBuildPushSuccess_SignedBuildNeverConsultsRemoteCache proves the F1/F4
+// mitigation for the remote build-skip cache: a cache hit reconciles release
+// tags to a previously-pushed digest without this build ever running its own
+// SBOM attachment or signing step. If a signed build could still take a
+// cache hit, its SLSA/Cosign/DSSE attestations would be silently skipped
+// (F4), and the promoted digest's provenance would rest entirely on whoever
+// pushed the cache-<hash> tag rather than this run's own signer (F1) — which
+// may be a different, less-trusted actor with only cache-tag push access.
+// So Sign: true must mean the remote cache is never even consulted, cache
+// hit or not.
+func TestBuildPushSuccess_SignedBuildNeverConsultsRemoteCache(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+	cacher := &mockRemoteCacher{hit: true}
+	deps.RemoteCache = cacher
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+		Sign:       true,
+	}
+
+	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if cacher.computeInputHashCalled || cacher.checkCalled {
+		t.Fatalf("BUG: remote cache was consulted for a signed build (ComputeInputHash called=%v, Check called=%v) — a cache hit here would have skipped this run's own SBOM attachment and signing", cacher.computeInputHashCalled, cacher.checkCalled)
+	}
+	if res.Cached {
+		t.Errorf("expected a real, non-cached build result for a signed build")
+	}
+}
+
+// TestBuildPushSuccess_UnsignedBuildCanHitRemoteCache confirms the gate is
+// scoped correctly: an unsigned build (the only case where skipping the
+// build has no attestation to skip) still gets the cache's benefit — a real
+// hit short-circuits the build and returns the cache-hit result — so the
+// Sign: true restriction above isn't accidentally disabling caching
+// altogether.
+func TestBuildPushSuccess_UnsignedBuildCanHitRemoteCache(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+	cacher := &mockRemoteCacher{hit: true}
+	deps.RemoteCache = cacher
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+	}
+
+	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !cacher.computeInputHashCalled || !cacher.checkCalled {
+		t.Fatalf("expected the remote cache to be consulted for an unsigned build (ComputeInputHash called=%v, Check called=%v)", cacher.computeInputHashCalled, cacher.checkCalled)
+	}
+	if !res.Cached {
+		t.Errorf("expected a cached build result on a genuine cache hit")
+	}
+}
+
+// TestBuildPushSuccess_SLSAStatementWithEmptySubjectDoesNotPanic pins a bug
+// found while adding the remote-cache Sign-gating tests above: this was the
+// first test in this file to ever exercise Sign: true against a real
+// OutputPush build, and doing so panicked with "index out of range [0] with
+// length 0" — internal/core/pipeline.go's post-sign log line indexed
+// slsaStmt.Subject[0] unconditionally. mockSLSAGenerator legitimately
+// returns an empty-Subject ports.SLSAStatement with a nil error (the same
+// shape a real generator could return for an as-yet-unencountered edge
+// case), so this is a genuine crash-on-success bug, not a test-harness
+// artifact — a build's own logging must never be able to take the whole
+// process down after publishing has already succeeded.
+func TestBuildPushSuccess_SLSAStatementWithEmptySubjectDoesNotPanic(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+		Sign:       true,
+	}
+
+	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if res.Image.Ref == "" {
+		t.Errorf("expected a published image ref despite the empty-subject SLSA statement")
 	}
 }
 
@@ -780,6 +898,123 @@ func TestPipeline_BaseImageCVE_Gating(t *testing.T) {
 		res, err := core.Build(context.Background(), deps, reqFlag, core.BuildOptions{DryRun: true})
 		if err != nil {
 			t.Fatalf("expected build to succeed with AllowIncompleteScan=true, got: %v", err)
+		}
+		if res.BaseImage.Ref == "" {
+			t.Errorf("expected resolved base image")
+		}
+	})
+
+	t.Run("offline build fails closed instead of silently skipping an active CVE gate", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		scanCalled := false
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				scanCalled = true
+				return ports.ScanResult{
+					Passed:           false,
+					MaxSeverityFound: ports.SeverityCritical,
+					Vulnerabilities: []ports.Vulnerability{
+						{ID: "CVE-2026-1234", Severity: ports.SeverityCritical, Package: "libssl3"},
+					},
+				}, core.ErrVulnerabilityThresholdExceeded
+			},
+		}
+
+		reqFlag := req
+		reqFlag.FailOnCVE = ports.SeverityCritical
+		reqFlag.BaseImage.Offline = true
+		reqFlag.Normalize()
+
+		_, err := core.Build(context.Background(), deps, reqFlag, core.BuildOptions{DryRun: true})
+		if err == nil || !errors.Is(err, core.ErrScanIncomplete) {
+			t.Fatalf("expected ErrScanIncomplete when offline build skips an active CVE gate, got: %v", err)
+		}
+		if scanCalled {
+			t.Errorf("scanner must not be invoked for an offline build")
+		}
+	})
+
+	t.Run("hermetic build fails closed instead of silently skipping an active CVE gate", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		scanCalled := false
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				scanCalled = true
+				return ports.ScanResult{
+					Passed:           false,
+					MaxSeverityFound: ports.SeverityCritical,
+					Vulnerabilities: []ports.Vulnerability{
+						{ID: "CVE-2026-1234", Severity: ports.SeverityCritical, Package: "libssl3"},
+					},
+				}, core.ErrVulnerabilityThresholdExceeded
+			},
+		}
+
+		reqFlag := req
+		reqFlag.FailOnCVE = ports.SeverityCritical
+		reqFlag.Hermetic = true
+		reqFlag.Normalize()
+		if !reqFlag.BaseImage.Offline {
+			t.Fatalf("test premise broken: Normalize() no longer sets BaseImage.Offline from Hermetic")
+		}
+
+		_, err := core.Build(context.Background(), deps, reqFlag, core.BuildOptions{DryRun: true})
+		if err == nil || !errors.Is(err, core.ErrScanIncomplete) {
+			t.Fatalf("expected ErrScanIncomplete when hermetic build skips an active CVE gate, got: %v", err)
+		}
+		if scanCalled {
+			t.Errorf("scanner must not be invoked for a hermetic build")
+		}
+	})
+
+	t.Run("offline build with AllowIncompleteScan proceeds without calling the scanner", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		scanCalled := false
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				scanCalled = true
+				return ports.ScanResult{}, core.ErrVulnerabilityThresholdExceeded
+			},
+		}
+
+		reqFlag := req
+		reqFlag.FailOnCVE = ports.SeverityCritical
+		reqFlag.BaseImage.Offline = true
+		reqFlag.AllowIncompleteScan = true
+		reqFlag.Normalize()
+
+		res, err := core.Build(context.Background(), deps, reqFlag, core.BuildOptions{DryRun: true})
+		if err != nil {
+			t.Fatalf("expected build to succeed offline with AllowIncompleteScan=true, got: %v", err)
+		}
+		if scanCalled {
+			t.Errorf("scanner must not be invoked for an offline build even with AllowIncompleteScan")
+		}
+		if res.BaseImage.Ref == "" {
+			t.Errorf("expected resolved base image")
+		}
+	})
+
+	t.Run("offline build without an active CVE gate stays silent-skip (no error)", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		scanCalled := false
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				scanCalled = true
+				return ports.ScanResult{}, nil
+			},
+		}
+
+		reqFlag := req
+		reqFlag.BaseImage.Offline = true
+		reqFlag.Normalize()
+
+		res, err := core.Build(context.Background(), deps, reqFlag, core.BuildOptions{DryRun: true})
+		if err != nil {
+			t.Fatalf("expected offline build with no CVE gate to succeed, got: %v", err)
+		}
+		if scanCalled {
+			t.Errorf("scanner must not be invoked for an offline build")
 		}
 		if res.BaseImage.Ref == "" {
 			t.Errorf("expected resolved base image")

@@ -339,7 +339,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 	log.Info("base image resolved", "ref", baseInfo.Ref, "pinned", baseInfo.PinnedRef, "isIndex", base.IsIndex)
 
-	if deps.Scanner != nil && !req.BaseImage.Offline && !req.Hermetic {
+	if deps.Scanner != nil {
 		effectiveFailOn := req.FailOnCVE
 		failGateActive := effectiveFailOn != ""
 		if effectiveFailOn == "" {
@@ -357,33 +357,57 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			effectiveFailOn = ports.SeverityCritical
 		}
 
-		scanRes, scanErr := deps.Scanner.Scan(ctx, ports.ScanRequest{
-			Target:          base.PinnedRef,
-			FailOn:          effectiveFailOn,
-			AllowIncomplete: req.AllowIncompleteScan,
-		})
-
-		// Record scan result in pokkum.lock if lockfile tracking is available
-		if deps.BaseImages != nil {
-			_ = deps.BaseImages.RecordScanResult(ctx, lockPath, req.BaseImage.Preset, scanRes)
-		}
-
-		if scanErr != nil {
-			if errors.Is(scanErr, ErrVulnerabilityThresholdExceeded) {
-				if failGateActive {
-					return BuildResult{}, fmt.Errorf("base image vulnerability scan failed: %w", scanErr)
+		if req.BaseImage.Offline || req.Hermetic {
+			// The scanner needs to query a remote vulnerability database, which an
+			// offline/hermetic build cannot do by design — same reasoning as
+			// --allow-incomplete below: a build that never inspected the base
+			// image is not the same as one that inspected it and found nothing.
+			//
+			// Skipping this quietly is fine when no CVE gate was requested. But
+			// when the operator explicitly asked for --fail-on-cve (or set
+			// POKKUM_FAIL_ON_CVE), a silent skip would make them believe the gate
+			// ran and passed, when it never executed at all. Fail closed, exactly
+			// like the incomplete-scan case, unless AllowIncompleteScan
+			// (--allow-incomplete) says the operator has already accepted that
+			// tradeoff.
+			if failGateActive {
+				if req.AllowIncompleteScan {
+					log.Warn("base image vulnerability scan skipped: offline/hermetic build cannot reach the vulnerability database; proceeding because --allow-incomplete was set", "offline", req.BaseImage.Offline, "hermetic", req.Hermetic, "failOnCVE", effectiveFailOn)
+				} else {
+					return BuildResult{}, fmt.Errorf("base image vulnerability scan cannot run in offline/hermetic mode, but a CVE gate (fail-on-cve=%s) is active: %w (pass --allow-incomplete to proceed without a scan, or drop --fail-on-cve for this build)", effectiveFailOn, ErrScanIncomplete)
 				}
-				log.Warn("base image contains vulnerabilities exceeding threshold", "pinned", base.PinnedRef, "vulns", len(scanRes.Vulnerabilities), "maxSeverity", scanRes.MaxSeverityFound)
-			} else if errors.Is(scanErr, ErrScanIncomplete) {
-				if failGateActive && !req.AllowIncompleteScan {
-					return BuildResult{}, fmt.Errorf("base image vulnerability scan incomplete: %w", scanErr)
-				}
-				log.Warn("base image vulnerability scan incomplete: vulnerability database lookup failed", "err", scanErr)
 			} else {
-				log.Debug("base image vulnerability scan warning", "err", scanErr)
+				log.Debug("base image vulnerability scan skipped: offline/hermetic build cannot reach the vulnerability database", "offline", req.BaseImage.Offline, "hermetic", req.Hermetic)
 			}
-		} else if len(scanRes.Vulnerabilities) > 0 {
-			log.Info("base image vulnerability scan passed", "pinned", base.PinnedRef, "vulns", len(scanRes.Vulnerabilities), "maxSeverity", scanRes.MaxSeverityFound)
+		} else {
+			scanRes, scanErr := deps.Scanner.Scan(ctx, ports.ScanRequest{
+				Target:          base.PinnedRef,
+				FailOn:          effectiveFailOn,
+				AllowIncomplete: req.AllowIncompleteScan,
+			})
+
+			// Record scan result in pokkum.lock if lockfile tracking is available
+			if deps.BaseImages != nil {
+				_ = deps.BaseImages.RecordScanResult(ctx, lockPath, req.BaseImage.Preset, scanRes)
+			}
+
+			if scanErr != nil {
+				if errors.Is(scanErr, ErrVulnerabilityThresholdExceeded) {
+					if failGateActive {
+						return BuildResult{}, fmt.Errorf("base image vulnerability scan failed: %w", scanErr)
+					}
+					log.Warn("base image contains vulnerabilities exceeding threshold", "pinned", base.PinnedRef, "vulns", len(scanRes.Vulnerabilities), "maxSeverity", scanRes.MaxSeverityFound)
+				} else if errors.Is(scanErr, ErrScanIncomplete) {
+					if failGateActive && !req.AllowIncompleteScan {
+						return BuildResult{}, fmt.Errorf("base image vulnerability scan incomplete: %w", scanErr)
+					}
+					log.Warn("base image vulnerability scan incomplete: vulnerability database lookup failed", "err", scanErr)
+				} else {
+					log.Debug("base image vulnerability scan warning", "err", scanErr)
+				}
+			} else if len(scanRes.Vulnerabilities) > 0 {
+				log.Info("base image vulnerability scan passed", "pinned", base.PinnedRef, "vulns", len(scanRes.Vulnerabilities), "maxSeverity", scanRes.MaxSeverityFound)
+			}
 		}
 	}
 
@@ -424,26 +448,57 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 
 	// Stage 4.5: Composite Remote OCI Input Caching check.
+	//
+	// Deliberately excluded whenever req.Sign is set: a cache hit reconciles
+	// req.Tags straight to a previously-pushed digest without this build ever
+	// running its own SBOM attachment or signing step (stage 10 / the sign
+	// block below), so trusting a hit is only safe when this build was never
+	// going to attest anything anyway. A signed build must always run a
+	// fresh build and a fresh sign, so its SLSA/Cosign/DSSE attestations are
+	// provably produced by this run — never silently inherited from whatever
+	// pushed the cache-<hash> tag, which may be a different, less-trusted
+	// actor with only cache-tag push access (e.g. an unprivileged PR-build
+	// job) rather than release-tag push authority.
+	//
+	// This does not make the cache fully forgery-proof even for unsigned
+	// builds: CheckRemoteCache still trusts tag existence alone, so anyone
+	// with push access to this repo's cache-<hash> tags can still poison an
+	// unsigned build's cache entry. Closing that fully would mean verifying
+	// a real signature on the cache-hit image before reconciling tags — a
+	// larger follow-up tracked in Roadmap.md, not attempted here.
 	var compositeInputHash string
-	if deps.RemoteCache != nil && req.Output.Mode == OutputPush && !req.Compile.NoCache {
+	if deps.RemoteCache != nil && req.Output.Mode == OutputPush && !req.Compile.NoCache && !req.Sign {
 		var pStrs []string
 		for _, p := range req.Platforms {
 			pStrs = append(pStrs, p.String())
 		}
 		inputHash, err := deps.RemoteCache.ComputeInputHash(ctx, ports.RemoteCacheInputRequest{
-			ProjectDir:      req.ProjectDir,
-			BaseImageDigest: base.Digest.String(),
-			BunVersion:      toolchain.BunVersion,
-			BunVariant:      string(req.BunRuntime.Variant),
-			Platforms:       pStrs,
-			Strategy:        string(req.Compile.Strategy),
-			Compression:     string(req.Compile.Compression),
-			NoPrune:         req.Compile.NoPrune,
-			KeepVendor:      slices.Clone(req.Compile.KeepVendor),
-			NoPrecompress:   req.Compile.NoPrecompress,
-			NoStrip:         req.Compile.NoStrip,
-			Sourcemap:       req.Compile.Sourcemap,
-			RequireEnv:      slices.Clone(req.Runtime.RequireEnv),
+			ProjectDir:          req.ProjectDir,
+			BaseImageDigest:     base.Digest.String(),
+			BunVersion:          toolchain.BunVersion,
+			BunVariant:          string(req.BunRuntime.Variant),
+			BunCustomBinaryPath: req.BunRuntime.CustomBinaryPath,
+			Platforms:           pStrs,
+			Strategy:            string(req.Compile.Strategy),
+			Compression:         string(req.Compile.Compression),
+			NoPrune:             req.Compile.NoPrune,
+			KeepVendor:          slices.Clone(req.Compile.KeepVendor),
+			NoPrecompress:       req.Compile.NoPrecompress,
+			NoStrip:             req.Compile.NoStrip,
+			NoInject:            req.Compile.NoInject,
+			NoMinify:            req.Compile.NoMinify,
+			MinBunVersion:       req.Compile.MinBunVersion,
+			CompileEnv:          slices.Clone(req.Compile.Env),
+			Sourcemap:           req.Compile.Sourcemap,
+			Hermetic:            req.Hermetic,
+			SourceDateEpochUnix: req.SourceDateEpoch.Unix(),
+			Runtime:             req.Runtime,
+			Telemetry:           req.Telemetry,
+			Labels:              req.Labels,
+			Annotations:         req.Annotations,
+			SBOMFormat:          string(req.SBOM.Format),
+			SBOMAttachMode:      string(req.SBOM.AttachMode),
+			SBOMNoAttach:        req.SBOM.NoAttach,
 		})
 		if err == nil && inputHash != "" {
 			compositeInputHash = inputHash
@@ -660,9 +715,16 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			},
 			SourceDateEpoch: req.SourceDateEpoch,
 		})
-		if serr != nil {
+		switch {
+		case serr != nil:
 			log.Warn("failed to generate SLSA provenance statement", "err", serr)
-		} else {
+		case len(slsaStmt.Subject) == 0:
+			// A nil error with no subject is not a real success: the whole
+			// point of this statement is to name what was built, so log it
+			// as a warning rather than crashing on slsaStmt.Subject[0] (as a
+			// naive index would) or silently claiming success either way.
+			log.Warn("SLSA provenance statement generated with no subject", "ref", pub.Ref)
+		default:
 			log.Info("generated SLSA provenance statement", "subject", slsaStmt.Subject[0].Name)
 		}
 	}

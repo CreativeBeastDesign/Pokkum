@@ -1,11 +1,21 @@
 package remotecacheutils_test
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/random"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/remotecacheutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
 func TestComputeSourceTreeHash(t *testing.T) {
@@ -54,6 +64,104 @@ func TestComputeSourceTreeHash(t *testing.T) {
 	}
 }
 
+// TestComputeSourceTreeHash_FramingCannotBeForged reproduces the exact
+// second-preimage collision the pre-fix raw-concatenation framing was
+// vulnerable to: with "path\x00content" written directly into the hash for
+// each sorted file, a two-file tree {aaa.js: "BENIGN", bbb.js: "SECOND"}
+// hashed to the identical byte stream as a one-file tree whose single file's
+// content is crafted to contain "bbb.js\x00SECOND" — content that mimics a
+// second file's own path-plus-NUL-plus-content boundary. Framing each file's
+// contribution with a fixed-length (64 hex char, NUL-free) content digest
+// instead of raw content removes that ambiguity, so these two genuinely
+// different trees must now hash differently.
+func TestComputeSourceTreeHash_FramingCannotBeForged(t *testing.T) {
+	treeA := t.TempDir()
+	if err := os.WriteFile(filepath.Join(treeA, "aaa.js"), []byte("BENIGN"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(treeA, "bbb.js"), []byte("SECOND"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	treeB := t.TempDir()
+	forged := "BENIGN" + "bbb.js" + "\x00" + "SECOND"
+	if err := os.WriteFile(filepath.Join(treeB, "aaa.js"), []byte(forged), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hashA, err := remotecacheutils.ComputeSourceTreeHash(treeA)
+	if err != nil {
+		t.Fatalf("ComputeSourceTreeHash(treeA): %v", err)
+	}
+	hashB, err := remotecacheutils.ComputeSourceTreeHash(treeB)
+	if err != nil {
+		t.Fatalf("ComputeSourceTreeHash(treeB): %v", err)
+	}
+
+	if hashA == hashB {
+		t.Fatalf("BUG: genuinely different trees (2 files vs. 1 crafted file) collided on the same hash %s — the framing is forgeable again", hashA)
+	}
+}
+
+// TestComputeSourceTreeHash_ExecBitAndSymlinkAreCaptured proves two of the
+// framing fix's secondary properties: a file's owner-executable bit is part
+// of its identity (chmod +x must change the hash even though the bytes
+// don't), and a symlink is hashed by its target string, not dereferenced
+// (repointing a symlink must change the hash without touching the file it
+// used to point at).
+func TestComputeSourceTreeHash_ExecBitAndSymlinkAreCaptured(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "run.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := remotecacheutils.ComputeSourceTreeHash(dir)
+	if err != nil {
+		t.Fatalf("ComputeSourceTreeHash before chmod: %v", err)
+	}
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	afterChmod, err := remotecacheutils.ComputeSourceTreeHash(dir)
+	if err != nil {
+		t.Fatalf("ComputeSourceTreeHash after chmod: %v", err)
+	}
+	if before == afterChmod {
+		t.Errorf("expected hash to change when run.sh's executable bit is set")
+	}
+
+	targetA := filepath.Join(dir, "target-a.txt")
+	targetB := filepath.Join(dir, "target-b.txt")
+	if err := os.WriteFile(targetA, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetB, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(targetA, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	beforeRelink, err := remotecacheutils.ComputeSourceTreeHash(dir)
+	if err != nil {
+		t.Fatalf("ComputeSourceTreeHash with symlink: %v", err)
+	}
+	if err := os.Remove(linkPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(targetB, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	afterRelink, err := remotecacheutils.ComputeSourceTreeHash(dir)
+	if err != nil {
+		t.Fatalf("ComputeSourceTreeHash after relink: %v", err)
+	}
+	if beforeRelink == afterRelink {
+		t.Errorf("expected hash to change when the symlink is repointed, even though both targets have byte-identical content")
+	}
+}
+
 func TestComputeInputHash(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(`{"name":"test"}`), 0o644)
@@ -97,5 +205,163 @@ func TestComputeInputHash(t *testing.T) {
 	hash3, _ := remotecacheutils.ComputeInputHash(params3)
 	if hash1 != hash3 {
 		t.Errorf("expected hash to be independent of platform order")
+	}
+}
+
+// TestComputeInputHash_CoversPreviouslyMissingFields proves the cache-key
+// completeness fix: two builds that differ ONLY in a field that used to be
+// absent from InputParams (runtime port, signing-adjacent build config,
+// telemetry, SBOM attach settings) must never collide on the same hash — a
+// collision here is exactly what let one build's cached image get silently
+// promoted to a different build's release tags.
+func TestComputeInputHash_CoversPreviouslyMissingFields(t *testing.T) {
+	base := remotecacheutils.InputParams{
+		BaseImageDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		BunVersion:      "1.2.2",
+		BunVariant:      "standard",
+		Platforms:       []string{"linux/amd64"},
+		Strategy:        "layered",
+		Compression:     "gzip",
+	}
+	baseHash, err := remotecacheutils.ComputeInputHash(base)
+	if err != nil {
+		t.Fatalf("ComputeInputHash(base): %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		modify func(p *remotecacheutils.InputParams)
+	}{
+		{"runtime port", func(p *remotecacheutils.InputParams) { p.Runtime.Port = 8080 }},
+		{"runtime user", func(p *remotecacheutils.InputParams) { p.Runtime.User = "1000" }},
+		{"runtime env", func(p *remotecacheutils.InputParams) { p.Runtime.Env = map[string]string{"FOO": "bar"} }},
+		{"runtime require-env", func(p *remotecacheutils.InputParams) { p.Runtime.RequireEnv = []string{"DATABASE_URL"} }},
+		{"telemetry enabled", func(p *remotecacheutils.InputParams) { p.Telemetry.Enabled = true }},
+		{"telemetry endpoint", func(p *remotecacheutils.InputParams) { p.Telemetry.TracesEndpoint = "http://collector:4318" }},
+		{"no-minify", func(p *remotecacheutils.InputParams) { p.NoMinify = true }},
+		{"no-inject", func(p *remotecacheutils.InputParams) { p.NoInject = true }},
+		{"min bun version", func(p *remotecacheutils.InputParams) { p.MinBunVersion = "1.3.0" }},
+		{"compile env", func(p *remotecacheutils.InputParams) { p.CompileEnv = []string{"NODE_ENV=production"} }},
+		{"hermetic", func(p *remotecacheutils.InputParams) { p.Hermetic = true }},
+		{"source date epoch", func(p *remotecacheutils.InputParams) { p.SourceDateEpochUnix = 1700000000 }},
+		{"labels", func(p *remotecacheutils.InputParams) { p.Labels = map[string]string{"org.example": "v2"} }},
+		{"annotations", func(p *remotecacheutils.InputParams) { p.Annotations = map[string]string{"pokkum.dev/note": "x"} }},
+		{"sbom format", func(p *remotecacheutils.InputParams) { p.SBOMFormat = "cyclonedx-json" }},
+		{"sbom attach mode", func(p *remotecacheutils.InputParams) { p.SBOMAttachMode = "tag" }},
+		{"sbom no-attach", func(p *remotecacheutils.InputParams) { p.SBOMNoAttach = true }},
+		{"bun custom binary", func(p *remotecacheutils.InputParams) { p.BunCustomBinaryPath = "/opt/bun/bin/bun" }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := base
+			tc.modify(&p)
+			h, err := remotecacheutils.ComputeInputHash(p)
+			if err != nil {
+				t.Fatalf("ComputeInputHash: %v", err)
+			}
+			if h == baseHash {
+				t.Fatalf("BUG: changing %s did not change the input hash — two builds differing only in this field would collide on the same cache tag", tc.name)
+			}
+		})
+	}
+}
+
+// TestCacher_ComputeInputHash_DoesNotMutateCallerRuntime guards against a
+// subtle aliasing bug at the ports.RemoteCacher boundary: the underlying
+// ComputeInputHash(InputParams) sorts some slice fields in place for
+// order-independence, and req.Runtime (a plain struct, copied by value) still
+// shares its slice fields' backing arrays with whatever the caller — the
+// build pipeline — passed in. Cacher.ComputeInputHash must clone those slices
+// before sorting, or a hash computation would have the side effect of
+// silently reordering state the pipeline goes on to use later in the same
+// build (e.g. RuntimeConfig.RequireEnv baked into the image config).
+func TestCacher_ComputeInputHash_DoesNotMutateCallerRuntime(t *testing.T) {
+	requireEnv := []string{"ZEBRA", "ALPHA", "MIKE"}
+	original := append([]string(nil), requireEnv...)
+
+	c := remotecacheutils.New()
+	req := ports.RemoteCacheInputRequest{
+		BaseImageDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		Runtime:         ports.RuntimeConfig{RequireEnv: requireEnv},
+	}
+	if _, err := c.ComputeInputHash(context.Background(), req); err != nil {
+		t.Fatalf("ComputeInputHash: %v", err)
+	}
+
+	for i, v := range requireEnv {
+		if v != original[i] {
+			t.Fatalf("BUG: ComputeInputHash mutated the caller's RequireEnv slice in place: got %v, want %v", requireEnv, original)
+		}
+	}
+}
+
+// tagDenyingRegistry wraps an in-memory OCI registry and rejects any tag PUT
+// whose path contains one of deniedTags, while still serving every other
+// request normally. It simulates a real, common permission split: a CI
+// credential that can pull/read a repo's cache-* entries but cannot push its
+// release tags — a narrower, less-trusted credential than release authority.
+type tagDenyingRegistry struct {
+	inner      http.Handler
+	deniedTags []string
+}
+
+func (r *tagDenyingRegistry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodPut && strings.Contains(req.URL.Path, "/manifests/") {
+		for _, tag := range r.deniedTags {
+			if strings.HasSuffix(req.URL.Path, "/manifests/"+tag) {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"errors":[{"code":"DENIED","message":"push access denied for this tag"}]}`))
+				return
+			}
+		}
+	}
+	r.inner.ServeHTTP(w, req)
+}
+
+// TestCacher_Check_ReconcileTagsFailureIsNotReportedAsHit proves the F7 fix:
+// previously, a ReconcileTags failure on a cache hit was silently discarded
+// (`_ = ReconcileTags(...)`), so Check would report Hit: true — telling the
+// build pipeline the requested release tags now point at the cache-hit
+// digest, when in fact they were never moved at all. That combination (build
+// reported successful, tags silently stale or missing) is exactly the kind
+// of fail-open this audit exists to catch. This test populates a real cache
+// entry, then denies the PUT for the release tag specifically, and asserts
+// Check now reports Hit: false with a non-nil error — which makes the build
+// pipeline fall through to a real build+publish instead of a false success.
+func TestCacher_Check_ReconcileTagsFailureIsNotReportedAsHit(t *testing.T) {
+	reg := &tagDenyingRegistry{inner: registry.New(), deniedTags: []string{"v1.0.0"}}
+	s := httptest.NewServer(reg)
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/app"
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	inputHash := strings.Repeat("a", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	c := remotecacheutils.New()
+	res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+	})
+
+	if err == nil {
+		t.Fatal("expected a non-nil error when the release tag PUT is denied")
+	}
+	if res.Hit {
+		t.Fatalf("BUG: Check reported Hit: true despite ReconcileTags failing — the release tag %q was never actually moved to the cache-hit digest, but the caller was told the build succeeded", "v1.0.0")
 	}
 }
