@@ -26,6 +26,7 @@ const (
 	envProbePort       = "POKKUM_PROBE_PORT"
 	envShutdownTimeout = "POKKUM_SHUTDOWN_TIMEOUT"
 	envLogLevel        = "POKKUM_LOG_LEVEL"
+	envRequiredEnv     = "POKKUM_REQUIRED_ENV"
 
 	defaultPort      = 3000
 	defaultProbePort = 8081
@@ -70,6 +71,9 @@ type Config struct {
 
 	// LogLevel is the minimum level for the stderr text handler.
 	LogLevel slog.Level
+
+	// RequireEnv lists environment variable keys required to be present at runtime.
+	RequireEnv []string
 }
 
 // parseConfig resolves configuration from the environment and then applies flag
@@ -115,6 +119,13 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 			cfg.ShutdownTimeout = d
 		}
 	}
+	if raw := getenv(envRequiredEnv); raw != "" {
+		for _, key := range strings.Split(raw, ",") {
+			if k := strings.TrimSpace(key); k != "" {
+				cfg.RequireEnv = append(cfg.RequireEnv, k)
+			}
+		}
+	}
 
 	flagArgs, childArgs, sawSeparator := splitArgs(args)
 
@@ -128,11 +139,12 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 		fs.PrintDefaults()
 	}
 	var (
-		flagLevel     = fs.String("log-level", cfg.LogLevel.String(), "log level: debug, info, warn or error (env "+envLogLevel+")")
-		flagPort      = fs.Int("port", cfg.Port, "port written to the child's PORT variable (env "+envPort+")")
-		flagProbePort = fs.Int("probe-port", cfg.ProbePort, "port for the liveness and readiness endpoints (env "+envProbePort+")")
-		flagTimeout   = fs.Duration("shutdown-timeout", cfg.ShutdownTimeout, "grace period before SIGKILL (env "+envShutdownTimeout+")")
-		flagVersion   = fs.Bool("version", false, "print the supervisor version and exit")
+		flagLevel      = fs.String("log-level", cfg.LogLevel.String(), "log level: debug, info, warn or error (env "+envLogLevel+")")
+		flagPort       = fs.Int("port", cfg.Port, "port written to the child's PORT variable (env "+envPort+")")
+		flagProbePort  = fs.Int("probe-port", cfg.ProbePort, "port for the liveness and readiness endpoints (env "+envProbePort+")")
+		flagTimeout    = fs.Duration("shutdown-timeout", cfg.ShutdownTimeout, "grace period before SIGKILL (env "+envShutdownTimeout+")")
+		flagRequireEnv = fs.String("require-env", strings.Join(cfg.RequireEnv, ","), "comma-separated list of required env vars (env "+envRequiredEnv+")")
+		flagVersion    = fs.Bool("version", false, "print the supervisor version and exit")
 	)
 	if err := fs.Parse(flagArgs); err != nil {
 		return cfg, warnings, err
@@ -151,6 +163,16 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 	cfg.ProbePort = *flagProbePort
 	cfg.ShutdownTimeout = *flagTimeout
 
+	if *flagRequireEnv != "" {
+		var reqs []string
+		for _, key := range strings.Split(*flagRequireEnv, ",") {
+			if k := strings.TrimSpace(key); k != "" {
+				reqs = append(reqs, k)
+			}
+		}
+		cfg.RequireEnv = reqs
+	}
+
 	// When "--" is present it is authoritative: everything before it is ours,
 	// everything after it is the child's, and a child argument that looks like
 	// a supervisor flag cannot be misread. Without it we fall back to the
@@ -163,7 +185,7 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 	}
 	cfg.Command = childArgs
 
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validate(getenv); err != nil {
 		return cfg, warnings, err
 	}
 	if cfg.Port == cfg.ProbePort {
@@ -172,7 +194,7 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 	return cfg, warnings, nil
 }
 
-func (c Config) validate() error {
+func (c Config) validate(getenv func(string) string) error {
 	if len(c.Command) == 0 {
 		return errors.New("no command given; expected: pokkum-init [flags] -- command [args...]")
 	}
@@ -187,6 +209,17 @@ func (c Config) validate() error {
 	}
 	if c.ShutdownTimeout <= 0 {
 		return fmt.Errorf("shutdown timeout %s must be positive", c.ShutdownTimeout)
+	}
+	if len(c.RequireEnv) > 0 && getenv != nil {
+		var missing []string
+		for _, key := range c.RequireEnv {
+			if getenv(key) == "" {
+				missing = append(missing, key)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("runtime env contract violation: missing required environment variable(s): %s", strings.Join(missing, ", "))
+		}
 	}
 	return nil
 }

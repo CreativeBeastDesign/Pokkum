@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
@@ -262,4 +264,42 @@ func TestImageAnnotationsBaseRefFallback(t *testing.T) {
 			t.Errorf("base.name = %q, want unset", got[ports.LabelBaseName])
 		}
 	})
+}
+
+func TestPokkumEnvWithRequireEnv(t *testing.T) {
+	rc := ports.RuntimeConfig{
+		Port:            3000,
+		ProbePort:       8081,
+		ShutdownTimeout: 30 * time.Second,
+		RequireEnv:      []string{"DATABASE_URL", "JWT_SECRET"},
+	}
+	got := pokkumEnv(rc)
+	found := false
+	for _, env := range got {
+		if env.key == ports.EnvRequiredEnv {
+			found = true
+			if env.value != "DATABASE_URL,JWT_SECRET" {
+				t.Errorf("got EnvRequiredEnv value = %q, want DATABASE_URL,JWT_SECRET", env.value)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("POKKUM_REQUIRED_ENV not found in pokkumEnv output: %v", got)
+	}
+}
+
+func TestMergeLabelsAndAnnotationsWithRequireEnv(t *testing.T) {
+	rc := ports.RuntimeConfig{
+		RequireEnv: []string{"DATABASE_URL", "JWT_SECRET"},
+	}
+	hash := v1.Hash{Algorithm: "sha256", Hex: "1234567890abcdef"}
+	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc)
+	if labels[ports.LabelRequiredEnv] != "DATABASE_URL,JWT_SECRET" {
+		t.Errorf("got LabelRequiredEnv = %q, want DATABASE_URL,JWT_SECRET", labels[ports.LabelRequiredEnv])
+	}
+
+	annotations := imageAnnotations(labels, "", nil)
+	if annotations[ports.AnnotationRequiredEnv] != "DATABASE_URL,JWT_SECRET" {
+		t.Errorf("got AnnotationRequiredEnv = %q, want DATABASE_URL,JWT_SECRET", annotations[ports.AnnotationRequiredEnv])
+	}
 }

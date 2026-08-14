@@ -719,6 +719,15 @@ func validateRuntime(rc RuntimeConfig) error {
 			return fmt.Errorf("exposed port %d out of range: %w", p, ErrInvalidRuntimeConfig)
 		}
 	}
+	for _, envKey := range rc.RequireEnv {
+		trimmed := strings.TrimSpace(envKey)
+		if trimmed == "" {
+			return fmt.Errorf("required env var name must not be empty: %w", ErrInvalidRuntimeConfig)
+		}
+		if strings.ContainsAny(trimmed, "= \t\n\r") {
+			return fmt.Errorf("required env var name %q must not contain '=' or whitespace: %w", envKey, ErrInvalidRuntimeConfig)
+		}
+	}
 	return nil
 }
 

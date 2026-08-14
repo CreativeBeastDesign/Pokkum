@@ -78,6 +78,10 @@ const (
 	// ("30s"). An unparseable value must fall back to DefaultShutdownTimeout
 	// rather than abort startup.
 	EnvShutdownTimeout = "POKKUM_SHUTDOWN_TIMEOUT"
+
+	// EnvRequiredEnv is read by pokkum-init as a comma-separated list of
+	// environment variable names that must be present and non-empty at runtime.
+	EnvRequiredEnv = "POKKUM_REQUIRED_ENV"
 )
 
 // Probe endpoints served by pokkum-init on the probe port.
@@ -99,6 +103,10 @@ const (
 	LabelPokkumVersion = "dev.pokkum.version"
 	LabelSupervisor    = "dev.pokkum.supervisor.version"
 	LabelBunVersion    = "dev.pokkum.bun.version"
+	LabelRequiredEnv   = "dev.pokkum.required-env"
+
+	// AnnotationRequiredEnv is the manifest annotation key for required env contract.
+	AnnotationRequiredEnv = "pokkum.dev/required-env"
 )
 
 // DefaultLayeredEntrypoint returns the image entrypoint for StrategyLayered:
@@ -153,6 +161,10 @@ type RuntimeConfig struct {
 	// the values Pokkum would otherwise set for PORT, POKKUM_PROBE_PORT and
 	// POKKUM_SHUTDOWN_TIMEOUT, which is how a user pins an unusual value.
 	Env map[string]string
+
+	// RequireEnv lists environment variables that must be non-empty at runtime.
+	// pokkum-init verifies presence at startup and fails fast if any are missing.
+	RequireEnv []string
 
 	// ExposedPorts lists additional TCP ports to declare in the image config.
 	// Port and ProbePort are always exposed and need not be repeated. Nil means

@@ -210,3 +210,46 @@ func eq(a, b []string) bool {
 	}
 	return true
 }
+
+func TestParseConfigRequiredEnv_Success(t *testing.T) {
+	environ := map[string]string{
+		envRequiredEnv: "DATABASE_URL,JWT_SECRET",
+		"DATABASE_URL": "postgres://localhost/db",
+		"JWT_SECRET":   "supersecret",
+	}
+	cfg, _, err := parseConfig([]string{"--", "/app/server"}, env(environ), io.Discard)
+	if err != nil {
+		t.Fatalf("expected success with required envs set, got: %v", err)
+	}
+	if len(cfg.RequireEnv) != 2 || cfg.RequireEnv[0] != "DATABASE_URL" || cfg.RequireEnv[1] != "JWT_SECRET" {
+		t.Fatalf("unexpected RequireEnv in config: %v", cfg.RequireEnv)
+	}
+}
+
+func TestParseConfigRequiredEnv_Missing(t *testing.T) {
+	environ := map[string]string{
+		envRequiredEnv: "DATABASE_URL,REDIS_URL,API_KEY",
+		"DATABASE_URL": "postgres://localhost/db",
+	}
+	_, _, err := parseConfig([]string{"--", "/app/server"}, env(environ), io.Discard)
+	if err == nil {
+		t.Fatalf("expected error when required envs are missing, got nil")
+	}
+	if !strings.Contains(err.Error(), "runtime env contract violation") || !strings.Contains(err.Error(), "REDIS_URL") || !strings.Contains(err.Error(), "API_KEY") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestParseConfigRequiredEnv_FlagOverride(t *testing.T) {
+	environ := map[string]string{
+		"FOO": "bar",
+	}
+	cfg, _, err := parseConfig([]string{"-require-env=FOO,BAZ", "--", "/app/server"}, env(environ), io.Discard)
+	if err == nil {
+		t.Fatalf("expected error for missing BAZ, got nil")
+	}
+	if !strings.Contains(err.Error(), "BAZ") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+	_ = cfg
+}

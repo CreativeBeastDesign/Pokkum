@@ -62,7 +62,7 @@ func applyRuntime(
 	cfg.Config.WorkingDir = rc.WorkingDir
 	cfg.Config.Env = mergeEnv(baseCfg.Config.Env, pokkumEnv(rc))
 	cfg.Config.ExposedPorts = exposedPorts(baseCfg.Config.ExposedPorts, rc)
-	cfg.Config.Labels = mergeLabels(baseCfg.Config.Labels, req.Labels, baseDigest, ts)
+	cfg.Config.Labels = mergeLabels(baseCfg.Config.Labels, req.Labels, baseDigest, ts, rc)
 
 	// Fields that record where an image was assembled rather than what it
 	// contains. They are pure build-host noise and would defeat reproducibility
@@ -96,6 +96,12 @@ func pokkumEnv(rc ports.RuntimeConfig) []envVar {
 		{ports.EnvPort, strconv.Itoa(rc.Port)},
 		{ports.EnvProbePort, strconv.Itoa(rc.ProbePort)},
 		{ports.EnvShutdownTimeout, rc.ShutdownTimeout.String()},
+	}
+	if len(rc.RequireEnv) > 0 {
+		reqEnvs := slices.Clone(rc.RequireEnv)
+		slices.Sort(reqEnvs)
+		reqEnvs = slices.Compact(reqEnvs)
+		out = append(out, envVar{ports.EnvRequiredEnv, strings.Join(reqEnvs, ",")})
 	}
 	for _, k := range slices.Sorted(maps.Keys(rc.Env)) {
 		out = append(out, envVar{k, rc.Env[k]})
@@ -172,8 +178,8 @@ func tcpPort(p int) string { return strconv.Itoa(p) + "/tcp" }
 // stage is a whole-map overlay onto a map, iteration order within a stage
 // cannot affect the result; only the order of the stages can, and that is
 // fixed.
-func mergeLabels(base, caller map[string]string, baseDigest v1.Hash, ts time.Time) map[string]string {
-	out := make(map[string]string, len(base)+len(caller)+2)
+func mergeLabels(base, caller map[string]string, baseDigest v1.Hash, ts time.Time, rc ports.RuntimeConfig) map[string]string {
+	out := make(map[string]string, len(base)+len(caller)+3)
 	maps.Copy(out, base)
 
 	out[ports.LabelCreated] = ts.Format(time.RFC3339)
@@ -182,6 +188,12 @@ func mergeLabels(base, caller map[string]string, baseDigest v1.Hash, ts time.Tim
 	// the only value that cannot be wrong: it is read off the very object the
 	// layers were appended to.
 	out[ports.LabelBaseDigest] = baseDigest.String()
+	if len(rc.RequireEnv) > 0 {
+		reqEnvs := slices.Clone(rc.RequireEnv)
+		slices.Sort(reqEnvs)
+		reqEnvs = slices.Compact(reqEnvs)
+		out[ports.LabelRequiredEnv] = strings.Join(reqEnvs, ",")
+	}
 
 	maps.Copy(out, caller)
 	return out
@@ -199,11 +211,14 @@ func mergeLabels(base, caller map[string]string, baseDigest v1.Hash, ts time.Tim
 // the field docs on PackageRequest.BaseRef for why the label wins over the
 // field.
 func imageAnnotations(labels map[string]string, baseRef string, caller map[string]string) map[string]string {
-	out := make(map[string]string, len(ociAnnotationKeys)+len(caller))
+	out := make(map[string]string, len(ociAnnotationKeys)+len(caller)+1)
 	for _, k := range ociAnnotationKeys {
 		if v, ok := labels[k]; ok && v != "" {
 			out[k] = v
 		}
+	}
+	if v, ok := labels[ports.LabelRequiredEnv]; ok && v != "" {
+		out[ports.AnnotationRequiredEnv] = v
 	}
 	if _, ok := out[ports.LabelBaseName]; !ok && baseRef != "" {
 		out[ports.LabelBaseName] = baseRef

@@ -76,6 +76,7 @@ type buildFlags struct {
 	allowSecretPatterns []string
 	hermetic            bool
 	registryConfig      string
+	requireEnv          []string
 }
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -181,6 +182,8 @@ The project directory defaults to the current working directory.`,
 		"Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required)")
 	cmd.Flags().StringVar(&flags.registryConfig, "registry-config", "",
 		"Path to custom OCI registry auth config file (config.json)")
+	cmd.Flags().StringSliceVar(&flags.requireEnv, "require-env", nil,
+		"Declare required runtime environment variables (comma-separated or repeatable)")
 
 	return cmd
 }
@@ -268,6 +271,19 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		Strategy:    core.BuildStrategy(flags.strategy),
 		Compression: core.CompressionAlgorithm(flags.compression),
 		NoInject:    flags.noInject || !flags.inject,
+	}
+
+	// Runtime options
+	if len(flags.requireEnv) > 0 {
+		var reqEnvs []string
+		for _, re := range flags.requireEnv {
+			for _, part := range strings.Split(re, ",") {
+				if p := strings.TrimSpace(part); p != "" {
+					reqEnvs = append(reqEnvs, p)
+				}
+			}
+		}
+		req.Runtime.RequireEnv = reqEnvs
 	}
 
 	// Telemetry options

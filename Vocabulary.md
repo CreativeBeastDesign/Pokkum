@@ -50,6 +50,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--sigstore-trusted-root` | — | — | (embedded) | Path to a custom Sigstore trusted root snapshot (e.g. for a private Sigstore deployment). |
 | `--no-verify-base` | — | — | `false` | Suppress base image signature verification entirely (both static-key and keyless). |
 | `--allow-secret-pattern` | — | — | (none) | Regex pattern to ignore during build-time secret scanning, repeatable. |
+| `--require-env` | — | — | (none) | Declare required runtime environment variables (comma-separated or repeatable). Stamped into image annotations (`pokkum.dev/required-env`) and validated by the supervisor on container boot. |
 | `--hermetic` | — | — | `false` | Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required). |
 | `--registry-config` | — | — | (none) | Path to a `docker config.json`-style auth file, keyed by registry hostname (`"auths": {"<host>": {...}}`), with dynamic credential-helper execution (`credHelpers`, `credsStore`) shelling out to `docker-credential-*` binaries (e.g. ECR, GCR, OSXKeychain) and caching credentials in-memory, merged ahead of `authn.DefaultKeychain`. |
 | `--tarball` | — | — | (none) | Export as an OCI archive to the given path. Mutually exclusive with `--local`. |
@@ -233,6 +234,7 @@ These configure the image's *runtime* behavior inside the container (read by `/p
 | `PORT` | `3000` | Port the compiled app listens on. |
 | `POKKUM_PROBE_PORT` | `8081` | Port the supervisor serves `/healthz` and `/readyz` on. |
 | `POKKUM_SHUTDOWN_TIMEOUT` | `30s` | Grace period after `SIGTERM` before `SIGKILL`. |
+| `POKKUM_REQUIRED_ENV` | (none) | Comma-separated list of required environment variable names that must be present and non-empty at container boot; supervisor fails fast if any are missing. |
 
 ---
 
@@ -242,7 +244,6 @@ Post-v1.0 items from [Roadmap.md](Roadmap.md):
 
 | Roadmap Item | Proposed Flag(s) | Notes |
 |---|---|---|
-| Runtime Env Contract | `--require-env=KEY1,KEY2` on `build` | Build-time declaration; runtime validation enforced by supervisor at startup. |
 | Monorepo Affected-Detection | `--since=<git-ref>` on `resolve` | Skips unchanged `pokkum://` apps entirely based on git diffs. |
 | Static/Prerendered Page Optimization | `--static` on `build` | Builds a zero-JS-runtime Nginx-alpine image instead of Bun runtime image. |
 | Multi-Environment Management | `--target-env=<name>` on `build`/`resolve`/`apply` | Named `--target-env` to avoid colliding with `build`'s OTel `--telemetry-env`. |
