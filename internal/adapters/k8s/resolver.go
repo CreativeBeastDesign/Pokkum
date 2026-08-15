@@ -57,6 +57,14 @@ type imageNodeTarget struct {
 	// selectors need to scope to this workload instead of the whole
 	// namespace. Nil when no such ancestor was found.
 	templateNode *yaml.Node
+
+	// docRootNode is the top-level mapping (the document root) of the YAML
+	// document that contains this target. It is where document-level
+	// annotations (e.g. pokkum.dev/current-image) live when they are placed at
+	// the workload's top level rather than on the Pod template. It can differ
+	// from templateNode (a Deployment's template vs the Deployment object) and
+	// is nil only when the document is not a mapping.
+	docRootNode *yaml.Node
 }
 
 // parseYAMLDocuments decodes a byte slice into individual YAML AST document nodes.
@@ -111,8 +119,9 @@ func isContainersKey(k string) bool {
 
 // findImageNodes recursively scans a YAML AST node for mapping entries with
 // key "image", recording both the enclosing container mapping and the
-// nearest ancestor Pod spec mapping for each one.
-func findImageNodes(node *yaml.Node) []imageNodeTarget {
+// nearest ancestor Pod spec mapping for each one. docRoot is the document root
+// node this scan started from (the target's enclosing document).
+func findImageNodes(docRoot *yaml.Node) []imageNodeTarget {
 	var targets []imageNodeTarget
 	var walk func(n *yaml.Node, podSpec *yaml.Node, template *yaml.Node)
 	walk = func(n *yaml.Node, podSpec *yaml.Node, template *yaml.Node) {
@@ -147,6 +156,7 @@ func findImageNodes(node *yaml.Node) []imageNodeTarget {
 						containerNode: n,
 						podSpecNode:   podSpec,
 						templateNode:  childTemplate,
+						docRootNode:   docRoot,
 					})
 				}
 				childPodSpec := podSpec
@@ -165,7 +175,7 @@ func findImageNodes(node *yaml.Node) []imageNodeTarget {
 			}
 		}
 	}
-	walk(node, nil, nil)
+	walk(docRoot, nil, nil)
 	return targets
 }
 
@@ -462,6 +472,16 @@ func (r *Resolver) References(_ context.Context, docs []ports.Document) ([]ports
 	return refs, nil
 }
 
+// docParseResult is one parsed manifest document together with the set of
+// image-value targets (with their container/template/document-root nodes) found
+// in it and whether any of them was a pokkum:// reference.
+type docParseResult struct {
+	doc       ports.Document
+	nodes     []*yaml.Node
+	targets   []imageNodeTarget
+	hasPokkum bool
+}
+
 // Resolve rewrites every pokkum:// reference in req.Documents to a concrete digest reference.
 func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports.ResolveResult, error) {
 	if req.Build == nil {
@@ -469,13 +489,6 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 	}
 	if len(req.Documents) == 0 {
 		return ports.ResolveResult{}, fmt.Errorf("k8s: no documents provided: %w", core.ErrInvalidRequest)
-	}
-
-	type docParseResult struct {
-		doc       ports.Document
-		nodes     []*yaml.Node
-		targets   []imageNodeTarget
-		hasPokkum bool
 	}
 
 	parsedDocs := make([]docParseResult, len(req.Documents))
@@ -526,11 +539,33 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 	}
 
 	resolvedMap := make(map[string]string)
+	skippedMap := make(map[string]bool)
 	var g errgroup.Group
 	var mu sync.Mutex
+	clusterCache := make(map[string]ports.ClusterWorkloadState)
 
 	for _, path := range distinctPaths {
 		p := path
+
+		// Monorepo affected-detection (--since): an unaffected project with a
+		// known prior digest can skip compilation and packaging entirely. We
+		// only ever skip when we can reuse a real, previously-known digest;
+		// otherwise we fall through to a full build so the emitted manifest
+		// always carries a genuine repo@sha256:… reference.
+		if req.Since != "" && req.AffectedDetector != nil {
+			affected, err := req.AffectedDetector(ctx, p, req.Since)
+			if err != nil {
+				return ports.ResolveResult{}, fmt.Errorf("k8s: affected check for %q since %q: %w: %w", p, req.Since, err, core.ErrManifestUnresolved)
+			}
+			if !affected {
+				if existing := findExistingImageForPath(ctx, p, parsedDocs, clusterCache, req.ClusterInspector); existing != "" {
+					resolvedMap[p] = existing
+					skippedMap[p] = true
+					continue
+				}
+			}
+		}
+
 		g.Go(func() error {
 			ref, err := req.Build(ctx, p)
 			if err != nil {
@@ -569,36 +604,32 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 			continue
 		}
 
-		var docRoot *yaml.Node
-		if len(pd.nodes) > 0 {
-			docRoot = pd.nodes[0]
-		}
-
-		// Live cluster annotation inspection: if inspector is configured, query cluster state
-		// for this workload before resolving image references.
-		var clusterState ports.ClusterWorkloadState
-		if req.ClusterInspector != nil && docRoot != nil {
-			kind, name, ns := getDocKindAndMeta(docRoot)
-			if kind != "" && name != "" {
-				st, err := req.ClusterInspector(ctx, kind, name, ns)
-				if err != nil {
-					// Best-effort: cluster-history enrichment must never
-					// block apply, so an inspection failure here does not
-					// fail Resolve. It is still surfaced — never silently
-					// dropped — via ClusterInspectionWarnings so the command
-					// layer can warn the operator that rollback history for
-					// this workload may now be incomplete rather than
-					// genuinely empty.
-					clusterWarnings = append(clusterWarnings, ports.ClusterInspectionWarning{
-						Kind:      kind,
-						Name:      name,
-						Namespace: ns,
-						Err:       err,
-					})
-				} else {
-					clusterState = st
+		// Live cluster annotation inspection: if inspector is configured, query
+		// cluster state for this workload before resolving image references.
+		// Best-effort: a failure never fails Resolve; it is surfaced via
+		// ClusterInspectionWarnings (deduplicated per workload) so the command
+		// layer can warn the operator that rollback history for this workload
+		// may now be incomplete rather than genuinely empty.
+		clusterWarned := make(map[string]bool)
+		clusterStateFor := func(t imageNodeTarget) ports.ClusterWorkloadState {
+			st, err := queryClusterState(ctx, clusterCache, req.ClusterInspector, t.docRootNode)
+			if err != nil {
+				kind, name, ns := getDocKindAndMeta(t.docRootNode)
+				if name != "" {
+					key := clusterCacheKey(kind, ns, name)
+					if !clusterWarned[key] {
+						clusterWarned[key] = true
+						clusterWarnings = append(clusterWarnings, ports.ClusterInspectionWarning{
+							Kind:      kind,
+							Name:      name,
+							Namespace: ns,
+							Err:       err,
+						})
+					}
 				}
+				return ports.ClusterWorkloadState{}
 			}
+			return st
 		}
 
 		var containerNodes []*yaml.Node
@@ -615,6 +646,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 			val := t.valNode.Value
 			path, _, _ := parsePokkumRef(val, false)
 			resolved := resolvedMap[path]
+			clusterState := clusterStateFor(t)
 
 			// val is always a pokkum:// reference here — targets only ever
 			// reach this loop via the isRef branch above — so it can never
@@ -623,7 +655,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 			// prior resolved digest survives between runs is
 			// AnnotationCurrentImage, written by the previous Resolve call
 			// on this same file; compare against that instead.
-			for _, annNode := range []*yaml.Node{t.templateNode, docRoot} {
+			for _, annNode := range targetAnnotationNodes(t) {
 				if annNode == nil {
 					continue
 				}
@@ -673,6 +705,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 				Document: pd.doc.Name,
 				Path:     path,
 				Resolved: resolved,
+				Skipped:  skippedMap[path],
 			})
 
 			if req.SecurityDefaults {
@@ -931,4 +964,114 @@ func generatePodDisruptionBudgetDocument(docName string, workloadLabels map[stri
 		Name:    docName + "#pdb",
 		Content: []byte(sb.String()),
 	}, true
+}
+
+// targetAnnotationNodes returns the distinct AST nodes where annotations
+// should be read and written for this target: the Pod template (if any) and
+// the document root (if it is a different node). Keeping them in stable order
+// (template first, then document root) mirrors the pre-existing behaviour of
+// writing both, and lets skip-path reuse and the regular annotation pass agree
+// on exactly where a prior resolved digest lives.
+func targetAnnotationNodes(t imageNodeTarget) []*yaml.Node {
+	var nodes []*yaml.Node
+	if t.templateNode != nil {
+		nodes = append(nodes, t.templateNode)
+	}
+	if t.docRootNode != nil && t.docRootNode != t.templateNode {
+		nodes = append(nodes, t.docRootNode)
+	}
+	return nodes
+}
+
+// clusterCacheKey returns the per-resolve cache key for a workload.
+func clusterCacheKey(kind, namespace, name string) string {
+	return kind + "\x00" + namespace + "\x00" + name
+}
+
+// queryClusterState returns the live cluster state for the workload owning
+// docRoot, consulting and populating a per-resolve cache so every call for the
+// same workload — skip-path reuse and the regular annotation pass alike —
+// performs at most one kubectl query. On error it returns the error so the
+// caller can decide how loudly to surface it; failures are deliberately not
+// cached so a transient error does not pin an empty state for the rest of the
+// resolve.
+func queryClusterState(ctx context.Context, clusterCache map[string]ports.ClusterWorkloadState, inspector ports.ClusterInspector, docRoot *yaml.Node) (ports.ClusterWorkloadState, error) {
+	if inspector == nil || docRoot == nil {
+		return ports.ClusterWorkloadState{}, nil
+	}
+	kind, name, ns := getDocKindAndMeta(docRoot)
+	if kind == "" || name == "" {
+		return ports.ClusterWorkloadState{}, nil
+	}
+	key := clusterCacheKey(kind, ns, name)
+	if st, ok := clusterCache[key]; ok {
+		return st, nil
+	}
+	st, err := inspector(ctx, kind, name, ns)
+	if err != nil {
+		return ports.ClusterWorkloadState{}, err
+	}
+	clusterCache[key] = st
+	return st, nil
+}
+
+// targetContainerName returns the "name" scalar of the container mapping
+// owning this image target, or "" when there is none.
+func targetContainerName(t imageNodeTarget) string {
+	if t.containerNode == nil {
+		return ""
+	}
+	if nNode, ok := mapGet(t.containerNode, "name"); ok && nNode.Kind == yaml.ScalarNode {
+		return nNode.Value
+	}
+	return ""
+}
+
+// findExistingImageForPath returns a previously-known digest reference for the
+// project path p, used to skip a build for an unaffected project. It looks in
+// order at: the manifest's current-image annotation (template and/or document
+// root), the live cluster's current-image annotation, and the live cluster's
+// container image for the matching container. A candidate is only accepted if
+// it is a digest reference (contains "@sha256:"). When no prior digest is
+// known, or cluster inspection fails, it returns "" so the caller falls through
+// to a full build — silently treating an inspection failure as "no reusable
+// image" rather than failing resolve on a best-effort skip.
+func findExistingImageForPath(ctx context.Context, p string, parsedDocs []docParseResult, clusterCache map[string]ports.ClusterWorkloadState, inspector ports.ClusterInspector) string {
+	for _, pd := range parsedDocs {
+		for _, t := range pd.targets {
+			val := t.valNode.Value
+			targetPath, _, _ := parsePokkumRef(val, false)
+			if targetPath != p {
+				continue
+			}
+
+			// A prior resolved digest survives between runs in the
+			// current-image annotation, written by a previous Resolve call on
+			// this same file. Prefer it over anything the cluster reports.
+			for _, annNode := range targetAnnotationNodes(t) {
+				if cur := getAnnotation(annNode, ports.AnnotationCurrentImage); cur != "" && strings.Contains(cur, "@sha256:") {
+					return cur
+				}
+			}
+
+			// Fall back to live cluster state for the workload owning this
+			// target. A failure here is best-effort: no reuse, fall through.
+			clusterState, err := queryClusterState(ctx, clusterCache, inspector, t.docRootNode)
+			if err != nil {
+				continue
+			}
+			if cur := clusterState.Annotations[ports.AnnotationCurrentImage]; cur != "" && strings.Contains(cur, "@sha256:") {
+				return cur
+			}
+			if cName := targetContainerName(t); cName != "" && strings.Contains(clusterState.Containers[cName], "@sha256:") {
+				return clusterState.Containers[cName]
+			}
+			for _, img := range clusterState.Containers {
+				if strings.Contains(img, "@sha256:") {
+					return img
+				}
+			}
+		}
+	}
+	return ""
 }

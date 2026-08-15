@@ -114,6 +114,9 @@ The post-v1.0 milestones addressed critical supply chain verification, CVE gatin
 - [x] **Live Cluster Annotation Inspection**: `pokkum apply` queries live cluster state (`kubectl get <kind>/<name> -n <ns> -o json`) before manifest resolution to seed `pokkum.dev/image-history` and active images, enabling multi-generation history accumulation across independent CLI runs on static `pokkum://` templates (`--cluster-inspect`, `--no-cluster-inspect`). Every kubectl failure (unreachable cluster, RBAC denial, malformed kubeconfig) used to be folded into the same "workload not found" empty state at Debug-only log level, silently resetting rollback history with no operator-visible signal. Fixed: only a genuine `(NotFound)` StatusReason is treated as fresh; every other failure surfaces as a Warn-level log line via `ResolveResult.ClusterInspectionWarnings`.
 - [x] **Runtime Environment Contract**: Declares required runtime environment variables in OCI image annotations (`pokkum.dev/required-env`) and embeds contract into runtime config, enforced by PID-1 supervisor (`/pokkum/init`) to fail-fast on startup if any are missing (`--require-env=KEY1,KEY2` on `build`).
 
+### Adoption & Monorepo Scale (Tier 4)
+- [x] **Monorepo Affected-Detection (`--since`)**: `pokkum resolve` and `pokkum apply` accept `--since=<git-ref>` to diff each `pokkum://` project's source tree against a base commit (`internal/adapters/gitutils` — `git diff --name-only <ref> -- .` plus `git status --porcelain` for untracked/staged/deleted changes). An unaffected project with a known prior digest — read from the manifest's `pokkum.dev/current-image` annotation, or from live cluster state when configured — **skips compilation and packaging entirely** and reuses that digest in the emitted manifest (logged as `reused unaffected image reference`). If no prior digest is known, or the project is affected, it falls through to a normal build so every emitted reference is a real `repo@sha256:…`. `--since` is fail-closed: an unknown ref or a git failure fails the resolve rather than silently building or silently skipping. See `internal/ports/k8s.go` (`AffectedDetector`, `ResolveRequest.Since`, `Reference.Skipped`) and `cmd/pokkum/k8s.go`.
+
 ---
 
 ## Architectural & Performance Optimizations
@@ -147,19 +150,14 @@ The post-v1.0 milestones addressed critical supply chain verification, CVE gatin
 
 Prioritized backlog for ongoing development:
 
-### 1. Monorepo Affected-Detection (High Priority)
-- **Problem**: In multi-app monorepos with multiple `pokkum://` image URIs, running `resolve`/`apply` builds all services regardless of which files changed.
-- **Solution**: Implement git-diff input tracking per SvelteKit app directory. If files in an application's source tree have not changed since a base commit, skip compilation and packaging entirely.
-- **Flags/Interface**: `--since=<git-ref>` on `pokkum resolve` and `pokkum apply`.
-
-### 2. Static / Prerendered Page Optimization (Medium Priority)
+### 1. Static / Prerendered Page Optimization (Medium Priority)
 - **Problem**: Fully static or predominantly prerendered SvelteKit sites still incur Bun runtime memory overhead and layer distribution size.
 - **Solution**:
   - Extract prerendered static assets (`.svelte-kit/output/prerendered`) to a dedicated slim OCI layer with immutable Cache-Control metadata.
   - Add a `--static` mode compiling purely static sites onto an `nginx:alpine` or minimal static file server image with zero JavaScript runtime overhead.
 - **Flags/Interface**: `--static` on `pokkum build`.
 
-### 3. Policy as Code Enforcement (Low Priority / Backlog)
+### 2. Policy as Code Enforcement (Low Priority / Backlog)
 - **Problem**: Security compliance rules (e.g., "no critical CVEs", "must contain SBOM", "must run as non-root") are currently validated imperatively across disparate flags.
 - **Solution**: Integrate Open Policy Agent (OPA) / Rego policy evaluation to assert organizational supply-chain and container security policies against image metadata, SBOMs, and scan results prior to publishing.
 - **Flags/Interface**: `pokkum policy check --policy=<path>` subcommand and `--policy=<path>` build gate.

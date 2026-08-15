@@ -96,6 +96,9 @@ func TestApplyCommandClusterInspectFlags(t *testing.T) {
 	if flag := cmd.Flags().Lookup("no-cluster-inspect"); flag == nil {
 		t.Fatalf("expected --no-cluster-inspect flag to be registered")
 	}
+	if flag := cmd.Flags().Lookup("since"); flag == nil {
+		t.Fatalf("expected --since flag to be registered")
+	}
 }
 
 func TestKubectlClusterInspector(t *testing.T) {

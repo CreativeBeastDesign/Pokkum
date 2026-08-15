@@ -97,7 +97,8 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `registryutils`: Utility package for resolving Docker `config.json` auth keychains, executing dynamic credential helpers (`credHelpers`, `credsStore`), and caching credentials in-memory.
    - `sbom`: Generates deterministic SPDX 2.3 or CycloneDX 1.5 SBOMs natively without external cataloger dependencies.
    - `supervisor`: Embedded `pokkum-init` supervisor binary assets (`/pokkum/init`), stored zstd-compressed to shrink the CLI footprint and decompressed on-the-fly to the raw ELF by `ports.SupervisorProvider`.
-   - `k8s`: Kubernetes manifest inspection, document rewriting, and `pokkum://` schema resolution.
+    - `k8s`: Kubernetes manifest inspection, document rewriting, and `pokkum://` schema resolution.
+    - `gitutils`: Utility package for git-based monorepo affected-project detection (`ports.AffectedDetector`, `--since` on `resolve`/`apply`), declaring `const IsUtilityPackage = true`. It diffs each project tree against a base ref (`git diff --name-only <ref> -- .`) plus a `git status --porcelain` check for untracked/staged/deleted changes, validating the ref via `rev-parse --verify <ref>^{commit}` and failing closed on git errors.
    - `sveltekit`: Checks `@jesterkit/exe-sveltekit` adapter installation in target projects.
    - `cosign`: Signs OCI images, attaches Cosign signatures to OCI registries, and implements `ports.ReleaseVerifier` for release signature and SHA-256 checksum verification.
    - `secretguard`: Build-time entropy and pattern scanner for detecting hardcoded secrets in source files before image packaging (`ports.SecretGuard`).
@@ -246,6 +247,7 @@ Pokkum includes a native Kubernetes resolver (`pokkum resolve` / `pokkum apply`)
      image: ghcr.io/example/my-app@sha256:123456789abcdef...
      ```
    - When the value being replaced was already a concrete image reference (not a `pokkum://` URI — i.e. this is a re-resolve of a previously-resolved manifest), records it in a `pokkum.dev/previous-image` annotation before overwriting, so a later `pokkum rollback -f manifest.yaml` (no `--to` needed) can undo this one change.
+   - **Monorepo affected-detection (`--since=<git-ref>`)**: as an optimization, each `pokkum://` project's source tree is diffed against a base git ref (`internal/adapters/gitutils`). A project that has **not** changed since that ref, and for which a prior digest is known — from its manifest `pokkum.dev/current-image` annotation or from live cluster state when inspecting — **skips compilation and packaging entirely** and reuses that digest in the emitted manifest (logged `reused unaffected image reference`, surfaced via `ports.Reference.Skipped`). If no prior digest is known, or the project is affected, it is built normally, so every emitted reference is a real `repo@sha256:…`. `--since` is fail-closed: an unknown ref or a git error fails the resolve rather than silently building or silently skipping.
 3. Running `pokkum apply -f manifest.yaml`:
    - Resolves all references and pipes the resulting manifest directly into `kubectl apply -f -`.
 

@@ -7,9 +7,10 @@ Pokkum is a Go-based zero-dependency OCI container image compiler for SvelteKit 
 - Tech Stack & Dependencies: `mem:tech_stack`
 - OpenTelemetry & Metrics Pipeline: `mem:telemetry`
 - Verification & Test Commands: `mem:task_completion`
+- Self-Review Checklist: `mem:self_review_checklist`
 
 ## Shared Conventions
-- Serena holds only project knowledge and shared conventions — not agent-specific process/workflow rules.
+- Serena holds project knowledge, shared conventions, and cross-agent-harness process artifacts that benefit from a single edited-in-place source of truth (e.g. `mem:self_review_checklist`) — every agent working this codebase has Serena access, so a shared checklist belongs here rather than forked into each harness's own instruction file. Harness-specific mechanics (planning/orchestration format, delegation tooling) stay in each harness's own instruction file. The chronological incident log (`Lessons.md`) stays a plain repo-root file, not a memory — it's append-only and read by grep, the opposite shape of a concise Serena memory.
 - Verification of code changes is the consolidated `make verify` target (see `mem:task_completion`).
 
 ## Invariants
@@ -32,3 +33,4 @@ Pokkum is a Go-based zero-dependency OCI container image compiler for SvelteKit 
 - SBOM Attachment: Native deterministic SBOMs (SPDX 2.3 / CycloneDX 1.5) are attached by default as OCI 1.1 referrers (`--sbom-attach=referrer`), with legacy `.sbom` tag fallback (`--sbom-attach=tag`).
 - Keyless Sigstore Base Verification: Stock presets (`distroless`/`chainguard`) use keyless Sigstore verification (Fulcio+Rekor) against embedded trust roots by default, while custom bases use static-key Cosign verification (`--base-verify-mode`).
 - Hot-Reload Dev Environment: `pokkum dev` builds, loads into Docker daemon, runs, and watches source files for auto-rebuilding with interactive shell debugging (`--debug`).
+- Monorepo Affected-Detection: `pokkum resolve`/`apply --since=<git-ref>` diff each `pokkum://` project tree against a base ref (`internal/adapters/gitutils`, `ports.AffectedDetector`) and skip build/packaging for an unaffected project that has a known prior digest (manifest `pokkum.dev/current-image` annotation or live cluster state), reusing that digest in the emitted manifest (`ports.Reference.Skipped`); falls through to a real build otherwise, fail-closed on bad ref/git errors.

@@ -15,7 +15,13 @@ This document defines the core guidelines, architectural invariants, verificatio
 At the beginning of any non-trivial task, agents **MUST**:
 
 1. Access Serena MCP and read `mem:core` using the `read_memory` tool.
-2. Follow references to domain-specific memories (`mem:conventions`, `mem:tech_stack`, `mem:telemetry`, `mem:task_completion`) as needed for the task.
+2. Follow references to domain-specific memories (`mem:conventions`, `mem:tech_stack`, `mem:telemetry`, `mem:task_completion`, `mem:self_review_checklist`) as needed for the task.
+
+### Pre-Task Checklist
+
+Before writing any code, in addition to the Serena startup protocol above:
+
+- **Search `Lessons.md` for related entries.** Grep it for keywords tied to the packages/files/behavior about to be touched (function names, package names, bug categories such as `concurrency`, `resource-leak`, `multi-item`, `determinism`). A prior incident in the same area is a strong signal of being about to repeat it — read that entry's root cause and preventative rule *before* writing a line of code, not after. See the Root Cause Analysis subsection under Section 5 for how entries are structured.
 
 ### Keeping Serena Memories Up-to-Date
 
@@ -96,16 +102,45 @@ When code changes have occurred, agents **MUST** execute the following 4-step ve
 3. **CLI Compilation Check**: `go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test`
 4. **Full Internal Test Suite** (includes Architecture Purity Verification `internal/architecture_test.go`): `go test ./internal/...`
 
-Before declaring any non-trivial feature or refactor complete, review your own diff (`git diff`) line by line against the functional spec, with particular attention to: off-by-one errors, nil pointer dereferences, unhandled errors, state inconsistencies; unintended side effects outside the intended Hexagonal boundary; goroutine leaks, unclosed `io.Reader`/`io.Closer`/`os.File` handles, and clock access violations.
+Before declaring any non-trivial feature or refactor complete, review your own diff (`git diff`) line by line against the functional spec. Use the Self-Review Checklist below to do this — treat it as a set of things to *mechanically verify* against the actual diff, not a paragraph to keep in mind while skimming.
 
 If a bug or edge case failure is found during self-review, flag it explicitly, fix it, and re-run the full verification suite. **Silent patching is strictly forbidden.**
 
-### Root Cause Analysis & `Lessons.md`
+### 5.1 Self-Review Checklist
+
+> [!IMPORTANT]
+> A real bug in this codebase (a goroutine leak in a fan-out resolve loop) survived an instruction that told the agent, in prose, to "scan for goroutine leaks." The instruction wasn't wrong, it just wasn't checkable — nothing forced a concrete look at the specific lines where it mattered.
+
+The checklist itself lives in Serena as `mem:self_review_checklist`, not inline here. It's a cross-harness artifact — every agent working this codebase has Serena access, and an edited-in-place shared checklist beats several drifting local copies. **Read `mem:self_review_checklist` before declaring any non-trivial diff complete, and run every row against the actual diff lines** — not from memory of having read it once. If a row doesn't apply, say so explicitly ("N/A: no concurrent dispatch in this diff") rather than skipping it silently.
+
+### 5.2 Commit Discipline
+
+A change that only exists as uncommitted working-tree state is one `git clean`/`checkout`/`reset --hard` away from being lost, and it can't be reviewed, diffed, or handed off. Before ending a session that produced a non-trivial code change:
+
+- Commit it, with a message describing *what* and *why* — not `"Commit"` or `"wip"`. If the change has logically separable phases (e.g. "add the port interface" vs. "wire it into the resolver" vs. "fix the bug found during self-review"), prefer several small commits over one large squashed one, so the reasoning stays recoverable later.
+- If deliberately leaving something uncommitted (the user asked to hold off, or it's a draft), say so explicitly in the final answer. Don't let it go unmentioned.
+
+### 5.3 Root Cause Analysis & `Lessons.md`
 
 Upon discovering a bug during self-review or debugging:
 
 1. Conduct a root-cause analysis into _why_ the bug was introduced (e.g., faulty assumption, missed boundary, leaky abstraction).
-2. Log the incident and key takeaway in [`Lessons.md`](file:///Users/andrebarlocher/Documents/Go/Pokkum/Lessons.md) (creating the file if it does not exist).
+2. Log the incident in [`Lessons.md`](file:///Users/andrebarlocher/Documents/Go/Pokkum/Lessons.md) (creating the file if it does not exist), using this structure so future agents can find and act on it, not just read it in passing:
+
+   ```
+   ## YYYY-MM-DD — <one-line summary>
+   **Category:** <e.g. concurrency / resource-leak / multi-item / determinism / boundary>
+   **Root cause:** <the faulty assumption or missed case>
+   **Where:** <file:line or function>
+   **Fix:** <what changed>
+   **Preventative rule:** <the general, reusable rule — this is what feeds `mem:self_review_checklist`>
+   ```
+
+3. **Close the loop — update `mem:self_review_checklist` in Serena, don't just log the incident.** Use Serena's `edit_memory`/`write_memory` tools to check whether the bug's category matches an existing row:
+   - If it matches but the checklist didn't catch it, the row's wording was too vague or too narrow — revise it so this exact failure mode is unambiguously covered next time.
+   - If it's a genuinely new category, add a new row.
+
+   A `Lessons.md` entry with no corresponding checklist update is a bug likely to be reintroduced. The Serena checklist — not the log — is what actually gets consulted during the next self-review, by every harness working this codebase; an entry that never updates it is a write with no matching read.
 
 ---
 
@@ -186,11 +221,12 @@ Do not restate the full plan or Execution Table on every update — one line, re
 
 Agents **MUST** keep the project documentation and persistent knowledge graph synchronized whenever code, CLI flags, interfaces, or architectural patterns change:
 
-- **`Lessons.md`**: Record bug post-mortems, root causes, and preventative rules flagged during self-review or debugging sessions.
+- **`Lessons.md`**: Record bug post-mortems, root causes, and preventative rules flagged during self-review or debugging sessions — and close the loop by updating `mem:self_review_checklist` per Section 5.3.
 - **`Roadmap.md`**: Update task completion status (`[x]`), adjust scopes, or re-prioritize items.
 - **`ARCHITECTURE.md`**: Update architectural diagrams, adapter contracts, layer layouts, and boundary descriptions.
 - **`Vocabulary.md`**: Maintain the complete, human-readable reference of all CLI commands, subcommands, flags, defaults, and runtime environment variables.
-- **Serena MCP Memories (`mem:*`)**: Keep the machine-readable project memory graph for agents (`mem:core`, `mem:conventions`, `mem:tech_stack`, `mem:telemetry`, `mem:task_completion`, etc.) updated with latest invariants and decisions.
+- **Package-level `README.md` files** (e.g. `internal/adapters/<name>/README.md`): update alongside the top-level docs above whenever that package's behavior changes. These are human-facing, same as `ARCHITECTURE.md`/`Vocabulary.md` (Serena `mem:*` remains the source of truth for agents) — a new flag or field documented at the top level but not in its own package's README leaves a human contributor working in that directory with a stale picture.
+- **Serena MCP Memories (`mem:*`)**: Keep the machine-readable project memory graph for agents (`mem:core`, `mem:conventions`, `mem:tech_stack`, `mem:telemetry`, `mem:task_completion`, `mem:self_review_checklist`, etc.) updated with latest invariants and decisions.
 
 > [!IMPORTANT]
 > **Serena MCP is for Agents, docs are for humans.** Make sure to chose the most suitable wording, style, and tone for each document.

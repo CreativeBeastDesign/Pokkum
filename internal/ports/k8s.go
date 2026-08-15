@@ -85,7 +85,21 @@ type Reference struct {
 	// Resolved is the digest reference it was rewritten to, or empty in a
 	// References call, which does not build anything.
 	Resolved string
+
+	// Skipped is true when image compilation and packaging was skipped because
+	// the referenced project was detected as unaffected since a base git ref
+	// (via ResolveRequest.Since / AffectedDetector) and a prior digest was
+	// reused instead. It is always false in a References call, which builds
+	// nothing, and false for any reference that was actually built.
+	Skipped bool
 }
+
+// AffectedDetector determines whether the project at projectPath has changed
+// since sinceRef. It returns true if the project is affected (should be
+// rebuilt), false if it is unaffected (may be skipped when a prior digest is
+// known), or an error when the status cannot be determined — the caller must
+// then fail rather than silently build or silently skip.
+type AffectedDetector func(ctx context.Context, projectPath, sinceRef string) (bool, error)
 
 // ResolveRequest asks the resolver to rewrite every pokkum:// reference.
 type ResolveRequest struct {
@@ -103,6 +117,19 @@ type ResolveRequest struct {
 	// rejects a manifest whose image value merely looks like a scheme typo
 	// ("pokkum:/", "pokkum:"). Defaults to false.
 	Strict bool
+
+	// Since is the optional git reference (e.g. "main", "HEAD~1", a tag, or a
+	// commit SHA) used for monorepo affected-detection. When non-empty and
+	// AffectedDetector is set, a referenced project whose tree has not changed
+	// since this ref may skip compilation/packaging and reuse an existing
+	// digest (see AffectedDetector and the Resolve docs). When empty, every
+	// referenced project is built.
+	Since string
+
+	// AffectedDetector determines whether a project path has changed since
+	// Since. When nil (or Since is empty), all referenced projects are
+	// considered affected and built.
+	AffectedDetector AffectedDetector
 
 	// SecurityDefaults, when true, injects hardened securityContext defaults
 	// into every Pod spec and container that a pokkum:// reference was

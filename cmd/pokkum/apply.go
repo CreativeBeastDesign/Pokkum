@@ -29,6 +29,7 @@ type applyFlags struct {
 	clusterInspect     bool
 	noClusterInspect   bool
 	registryConfig     string
+	since              string
 }
 
 func newApplyCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -72,6 +73,8 @@ PATH and is equivalent to:
 		"Disable live cluster annotation inspection (shorthand for --cluster-inspect=false)")
 	cmd.Flags().StringVar(&flags.registryConfig, "registry-config", "",
 		"Path to custom OCI registry auth config file (config.json)")
+	cmd.Flags().StringVar(&flags.since, "since", "",
+		"Git ref (commit, branch, tag) to diff against for monorepo affected-detection; unchanged apps skip building when a prior digest is known")
 
 	// file is required
 	_ = cmd.MarkFlagRequired("file")
@@ -94,7 +97,8 @@ func runApply(ctx context.Context, logger *slog.Logger, flags *applyFlags) error
 		"securityContext", secCtx,
 		"networkPolicy", netPol,
 		"resourceDefaults", resDefs,
-		"clusterInspect", inspectCluster)
+		"clusterInspect", inspectCluster,
+		"since", flags.since)
 
 	// Look up kubectl before doing any of the (potentially expensive) build
 	// and push work, so a missing kubectl fails in milliseconds rather than
@@ -116,6 +120,7 @@ func runApply(ctx context.Context, logger *slog.Logger, flags *applyFlags) error
 		NetworkPolicy:      netPol,
 		ResourceDefaults:   resDefs,
 		RegistryConfigPath: flags.registryConfig,
+		Since:              flags.since,
 		ClusterInspector:   inspector,
 	})
 	if err != nil {

@@ -16,3 +16,5 @@ make verify
 2. **Adapter Unit Tests**: `go test ./internal/adapters/...`
 3. **CLI Compilation Check**: `go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test`
 4. **Full Internal Test Suite (includes AST Architecture Purity Check)**: `go test ./internal/...`
+
+Before declaring a non-trivial diff complete, also run it against `mem:self_review_checklist` — a shared, edited-in-place list of hard-to-spot bug patterns (fan-out error paths, resource cleanup on every branch, multi-item/non-first-item test coverage, ordering, clock access). `make verify` passing is necessary but not sufficient: it confirms the tests you wrote pass, not that you wrote the tests that would have caught the bug.

@@ -46,3 +46,10 @@ func TestSecurityContextEnabled(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveCommandSinceFlag(t *testing.T) {
+	cmd := newResolveCommand(context.Background(), discardLogger())
+	if flag := cmd.Flags().Lookup("since"); flag == nil {
+		t.Fatalf("expected --since flag to be registered")
+	}
+}

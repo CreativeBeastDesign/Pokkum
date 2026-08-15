@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -343,4 +345,117 @@ func toPortsDocuments(fixtures []documentFixture) []ports.Document {
 		docs[i] = ports.Document{Name: f.name, Content: []byte(f.content)}
 	}
 	return docs
+}
+
+// TestResolveManifests_Since_SkipsUnaffectedEndToEnd wires the real git
+// detector through resolveManifests: with --since set, only the app whose tree
+// actually changed is built; the unchanged app reuses its seeded prior digest
+// and is not compiled.
+func TestResolveManifests_Since_SkipsUnaffectedEndToEnd(t *testing.T) {
+	t.Setenv("POKKUM_DOCKER_REPO", "ghcr.io/test/repo")
+
+	repoDir := t.TempDir()
+	gitExec(t, repoDir, "init")
+	gitExec(t, repoDir, "config", "user.name", "Pokkum Test")
+	gitExec(t, repoDir, "config", "user.email", "test@pokkum.dev")
+	gitExec(t, repoDir, "config", "commit.gpgsign", "false")
+
+	webDir := filepath.Join(repoDir, "apps", "web")
+	apiDir := filepath.Join(repoDir, "apps", "api")
+	if err := os.MkdirAll(webDir, 0o755); err != nil {
+		t.Fatalf("mkdir web: %v", err)
+	}
+	if err := os.MkdirAll(apiDir, 0o755); err != nil {
+		t.Fatalf("mkdir api: %v", err)
+	}
+	writeFile(t, filepath.Join(webDir, "package.json"), `{"name":"web"}`)
+	writeFile(t, filepath.Join(apiDir, "package.json"), `{"name":"api"}`)
+	gitExec(t, repoDir, "add", ".")
+	gitExec(t, repoDir, "commit", "-m", "initial")
+	baseSHA := gitExec(t, repoDir, "rev-parse", "HEAD")
+
+	// Change only apps/api in a new commit.
+	writeFile(t, filepath.Join(apiDir, "src.ts"), `export const x = 1;`)
+	gitExec(t, repoDir, "add", ".")
+	gitExec(t, repoDir, "commit", "-m", "touch api")
+
+	// The manifest is relative to the manifest directory (repoDir), which
+	// matches the detector's baseDir, so pokkum:// paths resolve correctly.
+	manifest := filepath.Join(repoDir, "deploy.yaml")
+	writeFile(t, manifest, `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  annotations:
+    pokkum.dev/current-image: ghcr.io/test/repo/apps-web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+spec:
+  template:
+    metadata:
+      annotations:
+        pokkum.dev/current-image: ghcr.io/test/repo/apps-web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    spec:
+      containers:
+      - name: web
+        image: pokkum://./apps/web
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-app
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: pokkum://./apps/api
+`)
+
+	var webBuilds, apiBuilds atomic.Int32
+	mockBuilder := func(_ context.Context, path string) (string, error) {
+		if path == "./apps/api" {
+			apiBuilds.Add(1)
+			return "ghcr.io/test/repo/apps-api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", nil
+		}
+		webBuilds.Add(1)
+		return "ghcr.io/test/repo/apps-web@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", nil
+	}
+
+	out, err := resolveManifests(context.Background(), discardLogger(), resolveManifestsOptions{
+		File:             manifest,
+		SecurityContext:  false,
+		NetworkPolicy:    false,
+		ResourceDefaults: false,
+		ImageBuilder:     mockBuilder,
+		Since:            baseSHA,
+	})
+	if err != nil {
+		t.Fatalf("resolveManifests failed: %v", err)
+	}
+
+	if apiBuilds.Load() != 1 {
+		t.Errorf("expected affected app apps/api to be built exactly once, got %d builds", apiBuilds.Load())
+	}
+	if webBuilds.Load() != 0 {
+		t.Errorf("expected unaffected app apps/web to be skipped (reused), got %d builds", webBuilds.Load())
+	}
+
+	outStr := string(out)
+	if !strings.Contains(outStr, "apps-api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") {
+		t.Errorf("expected apps/api resolved to its built digest, got:\n%s", outStr)
+	}
+	// apps/web must retain its seeded prior digest (reused, not rebuilt).
+	if !strings.Contains(outStr, "apps-web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
+		t.Errorf("expected apps/web to reuse its prior seeded digest, got:\n%s", outStr)
+	}
+}
+
+func gitExec(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s failed: %v\nOutput: %s", args, dir, err, string(out))
+	}
+	return strings.TrimSpace(string(out))
 }

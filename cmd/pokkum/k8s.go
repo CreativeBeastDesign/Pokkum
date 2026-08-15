@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/gitutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/k8s"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -37,6 +38,8 @@ type resolveManifestsOptions struct {
 	NetworkPolicy      bool
 	ResourceDefaults   bool
 	RegistryConfigPath string
+	Since              string
+	AffectedDetector   ports.AffectedDetector
 	ImageBuilder       ports.ImageBuilder
 	ClusterInspector   ports.ClusterInspector
 }
@@ -67,11 +70,20 @@ func resolveManifests(ctx context.Context, logger *slog.Logger, opts resolveMani
 		builder = newImageBuilder(logger, baseDir, dockerRepo)
 	}
 
+	// Monorepo affected-detection: when --since is given, an unaffected
+	// project with a known prior digest skips building and reuses that digest.
+	detector := opts.AffectedDetector
+	if detector == nil && opts.Since != "" {
+		detector = gitutils.NewAffectedDetector(baseDir)
+	}
+
 	resolver := k8s.NewResolver()
 	res, err := resolver.Resolve(ctx, ports.ResolveRequest{
 		Documents:          docs,
 		Build:              builder,
 		Strict:             true,
+		Since:              opts.Since,
+		AffectedDetector:   detector,
 		SecurityDefaults:   opts.SecurityContext,
 		NetworkPolicy:      opts.NetworkPolicy,
 		ResourceDefaults:   opts.ResourceDefaults,
@@ -94,7 +106,11 @@ func resolveManifests(ctx context.Context, logger *slog.Logger, opts resolveMani
 
 	logger.Info("manifests resolved", "documents", len(res.Documents), "references", len(res.References))
 	for _, ref := range res.References {
-		logger.Info("resolved image reference", "document", ref.Document, "path", ref.Path, "resolved", ref.Resolved)
+		if ref.Skipped {
+			logger.Info("reused unaffected image reference", "document", ref.Document, "path", ref.Path, "resolved", ref.Resolved, "since", opts.Since)
+		} else {
+			logger.Info("resolved image reference", "document", ref.Document, "path", ref.Path, "resolved", ref.Resolved)
+		}
 	}
 
 	return joinDocuments(res.Documents), nil

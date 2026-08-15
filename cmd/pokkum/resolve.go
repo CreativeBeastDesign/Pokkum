@@ -22,6 +22,7 @@ type resolveFlags struct {
 	resourceDefaults   bool
 	noResourceDefaults bool
 	registryConfig     string
+	since              string
 }
 
 func newResolveCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -64,6 +65,8 @@ All logging goes to stderr.`,
 		"Disable resource default injection and PodDisruptionBudget generation")
 	cmd.Flags().StringVar(&flags.registryConfig, "registry-config", "",
 		"Path to custom OCI registry auth config file (config.json)")
+	cmd.Flags().StringVar(&flags.since, "since", "",
+		"Git ref (commit, branch, tag) to diff against for monorepo affected-detection; unchanged apps skip building when a prior digest is known")
 
 	// file is required
 	_ = cmd.MarkFlagRequired("file")
@@ -84,7 +87,8 @@ func runResolve(ctx context.Context, logger *slog.Logger, flags *resolveFlags) e
 		"recursive", flags.recursive,
 		"securityContext", secCtx,
 		"networkPolicy", netPol,
-		"resourceDefaults", resDefs)
+		"resourceDefaults", resDefs,
+		"since", flags.since)
 
 	out, err := resolveManifests(ctx, logger, resolveManifestsOptions{
 		File:               flags.file,
@@ -93,6 +97,7 @@ func runResolve(ctx context.Context, logger *slog.Logger, flags *resolveFlags) e
 		NetworkPolicy:      netPol,
 		ResourceDefaults:   resDefs,
 		RegistryConfigPath: flags.registryConfig,
+		Since:              flags.since,
 	})
 	if err != nil {
 		return err
