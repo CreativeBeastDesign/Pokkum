@@ -18,13 +18,21 @@ type Server struct {
 type Option func(*serverConfig)
 
 type serverConfig struct {
-	wrapper func(http.Handler) http.Handler
+	wrapper     func(http.Handler) http.Handler
+	blobHandler registry.BlobHandler
 }
 
 // WithHandlerWrapper wraps the registry's HTTP handler (e.g., for request counting or logging).
 func WithHandlerWrapper(wrapper func(http.Handler) http.Handler) Option {
 	return func(cfg *serverConfig) {
 		cfg.wrapper = wrapper
+	}
+}
+
+// WithBlobHandler configures the blob storage backend for the registry.
+func WithBlobHandler(bh registry.BlobHandler) Option {
+	return func(cfg *serverConfig) {
+		cfg.blobHandler = bh
 	}
 }
 
@@ -35,7 +43,12 @@ func NewServer(opts ...Option) (*Server, error) {
 		opt(&cfg)
 	}
 
-	var handler http.Handler = registry.New()
+	var regOpts []registry.Option
+	if cfg.blobHandler != nil {
+		regOpts = append(regOpts, registry.WithBlobHandler(cfg.blobHandler))
+	}
+
+	var handler http.Handler = registry.New(regOpts...)
 	if cfg.wrapper != nil {
 		handler = cfg.wrapper(handler)
 	}

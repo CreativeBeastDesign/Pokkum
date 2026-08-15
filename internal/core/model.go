@@ -576,6 +576,11 @@ type BuildRequest struct {
 	// for the two-platform case; a negative value is invalid.
 	Concurrency int
 
+	// PushConcurrency caps how many layers are uploaded to the registry in
+	// parallel. Zero means the registry adapter uses its own default; a negative
+	// value is invalid.
+	PushConcurrency int
+
 	// Insecure permits plain HTTP and skips TLS verification for both the base
 	// image pull and the push. Intended for local test registries only.
 	Insecure bool
@@ -764,6 +769,10 @@ func (r BuildRequest) Validate() error {
 
 	if r.Concurrency < 0 {
 		return fmt.Errorf("concurrency %d must not be negative: %w", r.Concurrency, ErrInvalidRequest)
+	}
+
+	if r.PushConcurrency < 0 {
+		return fmt.Errorf("push concurrency %d must not be negative: %w", r.PushConcurrency, ErrInvalidRequest)
 	}
 	return nil
 }

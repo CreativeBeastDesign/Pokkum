@@ -215,8 +215,8 @@ func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 // Build runs the whole pipeline: validate, preflight, prepare, compile and
 // package every platform, index them, generate the SBOM, publish, attach.
 //
-// The stage order is fixed and each stage is a barrier, because every stage
-// consumes the previous one's output:
+// The stage order is fixed and every stage but one is a barrier, because
+// every stage consumes the previous one's output:
 //
 //  1. Normalize + Validate the request, and check the ports are wired. No
 //     subprocess and no packet leaves the machine before this passes.
@@ -225,13 +225,31 @@ func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 //  3. BaseImageResolver.Resolve — one call for every platform at once, and
 //     the libc compatibility gate. Done before any compile so that an
 //     incompatible base costs a round trip rather than two 90 MB builds.
-//  4. --dry-run stops here and reports the plan.
-//  5. Compiler.Prepare — the SvelteKit build. Exactly once, never in
-//     parallel: it writes into ProjectDir/.svelte-kit and the port documents
-//     it as unsafe to run concurrently for the same project.
+//     Signature verification is deliberately *not* part of this call (see
+//     stage 5) — Resolve only pins the digest that everything downstream,
+//     including the remote-cache key, needs.
+//  4. --dry-run stops here and reports the plan, after synchronously
+//     verifying the base image signature so a dry run still fails fast on
+//     an invalid one.
+//  5. Compiler.Prepare — the SvelteKit build — runs concurrently (via
+//     errgroup) with BaseImageResolver.VerifyBaseImage and
+//     NativeInspector.Inspect, since a cache miss needs all three to
+//     succeed before publishing but none of them needs to finish before
+//     Prepare can start. Prepare itself still runs exactly once: it writes
+//     into ProjectDir/.svelte-kit and the port documents it as unsafe to
+//     run concurrently with another Prepare for the same project. A
+//     failure in either concurrent check cancels the in-flight Prepare
+//     (tearing down the bun subprocess tree, not just abandoning a
+//     goroutine) and fails the build before fan-out is ever reached — first
+//     error wins via errgroup, not errors.Join, so if two fail at genuinely
+//     overlapping times only one error surfaces and which one is not
+//     deterministic. A cache hit (stage 3.5, ahead of this stage) skips
+//     VerifyBaseImage and Inspect entirely — neither check has anything
+//     left to gate once nothing is going to be built from source or from
+//     the base image.
 //  6. Fan out: per platform Compile → Supervisor.Binary → Packager.Build,
-//     plus the single SBOM scan. This is the only parallel section and it is
-//     where all the wall-clock time is.
+//     plus the single SBOM scan. This is the only other parallel section
+//     and it is where most of the wall-clock time is.
 //  7. Packager.Index when more than one platform was built.
 //  8. --print-manifest stops here and emits the manifest and config JSON.
 //  9. Publish through whichever of Registry / LocalLoader / TarballWriter the
@@ -280,12 +298,6 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 	log.Info("preflight ok", "bun", pf.BunVersion, "bunPath", pf.BunPath, "adapter", pf.AdapterVersion, "sveltekit", pf.SvelteKitVersion)
 
-	// Preflight Native Inspection
-	if _, err := deps.NativeInspector.Inspect(ctx, req.ProjectDir, req.Platforms[0]); err != nil {
-		return BuildResult{}, err
-	}
-	log.Info("native inspector ok")
-
 	toolchain := Toolchain{
 		PokkumVersion:    deps.Version,
 		BunVersion:       pf.BunVersion,
@@ -309,7 +321,14 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	// is deliberately outside the per-platform fan-out — which is also what
 	// makes it reachable from --dry-run.
 	lockPath := filepath.Join(req.ProjectDir, ports.PokkumLockfileName)
-	base, err := deps.BaseImages.Resolve(ctx, ports.BaseImageRequest{
+	// baseReq is reused verbatim for the deferred VerifyBaseImage calls below
+	// (dry-run's synchronous one and the concurrent one in the errgroup block
+	// near Prepare), so Resolve and VerifyBaseImage always agree on
+	// Ref/Preset/Platforms/Insecure/etc. VerifySignature is false here because
+	// signature verification no longer happens inline inside Resolve — it now
+	// happens later, gated on a confirmed cache miss (or synchronously for
+	// dry-run), never on a cache hit.
+	baseReq := ports.BaseImageRequest{
 		Preset:          req.BaseImage.Preset,
 		Ref:             req.BaseImage.Ref,
 		Platforms:       req.Platforms,
@@ -317,14 +336,15 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		LockfilePath:    lockPath,
 		UpdateBase:      req.BaseImage.UpdateBase,
 		Offline:         req.BaseImage.Offline,
-		VerifySignature: !req.BaseImage.NoVerifyBase,
+		VerifySignature: false,
 		VerifyMode:      req.BaseImage.VerifyMode,
 		KeylessIdentity: ports.KeylessIdentity{
 			SAN:    req.BaseImage.KeylessSAN,
 			Issuer: req.BaseImage.KeylessIssuer,
 		},
 		TrustedRootPath: req.BaseImage.TrustedRootPath,
-	})
+	}
+	base, err := deps.BaseImages.Resolve(ctx, baseReq)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -445,6 +465,21 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 
 	// Stage 4: --dry-run stops here, having touched nothing.
 	if opts.DryRun {
+		// Resolve above only resolved the digest/manifest (VerifySignature is
+		// always false in baseReq now); verify the signature synchronously
+		// here so a dry run still fails fast on a bad base image signature,
+		// exactly as it did when Resolve verified inline.
+		if !req.BaseImage.NoVerifyBase {
+			if err := deps.BaseImages.VerifyBaseImage(ctx, base, baseReq); err != nil {
+				return BuildResult{}, err
+			}
+		}
+		// Same reasoning for native-module inspection: it used to run
+		// unconditionally before this stage; keep that guarantee for dry
+		// runs even though a real build now overlaps it with Prepare.
+		if _, err := deps.NativeInspector.Inspect(ctx, req.ProjectDir, req.Platforms[0]); err != nil {
+			return BuildResult{}, err
+		}
 		res := BuildResult{
 			Image: ImageResult{
 				Mode:        req.Output.Mode,
@@ -529,6 +564,19 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				} else {
 					log.Info("remote input cache hit; build skipped", "repo", req.Repo, "digest", cacheRes.Digest.String(), "inputHash", inputHash)
 				}
+				// Auditable disclosure of the accepted security tradeoff: a
+				// confirmed cache hit short-circuits before Stage 5, so base-image
+				// signature verification does NOT run on the hit path. Nothing is
+				// built from the base image on a hit and the cache key already
+				// binds the base image digest (base.Digest, pinned via pokkum.lock),
+				// so the hit can only match the exact base the verifier would have
+				// checked. Log it explicitly so CI/operators can see the skip and
+				// the residual trust model instead of it being silently invisible.
+				baseVerifySkipped := "cache hit; base image signature verification skipped (not built from base)"
+				if req.BaseImage.NoVerifyBase {
+					baseVerifySkipped = "base image signature verification already disabled via --no-verify-base"
+				}
+				log.Info(baseVerifySkipped, "repo", req.Repo, "baseRef", base.Ref, "baseDigest", base.Digest.String())
 				res := BuildResult{
 					Image: ImageResult{
 						Mode:      req.Output.Mode,
@@ -574,24 +622,68 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		return BuildResult{}, err
 	}
 
-	// Stage 5: the SvelteKit build. Once, serially, before any fan-out.
-	prep, err := deps.Compiler.Prepare(ctx, ports.PrepareRequest{
-		Strategy:        req.Compile.Strategy,
-		ProjectDir:      req.ProjectDir,
-		SourceDateEpoch: req.SourceDateEpoch,
-		Env:             req.Compile.Env,
-		Platforms:       slices.Clone(req.Platforms),
-		NoInject:        req.Compile.NoInject,
-		Hermetic:        req.Hermetic,
-		NoPrune:         req.Compile.NoPrune,
-		KeepVendor:      slices.Clone(req.Compile.KeepVendor),
-		NoPrecompress:   req.Compile.NoPrecompress,
-		NoStrip:         req.Compile.NoStrip,
+	// Stage 5: the SvelteKit build, running concurrently with base-image
+	// signature verification and native-module inspection — neither of
+	// those checks has anything left to gate once the remote-cache check
+	// above has already returned (a cache hit never reaches this point, and
+	// a cache miss needs both checks to pass before the build can be
+	// published, but not before Prepare itself can start). A failure in
+	// either concurrent check cancels the in-flight Prepare via ctx and
+	// fails the whole build before fanOut is ever reached. Like fanOut
+	// below, this is first-error-wins via errgroup, not errors.Join — if
+	// Prepare and VerifyBaseImage fail at genuinely overlapping times, only
+	// one error surfaces and which one is not deterministic.
+	g, gctx := errgroup.WithContext(ctx)
+
+	var prep ports.PrepareResult
+	g.Go(func() error {
+		p, err := deps.Compiler.Prepare(gctx, ports.PrepareRequest{
+			Strategy:        req.Compile.Strategy,
+			ProjectDir:      req.ProjectDir,
+			SourceDateEpoch: req.SourceDateEpoch,
+			Env:             req.Compile.Env,
+			Platforms:       slices.Clone(req.Platforms),
+			NoInject:        req.Compile.NoInject,
+			Hermetic:        req.Hermetic,
+			NoPrune:         req.Compile.NoPrune,
+			KeepVendor:      slices.Clone(req.Compile.KeepVendor),
+			NoPrecompress:   req.Compile.NoPrecompress,
+			NoStrip:         req.Compile.NoStrip,
+		})
+		if err != nil {
+			return err
+		}
+		prep = p
+		return nil
 	})
-	if err != nil {
+
+	if !req.BaseImage.NoVerifyBase {
+		g.Go(func() error {
+			return deps.BaseImages.VerifyBaseImage(gctx, base, baseReq)
+		})
+	}
+
+	// Native inspection walks req.ProjectDir, which overlaps
+	// ProjectDir/.svelte-kit and ProjectDir/build — the exact trees Prepare
+	// is concurrently writing into. Today this is inert in production
+	// (NewClosuredAdapter's Inspect never returns an error; the result is
+	// discarded), but a StrictNativeAdapter wiring that fails on
+	// HasUnsupportedDynamicImports could see a nondeterministic verdict
+	// depending on how far Prepare has gotten. Not fixed here — flagging so
+	// it isn't rediscovered as a mystery flake.
+	g.Go(func() error {
+		_, err := deps.NativeInspector.Inspect(gctx, req.ProjectDir, req.Platforms[0])
+		return err
+	})
+
+	if err := g.Wait(); err != nil {
 		return BuildResult{}, err
 	}
 	log.Info("sveltekit build complete", "entrypoint", prep.EntrypointPath)
+	log.Info("native inspector ok")
+	if !req.BaseImage.NoVerifyBase {
+		log.Info("base image signature verified", "ref", baseInfo.Ref, "pinned", baseInfo.PinnedRef)
+	}
 
 	if err := checkCtx(ctx, "compile"); err != nil {
 		return BuildResult{}, err
@@ -938,6 +1030,7 @@ func publish(ctx context.Context, deps Deps, req BuildRequest, payload ports.Pay
 			Insecure:           req.Insecure,
 			UserAgent:          deps.UserAgent,
 			RegistryConfigPath: req.RegistryConfigPath,
+			Concurrency:        req.PushConcurrency,
 		})
 
 	case OutputLocal:

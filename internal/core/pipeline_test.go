@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -61,6 +62,7 @@ func (m *mockCompiler) Compile(ctx context.Context, req ports.CompileRequest) (p
 type mockBaseImageResolver struct {
 	resolveFn          func(ctx context.Context, req ports.BaseImageRequest) (*ports.BaseImage, error)
 	recordScanResultFn func(ctx context.Context, lockfilePath string, preset ports.BaseImagePreset, scan ports.ScanResult) error
+	verifyBaseImageFn  func(ctx context.Context, resolved *ports.BaseImage, req ports.BaseImageRequest) error
 }
 
 func (m *mockBaseImageResolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*ports.BaseImage, error) {
@@ -87,6 +89,13 @@ func (m *mockBaseImageResolver) Resolve(ctx context.Context, req ports.BaseImage
 func (m *mockBaseImageResolver) RecordScanResult(ctx context.Context, lockfilePath string, preset ports.BaseImagePreset, scan ports.ScanResult) error {
 	if m.recordScanResultFn != nil {
 		return m.recordScanResultFn(ctx, lockfilePath, preset, scan)
+	}
+	return nil
+}
+
+func (m *mockBaseImageResolver) VerifyBaseImage(ctx context.Context, resolved *ports.BaseImage, req ports.BaseImageRequest) error {
+	if m.verifyBaseImageFn != nil {
+		return m.verifyBaseImageFn(ctx, resolved, req)
 	}
 	return nil
 }
@@ -1344,4 +1353,242 @@ func TestPipeline_BaseImageCVE_Gating(t *testing.T) {
 			t.Errorf("expected non-empty digest on build result")
 		}
 	})
+}
+
+// --- Overlapped pipeline stage tests ---------------------------------------
+//
+// These cover the errgroup-based concurrency introduced in Build's Stage 5:
+// Compiler.Prepare now runs alongside BaseImageResolver.VerifyBaseImage and
+// NativeInspector.Inspect (internal/core/pipeline.go), gated on a confirmed
+// remote-cache miss, with signature verification still running synchronously
+// on --dry-run.
+
+// TestBuild_VerifyBaseImage_CancelsInFlightPrepare proves two things at once:
+// a VerifyBaseImage failure cancels an in-flight Prepare (rather than letting
+// it run to completion after the build has already failed), and that the two
+// calls genuinely overlap in wall-clock time rather than merely both being
+// invoked. The mock VerifyBaseImage blocks until Prepare has observably
+// started before it fails, so a pass here is only possible if both were
+// in-flight simultaneously.
+func TestBuild_VerifyBaseImage_CancelsInFlightPrepare(t *testing.T) {
+	prepareStarted := make(chan struct{})
+	var prepareSawCancel bool
+
+	deps := newFullDeps(io.Discard)
+	deps.Compiler = &mockCompiler{
+		prepareFn: func(ctx context.Context, _ ports.PrepareRequest) (ports.PrepareResult, error) {
+			close(prepareStarted)
+			<-ctx.Done()
+			prepareSawCancel = ctx.Err() != nil
+			return ports.PrepareResult{}, ctx.Err()
+		},
+	}
+	deps.BaseImages = &mockBaseImageResolver{
+		verifyBaseImageFn: func(_ context.Context, _ *ports.BaseImage, _ ports.BaseImageRequest) error {
+			// Block until Prepare is demonstrably in flight before failing, so
+			// this test cannot pass on a regression to sequential-but-still-
+			// correct calls (Prepare would never start, and this line would
+			// hang forever instead of silently passing).
+			<-prepareStarted
+			return fmt.Errorf("bad signature: %w", core.ErrBaseSignatureInvalid)
+		},
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+	}
+
+	_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+		t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+	}
+	if !prepareSawCancel {
+		t.Errorf("Compiler.Prepare's context was not observably cancelled when VerifyBaseImage failed")
+	}
+}
+
+// TestBuild_NativeInspection_CancelsInFlightPrepare is the same shape as
+// TestBuild_VerifyBaseImage_CancelsInFlightPrepare, via NativeInspector.Inspect
+// failing instead of VerifyBaseImage.
+func TestBuild_NativeInspection_CancelsInFlightPrepare(t *testing.T) {
+	prepareStarted := make(chan struct{})
+	var prepareSawCancel bool
+
+	deps := newFullDeps(io.Discard)
+	deps.Compiler = &mockCompiler{
+		prepareFn: func(ctx context.Context, _ ports.PrepareRequest) (ports.PrepareResult, error) {
+			close(prepareStarted)
+			<-ctx.Done()
+			prepareSawCancel = ctx.Err() != nil
+			return ports.PrepareResult{}, ctx.Err()
+		},
+	}
+	wantErr := errors.New("native inspection failed")
+	deps.NativeInspector = &mockNativeInspector{
+		inspectFn: func(_ context.Context, _ string, _ core.Platform) (ports.NativeInspectionResult, error) {
+			<-prepareStarted
+			return ports.NativeInspectionResult{}, wantErr
+		},
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+	}
+
+	_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if !prepareSawCancel {
+		t.Errorf("Compiler.Prepare's context was not observably cancelled when Inspect failed")
+	}
+}
+
+// TestBuild_CacheHit_SkipsVerifyBaseImageAndNativeInspection is the explicit
+// regression guard for the disclosed behavior change: on a confirmed
+// remote-cache hit, neither base-image signature verification nor native
+// module inspection has anything left to gate (nothing is built from source
+// or from the base image), so neither must run. Compiler.Prepare is
+// instrumented to fail the test outright if it is ever called, since a cache
+// hit must short-circuit before Stage 5 entirely.
+func TestBuild_CacheHit_SkipsVerifyBaseImageAndNativeInspection(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+	cacher := &mockRemoteCacher{hit: true, verified: true, signerIdentity: "static-key"}
+	deps.RemoteCache = cacher
+
+	verifyCalled := false
+	deps.BaseImages = &mockBaseImageResolver{
+		verifyBaseImageFn: func(_ context.Context, _ *ports.BaseImage, _ ports.BaseImageRequest) error {
+			verifyCalled = true
+			return nil
+		},
+	}
+	inspectCalled := false
+	deps.NativeInspector = &mockNativeInspector{
+		inspectFn: func(_ context.Context, _ string, _ core.Platform) (ports.NativeInspectionResult, error) {
+			inspectCalled = true
+			return ports.NativeInspectionResult{}, nil
+		},
+	}
+	deps.Compiler = &mockCompiler{
+		prepareFn: func(_ context.Context, _ ports.PrepareRequest) (ports.PrepareResult, error) {
+			t.Error("Compiler.Prepare must not run on a confirmed remote-cache hit")
+			return ports.PrepareResult{}, nil
+		},
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+	}
+
+	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !res.Cached {
+		t.Fatalf("expected a cached build result on a confirmed cache hit")
+	}
+	if verifyCalled {
+		t.Errorf("VerifyBaseImage must not be called on a confirmed remote-cache hit")
+	}
+	if inspectCalled {
+		t.Errorf("NativeInspector.Inspect must not be called on a confirmed remote-cache hit")
+	}
+}
+
+// TestBuild_CacheHit_DisclosesBaseImageVerificationSkip proves the auditable
+// disclosure of the accepted security tradeoff: on a confirmed remote-cache
+// hit, base-image signature verification is deliberately skipped, and the
+// pipeline must emit an explicit log line naming the base ref+digest so the
+// skip is visible in CI/operator logs rather than silently invisible.
+func TestBuild_CacheHit_DisclosesBaseImageVerificationSkip(t *testing.T) {
+	var buf bytes.Buffer
+	slogLogger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	deps := newFullDeps(io.Discard)
+	deps.Logger = slogLogger
+	cacher := &mockRemoteCacher{hit: true, verified: true, signerIdentity: "static-key"}
+	deps.RemoteCache = cacher
+	deps.Compiler = &mockCompiler{
+		prepareFn: func(_ context.Context, _ ports.PrepareRequest) (ports.PrepareResult, error) {
+			t.Error("Compiler.Prepare must not run on a confirmed remote-cache hit")
+			return ports.PrepareResult{}, nil
+		},
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+	}
+
+	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !res.Cached {
+		t.Fatalf("expected a cached build result on a confirmed cache hit")
+	}
+	got := buf.String()
+	if !strings.Contains(got, "base image signature verification skipped") {
+		t.Errorf("expected an explicit auditable log line disclosing the base-image verification skip on a cache hit, got:\n%s", got)
+	}
+}
+
+// TestBuild_DryRun_StillVerifiesBaseImageSignature is the regression guard
+// for the dry-run carve-out: Resolve itself no longer verifies signatures
+// (VerifySignature is always false in the request Build builds), so dry-run
+// must call VerifyBaseImage synchronously before writing its plan in order to
+// keep failing fast on a bad base image signature, exactly as it did when
+// Resolve verified inline.
+func TestBuild_DryRun_StillVerifiesBaseImageSignature(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+	deps.BaseImages = &mockBaseImageResolver{
+		verifyBaseImageFn: func(_ context.Context, _ *ports.BaseImage, _ ports.BaseImageRequest) error {
+			return fmt.Errorf("bad signature: %w", core.ErrBaseSignatureInvalid)
+		},
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+	}
+
+	_, err := core.Build(context.Background(), deps, req, core.BuildOptions{DryRun: true})
+	if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+		t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid (dry run must still fail fast on a bad base image signature)", err)
+	}
+}
+
+// TestBuild_DryRun_StillInspectsNativeModules is the regression guard for
+// the same carve-out on the other check: NativeInspector.Inspect used to
+// run unconditionally before the dry-run stop, before the concurrent block
+// existed. It moved into that concurrent block, which sits past the
+// dry-run return, so dry-run needs its own explicit call to keep failing
+// fast on an unsupported native module exactly as it did before.
+func TestBuild_DryRun_StillInspectsNativeModules(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+	deps.NativeInspector = &mockNativeInspector{
+		inspectFn: func(_ context.Context, _ string, _ core.Platform) (ports.NativeInspectionResult, error) {
+			return ports.NativeInspectionResult{}, fmt.Errorf("native module: %w", core.ErrNativeModulesUnsupported)
+		},
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+	}
+
+	_, err := core.Build(context.Background(), deps, req, core.BuildOptions{DryRun: true})
+	if !errors.Is(err, core.ErrNativeModulesUnsupported) {
+		t.Fatalf("err = %v, want core.ErrNativeModulesUnsupported (dry run must still fail fast on an unsupported native module)", err)
+	}
 }

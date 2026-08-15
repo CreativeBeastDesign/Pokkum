@@ -36,7 +36,22 @@ func (a *Adapter) Push(ctx context.Context, req ports.PushRequest) (ports.Publis
 	}
 
 	tags := tagsOrDefault(req.Tags)
-	opts, err := remoteOptions(ctx, req.Insecure, req.UserAgent, req.RegistryConfigPath)
+
+	// stats is scoped to this single Push call (see mountStats' doc comment on
+	// why it must never be shared across concurrent pushes on the same
+	// Adapter). It rides along on every request opts produces, but classify
+	// only ever records blob-shaped requests ("blobs/uploads" POSTs and
+	// "blobs/<digest>" HEADs), and digestExists/reconcileTags below only ever
+	// issue manifest HEADs/PUTs — so on the idempotent-skip branch stats stays
+	// empty by construction, and its summary is deliberately never read there.
+	stats := &mountStats{}
+	opts, err := remoteOptions(ctx, remoteConfig{
+		Insecure:           req.Insecure,
+		UserAgent:          req.UserAgent,
+		RegistryConfigPath: req.RegistryConfigPath,
+		Jobs:               req.Concurrency,
+		Stats:              stats,
+	})
 	if err != nil {
 		return ports.PublishResult{}, err
 	}
@@ -73,7 +88,17 @@ func (a *Adapter) Push(ctx context.Context, req ports.PushRequest) (ports.Publis
 			// with Size left at zero rather than fail a completed publish.
 			a.logger().Debug("push: could not compute transferred size", "repo", req.Repo, "err", err)
 		}
-		a.logger().Info("pushed image", "repo", req.Repo, "digest", digest.String(), "tags", tags, "size", size)
+
+		// stats only ever gets written to by requests remote.Write/WriteIndex
+		// issued, and that call has already returned by this point (writePayload
+		// is synchronous), so this read needs no further synchronization beyond
+		// the mutex summary already takes. mounted/declined/alreadyPresent cover
+		// mount-eligible (base-image-sourced) layers only: freshly-built layers
+		// never attempt a mount at all, so they never appear in these counts —
+		// see mount.go's "Known gap" doc comment.
+		mounted, declined, alreadyPresent := stats.summary()
+		a.logger().Info("pushed image", "repo", req.Repo, "digest", digest.String(), "tags", tags, "size", size,
+			"mount_layers_mounted", mounted, "mount_layers_declined", declined, "mount_layers_already_present", alreadyPresent)
 	}
 
 	return ports.PublishResult{

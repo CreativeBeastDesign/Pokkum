@@ -40,6 +40,7 @@
 | Log Aggregation (app-side, trace context)   | 7         | 2               | 3           | Trace-context JSON logging in adapter/runtime; CLI half already shipped          | None                              | Done     |
 | Built-in Metrics Endpoint (supervisor)      | 7         | 2               | 3           | Supervisor-level `/metrics` only; app metrics already shipped via OTel           | None                              | Done     |
 | Image Provenance Timeline                   | 6         | 5               | 5           | Registry API reliance; partially subsumed by `verify` + OCI annotations          | Registry (SLSA lookup)            | Done     |
+| Verify Base on Cache Hit                    | 3         | 7               | 2           | One Cosign/keyless verify per cache hit; opt-in strict; decoupled from `--cache-verify` | None (sigstore already vendored) | Backlog  |
 
 ### Shipped (removed from matrix)
 
@@ -282,4 +283,25 @@ When the container exits with a non-zero status during local testing, automatica
 - `--mirror-registry=<repo>` on `pokkum base update` mirrors base image indexes and Cosign `.sig` tags to a project-controlled registry
 - Verifies Cosign signatures against canonical upstream repo references while pulling image blobs from mirrors
 - Guarantees long-term reproducibility against `:latest` tag drift and upstream registry image pruning
+
+### Verify Base on Cache Hit (`--verify-base-on-cache-hit`)
+
+A confirmed remote-cache hit (`BuildResult{Cached:true}`) deliberately **skips** base-image signature
+verification (`BaseImageResolver.VerifyBaseImage`) — nothing is built from the base image on a hit, and the
+composite input hash already binds the base image *digest* (`base.Digest`, pinned via `pokkum.lock`) into the
+cache key, so a hit can only match the exact base the verifier would have checked. The skip is disclosed with an
+explicit audit log line on the hit path.
+
+This flag adds an **opt-in, strict** escape hatch for supply-chain-audit environments that require the uniform
+property "every emitted/promoted image traces to a verified base, hit or miss":
+
+- When set and a cache hit is confirmed, run `VerifyBaseImage` (the *base* check) before accepting the hit.
+- Closes the one narrow case the audit log cannot: a base whose pinned digest still matches (so cache hits keep
+  firing) but whose signature was later revoked/rekeyed/withdrawn — only re-running verification would notice.
+- **Structurally independent** of `--cache-verify`: that flag authenticates the cache-hit *output* image
+  (anti-poisoning), whereas this flag authenticates the *base* image. The two must not couple.
+- Tracking: Long-term Backlog on `Roadmap.md`. Deferred until a real consumer (an org with a strict
+  SBOM/SLSA attestation requirement) asks for it, to avoid feature-creep in the already-dense verification
+  surface. Opt-in so the sub-100ms fast path is preserved by default. (new flag: `--verify-base-on-cache-hit`
+  on `build`)
 

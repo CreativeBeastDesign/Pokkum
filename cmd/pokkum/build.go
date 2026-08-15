@@ -79,6 +79,7 @@ type buildFlags struct {
 	allowSecretPatterns []string
 	hermetic            bool
 	registryConfig      string
+	pushConcurrency     int
 	requireEnv          []string
 	failOnCVE           string
 	allowIncomplete     bool
@@ -200,6 +201,8 @@ The project directory defaults to the current working directory.`,
 		"Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required)")
 	cmd.Flags().StringVar(&flags.registryConfig, "registry-config", "",
 		"Path to custom OCI registry auth config file (config.json)")
+	cmd.Flags().IntVar(&flags.pushConcurrency, "push-concurrency", 0,
+		"Number of concurrent layer uploads during registry push (0 = registry adapter's default)")
 	cmd.Flags().StringSliceVar(&flags.requireEnv, "require-env", nil,
 		"Declare required runtime environment variables (comma-separated or repeatable)")
 	cmd.Flags().StringVar(&flags.failOnCVE, "fail-on-cve", "",
@@ -416,6 +419,7 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	req.AllowSecretPatterns = flags.allowSecretPatterns
 	req.Hermetic = flags.hermetic
 	req.RegistryConfigPath = flags.registryConfig
+	req.PushConcurrency = flags.pushConcurrency
 
 	// FailOnCVE: flag > env > config
 	failOnCVESetting := flags.failOnCVE

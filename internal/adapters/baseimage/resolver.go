@@ -308,11 +308,12 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 	}
 
 	out := &ports.BaseImage{
-		Ref:       ref,
-		PinnedRef: pinnedRef(parsedRef, pull.digest),
-		Digest:    pull.digest,
-		IsIndex:   pull.isIndex,
-		Images:    make(map[ports.Platform]v1.Image, len(req.Platforms)),
+		Ref:         ref,
+		UpstreamRef: upstreamRef,
+		PinnedRef:   pinnedRef(parsedRef, pull.digest),
+		Digest:      pull.digest,
+		IsIndex:     pull.isIndex,
+		Images:      make(map[ports.Platform]v1.Image, len(req.Platforms)),
 	}
 	if lf != nil {
 		if existing, ok := lockfileutils.GetLockedBase(lf, lockKey); ok {
@@ -1170,6 +1171,54 @@ func fingerprint(b []byte) string {
 		return ""
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+// VerifyBaseImage implements ports.BaseImageResolver. It verifies the Cosign
+// signature of an image a prior Resolve call already returned, so that
+// verification can run as its own pipeline stage instead of inline inside
+// Resolve. req.VerifySignature is deliberately ignored: calling this method is
+// itself the request to verify.
+func (r *Resolver) VerifyBaseImage(ctx context.Context, resolved *ports.BaseImage, req ports.BaseImageRequest) error {
+	if resolved == nil {
+		return fmt.Errorf("baseimage: verify called with no resolved base image: %w", core.ErrInvalidBaseImage)
+	}
+
+	nameOpts := []name.Option{name.WeakValidation}
+	if req.Insecure {
+		nameOpts = append(nameOpts, name.Insecure)
+	}
+	parsedRef, err := name.ParseReference(resolved.Ref, nameOpts...)
+	if err != nil {
+		return fmt.Errorf("baseimage: parse %q: %w: %w", resolved.Ref, err, core.ErrInvalidBaseImage)
+	}
+
+	// resolved.Ref is exactly the rawRef Resolve used for its own r.pull call
+	// (out.Ref = ref, the same ref passed to r.pull), so this hits the memoized
+	// pull cache — no second network round trip — and returns the identical
+	// *pulledManifest that Resolve itself saw. Deliberately not re-deriving
+	// ref/upstreamRef by re-reading the lockfile here: Resolve may have just
+	// written a *new* lockfile entry for this preset (see the "Update
+	// pokkum.lock" block), which would flip a fresh lockfile lookup from "not
+	// found" to "found" and pick a different (but digest-equivalent) ref string
+	// — missing the pull memoization cache and forcing a redundant network
+	// pull. Using resolved.Ref/resolved.UpstreamRef straight through avoids
+	// that entirely.
+	pull, err := r.pull(ctx, parsedRef, resolved.Ref, req.Insecure, req.RegistryConfigPath)
+	if err != nil {
+		return err
+	}
+
+	// Fail closed rather than verify a manifest other than the resolved one:
+	// if the cache was bypassed and a floating tag moved between Resolve and
+	// here, a signature that is perfectly valid for the *new* digest would
+	// otherwise be reported as proof for the image the rest of the build is
+	// actually assembling.
+	if pull.digest != resolved.Digest {
+		return fmt.Errorf("baseimage: %s: digest changed between resolve (%s) and verify (%s); refusing to verify a different manifest than the one already resolved: %w",
+			resolved.Ref, resolved.Digest, pull.digest, core.ErrBaseSignatureInvalid)
+	}
+
+	return r.verifyBaseImage(ctx, resolved.Ref, resolved.UpstreamRef, pull, req)
 }
 
 // RecordScanResult updates the locked base image entry in pokkum.lock with the latest scan findings.

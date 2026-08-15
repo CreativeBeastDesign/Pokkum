@@ -59,11 +59,58 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
-// insecureTransport is used for requests against a *Request.Insecure target:
-// local or self-signed test registries only. Package-level because
-// http.Transport is meant to be reused, not built per call.
-var insecureTransport http.RoundTripper = &http.Transport{
-	TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // opt-in via Insecure fields
+// defaultTransport and insecureTransport are the two transports every registry
+// operation in this package runs on: the former for ordinary targets, the
+// latter for a *Request.Insecure target (local or self-signed test registries
+// only).
+//
+// Both are clones of remote.DefaultTransport rather than bare &http.Transport{}
+// literals. go-containerregistry tunes its default for exactly this workload —
+// http.ProxyFromEnvironment, a 30s dial timeout, MaxIdleConnsPerHost: 50,
+// ForceAttemptHTTP2: true — and a literal silently drops all of it, leaving no
+// proxy support and net/http's default idle pool of 2 connections per host,
+// which throttles a multi-layer push.
+//
+// Cloning earns its keep twice over on the insecure path. Clone() carries the
+// tuning across, and it resets the internal HTTP/2 transport that
+// http.Transport caches on first use, so h2 is renegotiated against the new
+// TLSClientConfig instead of skipped. Assigning a custom TLSClientConfig is
+// what suppresses net/http's automatic HTTP/2 upgrade in the first place, which
+// is why the previous literal-based insecure transport quietly fell back to
+// HTTP/1.1 while the secure path got h2.
+//
+// That fix covers the self-signed-TLS-over-https case only. A plain http://
+// insecure target still speaks HTTP/1.1 no matter what is configured here:
+// net/http has no h2c (cleartext HTTP/2) client support, so it is a limitation
+// of the standard library rather than something this package can address.
+//
+// Package-level because http.Transport is meant to be reused across requests,
+// not rebuilt per call — a per-call transport would defeat connection pooling
+// entirely.
+var (
+	defaultTransport  = cloneDefaultTransport(nil)
+	insecureTransport = cloneDefaultTransport(&tls.Config{InsecureSkipVerify: true}) //nolint:gosec // opt-in via the Insecure request fields
+)
+
+// cloneDefaultTransport returns a copy of remote.DefaultTransport, applying
+// tlsConfig to the copy when it is non-nil.
+//
+// remote.DefaultTransport is declared as an http.RoundTripper, so its concrete
+// type is asserted rather than guaranteed by the compiler. Should upstream ever
+// change it to something other than *http.Transport, the assertion fails and
+// the value is returned unmodified: that drops the TLS override, so an insecure
+// target would start failing certificate verification instead of silently
+// skipping it, and it avoids panicking during package initialisation.
+func cloneDefaultTransport(tlsConfig *tls.Config) http.RoundTripper {
+	base, ok := remote.DefaultTransport.(*http.Transport)
+	if !ok {
+		return remote.DefaultTransport
+	}
+	cloned := base.Clone()
+	if tlsConfig != nil {
+		cloned.TLSClientConfig = tlsConfig
+	}
+	return cloned
 }
 
 var (
@@ -112,23 +159,77 @@ func nameOptions(insecure bool) []name.Option {
 	return opts
 }
 
+// remoteConfig carries everything remoteOptions needs to build a registry
+// operation's option set. It is a struct rather than a parameter list because
+// the two optional knobs below are both zero-valued at most call sites, and a
+// positional signature makes "false, "", "", 0, nil" indistinguishable at a
+// glance from a call that meant something by those values.
+type remoteConfig struct {
+	// Insecure selects insecureTransport over defaultTransport, for local or
+	// self-signed test registries only.
+	Insecure bool
+
+	// UserAgent is appended to go-containerregistry's own User-Agent when
+	// non-empty.
+	UserAgent string
+
+	// RegistryConfigPath points at an alternative Docker config.json; empty
+	// means the default keychain.
+	RegistryConfigPath string
+
+	// Jobs caps how many layers remote.Write uploads in parallel. Zero means
+	// "leave the choice to go-containerregistry", whose own default is
+	// currently 4 (defaultJobs, pkg/v1/remote/options.go).
+	//
+	// Zero must be omitted rather than passed through: remote.WithJobs
+	// rejects any value <= 0, and it does so when the option is applied inside
+	// remote.Write, not where the option is constructed — so passing 0 would
+	// turn a caller who simply had no opinion into a push failure raised from
+	// a confusingly distant place.
+	Jobs int
+
+	// Stats, when non-nil, wraps the chosen transport in a mountObserver that
+	// records per-blob mount/stream/already-present outcomes into it. Nil
+	// installs no wrapper at all, which is what callers that have no use for
+	// the accounting should pass — there is no reason for them to carry the
+	// extra indirection on every request.
+	//
+	// A non-nil value must be scoped to a single operation; see mountStats.
+	Stats *mountStats
+}
+
 // remoteOptions builds the remote.Option set common to every registry
 // operation: context threading (so a cancelled build aborts a 90MB upload
 // rather than leaking it into the background) and keychain resolution (supporting custom config.json).
-func remoteOptions(ctx context.Context, insecure bool, userAgent string, registryConfigPath string) ([]remote.Option, error) {
-	kc, err := registryutils.ResolveKeychain(registryConfigPath)
+//
+// The transport is always set explicitly, on the secure path as well as the
+// insecure one. Leaving it unset would fall through to remote's own
+// DefaultTransport, which is equivalent today but leaves the two paths running
+// on transports this package does not own — see defaultTransport above.
+func remoteOptions(ctx context.Context, cfg remoteConfig) ([]remote.Option, error) {
+	kc, err := registryutils.ResolveKeychain(cfg.RegistryConfigPath)
 	if err != nil {
 		return nil, err
+	}
+	rt := defaultTransport
+	if cfg.Insecure {
+		rt = insecureTransport
+	}
+	if cfg.Stats != nil {
+		// Wraps, never replaces: the observer delegates to the shared
+		// package-level transport so the connection pool survives.
+		rt = &mountObserver{base: rt, stats: cfg.Stats}
 	}
 	opts := []remote.Option{
 		remote.WithContext(ctx),
 		remote.WithAuthFromKeychain(kc),
+		remote.WithTransport(rt),
 	}
-	if userAgent != "" {
-		opts = append(opts, remote.WithUserAgent(userAgent))
+	if cfg.UserAgent != "" {
+		opts = append(opts, remote.WithUserAgent(cfg.UserAgent))
 	}
-	if insecure {
-		opts = append(opts, remote.WithTransport(insecureTransport))
+	if cfg.Jobs > 0 {
+		opts = append(opts, remote.WithJobs(cfg.Jobs))
 	}
 	return opts, nil
 }

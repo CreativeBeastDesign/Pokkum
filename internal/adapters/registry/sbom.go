@@ -48,7 +48,13 @@ func (a *Adapter) AttachSBOM(ctx context.Context, req ports.AttachSBOMRequest) (
 		return ports.PublishResult{}, fmt.Errorf("registry: attach sbom %s: build sbom image: %w: %w", req.Repo, err, core.ErrPushFailed)
 	}
 
-	opts, err := remoteOptions(ctx, req.Insecure, "", req.RegistryConfigPath)
+	// Jobs and Stats are left at their zero values deliberately: an SBOM is a
+	// single small layer, so there is nothing to parallelise and no mount
+	// accounting worth paying an extra transport hop for.
+	opts, err := remoteOptions(ctx, remoteConfig{
+		Insecure:           req.Insecure,
+		RegistryConfigPath: req.RegistryConfigPath,
+	})
 	if err != nil {
 		return ports.PublishResult{}, err
 	}

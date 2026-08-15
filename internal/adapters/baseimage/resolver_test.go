@@ -745,6 +745,232 @@ func TestResolve_BaseImageCosignSignatureVerification_RealSignature(t *testing.T
 	})
 }
 
+// --- VerifyBaseImage tests -------------------------------------------------
+//
+// These exercise the split verification call path introduced so signature
+// verification can run as its own pipeline stage (internal/core/pipeline.go),
+// concurrently with Compiler.Prepare, instead of inline inside Resolve.
+// Resolve itself is called with VerifySignature:false in every test below,
+// exactly as internal/core/pipeline.go now calls it.
+
+// TestVerifyBaseImage_UsesResolvedRef_NoSecondNetworkCall is the regression
+// guard for a real bug caught during review of this feature: an earlier draft
+// of VerifyBaseImage re-derived ref/upstreamRef by re-reading the lockfile,
+// which — because Resolve already writes a new lockfile entry before
+// returning — silently picked a different (but digest-equivalent) ref string
+// on the very first resolve for a preset, missing the r.pull memoization
+// cache and triggering a second, redundant pull of the base manifest.
+//
+// The fixed VerifyBaseImage takes resolved.Ref/resolved.UpstreamRef straight
+// through, so its own signature-verification call must add exactly one new
+// manifest GET (fetching the Cosign signature tag, which is not something
+// r.pull's cache covers and is expected on every call not yet proven by the
+// verifications cache) — never a second GET for the base image manifest
+// itself.
+func TestVerifyBaseImage_UsesResolvedRef_NoSecondNetworkCall(t *testing.T) {
+	s, cr := newTestRegistry(t)
+	ref := pushImage(t, s, "app/verify-once:v1", ports.LinuxAMD64)
+	privPEM, pubPEM := genECKeyPairPEM(t)
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	req := ports.BaseImageRequest{
+		Preset:          ports.BaseImageCustom,
+		Ref:             ref,
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		Insecure:        true,
+		VerifySignature: false,
+	}
+	resolved, err := r.Resolve(ctx, req)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	afterResolve := cr.manifestGETs.Load()
+	if afterResolve == 0 {
+		t.Fatalf("Resolve made no manifest GETs; test fixture is broken")
+	}
+
+	// Push a genuine signature for the resolved digest so VerifyBaseImage's
+	// own fetch (of the ".sig" tag, a different reference from the base
+	// image's own tag/digest and therefore never covered by r.pull's cache)
+	// succeeds cleanly, isolating the assertion to "did it also re-pull the
+	// base manifest".
+	parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	pushCosignSignature(t, s, parsedRef.Context().Name(), resolved.Digest, privPEM, false)
+	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
+
+	if err := r.VerifyBaseImage(ctx, resolved, req); err != nil {
+		t.Fatalf("VerifyBaseImage: %v", err)
+	}
+	afterVerify := cr.manifestGETs.Load()
+
+	if got, want := afterVerify-afterResolve, int64(1); got != want {
+		t.Errorf("manifest GETs added by VerifyBaseImage = %d, want exactly %d "+
+			"(the signature tag fetch only — a second GET here would mean the base "+
+			"image manifest was re-pulled under a ref string that missed the pull cache)",
+			got, want)
+	}
+}
+
+// TestVerifyBaseImage_DigestMismatch_FailsClosed proves VerifyBaseImage fails
+// closed rather than verifying a manifest other than the one Resolve actually
+// returned, e.g. because a floating tag moved between the two calls. Since
+// r.pull is memoized by ref, the cleanest way to force a genuine mismatch
+// without fighting the cache is to hand VerifyBaseImage a BaseImage whose
+// Digest field was tampered with after a real Resolve — VerifyBaseImage must
+// compare it against what its own (cache-hit) pull actually returns and
+// refuse to proceed.
+func TestVerifyBaseImage_DigestMismatch_FailsClosed(t *testing.T) {
+	s, _ := newTestRegistry(t)
+	ref := pushImage(t, s, "app/verify-mismatch:v1", ports.LinuxAMD64)
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+	req := ports.BaseImageRequest{
+		Preset:    ports.BaseImageCustom,
+		Ref:       ref,
+		Platforms: []ports.Platform{ports.LinuxAMD64},
+		Insecure:  true,
+	}
+	resolved, err := r.Resolve(ctx, req)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	tampered := *resolved
+	tampered.Digest = v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("f", 64)}
+
+	err = r.VerifyBaseImage(ctx, &tampered, req)
+	if err == nil {
+		t.Fatal("expected VerifyBaseImage to fail closed on a digest mismatch")
+	}
+	if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+		t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "digest changed between resolve") {
+		t.Errorf("error should explain the digest-changed reason, got: %v", err)
+	}
+}
+
+// TestVerifyBaseImage_KeylessAndStaticKey drives both signature-verification
+// dispatch paths through the split Resolve(VerifySignature:false) +
+// VerifyBaseImage call path, reusing the same fixtures as
+// TestResolve_BaseImageCosignSignatureVerification_RealSignature (static key)
+// and TestResolve_KeylessMode_ClaimsMismatchFailsClosed (keyless). The
+// underlying verifyBaseImage/runVerification dispatch logic is unchanged by
+// this feature — only how it gets called is new — so these mirror what those
+// tests already assert about Resolve, just observed through VerifyBaseImage
+// instead.
+func TestVerifyBaseImage_KeylessAndStaticKey(t *testing.T) {
+	t.Run("static key: genuinely signed image passes", func(t *testing.T) {
+		s, _ := newTestRegistry(t)
+		ref := pushImage(t, s, "app/verify-static-ok:v1", ports.LinuxAMD64)
+		privPEM, pubPEM := genECKeyPairPEM(t)
+
+		r := NewResolver(nil)
+		ctx := context.Background()
+		req := ports.BaseImageRequest{
+			Preset:          ports.BaseImageCustom,
+			Ref:             ref,
+			Platforms:       []ports.Platform{ports.LinuxAMD64},
+			Insecure:        true,
+			VerifySignature: false,
+		}
+		resolved, err := r.Resolve(ctx, req)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+
+		parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+		if err != nil {
+			t.Fatalf("ParseReference: %v", err)
+		}
+		pushCosignSignature(t, s, parsedRef.Context().Name(), resolved.Digest, privPEM, false)
+		t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
+
+		if err := r.VerifyBaseImage(ctx, resolved, req); err != nil {
+			t.Fatalf("expected genuinely-signed image to verify via VerifyBaseImage, got: %v", err)
+		}
+	})
+
+	t.Run("static key: tampered signature fails closed", func(t *testing.T) {
+		s, _ := newTestRegistry(t)
+		ref := pushImage(t, s, "app/verify-static-bad:v1", ports.LinuxAMD64)
+		privPEM, pubPEM := genECKeyPairPEM(t)
+
+		r := NewResolver(nil)
+		ctx := context.Background()
+		req := ports.BaseImageRequest{
+			Preset:          ports.BaseImageCustom,
+			Ref:             ref,
+			Platforms:       []ports.Platform{ports.LinuxAMD64},
+			Insecure:        true,
+			VerifySignature: false,
+		}
+		resolved, err := r.Resolve(ctx, req)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+
+		parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+		if err != nil {
+			t.Fatalf("ParseReference: %v", err)
+		}
+		pushCosignSignature(t, s, parsedRef.Context().Name(), resolved.Digest, privPEM, true)
+		t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
+
+		err = r.VerifyBaseImage(ctx, resolved, req)
+		if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+			t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+		}
+	})
+
+	t.Run("keyless: claims mismatch fails closed", func(t *testing.T) {
+		s, _ := newTestRegistry(t)
+		ref := pushImage(t, s, "app/verify-keyless-mismatch:v1", ports.LinuxAMD64)
+
+		r := NewResolver(nil)
+		ctx := context.Background()
+		req := ports.BaseImageRequest{
+			Preset:          ports.BaseImageCustom,
+			Ref:             ref,
+			Platforms:       []ports.Platform{ports.LinuxAMD64},
+			Insecure:        true,
+			VerifySignature: false,
+			VerifyMode:      ports.BaseImageVerifyKeyless,
+			KeylessIdentity: ports.KeylessIdentity{
+				Issuer: ports.DistrolessKeylessIssuer,
+				SAN:    ports.DistrolessKeylessSAN,
+			},
+		}
+		resolved, err := r.Resolve(ctx, req)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+
+		parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+		if err != nil {
+			t.Fatalf("ParseReference: %v", err)
+		}
+		pushKeylessSignatureFixture(t, s, parsedRef.Context().Name(), resolved.Digest, "../sigstore/testdata/distroless-nonroot")
+
+		err = r.VerifyBaseImage(ctx, resolved, req)
+		if err == nil {
+			t.Fatal("expected VerifyBaseImage to fail: a genuine distroless signature was attached to an unrelated image")
+		}
+		if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+			t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+		}
+		if !strings.Contains(err.Error(), "is a signature for repository") {
+			t.Fatalf("error does not indicate a claims (repository/digest) mismatch, got: %v", err)
+		}
+	})
+}
+
 func TestResolve_CustomRegistryConfig(t *testing.T) {
 	t.Run("invalid registry config path returns ErrRegistryAuth", func(t *testing.T) {
 		r := NewResolver(nil, nil)
@@ -1804,5 +2030,111 @@ func TestResolver_RecordScanResult(t *testing.T) {
 	}
 	if resolved.MaxSeverity != string(ports.SeverityCritical) {
 		t.Errorf("resolved.MaxSeverity = %q, want %q", resolved.MaxSeverity, string(ports.SeverityCritical))
+	}
+}
+
+// TestResolve_MirrorRef_LayersAreMountableFromMirrorRepo pins a property the
+// planned cross-repo-blob-mount optimization for registry pushes depends on:
+// when Resolve serves an image from a lockfile's entry.MirrorRef (the
+// "Base Image Escrow / Mirroring" feature, `pokkum base update
+// --mirror-registry=<repo>`), the v1.Image it returns must still be the
+// go-containerregistry "mountable" image remote.Get produces — i.e. every
+// layer must be a *remote.MountableLayer whose Reference names the MIRROR
+// repository, not the upstream one.
+//
+// This matters because remote.Write attempts a cross-repository blob mount
+// (skip re-uploading bytes it can prove the target registry already has) only
+// when pushing a *remote.MountableLayer, and it mounts FROM whatever
+// repository that layer's Reference names. A mirror set up via
+// --mirror-registry is typically same-host as the eventual push target
+// (that's the point of mirroring — escrow the base close to where builds
+// push), so the mount source has to be the mirror, not upstream, for the
+// optimization to ever actually fire. If Resolve's mirror-preference path
+// (resolver.go's `if entry.MirrorRef != ""` block) ever rebuilt or unwrapped
+// the image instead of returning exactly what r.pull cached from
+// remote.Get(...).Image(), this property would silently break and every
+// mirrored build would fall back to full layer re-uploads without anyone
+// noticing (no test currently observes the Reference on the returned image,
+// only that resolution succeeds and Ref/Digest look right).
+//
+// Setup deliberately points PinnedRef at an unreachable upstream host — the
+// same fixture shape as TestResolve_EscrowMirror_OfflineUsesMirrorWhenUpstreamUnreachable
+// — so that the only place the returned image's bytes could have come from is
+// the mirror pull.
+func TestResolve_MirrorRef_LayersAreMountableFromMirrorRepo(t *testing.T) {
+	sMirror, _ := newTestRegistry(t)
+	mirrorRef := pushImage(t, sMirror, "mirror/mountable:v1", ports.LinuxAMD64)
+
+	mParsed, err := name.ParseReference(mirrorRef, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference(mirror): %v", err)
+	}
+	desc, err := remote.Get(mParsed)
+	if err != nil {
+		t.Fatalf("remote.Get(mirror): %v", err)
+	}
+	wantMirrorRepoName := mParsed.Context().Name()
+
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+	lf := &ports.PokkumLockfile{
+		Version:   lockfileutils.LockfileSchemaVersion,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Bases: map[string]ports.BaseLockEntry{
+			string(ports.BaseImageCustom): {
+				// Upstream/pinned both point at an unreachable host: if the
+				// resolver ever fell back off the mirror path, Resolve would
+				// fail outright rather than silently return upstream-sourced
+				// layers, so a passing test here really does prove the mirror
+				// path produced the returned image.
+				Ref:       "upstream.example.invalid/mountable:v1",
+				Digest:    desc.Digest.String(),
+				PinnedRef: "127.0.0.1:1/upstream/mountable@" + desc.Digest.String(),
+				MirrorRef: mirrorRef,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	}
+	if err := lockfileutils.SaveLockfile(lockPath, lf); err != nil {
+		t.Fatalf("SaveLockfile: %v", err)
+	}
+
+	r := NewResolver(nil)
+	res, err := r.Resolve(context.Background(), ports.BaseImageRequest{
+		Preset:       ports.BaseImageCustom,
+		Ref:          "upstream.example.invalid/mountable:v1",
+		Platforms:    []ports.Platform{ports.LinuxAMD64},
+		LockfilePath: lockPath,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if res.Ref != mirrorRef {
+		t.Fatalf("res.Ref = %s, want %s (mirror should have been preferred)", res.Ref, mirrorRef)
+	}
+
+	img, ok := res.Images[ports.LinuxAMD64]
+	if !ok {
+		t.Fatalf("Images missing linux/amd64")
+	}
+
+	layers, err := img.Layers()
+	if err != nil {
+		t.Fatalf("Layers: %v", err)
+	}
+	if len(layers) == 0 {
+		t.Fatalf("test fixture produced an image with no layers")
+	}
+	for i, l := range layers {
+		ml, ok := l.(*remote.MountableLayer)
+		if !ok {
+			t.Fatalf("layer %d has type %T, want *remote.MountableLayer — Resolve's mirror path is not preserving "+
+				"go-containerregistry's mountable-image wrapping, so cross-repo blob mount can never fire for a "+
+				"mirrored base image", i, l)
+		}
+		if got := ml.Reference.Context().Name(); got != wantMirrorRepoName {
+			t.Errorf("layer %d MountableLayer.Reference repo = %q, want %q (the mirror repo) — a cross-repo mount "+
+				"attempt for this layer would target the wrong source repository", i, got, wantMirrorRepoName)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -534,6 +535,13 @@ func TestBuildRequestValidate(t *testing.T) {
 			},
 			wantErr: core.ErrInvalidRequest,
 		},
+		{
+			name: "negative push concurrency",
+			mutate: func(r *core.BuildRequest) {
+				r.PushConcurrency = -1
+			},
+			wantErr: core.ErrInvalidRequest,
+		},
 	}
 
 	for _, tt := range tests {
@@ -548,6 +556,65 @@ func TestBuildRequestValidate(t *testing.T) {
 				t.Errorf("Validate() error = %v, expected sentinel %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestBuildRequestPushConcurrency_ZeroAndPositiveValid confirms zero and
+// positive PushConcurrency values pass Validate() unchanged, mirroring
+// Concurrency's own "zero and positive are fine, only negative is rejected"
+// contract on the validation side.
+func TestBuildRequestPushConcurrency_ZeroAndPositiveValid(t *testing.T) {
+	validReq := func() core.BuildRequest {
+		r := core.BuildRequest{
+			ProjectDir: "/abs/path/to/project",
+			Repo:       "ghcr.io/example/app",
+		}
+		r.Normalize()
+		return r
+	}
+
+	for _, tc := range []int{0, 1, 8} {
+		t.Run(fmt.Sprintf("PushConcurrency=%d", tc), func(t *testing.T) {
+			req := validReq()
+			req.PushConcurrency = tc
+			if err := req.Validate(); err != nil {
+				t.Errorf("Validate() with PushConcurrency=%d: unexpected error: %v", tc, err)
+			}
+		})
+	}
+}
+
+// TestBuildRequestNormalize_PushConcurrencyIsNotDefaulted pins the
+// deliberate asymmetry between Concurrency and PushConcurrency: Normalize
+// defaults a zero Concurrency to len(Platforms), but has no corresponding
+// branch for PushConcurrency, whose zero value instead means "let the
+// registry adapter pick its own default" (see remoteConfig.Jobs in
+// internal/adapters/registry/registry.go). The two fields look alike enough
+// that a future edit could accidentally copy the Concurrency defaulting
+// pattern onto PushConcurrency; this test fails loudly if that happens.
+func TestBuildRequestNormalize_PushConcurrencyIsNotDefaulted(t *testing.T) {
+	for _, tc := range []int{0, -1, 3} {
+		t.Run(fmt.Sprintf("PushConcurrency=%d", tc), func(t *testing.T) {
+			r := core.BuildRequest{
+				ProjectDir:      "./my-app",
+				PushConcurrency: tc,
+			}
+			r.Normalize()
+			if r.PushConcurrency != tc {
+				t.Errorf("Normalize() changed PushConcurrency from %d to %d; PushConcurrency must be left untouched (unlike Concurrency, which defaults from 0)", tc, r.PushConcurrency)
+			}
+		})
+	}
+
+	// Contrast case: Concurrency=0 DOES get defaulted by Normalize, which is
+	// exactly the behavior PushConcurrency must NOT exhibit.
+	r := core.BuildRequest{
+		ProjectDir: "./my-app",
+		Platforms:  []core.Platform{core.LinuxAMD64, core.LinuxARM64},
+	}
+	r.Normalize()
+	if r.Concurrency != len(r.Platforms) {
+		t.Fatalf("sanity check failed: Concurrency = %d, want %d (len(Platforms)) after Normalize", r.Concurrency, len(r.Platforms))
 	}
 }
 

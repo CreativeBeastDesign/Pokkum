@@ -70,6 +70,10 @@ func (m *mockBaseResolver) RecordScanResult(_ context.Context, _ string, _ ports
 	return nil
 }
 
+func (m *mockBaseResolver) VerifyBaseImage(_ context.Context, _ *ports.BaseImage, _ ports.BaseImageRequest) error {
+	return nil
+}
+
 // mockSupervisorProvider provides a fixed supervisor binary for testing.
 type mockSupervisorProvider struct{}
 

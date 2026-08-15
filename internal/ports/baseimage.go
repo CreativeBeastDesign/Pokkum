@@ -318,6 +318,14 @@ type BaseImage struct {
 	// Ref is the reference that was resolved, as supplied (tag or digest).
 	Ref string
 
+	// UpstreamRef is the pristine reference naming the image's true upstream
+	// repository — unlike Ref, it is never rebound to a mirror or a locked
+	// pinned-digest form. It exists for the docker-reference claims check
+	// during signature verification, which must always be evaluated against
+	// the name a real upstream signature actually embeds, never against
+	// whatever mirror the bytes happened to be fetched through.
+	UpstreamRef string
+
 	// PinnedRef is Ref rewritten to its digest form, "repo@sha256:…". It is
 	// what gets recorded in the image labels and in the build summary so that
 	// a build can be reproduced exactly.
@@ -370,4 +378,20 @@ type BaseImageResolver interface {
 
 	// RecordScanResult updates the locked base image entry in pokkum.lock with the latest scan findings.
 	RecordScanResult(ctx context.Context, lockfilePath string, preset BaseImagePreset, scan ScanResult) error
+
+	// VerifyBaseImage verifies the Cosign/Sigstore signature of an
+	// already-resolved base image. resolved must be the exact value a prior
+	// Resolve(ctx, req) call returned for this req (same Ref/Preset/
+	// Platforms/Insecure/LockfilePath/UpdateBase/RegistryConfigPath/
+	// MirrorRegistry) — implementations verify resolved.Ref/resolved.Digest
+	// directly rather than re-deriving them from req, so this never re-reads
+	// the lockfile and never re-runs mirror/escrow logic. req.VerifySignature
+	// is ignored — verification always runs when this method is called. If
+	// resolved.Digest no longer matches what a fresh pull of resolved.Ref
+	// returns (e.g. a floating tag moved between the two calls),
+	// implementations must fail closed with core.ErrBaseSignatureInvalid
+	// rather than silently verifying a different manifest than the one
+	// resolved. Safe to call concurrently with other pipeline stages for the
+	// same build (it does not mutate shared state visible to the caller).
+	VerifyBaseImage(ctx context.Context, resolved *BaseImage, req BaseImageRequest) error
 }

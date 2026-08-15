@@ -96,6 +96,10 @@ type PushRequest struct {
 
 	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
 	RegistryConfigPath string
+
+	// Concurrency caps how many layers are uploaded to the registry in parallel.
+	// Zero means the registry adapter uses its own default.
+	Concurrency int
 }
 
 // AttachSBOMRequest publishes an SBOM alongside an already-pushed image, under
