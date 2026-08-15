@@ -300,10 +300,19 @@ func checkBaseImageSecurity(dir string, logger *slog.Logger) ports.DoctorCheck {
 		})
 		switch {
 		case errors.Is(err, core.ErrScanIncomplete):
-			// A failed lookup is not a confirmed vulnerability — reporting
-			// it as one would be worse than not knowing, since it would
-			// get "fixed" by re-running rather than by actually checking.
-			incompleteBases = append(incompleteBases, fmt.Sprintf("%s (%s)", name, target))
+			if entry.LastScannedAt != "" {
+				if entry.VulnerabilitiesCount > 0 {
+					if sev, err := ports.ParseSeverity(entry.MaxSeverity); err == nil {
+						if sev == ports.SeverityCritical {
+							vulnerableBases = append(vulnerableBases, fmt.Sprintf("%s (%s: %s [cached audit from %s])", name, target, entry.MaxSeverity, entry.LastScannedAt))
+						}
+					} else {
+						incompleteBases = append(incompleteBases, fmt.Sprintf("%s (%s: invalid severity %q)", name, target, entry.MaxSeverity))
+					}
+				}
+			} else {
+				incompleteBases = append(incompleteBases, fmt.Sprintf("%s (%s)", name, target))
+			}
 		case err != nil || !res.Passed:
 			vulnerableBases = append(vulnerableBases, fmt.Sprintf("%s (%s: %s)", name, target, res.MaxSeverityFound))
 		}
@@ -334,6 +343,6 @@ func checkBaseImageSecurity(dir string, logger *slog.Logger) ports.DoctorCheck {
 	return ports.DoctorCheck{
 		Name:    "Base Image Security & CVEs",
 		Passed:  true,
-		Message: fmt.Sprintf("all %d locked base images passed security vulnerability checks", len(lf.Bases)),
+		Message: fmt.Sprintf("all %d locked base image(s) passed security vulnerability checks", len(lf.Bases)),
 	}
 }

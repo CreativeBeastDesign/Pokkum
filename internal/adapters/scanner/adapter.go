@@ -133,6 +133,8 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 		// 2. Container image or tarball scan
 		imgVulns, imgToolchain, imgIncomplete, err := s.scanImageOrTarball(ctx, target, req.Offline)
 		if err != nil {
+			incomplete = true
+			warnings = append(warnings, fmt.Sprintf("image/tarball scan failed for %s: %v", target, err))
 			s.logger.DebugContext(ctx, "scanner: fallback to embedded advisories", "target", target, "err", err)
 		}
 		if imgIncomplete {

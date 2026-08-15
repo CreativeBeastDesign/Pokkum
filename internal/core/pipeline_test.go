@@ -305,6 +305,8 @@ type mockRemoteCacher struct {
 	computeInputHashCalled bool
 	checkCalled            bool
 	hit                    bool
+	verified               bool
+	signerIdentity         string
 }
 
 func (m *mockRemoteCacher) ComputeInputHash(context.Context, ports.RemoteCacheInputRequest) (string, error) {
@@ -315,7 +317,12 @@ func (m *mockRemoteCacher) ComputeInputHash(context.Context, ports.RemoteCacheIn
 func (m *mockRemoteCacher) Check(context.Context, ports.RemoteCacheRequest) (ports.RemoteCacheResult, error) {
 	m.checkCalled = true
 	if m.hit {
-		return ports.RemoteCacheResult{Hit: true, Ref: "ghcr.io/example/app@sha256:cachedcachedcachedcachedcachedcachedcachedcachedcachedcachedcach"}, nil
+		return ports.RemoteCacheResult{
+			Hit:            true,
+			Ref:            "ghcr.io/example/app@sha256:cachedcachedcachedcachedcachedcachedcachedcachedcachedcachedcach",
+			Verified:       m.verified,
+			SignerIdentity: m.signerIdentity,
+		}, nil
 	}
 	return ports.RemoteCacheResult{Hit: false}, nil
 }
@@ -530,14 +537,10 @@ func TestBuildPushSuccess(t *testing.T) {
 // TestBuildPushSuccess_SignedBuildNeverConsultsRemoteCache proves the F1/F4
 // mitigation for the remote build-skip cache: a cache hit reconciles release
 // tags to a previously-pushed digest without this build ever running its own
-// SBOM attachment or signing step. If a signed build could still take a
-// cache hit, its SLSA/Cosign/DSSE attestations would be silently skipped
-// (F4), and the promoted digest's provenance would rest entirely on whoever
-// pushed the cache-<hash> tag rather than this run's own signer (F1) — which
-// may be a different, less-trusted actor with only cache-tag push access.
-// So Sign: true must mean the remote cache is never even consulted, cache
-// hit or not.
-func TestBuildPushSuccess_SignedBuildNeverConsultsRemoteCache(t *testing.T) {
+// TestBuildPushSuccess_SignedBuildWithVerificationDisabledBypassesCache proves
+// that when a signed build runs with cache verification explicitly disabled,
+// it never consults the remote cache to avoid adopting an unverified digest.
+func TestBuildPushSuccess_SignedBuildWithVerificationDisabledBypassesCache(t *testing.T) {
 	deps := newFullDeps(io.Discard)
 	cacher := &mockRemoteCacher{hit: true}
 	deps.RemoteCache = cacher
@@ -548,6 +551,9 @@ func TestBuildPushSuccess_SignedBuildNeverConsultsRemoteCache(t *testing.T) {
 		Platforms:  []core.Platform{core.LinuxAMD64},
 		Tags:       []string{"v1.0.0"},
 		Sign:       true,
+		CacheVerify: core.RemoteCacheVerifyOptions{
+			VerifyMode: core.CacheVerifyNone,
+		},
 	}
 
 	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
@@ -555,22 +561,49 @@ func TestBuildPushSuccess_SignedBuildNeverConsultsRemoteCache(t *testing.T) {
 		t.Fatalf("Build failed: %v", err)
 	}
 	if cacher.computeInputHashCalled || cacher.checkCalled {
-		t.Fatalf("BUG: remote cache was consulted for a signed build (ComputeInputHash called=%v, Check called=%v) — a cache hit here would have skipped this run's own SBOM attachment and signing", cacher.computeInputHashCalled, cacher.checkCalled)
+		t.Fatalf("BUG: remote cache was consulted for a signed build with verification disabled (ComputeInputHash called=%v, Check called=%v)", cacher.computeInputHashCalled, cacher.checkCalled)
 	}
 	if res.Cached {
 		t.Errorf("expected a real, non-cached build result for a signed build")
 	}
 }
 
-// TestBuildPushSuccess_UnsignedBuildCanHitRemoteCache confirms the gate is
-// scoped correctly: an unsigned build (the only case where skipping the
-// build has no attestation to skip) still gets the cache's benefit — a real
-// hit short-circuits the build and returns the cache-hit result — so the
-// Sign: true restriction above isn't accidentally disabling caching
-// altogether.
+// TestBuildPushSuccess_SignedBuildWithVerifiedCacheHitCanSkipBuild proves that
+// when cache verification is active, a signed build can safely skip compilation on a verified cache hit.
+func TestBuildPushSuccess_SignedBuildWithVerifiedCacheHitCanSkipBuild(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+	cacher := &mockRemoteCacher{hit: true, verified: true, signerIdentity: "static-key"}
+	deps.RemoteCache = cacher
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+		Sign:       true,
+		CacheVerify: core.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      core.CacheVerifyStaticKey,
+		},
+	}
+
+	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !cacher.computeInputHashCalled || !cacher.checkCalled {
+		t.Fatalf("expected remote cache to be consulted for signed build with verification enabled")
+	}
+	if !res.Cached {
+		t.Errorf("expected a cached build result for a signed build on verified cache hit")
+	}
+}
+
+// TestBuildPushSuccess_UnsignedBuildCanHitRemoteCache confirms that an unsigned build
+// still gets the cache's benefit and short-circuits the build on a cache hit.
 func TestBuildPushSuccess_UnsignedBuildCanHitRemoteCache(t *testing.T) {
 	deps := newFullDeps(io.Discard)
-	cacher := &mockRemoteCacher{hit: true}
+	cacher := &mockRemoteCacher{hit: true, verified: true, signerIdentity: "static-key"}
 	deps.RemoteCache = cacher
 
 	req := core.BuildRequest{
@@ -1057,6 +1090,258 @@ func TestPipeline_BaseImageCVE_Gating(t *testing.T) {
 		}
 		if len(recordedScan.Vulnerabilities) != 1 {
 			t.Errorf("recorded vulns = %d, want 1", len(recordedScan.Vulnerabilities))
+		}
+	})
+
+	t.Run("Offline build reads cached lockfile scan audit and fails on threshold violation", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		req := core.BuildRequest{
+			ProjectDir: "/abs/project",
+			Repo:       "ghcr.io/example/app",
+			Platforms:  []core.Platform{core.LinuxAMD64},
+			BaseImage: core.BaseImageOptions{
+				Preset:  core.BaseImageDistroless,
+				Offline: true,
+			},
+			FailOnCVE: core.SeverityCritical,
+		}
+
+		// Mock resolver returning base image with cached critical audit
+		deps.BaseImages = &mockBaseImageResolver{
+			resolveFn: func(_ context.Context, _ ports.BaseImageRequest) (*ports.BaseImage, error) {
+				return &ports.BaseImage{
+					Ref:                  "gcr.io/distroless/cc-debian12:nonroot",
+					PinnedRef:            "gcr.io/distroless/cc-debian12@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+					Digest:               v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("1", 64)},
+					Images:               map[ports.Platform]v1.Image{ports.LinuxAMD64: empty.Image},
+					LastScannedAt:        "2026-08-15T00:00:00Z",
+					VulnerabilitiesCount: 2,
+					MaxSeverity:          "critical",
+				}, nil
+			},
+		}
+
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{DryRun: true})
+		if err == nil {
+			t.Fatalf("expected build to fail when cached audit contains critical vulnerability")
+		}
+		if !errors.Is(err, core.ErrVulnerabilityThresholdExceeded) {
+			t.Errorf("expected ErrVulnerabilityThresholdExceeded, got: %v", err)
+		}
+	})
+
+	t.Run("Sourcemap flag propagates to packager in layered strategy", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		pkgReqSourcemap := false
+		deps.Packager = &mockPackager{
+			buildFn: func(_ context.Context, req ports.PackageRequest) (v1.Image, error) {
+				pkgReqSourcemap = req.Sourcemap
+				return empty.Image, nil
+			},
+		}
+
+		req := core.BuildRequest{
+			ProjectDir: "/abs/project",
+			Repo:       "ghcr.io/example/app",
+			Platforms:  []core.Platform{core.LinuxAMD64},
+			Compile: core.CompileOptions{
+				Strategy:  core.StrategyLayered,
+				Sourcemap: true,
+			},
+		}
+
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+		if err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+		if !pkgReqSourcemap {
+			t.Errorf("expected Packager to receive Sourcemap = true in layered strategy")
+		}
+	})
+
+	t.Run("Sourcemap flag propagates to compiler and packager in exe strategy", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		compileReqSourcemap := false
+		deps.Compiler = &mockCompiler{
+			compileFn: func(_ context.Context, req ports.CompileRequest) (ports.Artifact, error) {
+				compileReqSourcemap = req.Sourcemap
+				return ports.Artifact{
+					Path: "/tmp/out/bin",
+				}, nil
+			},
+		}
+		pkgReqSourcemap := false
+		deps.Packager = &mockPackager{
+			buildFn: func(_ context.Context, req ports.PackageRequest) (v1.Image, error) {
+				pkgReqSourcemap = req.Sourcemap
+				return empty.Image, nil
+			},
+		}
+
+		req := core.BuildRequest{
+			ProjectDir: "/abs/project",
+			Repo:       "ghcr.io/example/app",
+			Platforms:  []core.Platform{core.LinuxAMD64},
+			Compile: core.CompileOptions{
+				Strategy:  core.StrategyExe,
+				Sourcemap: true,
+			},
+		}
+
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+		if err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+		if !compileReqSourcemap {
+			t.Errorf("expected Compiler to receive Sourcemap = true in exe strategy")
+		}
+		if !pkgReqSourcemap {
+			t.Errorf("expected Packager to receive Sourcemap = true in exe strategy")
+		}
+	})
+
+	t.Run("Offline build with cached clean audit (0 vulns) passes threshold check", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		req := core.BuildRequest{
+			ProjectDir: "/abs/project",
+			Repo:       "ghcr.io/example/app",
+			Platforms:  []core.Platform{core.LinuxAMD64},
+			BaseImage: core.BaseImageOptions{
+				Preset:  core.BaseImageDistroless,
+				Offline: true,
+			},
+			FailOnCVE: core.SeverityCritical,
+		}
+
+		deps.BaseImages = &mockBaseImageResolver{
+			resolveFn: func(_ context.Context, _ ports.BaseImageRequest) (*ports.BaseImage, error) {
+				return &ports.BaseImage{
+					Ref:                  "gcr.io/distroless/cc-debian12:nonroot",
+					PinnedRef:            "gcr.io/distroless/cc-debian12@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+					Digest:               v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("1", 64)},
+					Images:               map[ports.Platform]v1.Image{ports.LinuxAMD64: empty.Image},
+					LastScannedAt:        "2026-08-15T00:00:00Z",
+					VulnerabilitiesCount: 0,
+					MaxSeverity:          "",
+				}, nil
+			},
+		}
+
+		res, err := core.Build(context.Background(), deps, req, core.BuildOptions{DryRun: true})
+		if err != nil {
+			t.Fatalf("expected build to succeed for clean cached audit, got: %v", err)
+		}
+		if res.Image.Digest.String() == "" {
+			t.Errorf("expected non-empty digest on build result")
+		}
+	})
+
+	t.Run("Offline build with cached audit below threshold passes", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		req := core.BuildRequest{
+			ProjectDir: "/abs/project",
+			Repo:       "ghcr.io/example/app",
+			Platforms:  []core.Platform{core.LinuxAMD64},
+			BaseImage: core.BaseImageOptions{
+				Preset:  core.BaseImageDistroless,
+				Offline: true,
+			},
+			FailOnCVE: core.SeverityCritical,
+		}
+
+		deps.BaseImages = &mockBaseImageResolver{
+			resolveFn: func(_ context.Context, _ ports.BaseImageRequest) (*ports.BaseImage, error) {
+				return &ports.BaseImage{
+					Ref:                  "gcr.io/distroless/cc-debian12:nonroot",
+					PinnedRef:            "gcr.io/distroless/cc-debian12@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+					Digest:               v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("1", 64)},
+					Images:               map[ports.Platform]v1.Image{ports.LinuxAMD64: empty.Image},
+					LastScannedAt:        "2026-08-15T00:00:00Z",
+					VulnerabilitiesCount: 2,
+					MaxSeverity:          "medium",
+				}, nil
+			},
+		}
+
+		res, err := core.Build(context.Background(), deps, req, core.BuildOptions{DryRun: true})
+		if err != nil {
+			t.Fatalf("expected build to succeed when cached audit is below threshold, got: %v", err)
+		}
+		if res.Image.Digest.String() == "" {
+			t.Errorf("expected non-empty digest on build result")
+		}
+	})
+
+	t.Run("Offline build with malformed MaxSeverity in cached audit fails safe", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		req := core.BuildRequest{
+			ProjectDir: "/abs/project",
+			Repo:       "ghcr.io/example/app",
+			Platforms:  []core.Platform{core.LinuxAMD64},
+			BaseImage: core.BaseImageOptions{
+				Preset:  core.BaseImageDistroless,
+				Offline: true,
+			},
+			FailOnCVE: core.SeverityCritical,
+		}
+
+		deps.BaseImages = &mockBaseImageResolver{
+			resolveFn: func(_ context.Context, _ ports.BaseImageRequest) (*ports.BaseImage, error) {
+				return &ports.BaseImage{
+					Ref:                  "gcr.io/distroless/cc-debian12:nonroot",
+					PinnedRef:            "gcr.io/distroless/cc-debian12@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+					Digest:               v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("1", 64)},
+					Images:               map[ports.Platform]v1.Image{ports.LinuxAMD64: empty.Image},
+					LastScannedAt:        "2026-08-15T00:00:00Z",
+					VulnerabilitiesCount: 3,
+					MaxSeverity:          "unrecognized_bogus_severity",
+				}, nil
+			},
+		}
+
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{DryRun: true})
+		if err == nil {
+			t.Fatalf("expected build to fail on malformed cached severity string")
+		}
+		if !errors.Is(err, core.ErrScanIncomplete) {
+			t.Errorf("expected ErrScanIncomplete, got: %v", err)
+		}
+	})
+
+	t.Run("Offline build with malformed MaxSeverity and allow-incomplete proceeds", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		req := core.BuildRequest{
+			ProjectDir: "/abs/project",
+			Repo:       "ghcr.io/example/app",
+			Platforms:  []core.Platform{core.LinuxAMD64},
+			BaseImage: core.BaseImageOptions{
+				Preset:  core.BaseImageDistroless,
+				Offline: true,
+			},
+			FailOnCVE:           core.SeverityCritical,
+			AllowIncompleteScan: true,
+		}
+
+		deps.BaseImages = &mockBaseImageResolver{
+			resolveFn: func(_ context.Context, _ ports.BaseImageRequest) (*ports.BaseImage, error) {
+				return &ports.BaseImage{
+					Ref:                  "gcr.io/distroless/cc-debian12:nonroot",
+					PinnedRef:            "gcr.io/distroless/cc-debian12@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+					Digest:               v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("1", 64)},
+					Images:               map[ports.Platform]v1.Image{ports.LinuxAMD64: empty.Image},
+					LastScannedAt:        "2026-08-15T00:00:00Z",
+					VulnerabilitiesCount: 3,
+					MaxSeverity:          "unrecognized_bogus_severity",
+				}, nil
+			},
+		}
+
+		res, err := core.Build(context.Background(), deps, req, core.BuildOptions{DryRun: true})
+		if err != nil {
+			t.Fatalf("expected build to proceed when AllowIncompleteScan is set, got: %v", err)
+		}
+		if res.Image.Digest.String() == "" {
+			t.Errorf("expected non-empty digest on build result")
 		}
 	})
 }

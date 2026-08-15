@@ -314,6 +314,13 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		IsIndex:   pull.isIndex,
 		Images:    make(map[ports.Platform]v1.Image, len(req.Platforms)),
 	}
+	if lf != nil {
+		if existing, ok := lockfileutils.GetLockedBase(lf, lockKey); ok {
+			out.LastScannedAt = existing.LastScannedAt
+			out.VulnerabilitiesCount = existing.VulnerabilitiesCount
+			out.MaxSeverity = existing.MaxSeverity
+		}
+	}
 
 	for _, p := range req.Platforms {
 		img, err := r.imageForPlatform(ref, req.Insecure, pull, p)

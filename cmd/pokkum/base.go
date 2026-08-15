@@ -162,10 +162,19 @@ func runBaseCheck(ctx context.Context, logger *slog.Logger, args []string) error
 			continue
 		}
 
+		auditInfo := ""
+		if entry.LastScannedAt != "" {
+			if entry.VulnerabilitiesCount > 0 {
+				auditInfo = fmt.Sprintf(" (scanned %s: %d vulns, max: %s)", entry.LastScannedAt, entry.VulnerabilitiesCount, entry.MaxSeverity)
+			} else {
+				auditInfo = fmt.Sprintf(" (scanned %s: 0 vulns)", entry.LastScannedAt)
+			}
+		}
+
 		if res.Digest.String() != entry.Digest {
-			fmt.Fprintf(os.Stdout, "[UPDATE AVAILABLE] %s: locked=%s upstream=%s\n", name, entry.Digest, res.Digest.String())
+			fmt.Fprintf(os.Stdout, "[UPDATE AVAILABLE] %s: locked=%s upstream=%s%s\n", name, entry.Digest, res.Digest.String(), auditInfo)
 		} else {
-			fmt.Fprintf(os.Stdout, "[UP TO DATE] %s: %s\n", name, entry.Digest)
+			fmt.Fprintf(os.Stdout, "[UP TO DATE] %s: %s%s\n", name, entry.Digest, auditInfo)
 		}
 	}
 

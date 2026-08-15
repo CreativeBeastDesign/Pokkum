@@ -23,6 +23,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sbom"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scanner"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/secretguard"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/slsa"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -66,6 +67,7 @@ type buildFlags struct {
 	bunVariant  string
 	strategy    string
 	compression string
+	sourcemap   bool
 
 	imageLabels []string
 
@@ -85,6 +87,14 @@ type buildFlags struct {
 	noPrecompress       bool
 	noStrip             bool
 	noCache             bool
+
+	// Cache verification flags
+	noCacheVerify        bool
+	cacheVerifyMode      string
+	cacheVerifyKey       string
+	cacheKeylessIdentity string
+	cacheKeylessIssuer   string
+	cacheVerifyStrict    bool
 }
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -206,6 +216,22 @@ The project directory defaults to the current working directory.`,
 		"Disable build-time stripping of unneeded debug symbols from native .node ELF addons")
 	cmd.Flags().BoolVar(&flags.noCache, "no-cache", false,
 		"Disable remote OCI composite input caching and force full rebuild")
+	cmd.Flags().BoolVar(&flags.sourcemap, "sourcemap", false,
+		"Generate and preserve source maps in compiled bundles and vendor layers")
+
+	// Cache verification flags
+	cmd.Flags().BoolVar(&flags.noCacheVerify, "no-cache-verify", false,
+		"Disable cryptographic signature verification on remote cache-hit images")
+	cmd.Flags().StringVar(&flags.cacheVerifyMode, "cache-verify-mode", "",
+		"Cache image signature verification mode: auto (default), static-key, or keyless")
+	cmd.Flags().StringVar(&flags.cacheVerifyKey, "cache-verify-key", "",
+		"Path or PEM string for static Cosign public key to verify remote cache hits")
+	cmd.Flags().StringVar(&flags.cacheKeylessIdentity, "cache-keyless-identity", "",
+		"Expected Fulcio certificate Subject Alternative Name for keyless cache verification")
+	cmd.Flags().StringVar(&flags.cacheKeylessIssuer, "cache-keyless-issuer", "",
+		"Expected OIDC issuer for keyless cache verification")
+	cmd.Flags().BoolVar(&flags.cacheVerifyStrict, "cache-verify-strict", false,
+		"Strict cache verification: fail build if candidate cache tag has invalid signature")
 
 	return cmd
 }
@@ -289,9 +315,21 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	if flags.strategy == "exe" {
 		logger.Warn("packaging strategy 'exe' is deprecated and will be removed in a future release; migrate to '--strategy=layered' (default)")
 	}
+
+	sourcemapSetting := flags.sourcemap
+	if !sourcemapSetting {
+		if envVal := os.Getenv("POKKUM_SOURCEMAP"); envVal != "" {
+			sourcemapSetting = envVal == "1" || strings.EqualFold(envVal, "true") || strings.EqualFold(envVal, "yes")
+		}
+	}
+	if !sourcemapSetting {
+		sourcemapSetting = cfg.GetBool("compile.sourcemap", false)
+	}
+
 	req.Compile = core.CompileOptions{
 		Strategy:      core.BuildStrategy(flags.strategy),
 		Compression:   core.CompressionAlgorithm(flags.compression),
+		Sourcemap:     sourcemapSetting,
 		NoInject:      flags.noInject || !flags.inject,
 		NoPrune:       flags.noPrune,
 		KeepVendor:    flags.keepVendor,
@@ -400,6 +438,60 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	}
 	req.AllowIncompleteScan = flags.allowIncomplete
 
+	// Cache verification configuration
+	if flags.noCacheVerify {
+		req.CacheVerify.VerifyMode = core.CacheVerifyNone
+		req.CacheVerify.VerifySignature = false
+	} else {
+		req.CacheVerify.VerifySignature = true
+		verifyModeSetting := flags.cacheVerifyMode
+		if verifyModeSetting == "" {
+			verifyModeSetting = os.Getenv("POKKUM_CACHE_VERIFY_MODE")
+		}
+		if verifyModeSetting != "" {
+			mode, err := core.ParseCacheVerifyMode(verifyModeSetting)
+			if err != nil {
+				return fmt.Errorf("invalid cache verify mode: %w", err)
+			}
+			req.CacheVerify.VerifyMode = mode
+		}
+	}
+
+	verifyKeySetting := flags.cacheVerifyKey
+	if verifyKeySetting == "" {
+		verifyKeySetting = os.Getenv("POKKUM_CACHE_PUBKEY")
+	}
+	if verifyKeySetting != "" {
+		if data, err := os.ReadFile(verifyKeySetting); err == nil {
+			req.CacheVerify.PublicKeyPEM = data
+		} else {
+			req.CacheVerify.PublicKeyPEM = []byte(verifyKeySetting)
+		}
+	}
+
+	keylessSANSetting := flags.cacheKeylessIdentity
+	if keylessSANSetting == "" {
+		keylessSANSetting = os.Getenv("POKKUM_CACHE_KEYLESS_IDENTITY")
+	}
+	if keylessSANSetting != "" {
+		req.CacheVerify.KeylessIdentity.SAN = keylessSANSetting
+	}
+
+	keylessIssuerSetting := flags.cacheKeylessIssuer
+	if keylessIssuerSetting == "" {
+		keylessIssuerSetting = os.Getenv("POKKUM_CACHE_KEYLESS_ISSUER")
+	}
+	if keylessIssuerSetting != "" {
+		req.CacheVerify.KeylessIdentity.Issuer = keylessIssuerSetting
+	}
+
+	req.CacheVerify.Strict = flags.cacheVerifyStrict
+	if flags.sigstoreTrustedRoot != "" {
+		if data, err := os.ReadFile(flags.sigstoreTrustedRoot); err == nil {
+			req.CacheVerify.TrustedRootJSON = data
+		}
+	}
+
 	// Execution-mode switches. They are not part of the request — both
 	// describe how far to get, not what to build — so they travel alongside it
 	// as core.BuildOptions.
@@ -492,7 +584,11 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		DSSESigner:      dsse.NewSigner(logger),
 		Scanner:         scanner.NewAdapter(logger),
 		SecretGuard:     secretguard.NewAdapter(),
-		RemoteCache:     remotecacheutils.New(),
+		RemoteCache: remotecacheutils.New(
+			remotecacheutils.WithLogger(logger),
+			remotecacheutils.WithCosignSigner(cosign.NewSigner(logger)),
+			remotecacheutils.WithKeylessVerifier(sigstore.NewVerifier(logger)),
+		),
 
 		Logger:    logger,
 		Stdout:    stdout,

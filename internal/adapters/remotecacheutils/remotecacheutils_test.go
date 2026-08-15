@@ -2,6 +2,14 @@ package remotecacheutils_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,9 +19,14 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/static"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/remotecacheutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -363,5 +376,830 @@ func TestCacher_Check_ReconcileTagsFailureIsNotReportedAsHit(t *testing.T) {
 	}
 	if res.Hit {
 		t.Fatalf("BUG: Check reported Hit: true despite ReconcileTags failing — the release tag %q was never actually moved to the cache-hit digest, but the caller was told the build succeeded", "v1.0.0")
+	}
+}
+
+func generateTestKey(t *testing.T) (privPEM, pubPEM []byte) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privDER})
+
+	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubPEM = pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
+	return privPEM, pubPEM
+}
+
+func pushTestCosignSignature(t *testing.T, repo string, digest v1.Hash, privPEM []byte, corrupt bool) {
+	t.Helper()
+
+	signer := cosign.NewSigner(nil)
+	bundle, err := signer.Sign(context.Background(), ports.CosignSignRequest{
+		Repo:   repo,
+		Digest: digest,
+		KeyPEM: privPEM,
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	b64Sig := bundle.Base64Signature
+	if corrupt {
+		raw, err := base64.StdEncoding.DecodeString(b64Sig)
+		if err != nil {
+			t.Fatalf("decode signature: %v", err)
+		}
+		raw[0] ^= 0xFF
+		b64Sig = base64.StdEncoding.EncodeToString(raw)
+	}
+
+	layer := static.NewLayer(bundle.PayloadBytes, "application/vnd.dev.cosign.simplesigning.v1+json")
+	sigImg, err := mutate.Append(empty.Image, mutate.Addendum{
+		Layer:       layer,
+		Annotations: map[string]string{"dev.cosignproject.cosign/signature": b64Sig},
+	})
+	if err != nil {
+		t.Fatalf("mutate.Append: %v", err)
+	}
+
+	sigTagStr := repo + ":" + digest.Algorithm + "-" + digest.Hex + ".sig"
+	tag, err := name.NewTag(sigTagStr, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(%q): %v", sigTagStr, err)
+	}
+	if err := remote.Write(tag, sigImg); err != nil {
+		t.Fatalf("Write signature: %v", err)
+	}
+}
+
+// TestCacher_Check_VerifiedCacheHit_StaticKey verifies that a candidate cache-hit image
+// with a valid Cosign signature is verified and promotes release tags.
+func TestCacher_Check_VerifiedCacheHit_StaticKey(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/app"
+
+	privPEM, pubPEM := generateTestKey(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("img.Digest: %v", err)
+	}
+
+	inputHash := strings.Repeat("b", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	// Push genuine Cosign signature
+	pushTestCosignSignature(t, repo, digest, privPEM, false)
+
+	c := remotecacheutils.New(remotecacheutils.WithCosignSigner(cosign.NewSigner(nil)))
+	res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyStaticKey,
+			PublicKeyPEM:    pubPEM,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+	if !res.Hit {
+		t.Fatalf("expected Hit: true for verified cache candidate")
+	}
+	if !res.Verified {
+		t.Fatalf("expected Verified: true")
+	}
+	if res.SignerIdentity != "static-key" {
+		t.Errorf("expected SignerIdentity 'static-key', got %q", res.SignerIdentity)
+	}
+
+	// Check release tag was created and points to digest
+	relTag, err := name.NewTag(repo+":v1.0.0", name.WeakValidation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relDesc, err := remote.Get(relTag)
+	if err != nil {
+		t.Fatalf("remote.Get release tag: %v", err)
+	}
+	if relDesc.Digest != digest {
+		t.Errorf("release tag digest %s != expected %s", relDesc.Digest, digest)
+	}
+}
+
+// TestCacher_Check_PoisonedCacheEntry_UnsignedRejected verifies that an unsigned cache candidate
+// is rejected when verification is active, and release tags are NOT promoted.
+func TestCacher_Check_PoisonedCacheEntry_UnsignedRejected(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/app"
+
+	_, pubPEM := generateTestKey(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+
+	inputHash := strings.Repeat("c", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	// Poisoned / unverified cache tag pushed without signature
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	c := remotecacheutils.New(remotecacheutils.WithCosignSigner(cosign.NewSigner(nil)))
+	res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyStaticKey,
+			PublicKeyPEM:    pubPEM,
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error (fallback to rebuild), got: %v", err)
+	}
+	if res.Hit {
+		t.Fatalf("BUG: Check reported Hit: true on an unsigned cache entry — cache poisoning vulnerability open")
+	}
+
+	// Verify release tag was NEVER promoted
+	relTag, err := name.NewTag(repo+":v1.0.0", name.WeakValidation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remote.Get(relTag); err == nil {
+		t.Fatalf("BUG: release tag v1.0.0 was promoted to unverified cache digest!")
+	}
+}
+
+// TestCacher_Check_PoisonedCacheEntry_InvalidSignatureRejected verifies that a candidate
+// with an invalid/tampered signature is rejected and tags are not promoted.
+func TestCacher_Check_PoisonedCacheEntry_InvalidSignatureRejected(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/app"
+
+	privPEM, pubPEM := generateTestKey(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("img.Digest: %v", err)
+	}
+
+	inputHash := strings.Repeat("d", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	// Push corrupted / tampered signature
+	pushTestCosignSignature(t, repo, digest, privPEM, true)
+
+	c := remotecacheutils.New(remotecacheutils.WithCosignSigner(cosign.NewSigner(nil)))
+	res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyStaticKey,
+			PublicKeyPEM:    pubPEM,
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on default non-strict check, got: %v", err)
+	}
+	if res.Hit {
+		t.Fatalf("BUG: Check reported Hit: true on corrupted signature candidate")
+	}
+
+	// Verify release tag was NEVER promoted
+	relTag, err := name.NewTag(repo+":v1.0.0", name.WeakValidation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remote.Get(relTag); err == nil {
+		t.Fatalf("BUG: release tag was promoted on corrupted signature!")
+	}
+}
+
+// TestCacher_Check_StrictEnforcementFailsOnError verifies that strict mode returns an error
+// when a candidate fails signature verification.
+func TestCacher_Check_StrictEnforcementFailsOnError(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/app"
+
+	privPEM, pubPEM := generateTestKey(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("img.Digest: %v", err)
+	}
+
+	inputHash := strings.Repeat("e", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	// Push corrupted signature
+	pushTestCosignSignature(t, repo, digest, privPEM, true)
+
+	c := remotecacheutils.New(remotecacheutils.WithCosignSigner(cosign.NewSigner(nil)))
+	res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyStaticKey,
+			PublicKeyPEM:    pubPEM,
+			Strict:          true,
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected non-nil error in strict mode")
+	}
+	if res.Hit {
+		t.Fatalf("expected Hit: false in strict mode error")
+	}
+}
+
+// TestCacher_Check_OptOutNoVerifyStillHits verifies that when verification is explicitly disabled
+// via CacheVerifyNone, an unsigned cache hit still works.
+func TestCacher_Check_OptOutNoVerifyStillHits(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/app"
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("img.Digest: %v", err)
+	}
+
+	inputHash := strings.Repeat("f", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	c := remotecacheutils.New()
+	res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifyMode: ports.CacheVerifyNone,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+	if !res.Hit {
+		t.Fatalf("expected Hit: true when verification is disabled")
+	}
+
+	relTag, err := name.NewTag(repo+":v1.0.0", name.WeakValidation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relDesc, err := remote.Get(relTag)
+	if err != nil {
+		t.Fatalf("remote.Get release tag: %v", err)
+	}
+	if relDesc.Digest != digest {
+		t.Errorf("release tag digest %s != expected %s", relDesc.Digest, digest)
+	}
+}
+
+type mockKeylessVerifier struct {
+	verifyFn func(ctx context.Context, req ports.KeylessVerifyRequest) (ports.KeylessVerifyResult, error)
+}
+
+func (m *mockKeylessVerifier) Verify(ctx context.Context, req ports.KeylessVerifyRequest) (ports.KeylessVerifyResult, error) {
+	if m.verifyFn != nil {
+		return m.verifyFn(ctx, req)
+	}
+	return ports.KeylessVerifyResult{}, errors.New("unimplemented mock keyless verifier")
+}
+
+// TestCacher_Check_ReplayAttack_DifferentRepoOrDigestClaimsRejected tests the scenario
+// where an attacker attempts a replay attack by attaching a signature from a different repository
+// or a different image digest. Even with a cryptographically valid signature, checkSimpleSigningClaims
+// must reject the claim mismatch and refuse to promote release tags.
+func TestCacher_Check_ReplayAttack_DifferentRepoOrDigestClaimsRejected(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/legit-app"
+
+	privPEM, pubPEM := generateTestKey(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("img.Digest: %v", err)
+	}
+
+	inputHash := strings.Repeat("1", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	// 1. Replay attack with different repository claim in payload
+	otherRepo := host + "/attacker/malicious"
+	signer := cosign.NewSigner(nil)
+	bundleOtherRepo, err := signer.Sign(context.Background(), ports.CosignSignRequest{
+		Repo:   otherRepo,
+		Digest: digest,
+		KeyPEM: privPEM,
+	})
+	if err != nil {
+		t.Fatalf("Sign otherRepo: %v", err)
+	}
+
+	layer := static.NewLayer(bundleOtherRepo.PayloadBytes, "application/vnd.dev.cosign.simplesigning.v1+json")
+	sigImg, err := mutate.Append(empty.Image, mutate.Addendum{
+		Layer:       layer,
+		Annotations: map[string]string{"dev.cosignproject.cosign/signature": bundleOtherRepo.Base64Signature},
+	})
+	if err != nil {
+		t.Fatalf("mutate.Append: %v", err)
+	}
+
+	sigTagStr := repo + ":" + digest.Algorithm + "-" + digest.Hex + ".sig"
+	sigTag, err := name.NewTag(sigTagStr, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(%q): %v", sigTagStr, err)
+	}
+	if err := remote.Write(sigTag, sigImg); err != nil {
+		t.Fatalf("Write signature: %v", err)
+	}
+
+	c := remotecacheutils.New(remotecacheutils.WithCosignSigner(cosign.NewSigner(nil)))
+	res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyStaticKey,
+			PublicKeyPEM:    pubPEM,
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on default non-strict check, got: %v", err)
+	}
+	if res.Hit {
+		t.Fatalf("BUG: Check reported Hit: true on replay attack with mismatched repository claim!")
+	}
+
+	// Verify release tag was NOT created
+	relTag, err := name.NewTag(repo+":v1.0.0", name.WeakValidation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remote.Get(relTag); err == nil {
+		t.Fatalf("BUG: release tag was promoted on repository claim mismatch!")
+	}
+
+	// Check that strict mode returns explicit error
+	_, strictErr := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyStaticKey,
+			PublicKeyPEM:    pubPEM,
+			Strict:          true,
+		},
+	})
+	if strictErr == nil {
+		t.Fatalf("expected error in strict mode for repository claim mismatch")
+	}
+	if !strings.Contains(strictErr.Error(), "payload repo") && !strings.Contains(strictErr.Error(), "invalid payload claims") {
+		t.Errorf("expected claim mismatch error message, got: %v", strictErr)
+	}
+}
+
+// TestCacher_Check_MalformedSignatureLayerPayload_GracefullyRejected tests that
+// corrupt or non-JSON payloads inside the signature layer do not cause panics or false hits.
+func TestCacher_Check_MalformedSignatureLayerPayload_GracefullyRejected(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/app"
+
+	_, pubPEM := generateTestKey(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("img.Digest: %v", err)
+	}
+
+	inputHash := strings.Repeat("2", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	// Push signature image with malformed (non-JSON) layer content
+	garbageLayer := static.NewLayer([]byte("not-json-garbage-bytes"), "application/vnd.dev.cosign.simplesigning.v1+json")
+	sigImg, err := mutate.Append(empty.Image, mutate.Addendum{
+		Layer:       garbageLayer,
+		Annotations: map[string]string{"dev.cosignproject.cosign/signature": "QUFBQQ=="},
+	})
+	if err != nil {
+		t.Fatalf("mutate.Append: %v", err)
+	}
+
+	sigTagStr := repo + ":" + digest.Algorithm + "-" + digest.Hex + ".sig"
+	sigTag, err := name.NewTag(sigTagStr, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(%q): %v", sigTagStr, err)
+	}
+	if err := remote.Write(sigTag, sigImg); err != nil {
+		t.Fatalf("Write signature: %v", err)
+	}
+
+	c := remotecacheutils.New(remotecacheutils.WithCosignSigner(cosign.NewSigner(nil)))
+	res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyStaticKey,
+			PublicKeyPEM:    pubPEM,
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on default non-strict check, got: %v", err)
+	}
+	if res.Hit {
+		t.Fatalf("BUG: Check reported Hit: true on malformed signature payload!")
+	}
+
+	// In strict mode, an error must be returned
+	_, strictErr := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyStaticKey,
+			PublicKeyPEM:    pubPEM,
+			Strict:          true,
+		},
+	})
+	if strictErr == nil {
+		t.Fatalf("expected error in strict mode for malformed payload")
+	}
+}
+
+// TestCacher_Check_KeylessVerification_IdentityMismatchRejected tests keyless
+// verification handling, asserting that certificate identity mismatches reject cache hits,
+// while matching identities succeed and promote release tags.
+func TestCacher_Check_KeylessVerification_IdentityMismatchRejected(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/app"
+
+	privPEM, _ := generateTestKey(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("img.Digest: %v", err)
+	}
+
+	inputHash := strings.Repeat("3", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	// Create valid Simple Signing payload
+	signer := cosign.NewSigner(nil)
+	bundle, err := signer.Sign(context.Background(), ports.CosignSignRequest{
+		Repo:   repo,
+		Digest: digest,
+		KeyPEM: privPEM,
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	// Push signature image with dummy keyless annotations
+	layer := static.NewLayer(bundle.PayloadBytes, "application/vnd.dev.cosign.simplesigning.v1+json")
+	sigImg, err := mutate.Append(empty.Image, mutate.Addendum{
+		Layer: layer,
+		Annotations: map[string]string{
+			"dev.cosignproject.cosign/signature": bundle.Base64Signature,
+			"dev.sigstore.cosign/certificate":    "-----BEGIN CERTIFICATE-----\nMIIC...\n-----END CERTIFICATE-----",
+			"dev.sigstore.cosign/bundle":         `{"SignedEntryTimestamp":"test"}`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("mutate.Append: %v", err)
+	}
+
+	sigTagStr := repo + ":" + digest.Algorithm + "-" + digest.Hex + ".sig"
+	sigTag, err := name.NewTag(sigTagStr, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(%q): %v", sigTagStr, err)
+	}
+	if err := remote.Write(sigTag, sigImg); err != nil {
+		t.Fatalf("Write signature: %v", err)
+	}
+
+	// 1. Mock verifier configured to reject due to identity mismatch
+	mockKeyless := &mockKeylessVerifier{
+		verifyFn: func(ctx context.Context, req ports.KeylessVerifyRequest) (ports.KeylessVerifyResult, error) {
+			if req.Identity.SAN != "ci@acme.com" {
+				return ports.KeylessVerifyResult{}, fmt.Errorf("certificate SAN %q != expected %q", "attacker@evil.com", req.Identity.SAN)
+			}
+			return ports.KeylessVerifyResult{
+				Issuer: req.Identity.Issuer,
+				SAN:    req.Identity.SAN,
+			}, nil
+		},
+	}
+
+	c := remotecacheutils.New(
+		remotecacheutils.WithCosignSigner(cosign.NewSigner(nil)),
+		remotecacheutils.WithKeylessVerifier(mockKeyless),
+	)
+
+	// Mismatched expected identity -> reject
+	resMismatch, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyKeyless,
+			KeylessIdentity: ports.KeylessIdentity{
+				SAN:    "other-developer@acme.com",
+				Issuer: "https://token.actions.githubusercontent.com",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on default non-strict check, got: %v", err)
+	}
+	if resMismatch.Hit {
+		t.Fatalf("BUG: Check reported Hit: true on keyless identity mismatch!")
+	}
+
+	// Matching expected identity -> succeed and promote tags
+	resMatch, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyKeyless,
+			KeylessIdentity: ports.KeylessIdentity{
+				SAN:    "ci@acme.com",
+				Issuer: "https://token.actions.githubusercontent.com",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check failed on matching identity: %v", err)
+	}
+	if !resMatch.Hit {
+		t.Fatalf("expected Hit: true for matching keyless identity")
+	}
+	if !resMatch.Verified {
+		t.Fatalf("expected Verified: true")
+	}
+	if resMatch.SignerIdentity != "keyless:ci@acme.com" {
+		t.Errorf("expected SignerIdentity 'keyless:ci@acme.com', got %q", resMatch.SignerIdentity)
+	}
+
+	// Verify release tag was promoted
+	relTag, err := name.NewTag(repo+":v1.0.0", name.WeakValidation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relDesc, err := remote.Get(relTag)
+	if err != nil {
+		t.Fatalf("remote.Get release tag: %v", err)
+	}
+	if relDesc.Digest != digest {
+		t.Errorf("release tag digest %s != expected %s", relDesc.Digest, digest)
+	}
+}
+
+// TestCacher_Check_KeylessVerification_SuffixRepoClaimRejected proves
+// checkSimpleSigningClaims' repo comparison is an exact match, not a suffix
+// match. The prior implementation accepted claimRepo whenever it ended with
+// "/"+expectedRepo (or vice versa) — so a payload claiming
+// "attacker.example/acme/app" was wrongly treated as matching expected repo
+// "acme/app". For the keyless path this check is the ONLY thing standing
+// between a validly-signed-by-the-trusted-identity payload for a different
+// repo and a false accept: sigstore-go's Verify proves identity + payload
+// integrity, never which repo the payload claims to describe (see
+// verifyCandidate's static-key path, which is separately protected by
+// cosign.Signer.Verify's own exact-match check — the keyless path has no
+// such second check). The mock keyless verifier here always succeeds, so
+// the repo claim is the only thing that can reject this candidate.
+func TestCacher_Check_KeylessVerification_SuffixRepoClaimRejected(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/app"
+	// Chosen so the OLD buggy check's "claimRepo ends with /+expectedRepo"
+	// branch would have accepted it: attackerClaim = "evil/" + repo.
+	attackerClaimedRepo := host + "/evil/" + repo
+
+	privPEM, _ := generateTestKey(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("img.Digest: %v", err)
+	}
+
+	inputHash := strings.Repeat("5", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	// A genuine Simple Signing payload, but signed for attackerClaimedRepo,
+	// not repo — simulating a real signature the trusted identity made for
+	// some other, differently-named artifact.
+	signer := cosign.NewSigner(nil)
+	bundle, err := signer.Sign(context.Background(), ports.CosignSignRequest{
+		Repo:   attackerClaimedRepo,
+		Digest: digest,
+		KeyPEM: privPEM,
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	layer := static.NewLayer(bundle.PayloadBytes, "application/vnd.dev.cosign.simplesigning.v1+json")
+	sigImg, err := mutate.Append(empty.Image, mutate.Addendum{
+		Layer: layer,
+		Annotations: map[string]string{
+			"dev.cosignproject.cosign/signature": bundle.Base64Signature,
+			"dev.sigstore.cosign/certificate":    "-----BEGIN CERTIFICATE-----\nMIIC...\n-----END CERTIFICATE-----",
+			"dev.sigstore.cosign/bundle":         `{"SignedEntryTimestamp":"test"}`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("mutate.Append: %v", err)
+	}
+
+	sigTagStr := repo + ":" + digest.Algorithm + "-" + digest.Hex + ".sig"
+	sigTag, err := name.NewTag(sigTagStr, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(%q): %v", sigTagStr, err)
+	}
+	if err := remote.Write(sigTag, sigImg); err != nil {
+		t.Fatalf("Write signature: %v", err)
+	}
+
+	// Always-succeeds keyless verifier: identity/crypto is not what's under
+	// test here, only the repo claim comparison is.
+	alwaysOK := &mockKeylessVerifier{
+		verifyFn: func(_ context.Context, req ports.KeylessVerifyRequest) (ports.KeylessVerifyResult, error) {
+			return ports.KeylessVerifyResult{Issuer: req.Identity.Issuer, SAN: req.Identity.SAN}, nil
+		},
+	}
+
+	c := remotecacheutils.New(remotecacheutils.WithKeylessVerifier(alwaysOK))
+	res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyKeyless,
+			KeylessIdentity: ports.KeylessIdentity{
+				SAN:    "ci@acme.com",
+				Issuer: "https://token.actions.githubusercontent.com",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on default non-strict check, got: %v", err)
+	}
+	if res.Hit {
+		t.Fatalf("BUG: Check reported Hit: true for a payload claiming repo %q against expected %q — the suffix-match repo comparison is forgeable", attackerClaimedRepo, repo)
+	}
+
+	relTag, err := name.NewTag(repo+":v1.0.0", name.WeakValidation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remote.Get(relTag); err == nil {
+		t.Fatalf("BUG: release tag was promoted despite the repo claim mismatch")
 	}
 }

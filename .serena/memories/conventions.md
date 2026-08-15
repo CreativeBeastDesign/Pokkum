@@ -10,11 +10,13 @@
 - **`sync.Pool` Buffer Recycling (`internal/adapters/poolutils`)**:
   - Manages `sync.Pool` allocation recycling for 64KB I/O copy buffers (`GetCopyBuffer`, `PutCopyBuffer`, `Copy`) and bounded `bytes.Buffer` instances (`GetByteBuffer`, `PutByteBuffer` capped at 1MB).
   - Eliminates heap allocation churn across tar archiving (`packager`), layer caching (`layercacheutils`), input hashing (`remotecacheutils`), and static asset pre-compression (`precompressutils`).
-- **Composite Remote OCI Input Caching (`internal/adapters/remotecacheutils`, `ports.RemoteCacher`)**:
+- **Composite Remote OCI Input Caching & Anti-Poisoning Verification (`internal/adapters/remotecacheutils`, `ports.RemoteCacher`)**:
   - Computes deterministic composite input hashes (`sha256(source + lockfile + baseDigest + bunVersion + platforms + flags)`).
-  - Queries target repository for `<repo>:cache-<input-hash>`. On hit, retags requested tags and returns `BuildResult{Cached: true}` in sub-100ms, completely skipping SvelteKit bundling and layer tarring.
-  - On miss, stamps `pokkum.dev/build-input-hash` annotation onto manifest and tags `cache-<input-hash>` in target repository.
-  - Escape hatch: `--no-cache` forces full rebuild.
+  - Queries target repository for `<repo>:cache-<input-hash>`. Prior to promoting release tags, cryptographically verifies Cosign static-key or Sigstore keyless signatures on the candidate image (`<repo>:<alg>-<hex>.sig`).
+  - On verified hit, retags requested release tags and returns `BuildResult{Cached: true}` in sub-100ms, skipping SvelteKit bundling and layer tarring.
+  - On unverified/tampered candidate, cleanly bypasses cache and falls back to a clean source build. In strict mode (`--cache-verify-strict`), fails the build.
+  - Signed builds can safely hit the cache when candidate images carry verified signatures matching trusted credentials.
+  - Escape hatch: `--no-cache` forces full rebuild; `--no-cache-verify` disables pre-promotion signature verification.
 - **ELF Native Addon Stripping (`internal/adapters/striputils`)**:
   - Automatically strips unneeded debug symbols from native `.node` addons and `.so` shared libraries in `/app/native` and `/app/vendor`.
   - Stripping occurs strictly inside `.pokkum/` sandbox directories, preserving user workspace source code.

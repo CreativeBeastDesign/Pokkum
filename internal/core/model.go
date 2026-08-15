@@ -116,11 +116,22 @@ type (
 
 	// SecretGuard defines the boundary port for build-time secret leak detection.
 	SecretGuard = ports.SecretGuard
+
+	// RemoteCacheVerifyMode specifies the verification mode for remote cache hits.
+	RemoteCacheVerifyMode = ports.RemoteCacheVerifyMode
+
+	// RemoteCacheVerifyOptions specifies verification criteria for remote cache hits.
+	RemoteCacheVerifyOptions = ports.RemoteCacheVerifyOptions
 )
 
 // Re-exported enum values, so that the command layer can build a BuildRequest
 // without also importing ports.
 const (
+	CacheVerifyAuto      = ports.CacheVerifyAuto
+	CacheVerifyStaticKey = ports.CacheVerifyStaticKey
+	CacheVerifyKeyless   = ports.CacheVerifyKeyless
+	CacheVerifyNone      = ports.CacheVerifyNone
+
 	SBOMFormatSPDXJSON      = ports.SBOMFormatSPDXJSON
 	SBOMFormatCycloneDXJSON = ports.SBOMFormatCycloneDXJSON
 	SBOMFormatNone          = ports.SBOMFormatNone
@@ -314,6 +325,19 @@ func ParseBaseImageVerifyMode(s string) (BaseImageVerifyMode, error) {
 	m := BaseImageVerifyMode(strings.ToLower(strings.TrimSpace(s)))
 	if !m.Valid() {
 		return "", fmt.Errorf("base image verify mode %q: %w", s, ErrInvalidBaseImage)
+	}
+	return m, nil
+}
+
+// ParseCacheVerifyMode converts user input to a RemoteCacheVerifyMode.
+func ParseCacheVerifyMode(s string) (RemoteCacheVerifyMode, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return CacheVerifyAuto, nil
+	}
+	m := RemoteCacheVerifyMode(s)
+	if !m.Valid() {
+		return "", fmt.Errorf("cache verify mode %q: %w", s, ErrInvalidRequest)
 	}
 	return m, nil
 }
@@ -574,6 +598,9 @@ type BuildRequest struct {
 
 	// AllowIncompleteScan permits the build to succeed even if vulnerability database lookups fail.
 	AllowIncompleteScan bool
+
+	// CacheVerify configures cryptographic signature verification on candidate remote cache-hit images.
+	CacheVerify RemoteCacheVerifyOptions
 }
 
 // Normalize fills in defaults in place. It is idempotent, it never fails, and
@@ -624,6 +651,13 @@ func (r *BuildRequest) Normalize() {
 		if ref, ok := r.BaseImage.Preset.DefaultRef(); ok {
 			r.BaseImage.Ref = ref
 		}
+	}
+
+	if r.CacheVerify.VerifyMode == "" {
+		r.CacheVerify.VerifyMode = CacheVerifyAuto
+	}
+	if r.CacheVerify.VerifyMode != CacheVerifyNone {
+		r.CacheVerify.VerifySignature = true
 	}
 
 	if r.SBOM.Format == "" {
@@ -722,6 +756,10 @@ func (r BuildRequest) Validate() error {
 
 	if r.FailOnCVE != "" && !r.FailOnCVE.Valid() {
 		return fmt.Errorf("fail-on-cve severity %q: %w", r.FailOnCVE, ErrInvalidRequest)
+	}
+
+	if r.CacheVerify.VerifyMode != "" && !r.CacheVerify.VerifyMode.Valid() {
+		return fmt.Errorf("cache verify mode %q: %w", r.CacheVerify.VerifyMode, ErrInvalidRequest)
 	}
 
 	if r.Concurrency < 0 {

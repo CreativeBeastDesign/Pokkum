@@ -1714,6 +1714,19 @@ func TestResolve_UpdateBase_DoesNotPreserveStaleMirrorRefForNewDigest(t *testing
 }
 
 func TestResolver_RecordScanResult(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	ref := pushImage(t, s, "app/distroless:latest", ports.LinuxAMD64)
+	parsed, err := name.ParseReference(ref, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	desc, err := remote.Get(parsed)
+	if err != nil {
+		t.Fatalf("remote.Get: %v", err)
+	}
+
 	tmpDir := t.TempDir()
 	lockPath := filepath.Join(tmpDir, "pokkum.lock")
 
@@ -1721,10 +1734,10 @@ func TestResolver_RecordScanResult(t *testing.T) {
 		Version:   lockfileutils.LockfileSchemaVersion,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		Bases: map[string]ports.BaseLockEntry{
-			string(ports.BaseImageDistroless): {
-				Ref:       "gcr.io/distroless/cc-debian12:nonroot",
-				Digest:    "sha256:1111222233334444555566667777888811112222333344445555666677778888",
-				PinnedRef: "gcr.io/distroless/cc-debian12@sha256:1111222233334444555566667777888811112222333344445555666677778888",
+			string(ports.BaseImageCustom): {
+				Ref:       ref,
+				Digest:    desc.Digest.String(),
+				PinnedRef: ref,
 				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 			},
 		},
@@ -1735,7 +1748,7 @@ func TestResolver_RecordScanResult(t *testing.T) {
 
 	r := NewResolver(nil)
 	scan := ports.ScanResult{
-		Target:           "gcr.io/distroless/cc-debian12@sha256:1111222233334444555566667777888811112222333344445555666677778888",
+		Target:           ref,
 		Passed:           false,
 		MaxSeverityFound: ports.SeverityCritical,
 		Vulnerabilities: []ports.Vulnerability{
@@ -1747,7 +1760,7 @@ func TestResolver_RecordScanResult(t *testing.T) {
 		},
 	}
 
-	err := r.RecordScanResult(context.Background(), lockPath, ports.BaseImageDistroless, scan)
+	err = r.RecordScanResult(context.Background(), lockPath, ports.BaseImageCustom, scan)
 	if err != nil {
 		t.Fatalf("RecordScanResult: %v", err)
 	}
@@ -1757,7 +1770,7 @@ func TestResolver_RecordScanResult(t *testing.T) {
 		t.Fatalf("LoadLockfile: %v", err)
 	}
 
-	entry, ok := lockfileutils.GetLockedBase(updatedLF, string(ports.BaseImageDistroless))
+	entry, ok := lockfileutils.GetLockedBase(updatedLF, string(ports.BaseImageCustom))
 	if !ok {
 		t.Fatalf("missing locked base entry")
 	}
@@ -1770,5 +1783,26 @@ func TestResolver_RecordScanResult(t *testing.T) {
 	}
 	if entry.MaxSeverity != string(ports.SeverityCritical) {
 		t.Errorf("MaxSeverity = %s, want critical", entry.MaxSeverity)
+	}
+
+	// Verify Resolve reads back the scan audit fields from the lockfile
+	resolved, err := r.Resolve(context.Background(), ports.BaseImageRequest{
+		Preset:       ports.BaseImageCustom,
+		Ref:          ref,
+		LockfilePath: lockPath,
+		Offline:      true,
+		Platforms:    []ports.Platform{ports.LinuxAMD64},
+	})
+	if err != nil {
+		t.Fatalf("Resolve offline: %v", err)
+	}
+	if resolved.LastScannedAt != entry.LastScannedAt {
+		t.Errorf("resolved.LastScannedAt = %q, want %q", resolved.LastScannedAt, entry.LastScannedAt)
+	}
+	if resolved.VulnerabilitiesCount != 3 {
+		t.Errorf("resolved.VulnerabilitiesCount = %d, want 3", resolved.VulnerabilitiesCount)
+	}
+	if resolved.MaxSeverity != string(ports.SeverityCritical) {
+		t.Errorf("resolved.MaxSeverity = %q, want %q", resolved.MaxSeverity, string(ports.SeverityCritical))
 	}
 }

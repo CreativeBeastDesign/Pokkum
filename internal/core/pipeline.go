@@ -359,22 +359,40 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 
 		if req.BaseImage.Offline || req.Hermetic {
 			// The scanner needs to query a remote vulnerability database, which an
-			// offline/hermetic build cannot do by design — same reasoning as
-			// --allow-incomplete below: a build that never inspected the base
-			// image is not the same as one that inspected it and found nothing.
-			//
-			// Skipping this quietly is fine when no CVE gate was requested. But
-			// when the operator explicitly asked for --fail-on-cve (or set
-			// POKKUM_FAIL_ON_CVE), a silent skip would make them believe the gate
-			// ran and passed, when it never executed at all. Fail closed, exactly
-			// like the incomplete-scan case, unless AllowIncompleteScan
-			// (--allow-incomplete) says the operator has already accepted that
-			// tradeoff.
-			if failGateActive {
+			// offline/hermetic build cannot do by design. If pokkum.lock already
+			// recorded a previous scan audit, we read it back.
+			if base.LastScannedAt != "" {
+				log.Info("using cached base image vulnerability audit from pokkum.lock",
+					"last_scanned_at", base.LastScannedAt,
+					"vulns", base.VulnerabilitiesCount,
+					"max_severity", base.MaxSeverity)
+
+				if failGateActive {
+					if base.MaxSeverity != "" {
+						recordedSev, err := ports.ParseSeverity(base.MaxSeverity)
+						if err != nil {
+							if req.AllowIncompleteScan {
+								log.Warn("cached base image vulnerability audit contains invalid severity level; proceeding because --allow-incomplete was set", "max_severity", base.MaxSeverity, "err", err)
+							} else {
+								return BuildResult{}, fmt.Errorf("cached base image vulnerability audit from %s has invalid max severity %q: %w", base.LastScannedAt, base.MaxSeverity, ErrScanIncomplete)
+							}
+						} else if recordedSev.Rank() >= effectiveFailOn.Rank() {
+							return BuildResult{}, fmt.Errorf("cached base image vulnerability audit from %s exceeds threshold %s (max severity: %s, %d vulnerabilities): %w",
+								base.LastScannedAt, effectiveFailOn, base.MaxSeverity, base.VulnerabilitiesCount, ErrVulnerabilityThresholdExceeded)
+						}
+					} else if base.VulnerabilitiesCount > 0 {
+						if req.AllowIncompleteScan {
+							log.Warn("cached base image vulnerability audit recorded vulnerabilities but missing max severity; proceeding because --allow-incomplete was set", "vulns", base.VulnerabilitiesCount)
+						} else {
+							return BuildResult{}, fmt.Errorf("cached base image vulnerability audit from %s recorded %d vulnerabilities but missing max severity: %w", base.LastScannedAt, base.VulnerabilitiesCount, ErrScanIncomplete)
+						}
+					}
+				}
+			} else if failGateActive {
 				if req.AllowIncompleteScan {
-					log.Warn("base image vulnerability scan skipped: offline/hermetic build cannot reach the vulnerability database; proceeding because --allow-incomplete was set", "offline", req.BaseImage.Offline, "hermetic", req.Hermetic, "failOnCVE", effectiveFailOn)
+					log.Warn("base image vulnerability scan skipped: offline/hermetic build cannot reach the vulnerability database and no previous scan is recorded in pokkum.lock; proceeding because --allow-incomplete was set", "offline", req.BaseImage.Offline, "hermetic", req.Hermetic, "failOnCVE", effectiveFailOn)
 				} else {
-					return BuildResult{}, fmt.Errorf("base image vulnerability scan cannot run in offline/hermetic mode, but a CVE gate (fail-on-cve=%s) is active: %w (pass --allow-incomplete to proceed without a scan, or drop --fail-on-cve for this build)", effectiveFailOn, ErrScanIncomplete)
+					return BuildResult{}, fmt.Errorf("base image vulnerability scan cannot run in offline/hermetic mode and no previous scan is recorded in pokkum.lock (fail-on-cve=%s): %w (pass --allow-incomplete to proceed without a scan, or drop --fail-on-cve for this build)", effectiveFailOn, ErrScanIncomplete)
 				}
 			} else {
 				log.Debug("base image vulnerability scan skipped: offline/hermetic build cannot reach the vulnerability database", "offline", req.BaseImage.Offline, "hermetic", req.Hermetic)
@@ -449,25 +467,19 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 
 	// Stage 4.5: Composite Remote OCI Input Caching check.
 	//
-	// Deliberately excluded whenever req.Sign is set: a cache hit reconciles
-	// req.Tags straight to a previously-pushed digest without this build ever
-	// running its own SBOM attachment or signing step (stage 10 / the sign
-	// block below), so trusting a hit is only safe when this build was never
-	// going to attest anything anyway. A signed build must always run a
-	// fresh build and a fresh sign, so its SLSA/Cosign/DSSE attestations are
-	// provably produced by this run — never silently inherited from whatever
-	// pushed the cache-<hash> tag, which may be a different, less-trusted
-	// actor with only cache-tag push access (e.g. an unprivileged PR-build
-	// job) rather than release-tag push authority.
-	//
-	// This does not make the cache fully forgery-proof even for unsigned
-	// builds: CheckRemoteCache still trusts tag existence alone, so anyone
-	// with push access to this repo's cache-<hash> tags can still poison an
-	// unsigned build's cache entry. Closing that fully would mean verifying
-	// a real signature on the cache-hit image before reconciling tags — a
-	// larger follow-up tracked in Roadmap.md, not attempted here.
+	// Cache-poisoning mitigation and verification:
+	// A candidate cache hit is validated against cryptographic signatures
+	// (Cosign static-key or Sigstore keyless) before release tags are promoted.
+	// For signed builds, cache hits are only permitted if signature verification
+	// is active and succeeds, ensuring release tags are never promoted to
+	// unverified digests. If verification fails or is missing, the cache hit
+	// is rejected and the build falls through cleanly to compilation from source.
 	var compositeInputHash string
-	if deps.RemoteCache != nil && req.Output.Mode == OutputPush && !req.Compile.NoCache && !req.Sign {
+	allowCache := deps.RemoteCache != nil && req.Output.Mode == OutputPush && !req.Compile.NoCache
+	if req.Sign && (req.CacheVerify.VerifyMode == CacheVerifyNone || !req.CacheVerify.VerifySignature) {
+		allowCache = false
+	}
+	if allowCache {
 		var pStrs []string
 		for _, p := range req.Platforms {
 			pStrs = append(pStrs, p.String())
@@ -509,9 +521,14 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				Insecure:           req.Insecure,
 				UserAgent:          deps.UserAgent,
 				RegistryConfigPath: req.RegistryConfigPath,
+				Verify:             req.CacheVerify,
 			})
 			if err == nil && cacheRes.Hit {
-				log.Info("remote input cache hit; build skipped", "repo", req.Repo, "digest", cacheRes.Digest.String(), "inputHash", inputHash)
+				if cacheRes.Verified {
+					log.Info("remote input cache hit; signature verified; build skipped", "repo", req.Repo, "digest", cacheRes.Digest.String(), "inputHash", inputHash, "signer", cacheRes.SignerIdentity)
+				} else {
+					log.Info("remote input cache hit; build skipped", "repo", req.Repo, "digest", cacheRes.Digest.String(), "inputHash", inputHash)
+				}
 				res := BuildResult{
 					Image: ImageResult{
 						Mode:      req.Output.Mode,

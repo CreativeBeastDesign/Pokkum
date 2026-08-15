@@ -55,6 +55,52 @@ type RemoteCacheInputRequest struct {
 	SBOMNoAttach        bool
 }
 
+// RemoteCacheVerifyMode specifies how signature verification on cache-hit images is performed.
+type RemoteCacheVerifyMode string
+
+const (
+	// CacheVerifyAuto selects keyless if expected identity is set, or static-key if public key is set.
+	CacheVerifyAuto RemoteCacheVerifyMode = "auto"
+	// CacheVerifyStaticKey enforces Cosign Simple Signing verification with a static public key.
+	CacheVerifyStaticKey RemoteCacheVerifyMode = "static-key"
+	// CacheVerifyKeyless enforces Sigstore keyless verification (Fulcio+Rekor).
+	CacheVerifyKeyless RemoteCacheVerifyMode = "keyless"
+	// CacheVerifyNone disables signature verification on cache hits.
+	CacheVerifyNone RemoteCacheVerifyMode = "none"
+)
+
+// Valid reports whether m is one of the recognized verification modes.
+func (m RemoteCacheVerifyMode) Valid() bool {
+	switch m {
+	case CacheVerifyAuto, CacheVerifyStaticKey, CacheVerifyKeyless, CacheVerifyNone:
+		return true
+	default:
+		return false
+	}
+}
+
+// RemoteCacheVerifyOptions specifies criteria for cryptographically verifying a candidate cache hit
+// before promoting release tags or accepting the hit.
+type RemoteCacheVerifyOptions struct {
+	// VerifySignature enables signature verification on candidate cache-hit images.
+	VerifySignature bool
+
+	// VerifyMode selects between auto, static-key, and keyless verification.
+	VerifyMode RemoteCacheVerifyMode
+
+	// PublicKeyPEM is the PEM-encoded public key bytes for static-key verification.
+	PublicKeyPEM []byte
+
+	// KeylessIdentity is the expected certificate identity for keyless Sigstore verification.
+	KeylessIdentity KeylessIdentity
+
+	// TrustedRootJSON is the optional custom Sigstore trusted root snapshot.
+	TrustedRootJSON []byte
+
+	// Strict causes verification failure to return an error rather than falling back to a fresh build.
+	Strict bool
+}
+
 // RemoteCacheRequest describes a query to the remote composite OCI input cache.
 type RemoteCacheRequest struct {
 	Repo               string
@@ -63,14 +109,17 @@ type RemoteCacheRequest struct {
 	Insecure           bool
 	UserAgent          string
 	RegistryConfigPath string
+	Verify             RemoteCacheVerifyOptions
 }
 
 // RemoteCacheResult is the outcome of a remote cache lookup.
 type RemoteCacheResult struct {
-	Hit    bool
-	Digest v1.Hash
-	Ref    string
-	Tags   []string
+	Hit            bool
+	Digest         v1.Hash
+	Ref            string
+	Tags           []string
+	Verified       bool
+	SignerIdentity string
 }
 
 // RemoteCacher defines the driven port for computing composite input hashes and
@@ -80,6 +129,6 @@ type RemoteCacher interface {
 	ComputeInputHash(ctx context.Context, req RemoteCacheInputRequest) (string, error)
 
 	// Check queries whether an image matching req.InputHash exists in req.Repo.
-	// On hit, it reconciles req.Tags to point to that digest and returns the result.
+	// On hit and successful verification (if enabled), it reconciles req.Tags to point to that digest and returns the result.
 	Check(ctx context.Context, req RemoteCacheRequest) (RemoteCacheResult, error)
 }

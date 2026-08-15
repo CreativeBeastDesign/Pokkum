@@ -334,6 +334,15 @@ type BaseImage struct {
 	// IsIndex reports whether Ref resolved to a multi-platform index rather
 	// than a single image. Informational.
 	IsIndex bool
+
+	// LastScannedAt is the RFC3339 timestamp when the base image was last audited for vulnerabilities.
+	LastScannedAt string
+
+	// VulnerabilitiesCount is the number of vulnerabilities found in the last scan.
+	VulnerabilitiesCount int
+
+	// MaxSeverity is the maximum severity level detected in the last scan.
+	MaxSeverity string
 }
 
 // BaseImageResolver fetches the base image and proves it can actually run a

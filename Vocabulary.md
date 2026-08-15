@@ -77,15 +77,22 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--bun-variant` | — | — | `standard` | Bun CPU variant (`standard` [AVX2 required on x86-64] or `baseline`). |
 | `--strategy` | — | — | `layered` | Packaging strategy (`layered` [5-layer layout] or `exe` [single executable]). |
 | `--compression` | — | — | `gzip` | Layer compression algorithm (`gzip` or `zstd`). |
+| `--sourcemap` | — | `POKKUM_SOURCEMAP` | `false` | Generate and preserve source maps in compiled bundles and vendor layers. |
 | `--no-prune` | — | — | `false` | Disable build-time stripping of non-runtime files (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests) from `/app/vendor`. |
 | `--keep-vendor` | — | — | (none) | Custom glob pattern(s) of vendor files to preserve during pruning, repeatable (e.g. `--keep-vendor='*.md'`). |
 | `--no-precompress` | — | — | `false` | Disable build-time static asset pre-compression (`.gz`, `.br`, `.zst`) for `/app/client`. |
 | `--no-strip` | — | — | `false` | Disable build-time stripping of unneeded debug symbols from native `.node` ELF addons. |
 | `--no-cache` | — | — | `false` | Disable checking and publishing to the remote composite OCI input cache. |
+| `--no-cache-verify` | — | — | `false` | Disable cryptographic signature verification on remote cache-hit images. |
+| `--cache-verify-mode` | — | `POKKUM_CACHE_VERIFY_MODE` | `auto` | Cache image signature verification mode: `auto` (default), `static-key`, or `keyless`. |
+| `--cache-verify-key` | — | `POKKUM_CACHE_PUBKEY` | (none) | Path or PEM string for static Cosign public key to verify remote cache hits. |
+| `--cache-keyless-identity` | — | `POKKUM_CACHE_KEYLESS_IDENTITY` | (none) | Expected Fulcio certificate Subject Alternative Name for keyless cache verification. |
+| `--cache-keyless-issuer` | — | `POKKUM_CACHE_KEYLESS_ISSUER` | (none) | Expected OIDC issuer for keyless cache verification. |
+| `--cache-verify-strict` | — | — | `false` | Strict cache verification: fail build if candidate cache tag has invalid signature instead of falling back to clean rebuild. |
 
 Positional: `[dir]` — project directory, defaults to `.`.
 
-Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode), `SOURCE_DATE_EPOCH` (reproducible build timestamp), and `POKKUM_CACHE_DIR` (custom base cache directory for layers and runtime binaries; defaults to `~/.cache/pokkum`).
+Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode), `SOURCE_DATE_EPOCH` (reproducible build timestamp), `POKKUM_CACHE_DIR` (custom base cache directory for layers and runtime binaries; defaults to `~/.cache/pokkum`), `POKKUM_SOURCEMAP` (enable source map preservation), `POKKUM_CACHE_PUBKEY` (static public key for remote cache verification), `POKKUM_CACHE_VERIFY_MODE`, `POKKUM_CACHE_KEYLESS_IDENTITY`, and `POKKUM_CACHE_KEYLESS_ISSUER`.
 
 ---
 
