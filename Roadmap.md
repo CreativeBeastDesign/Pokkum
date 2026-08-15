@@ -128,7 +128,7 @@ The post-v1.0 milestones addressed critical supply chain verification, CVE gatin
 
 ### 2. CLI Binary & Footprint Reduction
 - [x] **Targeted Scanner vs Monolithic Syft**: Replace the monolithic `anchore/syft` dependency with lightweight, zero-dependency parsers for `dpkg`, `apk`, and `package.json` to cut CLI binary size by ~50MB. *(⚠️ Requires long-term maintenance: Must track changes in Debian/Alpine package database formats and NPM ecosystem lockfile specs)* Image/tarball scanning (`pokkum scan <image>`) had a confirmed bug: it read only the `dependencies`/`devDependencies` maps out of vendored `package.json` files, never their own `name`/`version` — so it never actually cataloged the real installed npm packages Pokkum ships, undermining CVE lookups against the built image. Fixed to record each vendored package's own declared identity; see `TestExtractImagePackages_VendoredPackageJSON`.
-- [ ] **Compressed Embedded Supervisor Binaries**: Pre-compress `pokkum-init` binaries with `zstd` before `go:embed` and decompress on-the-fly, saving ~8MB.
+- [x] **Compressed Embedded Supervisor Binaries**: Pre-compress `pokkum-init` binaries with `zstd` before `go:embed` and decompress on-the-fly, saving ~8MB.
 - [ ] **Compiler Build Optimization Flags**: Enforce `-trimpath -ldflags="-s -w"` in release pipelines for significant binary size reduction.
 
 ### 3. Container Image Size Reduction

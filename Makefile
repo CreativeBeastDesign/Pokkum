@@ -25,19 +25,30 @@ build: supervisor  ##  Build the pokkum CLI binary (depends on supervisor)
 		-o ./pokkum \
 		./cmd/pokkum
 
-supervisor:  ##  Cross-compile supervisor binaries for Linux amd64/arm64
-	@echo "Building supervisor binaries..."
-	@mkdir -p ./internal/adapters/supervisor/bin
-	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-		-trimpath \
-		-ldflags "-s -w" \
-		-o ./internal/adapters/supervisor/bin/pokkum-init-linux-amd64 \
-		./supervisor/cmd/pokkum-init
-	@CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-		-trimpath \
-		-ldflags "-s -w" \
-		-o ./internal/adapters/supervisor/bin/pokkum-init-linux-arm64 \
-		./supervisor/cmd/pokkum-init
+SUPERVISOR_BIN := ./internal/adapters/supervisor/bin
+
+# Cross-compile the pokkum-init supervisor binaries for Linux amd64/arm64 and
+# embed them zstd-compressed (see internal/adapters/supervisor and
+# internal/ports/supervisor.go). Raw ELF binaries are built into a temporary
+# staging directory, compressed into $(SUPERVISOR_BIN)/pokkum-init-*.zst, and
+# never left behind: go:embed all:bin must only see .zst (plus .gitkeep) so the
+# pokkum CLI embeds ~4.7 MB instead of ~12 MB of loose ELF bytes.
+supervisor:  ##  Cross-compile + zstd-compress supervisor binaries for Linux amd64/arm64
+	@echo "Building + compressing supervisor binaries..."
+	@mkdir -p $(SUPERVISOR_BIN)
+	@stage=$$(mktemp -d); \
+	for arch in amd64 arm64; do \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build \
+			-trimpath \
+			-ldflags "-s -w" \
+			-o $$stage/pokkum-init-linux-$$arch \
+			./supervisor/cmd/pokkum-init || { rm -rf $$stage; exit 1; }; \
+		go run ./scripts/compress-zstd.go $$stage/pokkum-init-linux-$$arch $(SUPERVISOR_BIN)/pokkum-init-linux-$$arch.zst || { rm -rf $$stage; exit 1; }; \
+	done; \
+	rm -rf $$stage; \
+	rm -f $(SUPERVISOR_BIN)/pokkum-init-linux-amd64 $(SUPERVISOR_BIN)/pokkum-init-linux-arm64
+	@echo "Supervisor binaries compressed into $(SUPERVISOR_BIN)/"
+	@ls -la $(SUPERVISOR_BIN)
 
 test:  ##  Run all tests (go test ./...)
 	@echo "Running tests..."

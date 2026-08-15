@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -237,6 +239,94 @@ func TestBinaryConcurrency(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		if err := <-results; err != nil {
 			t.Error(err)
+		}
+	}
+}
+
+// TestDecodeSupervisorRoundTrip guards the core invariant of compressed embedding:
+// zstd-compressing a pokkum-init-style blob (ELF-prefixed) with the same encoder
+// settings `make supervisor` uses, then decoding it through decodeSupervisor,
+// must reproduce the original bytes exactly. This is what guarantees Binary()
+// returns the bit-identical raw binary the packager writes to /pokkum/init even
+// though the embedded representation is compressed.
+func TestDecodeSupervisorRoundTrip(t *testing.T) {
+	// A realistic supervisor payload: several KB of ELF-prefixed, mostly
+	// repetitive bytes (code sections compress well, like a real binary).
+	raw := make([]byte, 0, 32*1024)
+	raw = append(raw, []byte("\x7fELF\x02\x01\x01")...)
+	for i := 0; i < 4*1024; i++ {
+		raw = append(raw, byte(i%251))
+	}
+
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	compressed := enc.EncodeAll(raw, nil)
+
+	if len(compressed) >= len(raw) {
+		t.Fatalf("test payload did not compress (compressed=%d raw=%d); fixture too incompressible", len(compressed), len(raw))
+	}
+
+	got, err := decodeSupervisor(compressed)
+	if err != nil {
+		t.Fatalf("decodeSupervisor: %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Errorf("round-trip mismatch: got %d bytes, want %d", len(got), len(raw))
+	}
+
+	// The decoded slice must be owner-owned: mutating it must not affect a
+	// subsequent decode (the fresh allocation each DecodeAll produces).
+	if len(got) > 0 {
+		got[0] = ^got[0]
+		again, err := decodeSupervisor(compressed)
+		if err != nil {
+			t.Fatalf("second decodeSupervisor: %v", err)
+		}
+		if again[0] == got[0] {
+			t.Error("mutation of decoded slice affected a subsequent decode; output is not owner-owned")
+		}
+	}
+}
+
+// TestDecodeSupervisorCorrupt verifies that garbage (a present-but-unusable
+// embedded blob) surfaces as a decoder error rather than a panic or silent
+// success. This is the decode-seam counterpart of Binary() wrapping the failure
+// as errSupervisorCorrupt.
+func TestDecodeSupervisorCorrupt(t *testing.T) {
+	for _, bad := range [][]byte{
+		[]byte("this is definitely not a zstd frame"),
+		{},
+		{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00}, // valid zstd magic, garbage payload
+	} {
+		if _, err := decodeSupervisor(bad); err == nil {
+			t.Errorf("decodeSupervisor(%d bytes) succeeded on corrupt input; want error", len(bad))
+		}
+	}
+}
+
+// TestBinaryRealAssetsDecompress verifies that when the generated .zst assets are
+// embedded (i.e. `make supervisor` has been run), Binary returns valid raw ELF for
+// every supported platform — this is the end-to-end confirmation that the embedded
+// compressed representation decompresses cleanly through the public seam. When the
+// assets are absent (fresh checkout), the test skips exactly like the other
+// binary-presence tests.
+func TestBinaryRealAssetsDecompress(t *testing.T) {
+	p := New(slog.Default())
+	for _, plat := range ports.SupportedPlatforms {
+		data, err := p.Binary(context.Background(), plat)
+		if err != nil {
+			if errors.Is(err, core.ErrSupervisorUnavailable) {
+				t.Skipf("supervisor binary not embedded for %s; run `make supervisor` first", plat)
+			}
+			t.Fatalf("Binary(%s): %v", plat, err)
+		}
+		if len(data) == 0 {
+			t.Fatalf("Binary(%s) returned empty slice", plat)
+		}
+		if !bytes.HasPrefix(data, []byte("\x7fELF")) {
+			t.Errorf("Binary(%s): decompressed bytes do not start with ELF magic; got %v", plat, data[:4])
 		}
 	}
 }

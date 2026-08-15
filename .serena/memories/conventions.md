@@ -33,6 +33,12 @@
   - Eliminates 2-3 redundant disk reads and multiple compression passes, answering `v1.Layer` queries in `O(1)` time with byte-for-byte deterministic reproducibility.
 - **Pre-Calculated & Cached Immutable Layers (`internal/adapters/layercacheutils`)**:
   - `layercacheutils` caches compressed immutable layer blobs (`/usr/local/bin/bun`, `/pokkum/init`) in `~/.cache/pokkum/layers/` (or `$POKKUM_CACHE_DIR/layers`), saving ~100MB of tarring and gzip/zstd compression per build.
+- **Compressed Embedded Supervisor Binaries (`internal/adapters/supervisor`)**:
+  - `make supervisor` cross-compiles `pokkum-init` for linux amd64/arm64 into a temp staging dir and embeds them zstd-compressed (`.zst`, best compression) into `bin/`, removing raw ELF so `go:embed all:bin` embeds ~4.7MB instead of ~12MB.
+  - `ports.SupervisorProvider.Binary`/`Version` decompress on-the-fly via a shared lazy `zstd.Decoder` (`supervisorDecoder`, `sync.OnceValue`) and a `decodeSupervisor` seam; raw binary output is owner-owned and concurrency-safe.
+  - `Version()` hashes the decompressed raw amd64 bytes, so supervisor version labels are unchanged for identical binaries.
+  - Empty or corrupt embedded blobs yield `errSupervisorCorrupt` (distinct from `core.ErrSupervisorUnavailable` for an absent asset), so `Binary()` never returns empty bytes on a nil error.
+  - Compressor helper: `scripts/compress-zstd.go` (single-shot `EncodeAll`, `SpeedBestCompression`), deterministic for reproducible releases; no external zstd CLI dependency.
   - Cache keys are deterministically computed via `ComputeKey(targetPath, contentSHA256, platform, modTime, compression)`.
   - Automatic fallback to temp directories or in-memory layer generation if disk cache is unwritable.
 - **Vendor Layer Pruning & Zero-Mutation Sandbox (`internal/adapters/pruneutils`)**:

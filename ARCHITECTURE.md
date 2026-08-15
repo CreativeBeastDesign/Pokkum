@@ -96,7 +96,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `registry`: Handles OCI registry authentication (including per-registry auth chains from a `docker config.json`-style file via `--registry-config`), blob uploads, and index pushes.
    - `registryutils`: Utility package for resolving Docker `config.json` auth keychains, executing dynamic credential helpers (`credHelpers`, `credsStore`), and caching credentials in-memory.
    - `sbom`: Generates deterministic SPDX 2.3 or CycloneDX 1.5 SBOMs natively without external cataloger dependencies.
-   - `supervisor`: Embedded supervisor binary assets (`/pokkum/init`).
+   - `supervisor`: Embedded `pokkum-init` supervisor binary assets (`/pokkum/init`), stored zstd-compressed to shrink the CLI footprint and decompressed on-the-fly to the raw ELF by `ports.SupervisorProvider`.
    - `k8s`: Kubernetes manifest inspection, document rewriting, and `pokkum://` schema resolution.
    - `sveltekit`: Checks `@jesterkit/exe-sveltekit` adapter installation in target projects.
    - `cosign`: Signs OCI images, attaches Cosign signatures to OCI registries, and implements `ports.ReleaseVerifier` for release signature and SHA-256 checksum verification.
@@ -215,6 +215,8 @@ Because Pokkum container images run without Docker or a full OS init system, the
 * **Zombie Reaping**: Automatically reaps orphaned child processes using `unix.Wait4`.
 * **Graceful Shutdown**: Waits up to `POKKUM_SHUTDOWN_TIMEOUT` (default `30s`) for `/app/server` to exit before sending `SIGKILL`.
 * **Probes**: Exposes `/healthz` (supervisor status) and `/readyz` (app status) on `POKKUM_PROBE_PORT` (default `8081`).
+
+**Compressed embedding**: The `pokkum-init` binaries are cross-compiled by `make supervisor` into the `internal/adapters/supervisor/bin` directory and embedded zstd-compressed (`.zst`) into the `pokkum` CLI, cutting the embedded footprint from ~12 MB to ~4.7 MB. `ports.SupervisorProvider.Binary` decompresses the blob on-the-fly so the bytes written to `/pokkum/init` remain the bit-identical raw ELF — image digests, layer cache keys, and supervisor version labels are unaffected.
 
 ---
 
