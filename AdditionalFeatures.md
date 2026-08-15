@@ -6,7 +6,7 @@
 | ------------------------------------------- | --------- | --------------- | ----------- | -------------------------------------------------------------------------------- | --------------------------------- | -------- |
 | Live Cluster Annotation Inspection          | 8         | 2               | 4           | `kubectl get` pre-flight query in `pokkum apply` to seed deployment history      | `kubectl`                         | Done     |
 | Monorepo Affected-Detection                 | 7         | 1               | 4           | Git-diff input tracking per `pokkum://` app                                      | None                              | Medium   |
-| Static/Prerendered Page Optimization        | 8         | 1               | 4           | Mostly free under layered design; `--static` nginx mode is separate & costlier   | Nginx (only for `--static`)       | Medium   |
+| Static/Prerendered Page Optimization        | 8         | 1               | 4           | Shipped v1.0: prerendered slim layer (layered) + `--static` served by embedded Go `pokkum-static` (no nginx) | Embedded Go `pokkum-static`        | Done     |
 | Multi-Environment Management                | 7         | 3               | 5           | Config templating; secret-manager integrations                                   | Vault / AWS Secrets               | Medium   |
 | Hooks System                                | 6         | 2               | 5           | Small CLI size; cross-platform shell exec; defuses Plugin System demand          | Shell / Bun                       | Medium   |
 | Policy as Code                              | 5         | 6               | 7           | +15MB CLI size (embedding OPA/Rego); high policy maintenance                     | OPA / Rego                        | Low      |
@@ -84,9 +84,9 @@ When the container exits with a non-zero status during local testing, automatica
 
 ### Static/Prerendered Page Optimization
 
-- Extract prerendered pages to a separate slim layer
-- Generate immutable Cache-Control headers based on build output
-- `--static` flag to build a fully static site to an Nginx-alpine OCI image (zero JS runtime)
+- Extract prerendered pages to a separate slim OCI layer (`/app/prerendered`), served via the patched `handler.js` honoring `POKKUM_PRERENDERED_DIR` (layered strategy)
+- Generate immutable Cache-Control headers on prerendered assets based on build output
+- `--static` flag compiling a fully static site onto a minimal libc-free `chainguard/static` image served by the embedded Go `pokkum-static` PID-1 file server (zero JS/Bun runtime, no nginx)
 
 ### Asset Optimization Pipeline
 

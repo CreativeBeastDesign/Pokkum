@@ -78,7 +78,8 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--offline` | — | — | `false` | Strictly enforce using `pokkum.lock` and local cache without remote registry calls. |
 | `--bun-binary` | — | — | (none) | Local filesystem path escape hatch to a `bun` executable (skips resolution/download). |
 | `--bun-variant` | — | — | `standard` | Bun CPU variant (`standard` [AVX2 required on x86-64] or `baseline`). |
-| `--strategy` | — | — | `layered` | Packaging strategy (`layered` [5-layer layout] or `exe` [single executable]). |
+| `--strategy` | — | — | `layered` | Packaging strategy (`layered` [8-layer layout], `static` [zero-JS static site], or `exe` [single executable, deprecated]). |
+| `--static` | — | — | `false` | Shorthand for `--strategy=static`: compile a purely static site onto a minimal libc-free `chainguard/static` image served by the embedded `pokkum-static` PID-1 file server (no Bun runtime, no compiled executable). Conflicts with `--strategy=exe`; defaults the base to the static image when no `--base`/`--hardened` is given. |
 | `--compression` | — | — | `gzip` | Layer compression algorithm (`gzip` or `zstd`). |
 | `--sourcemap` | — | `POKKUM_SOURCEMAP` | `false` | Generate and preserve source maps in compiled bundles and vendor layers. |
 | `--no-prune` | — | — | `false` | Disable build-time stripping of non-runtime files (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests) from `/app/vendor`. |
@@ -271,6 +272,8 @@ These configure the image's *runtime* behavior inside the container (read by `/p
 | `POKKUM_PROBE_PORT` | `8081` | Port the supervisor serves `/healthz` and `/readyz` on. |
 | `POKKUM_SHUTDOWN_TIMEOUT` | `30s` | Grace period after `SIGTERM` before `SIGKILL`. |
 | `POKKUM_REQUIRED_ENV` | (none) | Comma-separated list of required environment variable names that must be present and non-empty at container boot; supervisor fails fast if any are missing. |
+| `POKKUM_PRERENDERED_DIR` | (none) | Path (in the image) of the mounted prerendered pages tree. Set by the packager to `/app/prerendered` for `--strategy=layered`; the patched adapter-node handler serves prerendered pages from here. |
+| `POKKUM_STATIC_ROOTS` | `/app/client:/app/prerendered` | Colon-separated list of static roots that `pokkum-static` serves (via Content-Encoding/Range/ETag) for `--strategy=static` images. Set by the packager at build time. |
 
 ---
 
@@ -281,7 +284,7 @@ Post-v1.0 items from [Roadmap.md](Roadmap.md):
 | Roadmap Item | Proposed Flag(s) | Notes |
 |---|---|---|
 | Monorepo Affected-Detection | `--since=<git-ref>` on `resolve` | Skips unchanged `pokkum://` apps entirely based on git diffs. |
-| Static/Prerendered Page Optimization | `--static` on `build` | Builds a zero-JS-runtime Nginx-alpine image instead of Bun runtime image. |
+| Static/Prerendered Page Optimization (v1.0 — done) | `--static` on `build` | Builds a zero-JS-runtime image served by the embedded Go `pokkum-static` file server (no Bun runtime), plus a dedicated prerendered-page layer for the layered strategy. |
 | Multi-Environment Management | `--target-env=<name>` on `build`/`resolve`/`apply` | Named `--target-env` to avoid colliding with `build`'s OTel `--telemetry-env`. |
 | Hooks System | `pokkum hook pre-build`, `pokkum hook post-build`, `--skip-hooks` | Subcommands run hooks directly; `--skip-hooks` bypasses them during `build`. |
 | Image Provenance Timeline | `pokkum history <image>`, `--output=json` | Reuses standard JSON envelope format. |

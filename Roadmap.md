@@ -153,9 +153,11 @@ Prioritized backlog for ongoing development:
 ### 1. Static / Prerendered Page Optimization (Medium Priority)
 - **Problem**: Fully static or predominantly prerendered SvelteKit sites still incur Bun runtime memory overhead and layer distribution size.
 - **Solution**:
-  - Extract prerendered static assets (`.svelte-kit/output/prerendered`) to a dedicated slim OCI layer with immutable Cache-Control metadata.
-  - Add a `--static` mode compiling purely static sites onto an `nginx:alpine` or minimal static file server image with zero JavaScript runtime overhead.
-- **Flags/Interface**: `--static` on `pokkum build`.
+  - Extract prerendered static assets to a dedicated slim OCI layer with immutable Cache-Control metadata (`/app/prerendered`, layered strategy; adapter-node handler patched to honor `POKKUM_PRERENDERED_DIR`).
+  - Add a `--static` mode compiling purely static sites onto a minimal libc-free `cgr.dev/chainguard/static` image served by the embedded statically-linked `pokkum-static` Go file server (`/pokkum/static`, PID 1) with zero JavaScript/Bun runtime overhead. `pokkum-static` implements Range requests, strong ETags, and Content-Encoding negotiation against the `.gz`/`.br`/`.zst` sidecars `precompressutils` generates.
+- **Flags/Interface**: `--static` on `pokkum build` (shorthand for `--strategy=static`; conflicts with `--strategy=exe`; defaults the base to `chainguard/static` with distroless preset when no `--base`/`--hardened` is given).
+
+**[x] Status: Done** — full static + prerendered pipeline shipped and verified.
 
 ### 2. Policy as Code Enforcement (Low Priority / Backlog)
 - **Problem**: Security compliance rules (e.g., "no critical CVEs", "must contain SBOM", "must run as non-root") are currently validated imperatively across disparate flags.

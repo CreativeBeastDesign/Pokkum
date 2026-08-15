@@ -277,7 +277,7 @@ Pokkum unifies trace spans and metrics into a native, zero-config OpenTelemetry 
 
 ## 8. Layer Caching & Packaging Strategies
 
-Pokkum supports two image compilation strategies controlled via `--strategy=layered|exe` (default: `layered`):
+Pokkum supports three image compilation strategies controlled via `--strategy=layered|exe|static` (default: `layered`; `--static` is the shorthand for `--strategy=static`):
 
 ### N-Layer Arch-Independent Layout (`--strategy=layered`)
 1. **Base Image Layer (Layer 0)**: Distroless Linux runtime (`distroless/cc-debian12:nonroot`).
@@ -287,9 +287,13 @@ Pokkum supports two image compilation strategies controlled via `--strategy=laye
 5. **App Client Layer (Layer 4)**: Static client assets (`/app/client/**`, architecture-independent).
 6. **App Vendor Layer (Layer 5)**: Split dependency JS vendor chunks (`/app/vendor/**`, architecture-independent).
 7. **Native Addon Layer (Layer 6)**: Native `.node` binaries and dynamic `.so` closure (`/app/native/**`, platform-specific), inspected and verified by `ClosuredNativeAdapter`.
+8. **Prerendered Layer (Layer 7)**: Prerendered static pages (`/app/prerendered/**`, architecture-independent). The generated `handler.js` is patched at build time to resolve this tree via the `POKKUM_PRERENDERED_DIR` env, which the packager sets to `/app/prerendered`, so prerendered pages serve from their own slim layer instead of being dropped.
 
 ### Single Executable Strategy (`--strategy=exe`)
 Combines supervisor and standalone compiled Bun binary into a 2-layer image (`/pokkum/init` and `/app/server`).
+
+### Static Strategy (`--strategy=static`)
+Compiles a purely static site (all routes prerendered) onto a minimal libc-free `cgr.dev/chainguard/static` base. There is **no Bun runtime, no server JS, and no separate supervisor**: the embedded statically-linked `pokkum-static` binary (`ports.StaticServerProvider`) is PID 1 at `/pokkum/static`, acting as both entrypoint and probe server. It serves the `/app/client` and `/app/prerendered` trees (the `POKKUM_STATIC_ROOTS` env), performing file serving with Range requests, strong ETags, and Content-Encoding negotiation against the `.gz`/`.br`/`.zst` sidecars `precompressutils` generates. Because the strategy feeds `RemoteCacheInputRequest.Strategy`, static builds get their own remote-cache key space, distinct from layered/exe. Source is `@sveltejs/adapter-static` staged at `.svelte-kit/output`.
 
 ---
 
