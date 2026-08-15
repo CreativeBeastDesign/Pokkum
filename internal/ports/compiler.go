@@ -275,9 +275,33 @@ const (
 	// StrategyExe builds a single compiled executable per architecture (legacy).
 	StrategyExe BuildStrategy = "exe"
 
+	// StrategyStatic builds a purely static site onto a minimal static file
+	// server image (pokkum-static) with no Bun runtime, JS processing or
+	// supervisor orchestration layer. The SvelteKit project is prerendered
+	// during the build, but the running image only serves /app/client and
+	// /app/prerendered files.
+	StrategyStatic BuildStrategy = "static"
+
 	// DefaultBuildStrategy is the default strategy for Pokkum builds.
 	DefaultBuildStrategy = StrategyLayered
 )
+
+// Valid reports whether s is a known strategy. The zero value ("") is NOT
+// valid; core normalises it to DefaultBuildStrategy before validating.
+func (s BuildStrategy) Valid() bool {
+	switch s {
+	case StrategyLayered, StrategyExe, StrategyStatic:
+		return true
+	default:
+		return false
+	}
+}
+
+// ApplyStatic reports whether the strategy produces a purely static image with
+// no Bun runtime and no supervisor layer.
+func (s BuildStrategy) ApplyStatic() bool {
+	return s == StrategyStatic
+}
 
 // PrepareRequest drives stage one of the two-stage compile: running the
 // SvelteKit build so that the adapter emits entrypoint files.

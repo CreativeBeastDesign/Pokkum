@@ -25,6 +25,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/secretguard"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/slsa"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/staticserver"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 )
@@ -66,6 +67,7 @@ type buildFlags struct {
 	bunBinary   string
 	bunVariant  string
 	strategy    string
+	static      bool
 	compression string
 	sourcemap   bool
 
@@ -178,7 +180,9 @@ The project directory defaults to the current working directory.`,
 	cmd.Flags().StringVar(&flags.bunVariant, "bun-variant", "standard",
 		"Bun CPU variant (standard [AVX2 required on x86-64] or baseline)")
 	cmd.Flags().StringVar(&flags.strategy, "strategy", "layered",
-		"Packaging strategy: layered (5-layer arch-independent layout [default]) or exe (single executable)")
+		"Packaging strategy: layered (5-layer arch-independent layout [default]), exe (single executable, deprecated), or static (purely static site served by an embedded Go file server, no Bun runtime)")
+	cmd.Flags().BoolVar(&flags.static, "static", false,
+		"Shorthand for --strategy=static: compile a purely static site onto a minimal libc-free base image, served by an embedded Go file server (ETag/Range/Content-Encoding). Cannot be combined with --strategy.")
 	cmd.Flags().StringVar(&flags.compression, "compression", "gzip",
 		"Layer compression algorithm: gzip (default) or zstd")
 	cmd.Flags().StringSliceVar(&flags.imageLabels, "image-label", nil,
@@ -312,6 +316,26 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		req.Output.TarballPath = flags.tarball
 	} else {
 		req.Output.Mode = core.OutputPush
+	}
+
+	// Reconcile the --static shorthand with an explicit --strategy flag. A
+	// static build compiles a purely static site (no Bun runtime, no bundled
+	// executable) onto a minimal libc-free base, served by the embedded
+	// pokkum-static Go file server.
+	if flags.static && flags.strategy == "exe" {
+		return fmt.Errorf("--static cannot be combined with --strategy=exe (layered, static, or nothing must be used)")
+	}
+	if flags.static {
+		flags.strategy = "static"
+		// Unless the user pinned an explicit base (--base/--hardened), default
+		// to a fully static, libc-free image: the entire point of --static is a
+		// server with no dynamic dependencies. Keep the distroless preset so the
+		// preset's keyless signature-verification defaults still apply; the Ref
+		// merely overrides the preset's cc-debian12 default ref.
+		if basePreset == "" {
+			req.BaseImage.Preset = core.BaseImageDistroless
+			req.BaseImage.Ref = core.StaticBaseRef
+		}
 	}
 
 	// Compile options
@@ -571,11 +595,12 @@ func runCoreBuild(ctx context.Context, deps core.Deps, req core.BuildRequest, op
 func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 	reg := registry.NewAdapter(logger)
 	return core.Deps{
-		Compiler:   bunexec.NewCompiler(logger),
-		BaseImages: baseimage.NewResolver(logger),
-		Supervisor: supervisor.New(logger),
-		Packager:   packager.NewPackager(logger),
-		BunRuntime: bunruntime.NewResolver("", nil),
+		Compiler:     bunexec.NewCompiler(logger),
+		BaseImages:   baseimage.NewResolver(logger),
+		Supervisor:   supervisor.New(logger),
+		StaticServer: staticserver.New(logger),
+		Packager:     packager.NewPackager(logger),
+		BunRuntime:   bunruntime.NewResolver("", nil),
 
 		Registry: reg,
 		Daemon:   reg,

@@ -76,6 +76,12 @@ var (
 	// because it is not something the user can fix in their project.
 	ErrSupervisorUnavailable = errors.New("supervisor binary unavailable")
 
+	// ErrStaticServerUnavailable reports that the pokkum-static binary for a
+	// supported platform is not present in the embedded set. Like
+	// ErrSupervisorUnavailable, this means the pokkum release was built
+	// incorrectly (typically without running `make static-server`).
+	ErrStaticServerUnavailable = errors.New("static server binary unavailable")
+
 	// ErrInvalidBaseImage reports an unparseable base image reference or an
 	// unknown preset.
 	ErrInvalidBaseImage = errors.New("invalid base image")

@@ -6,9 +6,16 @@
 *.out
 /dist/
 /.pokkum/
+/.gocache/
+
+# Stray root-level static server build artifact
+/pokkum-static
 
 # Generated supervisor binaries
 internal/adapters/supervisor/bin/pokkum-init-*
+
+# Generated static server binaries
+internal/adapters/staticserver/bin/pokkum-static-*
 
 # Node/SvelteKit build output in test fixtures
 node_modules/

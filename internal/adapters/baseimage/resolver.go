@@ -298,8 +298,14 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		return nil, fmt.Errorf("baseimage: offline mode enabled but base %q is not locked in %s: %w", req.Preset, req.LockfilePath, core.ErrInvalidBaseImage)
 	}
 
-	if reason, bad := staticBaseReason(ref); bad {
-		return nil, fmt.Errorf("baseimage: %s: %s: %w", ref, reason, core.ErrBaseImageIncompatible)
+	// The static-base gate applies only to dynamically linked payloads. A
+	// --strategy=static build runs the fully static pokkum-static server, so
+	// AllowStatic deliberately lifts it (the caller sets AllowStatic only when
+	// it knows the payload is static).
+	if !req.AllowStatic {
+		if reason, bad := staticBaseReason(ref); bad {
+			return nil, fmt.Errorf("baseimage: %s: %s: %w", ref, reason, core.ErrBaseImageIncompatible)
+		}
 	}
 
 	parsedRef, err := name.ParseReference(ref, nameOpts...)

@@ -234,6 +234,8 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	targetAdapter := "@sveltejs/adapter-node"
 	if req.Strategy == ports.StrategyExe {
 		targetAdapter = "@jesterkit/exe-sveltekit"
+	} else if req.Strategy == ports.StrategyStatic {
+		targetAdapter = "@sveltejs/adapter-static"
 	}
 
 	entrypoint := filepath.Join(req.ProjectDir, "build", "index.js")
@@ -241,6 +243,14 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	if req.Strategy == ports.StrategyExe {
 		entrypoint = filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit", "temp-server", "index.ts")
 		outputDir = filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit")
+	} else if req.Strategy == ports.StrategyStatic {
+		// A static build has no server entrypoint: the entire artifact is
+		// SvelteKit's .svelte-kit/output staging (client + prerendered), which
+		// every adapter populates before it runs. pokkum-static serves those two
+		// trees directly, so outputDir points at the staging dir (see the fan-out
+		// in core).
+		entrypoint = ""
+		outputDir = filepath.Join(req.ProjectDir, ".svelte-kit", "output")
 	}
 
 	// Inject virtual svelte.config.js telemetry/adapter configuration
@@ -295,27 +305,47 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		)
 	}
 
-	if _, err := os.Stat(entrypoint); err != nil {
-		return ports.PrepareResult{}, fmt.Errorf(
-			"bunexec: prepare %s: expected entrypoint %s not found after build (was @jesterkit/exe-sveltekit configured as the adapter?): %w: %w",
-			req.ProjectDir, entrypoint, err, core.ErrPrepareFailed,
-		)
+	if req.Strategy == ports.StrategyStatic {
+		// A static build has no server entrypoint; the artifact we contract on is
+		// SvelteKit's prerendered output staging, which the fan-out packages.
+		if _, err := os.Stat(filepath.Join(outputDir, "prerendered")); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf(
+				"bunexec: prepare %s: expected prerendered output %s after build (was @sveltejs/adapter-static configured as the adapter, with all routes prerenderable?): %w: %w",
+				req.ProjectDir, filepath.Join(outputDir, "prerendered"), err, core.ErrPrepareFailed,
+			)
+		}
+	} else {
+		if _, err := os.Stat(entrypoint); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf(
+				"bunexec: prepare %s: expected entrypoint %s not found after build (was @jesterkit/exe-sveltekit configured as the adapter?): %w: %w",
+				req.ProjectDir, entrypoint, err, core.ErrPrepareFailed,
+			)
+		}
+
+		// @jesterkit/exe-sveltekit's discoverClientAssets walks the filesystem
+		// without sorting, so assets.generated.ts (which temp-server/index.ts
+		// imports and Compile bundles) can list the same set of assets in a
+		// different order between two otherwise-identical builds. That reordering
+		// alone changes the compiled binary's bytes. Normalize it here, once, right
+		// after the SvelteKit build that generated it and before any Compile call
+		// reads it, so every platform compiles against an identically-ordered
+		// entrypoint.
+		assetsPath := filepath.Join(filepath.Dir(entrypoint), assetsGeneratedFilename)
+		if err := normalizeGeneratedAssetsFile(assetsPath); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, err)
+		}
 	}
 
-	// @jesterkit/exe-sveltekit's discoverClientAssets walks the filesystem
-	// without sorting, so assets.generated.ts (which temp-server/index.ts
-	// imports and Compile bundles) can list the same set of assets in a
-	// different order between two otherwise-identical builds. That reordering
-	// alone changes the compiled binary's bytes. Normalize it here, once, right
-	// after the SvelteKit build that generated it and before any Compile call
-	// reads it, so every platform compiles against an identically-ordered
-	// entrypoint.
-	assetsPath := filepath.Join(filepath.Dir(entrypoint), assetsGeneratedFilename)
-	if err := normalizeGeneratedAssetsFile(assetsPath); err != nil {
-		return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, err)
+	// The adapter-node handler resolves prerendered pages from its own
+	// directory by default; Pokkum mounts them in their own /app/prerendered
+	// layer and points the handler at it via POKKUM_PRERENDERED_DIR (set by the
+	// packager). Patch the generated handler in the build sandbox so prerendered
+	// pages actually serve (layered strategy only; static has its own server).
+	if req.Strategy == ports.StrategyLayered {
+		c.patchPrerenderedHandler(outputDir)
 	}
 
-	log.Info("bunexec: prepare complete", "entrypoint", entrypoint)
+	log.Info("bunexec: prepare complete", "entrypoint", entrypoint, "outputDir", outputDir)
 	return ports.PrepareResult{EntrypointPath: entrypoint, OutputDir: outputDir}, nil
 }
 

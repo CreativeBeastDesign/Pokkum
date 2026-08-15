@@ -153,6 +153,25 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		}
 	}
 	rc := req.Runtime.WithDefaults()
+	if req.Strategy == ports.StrategyStatic {
+		// A static image is its own init: pokkum-static is PID 1, so it is both
+		// the entrypoint and the probe server, and its static roots are the
+		// client and prerendered trees Pokkum mounts.
+		rc.Entrypoint = ports.DefaultStaticEntrypoint()
+		if rc.Env == nil {
+			rc.Env = map[string]string{}
+		}
+		rc.Env[ports.EnvStaticRoots] = ports.AppClientDirPrefix + ":" + ports.AppPrerenderedDirPrefix
+	} else if req.Strategy == ports.StrategyLayered && req.AppPrerenderedDir != "" {
+		// Let the patched adapter-node handler locate the prerendered tree Pokkum
+		// mounts at /app/prerendered (see Prepare and the fan-out in core). The
+		// stock handler would otherwise look for it under /app/server/prerendered,
+		// where it no longer lives.
+		if rc.Env == nil {
+			rc.Env = map[string]string{}
+		}
+		rc.Env[ports.EnvPrerenderedDir] = ports.AppPrerenderedDirPrefix
+	}
 	ts := pinnedTime(req.CreatedAt)
 
 	// The base digest is read before anything else expensive: for a lazily
@@ -261,6 +280,68 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 					Layer:     nativeLayer,
 					MediaType: layerMediaType,
 					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppNativeDirPrefix},
+				})
+			}
+		}
+		if req.AppPrerenderedDir != "" {
+			if info, err := os.Stat(req.AppPrerenderedDir); err == nil && info.IsDir() {
+				if !req.NoPrecompress {
+					_ = precompressutils.PrecompressDirectory(req.AppPrerenderedDir, ts)
+				}
+				prerenderedLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppPrerenderedDir, ports.AppPrerenderedDirPrefix, ts, req.Compression)
+				if err != nil {
+					return nil, fmt.Errorf("packager: build %s: prerendered layer: %w", req.Platform, err)
+				}
+				addenda = append(addenda, mutate.Addendum{
+					Layer:     prerenderedLayer,
+					MediaType: layerMediaType,
+					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppPrerenderedDirPrefix},
+				})
+			}
+		}
+	} else if req.Strategy == ports.StrategyStatic {
+		// Static images carry no Bun runtime, no server JS and no supervisor:
+		// pokkum-static is PID 1 and serves the client + prerendered trees.
+		staticLayer, err := buildStaticServerLayer(ctx, req, ts)
+		if err != nil {
+			return nil, err
+		}
+		addenda = append(addenda, mutate.Addendum{
+			Layer:     staticLayer,
+			MediaType: layerMediaType,
+			History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.StaticServerPath},
+		})
+
+		if req.AppClientDir != "" {
+			if info, err := os.Stat(req.AppClientDir); err == nil && info.IsDir() {
+				if !req.NoPrecompress {
+					_ = precompressutils.PrecompressDirectory(req.AppClientDir, ts)
+				}
+				clientLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppClientDir, ports.AppClientDirPrefix, ts, req.Compression)
+				if err != nil {
+					return nil, fmt.Errorf("packager: build %s: client layer: %w", req.Platform, err)
+				}
+				addenda = append(addenda, mutate.Addendum{
+					Layer:     clientLayer,
+					MediaType: layerMediaType,
+					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppClientDirPrefix},
+				})
+			}
+		}
+
+		if req.AppPrerenderedDir != "" {
+			if info, err := os.Stat(req.AppPrerenderedDir); err == nil && info.IsDir() {
+				if !req.NoPrecompress {
+					_ = precompressutils.PrecompressDirectory(req.AppPrerenderedDir, ts)
+				}
+				prerenderedLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppPrerenderedDir, ports.AppPrerenderedDirPrefix, ts, req.Compression)
+				if err != nil {
+					return nil, fmt.Errorf("packager: build %s: prerendered layer: %w", req.Platform, err)
+				}
+				addenda = append(addenda, mutate.Addendum{
+					Layer:     prerenderedLayer,
+					MediaType: layerMediaType,
+					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppPrerenderedDirPrefix},
 				})
 			}
 		}
@@ -397,14 +478,28 @@ func validatePackageRequest(req ports.PackageRequest) error {
 	if req.Base == nil {
 		return fmt.Errorf("packager: build %s: base image is required: %w", req.Platform, core.ErrPackageFailed)
 	}
-	if req.Strategy == ports.StrategyLayered {
+	switch req.Strategy {
+	case ports.StrategyLayered:
 		if req.BunRuntime.BinaryPath == "" {
 			return fmt.Errorf("packager: build %s: bun runtime binary path is required for layered strategy: %w", req.Platform, core.ErrPackageFailed)
 		}
 		if req.AppServerDir == "" {
 			return fmt.Errorf("packager: build %s: application server directory is required for layered strategy: %w", req.Platform, core.ErrPackageFailed)
 		}
-	} else {
+		if len(req.Supervisor) == 0 {
+			return fmt.Errorf("packager: build %s: supervisor binary is empty: %w", req.Platform, core.ErrSupervisorUnavailable)
+		}
+	case ports.StrategyStatic:
+		if len(req.StaticServer) == 0 {
+			return fmt.Errorf("packager: build %s: static server binary is empty: %w", req.Platform, core.ErrStaticServerUnavailable)
+		}
+		// A static image needs the pre-rendered client tree. Client is optional
+		// in principle (an API-only app could prerender everything), so only the
+		// prerendered tree is required; without it there is nothing to serve.
+		if req.AppPrerenderedDir == "" {
+			return fmt.Errorf("packager: build %s: prerendered directory is required for static strategy: %w", req.Platform, core.ErrPackageFailed)
+		}
+	default: // StrategyExe
 		if req.App.Path == "" {
 			return fmt.Errorf("packager: build %s: application binary path is required: %w", req.Platform, core.ErrPackageFailed)
 		}
@@ -412,9 +507,9 @@ func validatePackageRequest(req ports.PackageRequest) error {
 			return fmt.Errorf("packager: build %s: application binary is for %s: %w",
 				req.Platform, req.App.Platform, core.ErrPackageFailed)
 		}
-	}
-	if len(req.Supervisor) == 0 {
-		return fmt.Errorf("packager: build %s: supervisor binary is empty: %w", req.Platform, core.ErrSupervisorUnavailable)
+		if len(req.Supervisor) == 0 {
+			return fmt.Errorf("packager: build %s: supervisor binary is empty: %w", req.Platform, core.ErrSupervisorUnavailable)
+		}
 	}
 	if req.CreatedAt.IsZero() {
 		return fmt.Errorf("packager: build %s: created timestamp is required: %w", req.Platform, core.ErrPackageFailed)

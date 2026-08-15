@@ -43,6 +43,10 @@ type Deps struct {
 	// Supervisor yields the pokkum-init binary. Always required.
 	Supervisor ports.SupervisorProvider
 
+	// StaticServer yields the pokkum-static PID-1 static file server binary.
+	// Required for StrategyStatic only.
+	StaticServer ports.StaticServerProvider
+
 	// Packager assembles images and the index. Required unless the build is a
 	// dry run.
 	Packager ports.Packager
@@ -343,6 +347,12 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			Issuer: req.BaseImage.KeylessIssuer,
 		},
 		TrustedRootPath: req.BaseImage.TrustedRootPath,
+		// Only a static-strategy payload is fully static. Layered and exe
+		// payloads are dynamically linked against glibc, so the static-base gate
+		// (which rejects distroless/static and scratch) must stay armed for them;
+		// AllowStatic lifts it for --strategy=static so the libc-free default
+		// base is permitted.
+		AllowStatic: req.Compile.Strategy == StrategyStatic,
 	}
 	base, err := deps.BaseImages.Resolve(ctx, baseReq)
 	if err != nil {
@@ -926,7 +936,10 @@ func fanOut(
 				}
 				bunResult = res
 				log.Info("resolved bun runtime", "platform", p.String(), "version", bunResult.Version, "sha256", bunResult.SHA256)
-			} else {
+			} else if req.Compile.Strategy != StrategyStatic {
+				// Static builds have nothing to compile: the SvelteKit build
+				// output (.svelte-kit/output) is the entire artifact, served by
+				// pokkum-static with no Bun runtime and no bundled executable.
 				outPath := filepath.Join(workDir, "app-"+platformSlug(p))
 				log.Info("compiling", "platform", p.String(), "output", outPath)
 				compiledArt, err := deps.Compiler.Compile(gctx, ports.CompileRequest{
@@ -946,9 +959,22 @@ func fanOut(
 				log.Info("compiled", "platform", p.String(), "size", art.Size, "sha256", art.SHA256)
 			}
 
-			sup, err := deps.Supervisor.Binary(gctx, p)
-			if err != nil {
-				return err
+			var sup, staticSup []byte
+			var runnerErr error
+			if req.Compile.Strategy == StrategyStatic {
+				if deps.StaticServer == nil {
+					return fmt.Errorf("core: static server provider unavailable for static strategy: %w", ErrPackageFailed)
+				}
+				staticSup, runnerErr = deps.StaticServer.Binary(gctx, p)
+				if runnerErr != nil {
+					return fmt.Errorf("core: resolve static server for %s: %w", p, runnerErr)
+				}
+				log.Info("resolved static server", "platform", p.String())
+			} else {
+				sup, runnerErr = deps.Supervisor.Binary(gctx, p)
+				if runnerErr != nil {
+					return runnerErr
+				}
 			}
 
 			pkgReq := ports.PackageRequest{
@@ -959,6 +985,7 @@ func fanOut(
 				App:           art,
 				BunRuntime:    bunResult,
 				Supervisor:    sup,
+				StaticServer:  staticSup,
 				Runtime:       req.Runtime,
 				CreatedAt:     req.SourceDateEpoch,
 				Labels:        labels,
@@ -970,11 +997,22 @@ func fanOut(
 				NoStrip:       req.Compile.NoStrip,
 			}
 
-			if req.Compile.Strategy == StrategyLayered {
+			switch req.Compile.Strategy {
+			case StrategyLayered:
 				pkgReq.AppServerDir = filepath.Join(prep.OutputDir, "server")
 				pkgReq.AppClientDir = filepath.Join(prep.OutputDir, "client")
 				pkgReq.AppVendorDir = filepath.Join(prep.OutputDir, "vendor")
 				pkgReq.AppNativeDir = filepath.Join(prep.OutputDir, "native")
+				// Prerendered pages now live in their own /app/prerendered layer
+				// instead of being dropped; POKKUM_PRERENDERED_DIR points the
+				// patched handler at it.
+				pkgReq.AppPrerenderedDir = filepath.Join(prep.OutputDir, "prerendered")
+			case StrategyStatic:
+				// No server JS, vendor or native trees for a static site; the
+				// .svelte-kit/output staging holds the client and prerendered
+				// trees that pokkum-static serves.
+				pkgReq.AppClientDir = filepath.Join(prep.OutputDir, "client")
+				pkgReq.AppPrerenderedDir = filepath.Join(prep.OutputDir, "prerendered")
 			}
 
 			img, err := deps.Packager.Build(gctx, pkgReq)

@@ -39,6 +39,16 @@ const (
 	// AppNativeDirPrefix is the in-image mount point for native .node binaries and dynamic .so libraries.
 	AppNativeDirPrefix = "/app/native"
 
+	// AppPrerenderedDirPrefix is the in-image mount point for the extracted
+	// prerendered static pages layer. It is a sibling of /app/server so that a
+	// server resolving prerendered pages relative to its own directory (as
+	// @sveltejs/adapter-node does) can be pointed at it via EnvPrerenderedDir.
+	AppPrerenderedDirPrefix = "/app/prerendered"
+
+	// StaticServerPath is where the pokkum-static binary is placed in the
+	// image, and argv[0] of the entrypoint for StrategyStatic.
+	StaticServerPath = "/pokkum/static"
+
 	// WorkingDir is the image's working directory.
 	WorkingDir = "/app"
 
@@ -82,6 +92,19 @@ const (
 	// EnvRequiredEnv is read by pokkum-init as a comma-separated list of
 	// environment variable names that must be present and non-empty at runtime.
 	EnvRequiredEnv = "POKKUM_REQUIRED_ENV"
+
+	// EnvPrerenderedDir is read by the patched adapter-node runtime handler to
+	// choose where prerendered pages are served from. It is set to
+	// AppPrerenderedDirPrefix on layered builds that extract prerendered pages
+	// into their own layer. Absent means the server falls back to its compiled
+	// default (path.Join(dir, "prerendered")).
+	EnvPrerenderedDir = "POKKUM_PRERENDERED_DIR"
+
+	// EnvStaticRoots is read by pokkum-static to choose the read-only
+	// directories it serves, as a path-list separated by os.PathListSeparator.
+	// It defaults to AppClientDirPrefix + os.PathListSeparator +
+	// AppPrerenderedDirPrefix.
+	EnvStaticRoots = "POKKUM_STATIC_ROOTS"
 )
 
 // Probe endpoints served by pokkum-init on the probe port.
@@ -107,6 +130,13 @@ const (
 
 	// AnnotationRequiredEnv is the manifest annotation key for required env contract.
 	AnnotationRequiredEnv = "pokkum.dev/required-env"
+
+	// AnnotationPrerenderedImmutable is the manifest and image annotation pinned
+	// to layered images that extract prerendered pages into their own
+	// /app/prerendered layer. Its value records the path of that layer so that
+	// registry tooling and the static/prerendered server can rely on the pages
+	// being served with immutable cache semantics.
+	AnnotationPrerenderedImmutable = "pokkum.dev/prerendered-immutable"
 )
 
 // DefaultLayeredEntrypoint returns the image entrypoint for StrategyLayered:
@@ -119,6 +149,13 @@ func DefaultLayeredEntrypoint() []string {
 // separator, then the application binary.
 func DefaultEntrypoint() []string {
 	return []string{SupervisorPath, "--", AppBinaryPath}
+}
+
+// DefaultStaticEntrypoint returns the image entrypoint for StrategyStatic: the
+// pokkum-static binary, which is its own PID-1 static file server (no
+// supervisor orchestration layer is needed).
+func DefaultStaticEntrypoint() []string {
+	return []string{StaticServerPath}
 }
 
 // RuntimeConfig describes the runtime behaviour baked into the image config.
@@ -250,6 +287,19 @@ type PackageRequest struct {
 
 	// AppNativeDir is the host directory containing native .node modules and dynamic .so libraries to package at /app/native (StrategyLayered).
 	AppNativeDir string
+
+	// AppPrerenderedDir is the host directory containing prerendered pages to
+	// package at /app/prerendered (StrategyLayered and StrategyStatic). The
+	// image serves them through POKKUM_PRERENDERED_DIR (layered adapter-node
+	// handler) or as a root of pokkum-static. Optional: when empty, no
+	// prerendered layer is added.
+	AppPrerenderedDir string
+
+	// StaticServer is the pokkum-static PID-1 static file server binary for
+	// Platform, from StaticServerProvider.Binary. Required and non-empty for
+	// StrategyStatic. It becomes a single-file layer at StaticServerPath with
+	// mode 0555.
+	StaticServer []byte
 
 	// NoPrune disables vendor layer file pruning when building AppVendorDir layer.
 	NoPrune bool

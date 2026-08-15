@@ -1,4 +1,4 @@
-.PHONY: help build supervisor test test-short test-integration check-arch lint fmt verify clean
+.PHONY: help build supervisor static-server test test-short test-integration check-arch lint fmt verify clean
 
 check-arch:  ##  Run hexagonal architecture purity test suite
 	@echo "Checking hexagonal architecture purity..."
@@ -13,7 +13,7 @@ help:  ##  Show this help message
 	@echo ""
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  %-15s %s\n", $$1, $$2}' | sort
 
-build: supervisor  ##  Build the pokkum CLI binary (depends on supervisor)
+build: supervisor static-server  ##  Build the pokkum CLI binary (depends on supervisor + static-server)
 	@echo "Building pokkum CLI..."
 	@VERSION=$$(git describe --tags --always --dirty) && \
 	COMMIT=$$(git rev-parse --short HEAD) && \
@@ -49,6 +49,31 @@ supervisor:  ##  Cross-compile + zstd-compress supervisor binaries for Linux amd
 	rm -f $(SUPERVISOR_BIN)/pokkum-init-linux-amd64 $(SUPERVISOR_BIN)/pokkum-init-linux-arm64
 	@echo "Supervisor binaries compressed into $(SUPERVISOR_BIN)/"
 	@ls -la $(SUPERVISOR_BIN)
+
+STATIC_BIN := ./internal/adapters/staticserver/bin
+
+# Cross-compile the pokkum-static PID-1 static file server binaries for Linux
+# amd64/arm64 and embed them zstd-compressed (see internal/adapters/staticserver
+# and internal/ports/staticserver.go), mirroring the supervisor build exactly.
+# Raw ELF binaries are built into a temporary staging directory, compressed into
+# $(STATIC_BIN)/pokkum-static-*.zst, and never left behind: go:embed all:bin
+# must only see .zst (plus .gitkeep).
+static-server:  ##  Cross-compile + zstd-compress static server binaries for Linux amd64/arm64
+	@echo "Building + compressing static server binaries..."
+	@mkdir -p $(STATIC_BIN)
+	@stage=$$(mktemp -d); \
+	for arch in amd64 arm64; do \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build \
+			-trimpath \
+			-ldflags "-s -w" \
+			-o $$stage/pokkum-static-linux-$$arch \
+			./supervisor/cmd/pokkum-static || { rm -rf $$stage; exit 1; }; \
+		go run ./scripts/compress-zstd.go $$stage/pokkum-static-linux-$$arch $(STATIC_BIN)/pokkum-static-linux-$$arch.zst || { rm -rf $$stage; exit 1; }; \
+	done; \
+	rm -rf $$stage; \
+	rm -f $(STATIC_BIN)/pokkum-static-linux-amd64 $(STATIC_BIN)/pokkum-static-linux-arm64
+	@echo "Static server binaries compressed into $(STATIC_BIN)/"
+	@ls -la $(STATIC_BIN)
 
 test:  ##  Run all tests (go test ./...)
 	@echo "Running tests..."
@@ -88,3 +113,4 @@ clean:  ##  Clean build artifacts
 	@rm -f ./pokkum
 	@rm -rf ./build
 	@rm -f ./internal/adapters/supervisor/bin/pokkum-init-linux-*
+	@rm -f ./internal/adapters/staticserver/bin/pokkum-static-linux-*

@@ -158,6 +158,36 @@ func buildSupervisorLayer(ctx context.Context, req ports.PackageRequest, modTime
 	return layercacheutils.Put(cacheDir, cacheKey, layer, req.Compression)
 }
 
+// buildStaticServerLayer produces the deterministic layer Pokkum adds for
+// pokkum-static: a single file at ports.StaticServerPath, nothing else. It is
+// the static-strategy analogue of buildSupervisorLayer — the static server plays
+// PID 1 in a libc-free image where there is no separate supervisor.
+func buildStaticServerLayer(ctx context.Context, req ports.PackageRequest, modTime time.Time) (v1.Layer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("packager: build %s: %w", req.Platform, err)
+	}
+
+	cacheDir := layercacheutils.ResolveCacheDir()
+	contentHash := layercacheutils.ComputeBytesSHA256(req.StaticServer)
+	cacheKey := layercacheutils.ComputeKey(ports.StaticServerPath, contentHash, req.Platform, modTime, req.Compression)
+
+	if cached, ok := layercacheutils.Get(cacheDir, cacheKey, req.Compression); ok {
+		return cached, nil
+	}
+
+	file := layerFile{
+		path: ports.StaticServerPath,
+		size: int64(len(req.StaticServer)),
+		open: bytesOpener(req.StaticServer),
+	}
+	layer, err := buildLayer(ctx, req.Platform, file, modTime, req.Compression)
+	if err != nil {
+		return nil, err
+	}
+
+	return layercacheutils.Put(cacheDir, cacheKey, layer, req.Compression)
+}
+
 // countWriter records the total bytes written to it.
 type countWriter struct {
 	count int64

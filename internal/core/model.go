@@ -145,6 +145,10 @@ const (
 	BaseImageChainguard    = ports.BaseImageChainguard
 	BaseImageCustom        = ports.BaseImageCustom
 	DefaultBaseImagePreset = ports.DefaultBaseImagePreset
+	// StaticBaseRef is the default base image for --strategy=static builds: a
+	// fully static, libc-free image that runs the statically linked pokkum-static
+	// server. It is used only when a static build does not pin an explicit base.
+	StaticBaseRef = ports.StaticBaseRef
 
 	DefaultTag = ports.DefaultTag
 
@@ -158,6 +162,9 @@ const (
 	StrategyLayered = ports.StrategyLayered
 	// StrategyExe emits the single executable layout (legacy).
 	StrategyExe = ports.StrategyExe
+	// StrategyStatic emits a purely static site served by pokkum-static with no
+	// Bun runtime.
+	StrategyStatic = ports.StrategyStatic
 	// DefaultBuildStrategy is StrategyLayered.
 	DefaultBuildStrategy = ports.DefaultBuildStrategy
 
@@ -773,6 +780,10 @@ func (r BuildRequest) Validate() error {
 
 	if r.PushConcurrency < 0 {
 		return fmt.Errorf("push concurrency %d must not be negative: %w", r.PushConcurrency, ErrInvalidRequest)
+	}
+
+	if !r.Compile.Strategy.Valid() {
+		return fmt.Errorf("packaging strategy %q is invalid (supported: layered, exe, static): %w", r.Compile.Strategy, ErrInvalidRequest)
 	}
 	return nil
 }

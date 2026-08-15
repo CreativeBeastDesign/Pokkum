@@ -82,6 +82,13 @@ const (
 	ChainguardBaseRef = "cgr.dev/chainguard/glibc-dynamic:latest"
 )
 
+// StaticBaseRef is the default base image for --strategy=static builds: a
+// fully static, libc-free image that can run the statically linked pokkum-static
+// PID-1 server. It is used whenever a static build does not pin an explicit
+// base via --base; see internal/ports/packager.go for the runtime contract the
+// static server satisfies on such a base.
+const StaticBaseRef = "cgr.dev/chainguard/static:latest"
+
 // Keyless Sigstore identity constants for the stock distroless/chainguard
 // presets. Verified on 2026-08-12 by pulling live Cosign signature artifacts
 // and decoding their Fulcio leaf certificates; see the doc comment on
@@ -288,6 +295,14 @@ type BaseImageRequest struct {
 
 	// MirrorRegistry is the optional mirror registry repository for base image escrow (e.g. ghcr.io/myorg/base-mirror).
 	MirrorRegistry string
+
+	// AllowStatic permits base classes that carry no dynamic loader or libc
+	// (distroless/static, scratch) to pass the resolver's static-base gate.
+	// It must only be set when the built image runs a fully static payload —
+	// i.e. --strategy=static, whose pokkum-static PID-1 binary has zero dynamic
+	// dependencies. It must be false for the layered and exe strategies, whose
+	// Bun-compiled server binaries are dynamically linked against glibc.
+	AllowStatic bool
 }
 
 // PokkumLockfileName is the canonical lockfile name.
