@@ -87,6 +87,18 @@ type Supervisor struct {
 	cfg Config
 	log *slog.Logger
 
+	// childPath is the fully resolved path of the child executable. It is
+	// optional: when set, start uses it directly and skips exec.LookPath. main
+	// resolves it ahead of Run so the PATH walk (an independent, pure
+	// filesystem lookup) races with the probe server binding instead of
+	// serializing after it, which is the "parallelize fork/exec with the
+	// /healthz probe bind" optimization. When empty, start resolves it.
+	//
+	// A non-empty childPath must already be an absolute path (resolveChildPath
+	// guarantees this), so it is safe to consume from the pinned thread with no
+	// further filesystem work.
+	childPath string
+
 	// state is published by the supervise goroutine and read by anyone.
 	state atomic.Pointer[State]
 
@@ -115,12 +127,26 @@ type Supervisor struct {
 	deadlineStop context.CancelFunc
 }
 
+// Option configures a Supervisor before Run. It exists so callers can hand a
+// pre-resolved child path without changing the New signature.
+type Option func(*Supervisor)
+
+// WithChildPath preloads the fully resolved absolute path of the child
+// executable, so start skips exec.LookPath and can fork immediately. Callers
+// must guarantee it is absolute. See resolveChildPath.
+func WithChildPath(path string) Option {
+	return func(s *Supervisor) { s.childPath = path }
+}
+
 // New returns a Supervisor for cfg. A nil logger discards output.
-func New(cfg Config, log *slog.Logger) *Supervisor {
+func New(cfg Config, log *slog.Logger, opts ...Option) *Supervisor {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	s := &Supervisor{cfg: cfg, log: log}
+	for _, opt := range opts {
+		opt(s)
+	}
 	s.state.Store(&State{})
 	return s
 }
@@ -274,9 +300,13 @@ func (s *Supervisor) supervise(ctx context.Context, sigCh, chldCh <-chan os.Sign
 // os.Process.Wait is never called.
 func (s *Supervisor) start() error {
 	name := s.cfg.Command[0]
-	path, err := exec.LookPath(name)
-	if err != nil {
-		return fmt.Errorf("resolving command %q: %w", name, err)
+	path := s.childPath
+	if path == "" {
+		var err error
+		path, err = exec.LookPath(name)
+		if err != nil {
+			return fmt.Errorf("resolving command %q: %w", name, err)
+		}
 	}
 
 	proc, err := os.StartProcess(path, s.cfg.Command, &os.ProcAttr{
@@ -308,6 +338,33 @@ func (s *Supervisor) start() error {
 		"supervisor_pid", os.Getpid(),
 		"is_init", os.Getpid() == 1)
 	return nil
+}
+
+// resolveChildPath resolves the child executable to an absolute path, safely
+// callable before Run and from any goroutine. It is the concurrency seam for
+// the sub-millisecond startup optimization: the PATH walk is a pure, slow-ish
+// filesystem lookup that has no dependency on the probe server or on the
+// thread-pinned fork, so main.go runs it concurrently with NewProbeServer so
+// the probe bind and the PATH walk overlap instead of serializing.
+//
+// The resolved path is fed back to New via WithChildPath so start() can fork
+// immediately with no further lookups. Errors are preserved verbatim so
+// startExitCode keeps its exact 127/126 mapping; a resolver error and a
+// start()-time LookPath error are indistinguishable to the caller.
+//
+// If command[0] is already a path (as the /app/server entrypoint is), LookPath
+// returns it immediately, so this is latency-neutral in the common case and a
+// genuine overlap in the PATH-name case - never a regression.
+func resolveChildPath(command []string) (string, error) {
+	if len(command) == 0 {
+		return "", errors.New("no command given; expected: pokkum-init [flags] -- command [args...]")
+	}
+	name := command[0]
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("resolving command %q: %w", name, err)
+	}
+	return path, nil
 }
 
 // forward relays sig to the child's process group.

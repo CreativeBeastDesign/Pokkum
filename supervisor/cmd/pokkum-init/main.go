@@ -46,7 +46,21 @@ func main() {
 		log.Warn(w)
 	}
 
-	sup := New(cfg, log)
+	// Resolve the child executable to an absolute path up front, so the fork in
+	// Run never waits on a PATH walk. This is the parallelization the probe
+	// server's own goroutine rides on: once Run is entered, start() forks
+	// immediately while the probe server below binds its listener concurrently,
+	// instead of serializing the two. resolveChildPath is deliberately done
+	// here, ahead of the thread-pinned fork, because it is the one slow-ish,
+	// pure lookup that has no dependency on the probe server or the fork. See
+	// the comment on resolveChildPath and the WithChildPath seam.
+	childPath, err := resolveChildPath(cfg.Command)
+	if err != nil {
+		log.Error("failed to resolve child command", "error", err, "command", cfg.Command)
+		os.Exit(startExitCode(err))
+	}
+
+	sup := New(cfg, log, WithChildPath(childPath))
 
 	// The probe server (W8) is started here, before Run blocks, and stopped
 	// after Run returns. It depends on ProcessState, not *Supervisor, and
@@ -55,6 +69,12 @@ func main() {
 	// seam documented on the State and ProcessState types in supervisor.go,
 	// and TestStateSeamForProbeServer in supervisor_test.go, which pins the
 	// contract probe.go builds against.
+	//
+	// Because start() no longer performs exec.LookPath, the probe listener
+	// binds and the child fork overlap instead of serializing: /healthz can be
+	// answered as soon as the listener is up, while the Bun child is still
+	// being forked/exec'd. That overlap is the "fast sub-millisecond supervisor
+	// startup" the roadmap item names, guarded by the startup-overlap test.
 	//
 	// A probe server that fails to bind its port logs and returns rather than
 	// exiting the process; it must never be able to take the application down.

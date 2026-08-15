@@ -114,6 +114,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - Acts as `ENTRYPOINT ["/pokkum/init", "--", "/app/server"]`.
    - Handles PID-1 duties (reaping zombie sub-processes, forwarding OS signals like SIGTERM/SIGINT).
    - Serves HTTP health endpoints (`/healthz`, `/readyz`) on `POKKUM_PROBE_PORT` (default: 8081).
+   - **Fast startup overlap**: `main` resolves the child executable up front (`resolveChildPath` → `New(..., WithChildPath(...))`), so `start()` forks immediately with no `exec.LookPath` on the fork path; the probe listener binds `/healthz` on its own goroutine concurrently with the Bun fork/exec rather than serializing after it. Guarded by `startup_test.go`.
 
 ---
 
