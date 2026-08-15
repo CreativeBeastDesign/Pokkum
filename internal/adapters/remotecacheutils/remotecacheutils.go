@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -29,6 +28,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/poolutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/transportutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
@@ -429,9 +429,7 @@ func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Has
 		remoteOpts = append(remoteOpts, remote.WithUserAgent(req.UserAgent))
 	}
 	if req.Insecure {
-		remoteOpts = append(remoteOpts, remote.WithTransport(&http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		}))
+		remoteOpts = append(remoteOpts, remote.WithTransport(transportutils.InsecureTransport()))
 	}
 
 	sigTagStr := fmt.Sprintf("%s:%s-%s.sig", repo, digest.Algorithm, digest.Hex)
@@ -722,9 +720,7 @@ func CheckRemoteCache(ctx context.Context, repo string, cacheTag string, insecur
 		remoteOpts = append(remoteOpts, remote.WithUserAgent(userAgent))
 	}
 	if insecure {
-		remoteOpts = append(remoteOpts, remote.WithTransport(&http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		}))
+		remoteOpts = append(remoteOpts, remote.WithTransport(transportutils.InsecureTransport()))
 	}
 
 	desc, err := remote.Get(ref, remoteOpts...)
@@ -763,9 +759,7 @@ func ReconcileTags(ctx context.Context, repo string, digest v1.Hash, tags []stri
 		remoteOpts = append(remoteOpts, remote.WithUserAgent(userAgent))
 	}
 	if insecure {
-		remoteOpts = append(remoteOpts, remote.WithTransport(&http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		}))
+		remoteOpts = append(remoteOpts, remote.WithTransport(transportutils.InsecureTransport()))
 	}
 
 	digestRef := parsedRepo.Digest(digest.String())

@@ -21,6 +21,8 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 9. **Global logging flags (`--log-level`, `--log-format`) are registered twice on purpose**: once as `rootCmd.PersistentFlags()` for subcommands that don't redeclare them, and once again on `build` itself, because `main.go` pre-parses `os.Args` by hand (the `flag()` helper) to configure `slog` *before* cobra has even constructed the command tree.
 10. **`pokkum resolve` / `pokkum apply` intentionally expose no per-project build flags** other than cluster-facing options — every `pokkum://` reference is built with `Normalize()`'s defaults (multi-platform, distroless, SPDX-JSON SBOM). New build-time flags belong on `pokkum build`; only cluster-facing toggles belong on `resolve`/`apply`.
 
+11. **Compiler build optimization flags are enforced in every release build path, not exposed as CLI flags** (Roadmap "Compiler Build Optimization Flags"): every `pokkum` binary is compiled with `-trimpath` and `-ldflags="-s -w"` (strip DWARF/symbol tables) for a significant size reduction, in three places — the `Makefile` `build`/`supervisor` targets, `.goreleaser.yaml` (the official `pokkum upgrade` release pipeline), and `.github/workflows/slsa-builder.yml` (the SLSA L3 / trusted-builder path). All three also set `-X main.version/commit/buildDate` so `pokkum version` reports real release metadata (the SLSA path resolves these from git rather than goreleaser's templating). `scripts/check-build-flags.sh`, wired into `make verify` as its Step 0, fails the build if any of the three paths drops `-trimpath`, `-s -w`, or the `-X main.version` ldflag — guarding the size optimization against silent regression.
+
 ---
 
 ## 2. Global Flags (Root Command, Persistent)

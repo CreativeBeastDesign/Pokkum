@@ -203,6 +203,8 @@ To achieve this without a Docker daemon:
 | **Base Image Upstream Drift** | `pokkum.lock` records exact SHA256 digests of base images (`distroless`, `chainguard`). Subsequent builds reuse locked digests without registry queries unless `--update-base` or `pokkum base update` is run. |
 | **Bun Runtime Toolchain Drift** | `bunruntime` resolver pins version, CPU variant (`standard`/`baseline`), and SHA256 checksums of release binaries. Cached executables (`~/.cache/pokkum/bun`) ensure bit-identical runtime layers. |
 
+The Pokkum **CLI binary itself** is built reproducibly and size-optimized in every release path with the compiler build optimization flags (Roadmap "Compiler Build Optimization Flags"): `-trimpath` (strips absolute source paths, improving reproducibility and discarding path leakage) plus `-ldflags="-s -w"` (strips the DWARF symbol table / debug info) for a significant binary size reduction. This is enforced across the `Makefile` `build`/`supervisor` targets, `.goreleaser.yaml` (the official `pokkum upgrade` release pipeline), and `.github/workflows/slsa-builder.yml` (the SLSA L3 / trusted-builder path); all three also inject `-X main.version/commit/buildDate` so `pokkum version` carries real release metadata. `scripts/check-build-flags.sh` (run as Step 0 of `make verify`) guards against any of the three paths silently dropping the flags.
+
 
 ---
 

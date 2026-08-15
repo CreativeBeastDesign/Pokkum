@@ -72,6 +72,8 @@ check-fmt:  ##  Check code formatting with gofmt
 	@test -z "$$(gofmt -s -l .)"
 
 verify:  ##  Full agent verification suite: fmt+vet, adapter tests, CLI build, internal tests
+	@echo "Step 0/4 - Compiler build optimization flags regression guard..."
+	@bash scripts/check-build-flags.sh
 	@echo "Step 1/4 - Formatting & static analysis..."
 	@gofmt -s -w . && go vet ./...
 	@echo "Step 2/4 - Adapter unit tests..."

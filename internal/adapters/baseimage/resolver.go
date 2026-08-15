@@ -60,7 +60,6 @@ package baseimage
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -82,6 +81,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/transportutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -89,9 +89,14 @@ import (
 // insecureTransport is used for requests against BaseImageRequest.Insecure
 // targets: local or self-signed test registries only. It is package-level
 // because http.Transport is meant to be reused, not built per call.
-var insecureTransport http.RoundTripper = &http.Transport{
-	TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // opt-in via BaseImageRequest.Insecure
-}
+//
+// It is the process-wide shared insecure transport from transportutils — a
+// clone of remote.DefaultTransport (via the shared package) rather than a bare
+// &http.Transport{} literal, so the tuned defaults — proxy support, a 30s dial
+// timeout, MaxIdleConnsPerHost: 50, and most importantly ForceAttemptHTTP2:
+// true — are preserved even on the insecure path, where assigning a custom
+// TLSClientConfig would otherwise suppress net/http's automatic HTTP/2 upgrade.
+var insecureTransport http.RoundTripper = transportutils.InsecureTransport()
 
 var _ ports.BaseImageResolver = (*Resolver)(nil)
 

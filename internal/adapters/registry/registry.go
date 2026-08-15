@@ -46,16 +46,15 @@ package registry
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"log/slog"
-	"net/http"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/transportutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
@@ -88,30 +87,9 @@ import (
 // not rebuilt per call — a per-call transport would defeat connection pooling
 // entirely.
 var (
-	defaultTransport  = cloneDefaultTransport(nil)
-	insecureTransport = cloneDefaultTransport(&tls.Config{InsecureSkipVerify: true}) //nolint:gosec // opt-in via the Insecure request fields
+	defaultTransport  = transportutils.CloneDefaultTransport(nil)
+	insecureTransport = transportutils.InsecureTransport()
 )
-
-// cloneDefaultTransport returns a copy of remote.DefaultTransport, applying
-// tlsConfig to the copy when it is non-nil.
-//
-// remote.DefaultTransport is declared as an http.RoundTripper, so its concrete
-// type is asserted rather than guaranteed by the compiler. Should upstream ever
-// change it to something other than *http.Transport, the assertion fails and
-// the value is returned unmodified: that drops the TLS override, so an insecure
-// target would start failing certificate verification instead of silently
-// skipping it, and it avoids panicking during package initialisation.
-func cloneDefaultTransport(tlsConfig *tls.Config) http.RoundTripper {
-	base, ok := remote.DefaultTransport.(*http.Transport)
-	if !ok {
-		return remote.DefaultTransport
-	}
-	cloned := base.Clone()
-	if tlsConfig != nil {
-		cloned.TLSClientConfig = tlsConfig
-	}
-	return cloned
-}
 
 var (
 	_ ports.Registry      = (*Adapter)(nil)
