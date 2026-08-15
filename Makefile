@@ -1,4 +1,4 @@
-.PHONY: help build supervisor test test-short test-integration check-arch lint fmt clean
+.PHONY: help build supervisor test test-short test-integration check-arch lint fmt verify clean
 
 check-arch:  ##  Run hexagonal architecture purity test suite
 	@echo "Checking hexagonal architecture purity..."
@@ -70,6 +70,16 @@ fmt:  ##  Format code with gofmt and goimports
 check-fmt:  ##  Check code formatting with gofmt
 	@echo "Checking code formatting..."
 	@test -z "$$(gofmt -s -l .)"
+
+verify:  ##  Full agent verification suite: fmt+vet, adapter tests, CLI build, internal tests
+	@echo "Step 1/4 - Formatting & static analysis..."
+	@gofmt -s -w . && go vet ./...
+	@echo "Step 2/4 - Adapter unit tests..."
+	@go test ./internal/adapters/...
+	@echo "Step 3/4 - CLI compilation check..."
+	@go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test
+	@echo "Step 4/4 - Full internal test suite (incl. architecture purity)..."
+	@go test ./internal/...
 
 clean:  ##  Clean build artifacts
 	@echo "Cleaning build artifacts..."

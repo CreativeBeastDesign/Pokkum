@@ -8,6 +8,10 @@ Pokkum is a Go-based zero-dependency OCI container image compiler for SvelteKit 
 - OpenTelemetry & Metrics Pipeline: `mem:telemetry`
 - Verification & Test Commands: `mem:task_completion`
 
+## Shared Conventions
+- Serena holds only project knowledge and shared conventions — not agent-specific process/workflow rules.
+- Verification of code changes is the consolidated `make verify` target (see `mem:task_completion`).
+
 ## Invariants
 - Hexagonal architecture: `internal/ports` is the leaf dependency graph node; core never imports adapters.
 - Bit-for-Bit reproducibility: Timestamps, tar headers, base image digests (`pokkum.lock`), and `kit.version.name` are pinned to `SOURCE_DATE_EPOCH`.
