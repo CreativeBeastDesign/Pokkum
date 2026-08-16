@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -294,4 +295,57 @@ func TestResolver_StubLauncher_AdversarialTargetAndCacheIsolation(t *testing.T) 
 			t.Errorf("stock and stub SHA256 should differ")
 		}
 	})
+}
+
+// TestResolver_StubLauncher_CompileIsDeterministic guards the bug fixed in
+// compileStub: `bun build --compile` embeds something derived from the entry
+// file's path into the compiled binary, and every prior call built that
+// entry file under a fresh os.MkdirTemp directory, so compiling the exact
+// same stub source for the exact same (version, variant, platform) produced
+// a different SHA256 on every invocation — a direct violation of this
+// repo's bit-for-bit OCI reproducibility invariant (a --stub-launcher image
+// would fail `pokkum verify --rebuild`). No prior test in this file invoked
+// the real bun compiler at all, which is how the bug shipped undetected.
+// Skipped like TestRealBuildIsReproducibleAcrossRuns: real compiles are slow
+// and require bun on PATH.
+func TestResolver_StubLauncher_CompileIsDeterministic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real bun compile determinism check in short mode")
+	}
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun not found on PATH; skipping real bun compile determinism check")
+	}
+
+	platforms := []ports.Platform{ports.LinuxAMD64, ports.LinuxARM64}
+
+	for _, platform := range platforms {
+		t.Run(platform.String(), func(t *testing.T) {
+			req := ports.BunResolverRequest{
+				Platform:        platform,
+				Version:         "1.2.2",
+				Variant:         ports.BunVariantStandard,
+				StubLauncher:    true,
+				SourceDateEpoch: time.Unix(1700000000, 0),
+			}
+
+			const runs = 3
+			shas := make([]string, 0, runs)
+			for i := 0; i < runs; i++ {
+				// A fresh cache dir per run forces a real compile each time
+				// instead of short-circuiting on the cache-hit path.
+				resolver := NewResolver(t.TempDir(), nil)
+				res, err := resolver.Resolve(context.Background(), req)
+				if err != nil {
+					t.Fatalf("run %d: Resolve failed: %v", i, err)
+				}
+				shas = append(shas, res.SHA256)
+			}
+
+			for i := 1; i < runs; i++ {
+				if shas[i] != shas[0] {
+					t.Errorf("compiled stub launcher is non-deterministic for %s: run 0 SHA256=%s, run %d SHA256=%s", platform, shas[0], i, shas[i])
+				}
+			}
+		})
+	}
 }

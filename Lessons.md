@@ -5,6 +5,25 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-16 — Non-deterministic stub-launcher binary: the suspected root cause (ELF build-id) was wrong
+
+**Category:** determinism / external-tool-output (a new subcategory: non-determinism introduced by a *third-party compiler's* output, not by Pokkum's own code touching a clock or an unsorted collection)
+
+**Root cause:** `internal/adapters/bunruntime/resolver.go`'s `compileStub` wrote the stub entry file (`stub-entry.ts`, constant content) into a fresh `os.MkdirTemp` directory on every call, then passed that file's *absolute path* as the entry argument to `bun build --compile`. `bun build --compile` embeds something derived from the entry file's path into the compiled binary's bytes — since the temp directory's random suffix differs on every invocation, the absolute path differed too, so the same stub source compiled to a different SHA256 on every call even for an identical `(version, variant, platform)`.
+
+A prior investigation (handed off in `concepts/stub-launcher-determinism-fix-handoff.md`) had already confirmed the binary was non-deterministic, but reproduced it using **two different `--outfile` names** (`bun-stub-x64` vs `bun-stub-x64-run2`) and, from a `file`/`BuildID` inspection showing different ELF build-ids, suspected the `.note.gnu.build-id` section (ordinary per-link linker randomness) was the culprit — a plausible but never-empirically-isolated hypothesis. Actually isolating the diff (per the handoff's own step 1, before designing a fix) told a different story:
+- Fixing the `--outfile` name/directory alone (same entry-file path) → **byte-identical** output, no build-id difference at all.
+- Varying only the entry file's directory (fixed outfile) → **non-identical** output, confirming the entry path — not the outfile path, not linker build-id randomness — was the actual variable.
+- Passing the entry file as a **relative filename** with `cmd.Dir` set to its directory, invoked from arbitrarily different `os.MkdirTemp` directories → byte-identical output across 4 consecutive runs (x64) and 2 runs (arm64), with zero ELF patching needed.
+
+**Where:** `internal/adapters/bunruntime/resolver.go`'s `compileStub` (~line 302).
+
+**Fix:** `compileStub` now passes the entry file as a bare relative filename (`stub-entry.ts`) with `cmd.Dir` set to the containing temp directory, instead of `entryFile`'s absolute path. No ELF post-processing, no fixed/shared path across concurrent calls, no `SourceDateEpoch` threading needed — the previously-suspected build-id randomness turned out not to be an independent source of variance once the entry path was fixed. New regression test `TestResolver_StubLauncher_CompileIsDeterministic` in `resolver_test.go` (guarded like `TestRealBuildIsReproducibleAcrossRuns`: skipped under `-short` and when `bun` isn't on `PATH`) compiles the real stub launcher 3 times per platform (amd64, arm64) into fresh cache dirs and asserts identical SHA256; verified to fail against the pre-fix code (non-deterministic across all 3 runs on both platforms) before confirming it passes against the fix.
+
+**Preventative rule:** An initial root-cause hypothesis for a non-deterministic build artifact — especially one based on a plausible-sounding mechanism (linker build-id, ASLR, timestamps) rather than an actual isolated byte-diff — is a claim to verify, not a design input. Before writing a fix (ELF patching, `SourceDateEpoch` threading, or otherwise), reproduce the exact production code path (same invocation shape, same use of temp directories/fixed names) and vary exactly one input at a time until the true variable is isolated; a repro that changes two things at once (as the original handoff's `--outfile` name did) can implicate the wrong mechanism entirely. This generalizes `mem:self_review_checklist` row 12's fixture-fidelity lesson ("would running the real tool right now actually produce this?") to root-cause hypotheses for non-code-path bugs, not just fixtures.
+
+---
+
 ## 2026-08-17 — `TransformViteConfig` naive substring matching risked mutating commented-out code and string literals in Vite configs
 
 **Category:** logic-error / tokenizer (boundary condition in source-code transformations)

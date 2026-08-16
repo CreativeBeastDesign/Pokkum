@@ -315,7 +315,8 @@ func (r *Resolver) compileStub(ctx context.Context, version string, variant port
 	}
 	defer os.RemoveAll(tmpDir)
 
-	entryFile := filepath.Join(tmpDir, "stub-entry.ts")
+	const entryFilename = "stub-entry.ts"
+	entryFile := filepath.Join(tmpDir, entryFilename)
 	// Non-foldable path expression prevents Bun bundler from constant-folding and inlining /app/server/index.js at compile time.
 	stubCode := "const p = \"/app/server/\" + \"index.js\";\nawait import(p);\n"
 	if err := os.WriteFile(entryFile, []byte(stubCode), 0600); err != nil {
@@ -328,7 +329,19 @@ func (r *Resolver) compileStub(ctx context.Context, version string, variant port
 	// entryFile are paths this function created itself under a fresh
 	// os.MkdirTemp directory. None of these three arguments are derived from
 	// user or network input.
-	cmd := exec.CommandContext(ctx, "bun", "build", "--compile", "--target="+targetName, "--outfile="+tmpBinary, entryFile) //nolint:gosec // G204: fixed resolver-internal target name + self-created temp paths, not user-controlled
+	//
+	// The entry argument is passed as a bare relative filename (entryFilename,
+	// not entryFile's absolute path), with cmd.Dir set to tmpDir. `bun build
+	// --compile` embeds something derived from the entry file's path into the
+	// compiled binary's bytes, so passing the absolute path — which differs
+	// on every call because tmpDir is a fresh os.MkdirTemp directory — made
+	// every compiled stub non-deterministic even for byte-identical source,
+	// target, and output path. Passing a fixed relative argument instead
+	// (verified empirically across repeated runs and separate MkdirTemp
+	// directories) produces byte-identical output; see Lessons.md's
+	// stub-launcher determinism entry for the investigation.
+	cmd := exec.CommandContext(ctx, "bun", "build", "--compile", "--target="+targetName, "--outfile="+tmpBinary, entryFilename) //nolint:gosec // G204: fixed resolver-internal target name + self-created temp paths, not user-controlled
+	cmd.Dir = tmpDir
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 
