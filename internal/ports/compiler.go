@@ -54,6 +54,7 @@ package ports
 
 import (
 	"context"
+	"runtime"
 	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -99,6 +100,14 @@ var (
 // express an immutable slice; callers must not modify it. Use
 // slices.Clone(SupportedPlatforms) if you need to sort or append.
 var SupportedPlatforms = []Platform{LinuxAMD64, LinuxARM64}
+
+// LocalPlatform returns the host architecture mapped to Linux (e.g. LinuxARM64 on ARM, LinuxAMD64 on x86_64).
+func LocalPlatform() Platform {
+	if runtime.GOARCH == "arm64" {
+		return LinuxARM64
+	}
+	return LinuxAMD64
+}
 
 // String renders the platform in OCI notation: "linux/amd64", or
 // "linux/arm/v7" when a variant is set. It is the canonical human- and

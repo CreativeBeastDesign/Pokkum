@@ -5,6 +5,37 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-16 — Requesting an explicit `--profile` without a `.pokkum.yaml` file silently ignored the profile because `projCfg != nil` guarded profile merging
+
+**Category:** logic / boundary (silent failure on missing prerequisite configuration)
+
+**Where:** `cmd/pokkum/build.go:397-405` (`buildRequestFromConfigAndFlags`)
+
+**What happened:** When a user explicitly supplied `--profile <name>` on the CLI in a workspace where `.pokkum.yaml` did not exist, `cfg.Load(projectDir)` returned `os.ErrNotExist` and set `projCfg = nil`. The profile application check was written as:
+```go
+activeProfile := flags.profile
+if activeProfile != "" && projCfg != nil {
+    merged, err := cfg.ApplyProfile(projCfg, activeProfile)
+    ...
+}
+```
+Because `projCfg` was `nil`, the entire block was skipped with no warning or error. The build continued with default flags, silently dropping all user intent specified by `--profile`.
+
+**Root cause:** Conflating optional configuration loading (it is normal for `.pokkum.yaml` to be omitted when running vanilla builds) with explicit CLI feature flags (`--profile` requires a config file to resolve against). The guard was defensive against `nil` dereference on `projCfg` but failed to validate the prerequisite when the user explicitly asked for a profile.
+
+**Fix:** Added an explicit validation check right after loading:
+```go
+activeProfile := strings.TrimSpace(flags.profile)
+if activeProfile != "" && projCfg == nil {
+    return nil, fmt.Errorf("profile %q requested but no %s found in project", activeProfile, config.ConfigFilename)
+}
+```
+If `.pokkum.yaml` does not exist and the user passed `--profile`, the command fails fast with a clear error.
+
+**Preventative rule:** When a CLI feature depends on an optional configuration file or context object, always distinguish between *implicit* activation (defaulting/no-op when the file is absent) and *explicit* activation (when the user passes an explicit flag demanding that feature). Explicit activation against a missing prerequisite must always fail fast with an explanatory error, never silently fall back to default behavior.
+
+---
+
 ## 2026-08-16 — `core.Build`'s `Normalize()` pre-defaults `Runtime.Entrypoint` to the exe shape before the strategy is known, so `StrategyLayered` images built through the real pipeline get an unrunnable entrypoint
 
 **Category:** boundary (strategy-dependent default computed before the strategy-aware code path runs)

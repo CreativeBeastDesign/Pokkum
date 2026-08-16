@@ -37,8 +37,9 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 
 ## 3. `pokkum build [dir]`
 
-| Flag | Shorthand | Env / Config | Default | Description |
+| Flag | Shorthand | Environment Variable | Default | Description |
 |---|---|---|---|---|
+| `--profile` | `-P` | — | (none) | Activate a named build profile defined in `.pokkum.yaml` (e.g. `--profile local`, `--profile production`). Applies profile overrides with precedence: CLI flag > Env var > Profile > Top-level config > Defaults. |
 | `--platform` | `-p` | — | `linux/amd64,linux/arm64` | Target platform(s); repeatable. `all` selects every supported platform. |
 | `--base` | — | — | (unset → distroless) | Base image preset (`distroless`, `chainguard`) or a custom image reference. |
 | `--hardened` | — | — | `false` | Shorthand for `--base chainguard`. |
@@ -141,14 +142,32 @@ Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode), `SOU
 
 ## 7. `pokkum init [dir]`
 
+Initializes a SvelteKit workspace for Pokkum by creating `.pokkum.yaml` (with default configuration and build profiles) and `.pokkumignore`. In interactive terminal sessions (TTY), runs a guided questionnaire for target container registry, base image preset, build strategy, local profile, and CVE gating policy.
+
 | Flag | Shorthand | Default | Description |
 |---|---|---|---|
 | `--dir` | `-d` | `.` | Path to SvelteKit project directory. |
 | `--defaults` | — | `false` | Accept default initialization settings without interactive prompts. |
+| `--output` | — | `text` | Output serialization format (`text` or `json`). |
 
 ---
 
-## 8. `pokkum explain` / `pokkum why` / `pokkum diff`
+## 8. `pokkum config`
+
+Subcommand group to inspect and validate project configuration files (`.pokkum.yaml`).
+
+| Subcommand / Flag | Default | Description |
+|---|---|---|
+| `pokkum config view [dir]` | — | Resolves and prints the active configuration after evaluating defaults and environment bindings. |
+| `pokkum config view --profile <name>` | — | Resolves and prints configuration with the specified named profile overrides applied. |
+| `pokkum config validate [dir]` | — | Validates syntax, schema version, presets, and platform strings in `.pokkum.yaml`. |
+| `--profile`, `-P` | (none) | (`view` only) Profile to resolve and display. |
+| `--dir`, `-d` | `.` | Path to SvelteKit project directory. |
+| `--output` | `text` | Output serialization format (`text` or `json`). |
+
+---
+
+## 9. `pokkum explain` / `pokkum why` / `pokkum diff`
 
 | Command / Flag | Default | Description |
 |---|---|---|

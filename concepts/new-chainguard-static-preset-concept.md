@@ -14,7 +14,7 @@
 
 Reusing `BaseImageChainguard` for `--static`'s default correctly fixes (1) — this codebase's own doc comment (`internal/ports/baseimage.go`) already cross-validated that Chainguard's Fulcio SAN is identical across `chainguard/glibc-dynamic` and `chainguard/static`, three years of certs, byte-identical — so verifying a `chainguard/static` pull against the `BaseImageChainguard` identity is not a shortcut, it's provably correct.
 
-But it leaves a **residual, narrower collision** in (2): `pokkum build --base cgr.dev/chainguard/glibc-dynamic` (explicit layered, dynamic linking) and `pokkum build --static` (static, libc-free) in the same project now share one `pokkum.lock` slot — both are `Preset = "chainguard"` — for two base images that are not interchangeable. This is a much narrower version of the bug that motivated the original fix (which was between `distroless` and `chainguard/static`, a total mismatch); the residual case only bites a project that deliberately uses *both* an explicit Chainguard dynamic base *and* `--static`, which is a real but uncommon combination.
+But it leaves a **residual, narrower collision** in (2): `pokkum build --base cgr.dev/chainguard/glibc-dynamic` (explicit layered, dynamic linking) and `pokkum build --static` (static, libc-free) in the same project now share one `pokkum.lock` slot — both are `Preset = "chainguard"` — for two base images that are not interchangeable. This is a much narrower version of the bug that motivated the original fix (which was between `distroless` and `chainguard/static`, a total mismatch); the residual case only bites a project that deliberately uses _both_ an explicit Chainguard dynamic base _and_ `--static`, which is a real but uncommon combination.
 
 ---
 
@@ -103,11 +103,14 @@ This gives `--static` its own `pokkum.lock` key (`"chainguard-static"`), fully d
 
 ## 4. Backward Compatibility
 
-A `pokkum.lock` file already containing a `"chainguard"` entry created by a `--static` build under the *current* (2026-08-16) fix will **not** be found under the new `"chainguard-static"` key once this ships — the next `--static` build silently re-resolves against the registry and writes a new `"chainguard-static"` entry, leaving the stale `"chainguard"` entry orphaned in the lockfile (harmless, but dead weight, and confusing in a `git diff` of `pokkum.lock`).
+> NOTE: Backward Compatibility is not required, as this tool has not been published yet.
+
+A `pokkum.lock` file already containing a `"chainguard"` entry created by a `--static` build under the _current_ (2026-08-16) fix will **not** be found under the new `"chainguard-static"` key once this ships — the next `--static` build silently re-resolves against the registry and writes a new `"chainguard-static"` entry, leaving the stale `"chainguard"` entry orphaned in the lockfile (harmless, but dead weight, and confusing in a `git diff` of `pokkum.lock`).
 
 Options:
+
 - **Do nothing** (simplest): document the one-time re-resolve in a changelog/release note. Low blast radius — re-resolving a base image tag is exactly what `pokkum.lock` already does gracefully on a cache miss.
-- **One-time migration**: on lockfile load, if `"chainguard-static"` is absent but `"chainguard"`'s `entry.Ref` equals `StaticBaseRef` (i.e., it was almost certainly written by a prior `--static` build, not a real `--base chainguard` layered build), copy it to the new key. Adds a real edge case (what if a project genuinely used *both* and the `"chainguard"` entry is ambiguous?) for a one-time convenience — probably not worth the complexity.
+- **One-time migration**: on lockfile load, if `"chainguard-static"` is absent but `"chainguard"`'s `entry.Ref` equals `StaticBaseRef` (i.e., it was almost certainly written by a prior `--static` build, not a real `--base chainguard` layered build), copy it to the new key. Adds a real edge case (what if a project genuinely used _both_ and the `"chainguard"` entry is ambiguous?) for a one-time convenience — probably not worth the complexity.
 
 **Recommendation: do nothing beyond a changelog note.** The lockfile is designed to self-heal on a miss; this is precisely that mechanism doing its job.
 
@@ -115,20 +118,23 @@ Options:
 
 ## 5. Trade-offs vs. the Shipped Fix
 
-| | Reuse `BaseImageChainguard` (shipped) | New `BaseImageChainguardStatic` (this doc) |
-|---|---|---|
-| Signature identity | Correct (proven identical SAN) | Correct |
-| `pokkum.lock` collision | Residual: only vs. explicit `--base chainguard` layered builds in the same project | None |
-| Surface area | Zero new CLI-visible concepts | New preset name to document (`Vocabulary.md`, `--base` help text, `pokkum base update --preset`) |
-| Migration cost | None | One orphaned lockfile entry per existing `--static` user, self-healing (§4) |
-| Symmetry | N/A | Raises the question of whether `distroless` needs an equivalent (`BaseImageDistrolessStatic`) for consistency, even though nothing currently uses `distroless/static` as a real base (it's explicitly the libc-free trap `staticBaseReason` exists to reject for non-static strategies) |
+|                         | Reuse `BaseImageChainguard` (shipped)                                              | New `BaseImageChainguardStatic` (this doc)                                                                                                                                                                                                                                              |
+| ----------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Signature identity      | Correct (proven identical SAN)                                                     | Correct                                                                                                                                                                                                                                                                                 |
+| `pokkum.lock` collision | Residual: only vs. explicit `--base chainguard` layered builds in the same project | None                                                                                                                                                                                                                                                                                    |
+| Surface area            | Zero new CLI-visible concepts                                                      | New preset name to document (`Vocabulary.md`, `--base` help text, `pokkum base update --preset`)                                                                                                                                                                                        |
+| Migration cost          | None                                                                               | One orphaned lockfile entry per existing `--static` user, self-healing (§4)                                                                                                                                                                                                             |
+| Symmetry                | N/A                                                                                | Raises the question of whether `distroless` needs an equivalent (`BaseImageDistrolessStatic`) for consistency, even though nothing currently uses `distroless/static` as a real base (it's explicitly the libc-free trap `staticBaseReason` exists to reject for non-static strategies) |
 
-The residual collision the shipped fix leaves open is narrow enough (requires deliberately combining `--base cgr.dev/chainguard/glibc-dynamic` *and* `--static` in one project) that this is a **low-priority** correctness polish, not an open bug — see `Roadmap.md`'s backlog framing.
+The residual collision the shipped fix leaves open is narrow enough (requires deliberately combining `--base cgr.dev/chainguard/glibc-dynamic` _and_ `--static` in one project) that this is a **low-priority** correctness polish, not an open bug — see `Roadmap.md`'s backlog framing.
 
 ---
 
 ## 6. Open Questions
 
-- Preset value naming: `"chainguard-static"` vs `"static-chainguard"` vs something that doesn't couple the vendor name to "static" at all (e.g. a generic `"static"` preset, since `chainguard/static` is currently the *only* sensible libc-free choice — but that forecloses ever offering a second static-base vendor without a breaking rename).
+- Preset value naming: `"chainguard-static"` vs `"static-chainguard"` vs something that doesn't couple the vendor name to "static" at all (e.g. a generic `"static"` preset, since `chainguard/static` is currently the _only_ sensible libc-free choice — but that forecloses ever offering a second static-base vendor without a breaking rename).
+  - Decision: Let's go with `"static"`
 - Should `--base-verify-mode`/`--base-keyless-identity`/`--base-keyless-issuer` CLI help text enumerate the new preset alongside `distroless`/`chainguard`, or fold it into `chainguard`'s existing description with a note?
+  - Decision: Should enumerate new preset, don't fold into `chainguard`
 - Worth doing at all before a second real-world report of the residual collision, per the same "don't build for a hypothetical" reasoning as `strategy-dispatch-refactor-concept.md` §6 — or is base-image identity correctness enough of a supply-chain-security concern to justify doing it proactively regardless of how narrow the trigger is? (Unlike the strategy-dispatch refactor, this one touches signature verification — arguably a lower bar for "worth doing early.")
+  - Decision: Worth doing before shipping to avoid backwards compatibility issues.

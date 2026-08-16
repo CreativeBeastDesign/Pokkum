@@ -105,7 +105,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `secretguard`: Build-time entropy and pattern scanner for detecting hardcoded secrets in source files before image packaging (`ports.SecretGuard`).
    - `slsa`: Generates SLSA v1.0 provenance predicate statements.
    - `dsse`: Wraps attestations in Dead Simple Signing Envelopes (DSSE).
-   - `config`: Environment variable and CLI flag parsing/validation.
+   - `config`: Implements `ports.ConfigManager` for reading, writing, and validating `.pokkum.yaml` project configurations, evaluating build profiles (e.g. `local`, `production`), and enforcing precedence: explicit CLI flags > environment variables > profile overrides > top-level config defaults.
    - `ignore`: Reads `.pokkumignore` patterns to exclude unwanted files (`.env.local`, source maps, fixtures).
    - `nativeinspect`: Inspects compiled binaries (`DT_NEEDED`, glibc symbols) to ensure base image compatibility.
 

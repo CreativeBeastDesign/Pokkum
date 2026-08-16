@@ -122,6 +122,18 @@ type (
 
 	// RemoteCacheVerifyOptions specifies verification criteria for remote cache hits.
 	RemoteCacheVerifyOptions = ports.RemoteCacheVerifyOptions
+
+	// ProjectConfig represents the root .pokkum.yaml configuration structure.
+	ProjectConfig = ports.ProjectConfig
+
+	// BuildProfile defines partial overrides for build parameters.
+	BuildProfile = ports.BuildProfile
+
+	// ConfigManager is the port interface for loading, saving, and resolving Pokkum configurations.
+	ConfigManager = ports.ConfigManager
+
+	// InitConfigOptions provides parameters for bootstrapping a new .pokkum.yaml.
+	InitConfigOptions = ports.InitConfigOptions
 )
 
 // Re-exported enum values, so that the command layer can build a BuildRequest
@@ -239,7 +251,11 @@ func ParseOutputMode(s string) (OutputMode, error) {
 // platforms Pokkum can actually build, and returns ErrUnsupportedPlatform
 // otherwise. It is the entry point for user input.
 func ParsePlatform(s string) (Platform, error) {
-	parts := strings.Split(strings.TrimSpace(s), "/")
+	s = strings.TrimSpace(s)
+	if strings.EqualFold(s, "local") || strings.EqualFold(s, "host") {
+		return ports.LocalPlatform(), nil
+	}
+	parts := strings.Split(s, "/")
 	var p Platform
 	switch len(parts) {
 	case 2:

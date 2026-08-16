@@ -77,6 +77,11 @@
   - Secret-Inlining Guard (`secretguard`) runs build-time entropy and pattern scanning across project sources during `pokkum build` before packaging layers, preventing hardcoded secret leaks (`core.ErrSecretInlined`). Pass `--allow-secret-pattern=<regex>` to bypass false positives.
 - **Migration & Adoption Tooling (`Tier 3 Post-v1.0`)**:
   - `pokkum adopt [dir]` migrates existing SvelteKit repositories (configured for `@sveltejs/adapter-node`, `adapter-vercel`, `adapter-auto`, `adapter-cloudflare`, etc.) to Pokkum compilation defaults. Rewrites `svelte.config.js` and `package.json`, bootstraps `.pokkumignore`, and optionally deletes legacy container artifacts (`--remove-dockerfile`). Supports `--dry-run` and `--output=json`. Implemented in `internal/adapters/sveltekitutils.Adopt`.
+- **Project Configuration & Build Profiles (`.pokkum.yaml`, `ports.ConfigManager`)**:
+  - `.pokkum.yaml` defines top-level build defaults (repo, base preset, strategy, platforms, image metadata/labels/env/ports, security gates, SBOM, cache) and named workflow profiles (`map[string]ports.BuildProfile`, e.g. `local`, `production`).
+  - Precedence hierarchy: explicit CLI flags > environment variables (`POKKUM_*`) > active profile overrides (`--profile <name>` or automatic `local` profile on `--local`) > top-level `.pokkum.yaml` defaults > built-in defaults.
+  - Port/Adapter interface: `ports.ConfigManager` implemented by `internal/adapters/config` (`Manager`).
+  - Subcommands: `pokkum init` bootstraps `.pokkum.yaml` and `.pokkumignore` with interactive terminal questionnaire (and `--defaults` mode); `pokkum config view` (with `--profile`) and `pokkum config validate` inspect and validate project configurations.
 - **Structured JSON Schema Standard (`--output=json`)**:
   - Global `--output=text|json` flag standardizes CLI stdout into versioned `ports.JSONEnvelope` payloads (`schema_version: "1.0"`).
 - **Cluster Hardening & Manifest Defaults (`v1.0 MVP`)**:

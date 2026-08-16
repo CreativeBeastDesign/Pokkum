@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -78,6 +79,13 @@ type buildFlags struct {
 
 	imageLabels []string
 
+	profile            string
+	platformExplicit   bool
+	baseExplicit       bool
+	sbomExplicit       bool
+	sbomAttachExplicit bool
+	sourcemapExplicit  bool
+
 	noVerifyBase        bool
 	baseVerifyMode      string
 	baseKeylessIdentity string
@@ -119,11 +127,18 @@ The project directory defaults to the current working directory.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.strategyExplicit = cmd.Flags().Changed("strategy")
+			flags.platformExplicit = cmd.Flags().Changed("platform")
+			flags.baseExplicit = cmd.Flags().Changed("base")
+			flags.sbomExplicit = cmd.Flags().Changed("sbom")
+			flags.sbomAttachExplicit = cmd.Flags().Changed("sbom-attach")
+			flags.sourcemapExplicit = cmd.Flags().Changed("sourcemap")
 			return runBuild(ctx, logger, flags, args)
 		},
 	}
 
 	// Flag definitions with defaults from spec
+	cmd.Flags().StringVarP(&flags.profile, "profile", "P", "",
+		"Activate a named build profile defined in .pokkum.yaml (e.g. --profile local or --profile production)")
 	cmd.Flags().StringSliceVarP(&flags.platforms, "platform", "p", []string{"linux/amd64", "linux/arm64"},
 		"Target platform(s); repeatable, e.g. --platform linux/amd64 --platform linux/arm64. Use 'all' for all supported platforms")
 	cmd.Flags().StringVar(&flags.base, "base", "",
@@ -258,275 +273,9 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 
 	logger.Debug("build command started", "project_dir", projectDir)
 
-	// Load configuration
-	cfg, err := config.New(projectDir, logger)
+	req, err := buildRequestFromConfigAndFlags(ctx, logger, flags, projectDir)
 	if err != nil {
-		return fmt.Errorf("config loader: %w", err)
-	}
-
-	// Build the request from flags, config, and environment
-	req := core.BuildRequest{
-		ProjectDir: projectDir,
-	}
-
-	// Repo: from env, then config, then error if missing (for push mode)
-	repo := os.Getenv("POKKUM_DOCKER_REPO")
-	if repo == "" {
-		repo = cfg.GetString("docker.repo", "")
-	}
-	req.Repo = repo
-
-	// Platforms: parse from flags
-	platforms, err := core.ParsePlatforms(flags.platforms)
-	if err != nil {
-		return fmt.Errorf("invalid platforms: %w", err)
-	}
-	req.Platforms = platforms
-
-	// Base image options
-	basePreset := flags.base
-	if flags.hardened {
-		basePreset = "chainguard"
-	}
-	if basePreset != "" {
-		parsed, err := core.ParseBaseImagePreset(basePreset)
-		if err != nil {
-			return fmt.Errorf("invalid base image preset: %w", err)
-		}
-		req.BaseImage.Preset = parsed
-	}
-	req.BaseImage.UpdateBase = flags.updateBase
-	req.BaseImage.Offline = flags.offline
-
-	// SBOM format and attachment mode
-	sbomFmt, err := core.ParseSBOMFormat(flags.sbom)
-	if err != nil {
-		return fmt.Errorf("invalid sbom format: %w", err)
-	}
-	req.SBOM.Format = sbomFmt
-
-	sbomAttachMode, err := core.ParseSBOMAttachMode(flags.sbomAttach)
-	if err != nil {
-		return fmt.Errorf("invalid sbom attach mode: %w", err)
-	}
-	req.SBOM.AttachMode = sbomAttachMode
-
-	// Output mode
-	if flags.local && flags.tarball != "" {
-		return fmt.Errorf("cannot specify both --local and --tarball")
-	}
-	if flags.local {
-		req.Output.Mode = core.OutputLocal
-	} else if flags.tarball != "" {
-		req.Output.Mode = core.OutputTarball
-		req.Output.TarballPath = flags.tarball
-	} else {
-		req.Output.Mode = core.OutputPush
-	}
-
-	// Reconcile the --static shorthand with an explicit --strategy flag. A
-	// static build compiles a purely static site (no Bun runtime, no bundled
-	// executable) onto a minimal libc-free base, served by the embedded
-	// pokkum-static Go file server.
-	if flags.static && flags.strategyExplicit && flags.strategy != "static" {
-		return fmt.Errorf("--static cannot be combined with --strategy=%s (layered, static, or nothing must be used)", flags.strategy)
-	}
-	if flags.static {
-		flags.strategy = "static"
-		// Unless the user pinned an explicit base (--base/--hardened), default
-		// to a fully static, libc-free image: the entire point of --static is a
-		// server with no dynamic dependencies. StaticBaseRef (chainguard/static)
-		// is signed with Chainguard's identity, not Distroless's — Preset must
-		// be BaseImageChainguard so signature verification and the pokkum.lock
-		// cache key both agree with the image actually being pulled, and so a
-		// plain build's "distroless"-keyed lock entry never collides with a
-		// --static build's base in the same project.
-		if basePreset == "" {
-			req.BaseImage.Preset = core.BaseImageChainguard
-			req.BaseImage.Ref = core.StaticBaseRef
-		}
-	}
-
-	// Compile options
-	if flags.strategy == "exe" {
-		logger.Warn("packaging strategy 'exe' is deprecated and will be removed in a future release; migrate to '--strategy=layered' (default)")
-	}
-
-	sourcemapSetting := flags.sourcemap
-	if !sourcemapSetting {
-		if envVal := os.Getenv("POKKUM_SOURCEMAP"); envVal != "" {
-			sourcemapSetting = envVal == "1" || strings.EqualFold(envVal, "true") || strings.EqualFold(envVal, "yes")
-		}
-	}
-	if !sourcemapSetting {
-		sourcemapSetting = cfg.GetBool("compile.sourcemap", false)
-	}
-
-	req.Compile = core.CompileOptions{
-		Strategy:      core.BuildStrategy(flags.strategy),
-		Compression:   core.CompressionAlgorithm(flags.compression),
-		Sourcemap:     sourcemapSetting,
-		NoInject:      flags.noInject || !flags.inject,
-		NoPrune:       flags.noPrune,
-		KeepVendor:    flags.keepVendor,
-		NoPrecompress: flags.noPrecompress,
-		NoStrip:       flags.noStrip,
-		NoCache:       flags.noCache,
-	}
-
-	// Runtime options
-	if len(flags.requireEnv) > 0 {
-		var reqEnvs []string
-		for _, re := range flags.requireEnv {
-			for _, part := range strings.Split(re, ",") {
-				if p := strings.TrimSpace(part); p != "" {
-					reqEnvs = append(reqEnvs, p)
-				}
-			}
-		}
-		req.Runtime.RequireEnv = reqEnvs
-	}
-
-	// Telemetry options
-	req.Telemetry = core.TelemetryOptions{
-		Enabled:         flags.telemetry && !flags.noTelemetry,
-		TracesEndpoint:  flags.otelExport,
-		MetricsEndpoint: flags.otelExport,
-		SampleRate:      flags.traceSampleRate,
-		MetricsOnly:     flags.metricsOnly,
-		Environment:     flags.telemetryEnv,
-		WithSidecar:     flags.withOtelSidecar,
-	}
-
-	// Signing options
-	req.Sign = flags.sign && !flags.noSign
-
-	// Bun runtime options
-	req.BunRuntime = core.BunRuntimeOptions{
-		CustomBinaryPath: flags.bunBinary,
-		Variant:          core.BunVariant(flags.bunVariant),
-	}
-
-	// Resolve SOURCE_DATE_EPOCH before label discovery: the "created" label
-	// must report exactly the timestamp the rest of the build actually uses
-	// (layer mtimes, image config, history entries), not a second,
-	// independently-resolved value that could disagree with it.
-	timestamp, err := cfg.ResolveBuildTimestamp()
-	if err != nil {
-		return fmt.Errorf("source date epoch: %w", err)
-	}
-	req.SourceDateEpoch = timestamp
-
-	// Parse image labels
-	if req.Labels == nil {
-		req.Labels = make(map[string]string)
-	}
-	if len(flags.imageLabels) > 0 {
-		for _, lbl := range flags.imageLabels {
-			k, v, ok := strings.Cut(lbl, "=")
-			if !ok {
-				return fmt.Errorf("invalid --image-label %q: expected key=value", lbl)
-			}
-			req.Labels[strings.TrimSpace(k)] = strings.TrimSpace(v)
-		}
-	}
-	req.Labels = discoverGitMetadata(ctx, projectDir, req.Labels, timestamp)
-
-	req.BaseImage.NoVerifyBase = flags.noVerifyBase
-	if flags.baseVerifyMode != "" {
-		verifyMode, err := core.ParseBaseImageVerifyMode(flags.baseVerifyMode)
-		if err != nil {
-			return fmt.Errorf("invalid base verify mode: %w", err)
-		}
-		req.BaseImage.VerifyMode = verifyMode
-	}
-	if flags.baseKeylessIdentity != "" {
-		req.BaseImage.KeylessSAN = flags.baseKeylessIdentity
-	}
-	if flags.baseKeylessIssuer != "" {
-		req.BaseImage.KeylessIssuer = flags.baseKeylessIssuer
-	}
-	if flags.sigstoreTrustedRoot != "" {
-		req.BaseImage.TrustedRootPath = flags.sigstoreTrustedRoot
-	}
-	req.AllowSecretPatterns = flags.allowSecretPatterns
-	req.Hermetic = flags.hermetic
-	req.RegistryConfigPath = flags.registryConfig
-	req.PushConcurrency = flags.pushConcurrency
-
-	// FailOnCVE: flag > env > config
-	failOnCVESetting := flags.failOnCVE
-	if failOnCVESetting == "" {
-		failOnCVESetting = os.Getenv("POKKUM_FAIL_ON_CVE")
-	}
-	if failOnCVESetting == "" {
-		failOnCVESetting = cfg.GetString("security.fail_on_cve", "")
-	}
-	if failOnCVESetting != "" {
-		if failOnCVESetting == "1" || strings.EqualFold(failOnCVESetting, "true") || strings.EqualFold(failOnCVESetting, "yes") {
-			req.FailOnCVE = core.SeverityCritical
-		} else {
-			sev, err := core.ParseSeverity(failOnCVESetting)
-			if err != nil {
-				return fmt.Errorf("invalid fail-on-cve severity %q: %w", failOnCVESetting, err)
-			}
-			req.FailOnCVE = sev
-		}
-	}
-	req.AllowIncompleteScan = flags.allowIncomplete
-
-	// Cache verification configuration
-	if flags.noCacheVerify {
-		req.CacheVerify.VerifyMode = core.CacheVerifyNone
-		req.CacheVerify.VerifySignature = false
-	} else {
-		req.CacheVerify.VerifySignature = true
-		verifyModeSetting := flags.cacheVerifyMode
-		if verifyModeSetting == "" {
-			verifyModeSetting = os.Getenv("POKKUM_CACHE_VERIFY_MODE")
-		}
-		if verifyModeSetting != "" {
-			mode, err := core.ParseCacheVerifyMode(verifyModeSetting)
-			if err != nil {
-				return fmt.Errorf("invalid cache verify mode: %w", err)
-			}
-			req.CacheVerify.VerifyMode = mode
-		}
-	}
-
-	verifyKeySetting := flags.cacheVerifyKey
-	if verifyKeySetting == "" {
-		verifyKeySetting = os.Getenv("POKKUM_CACHE_PUBKEY")
-	}
-	if verifyKeySetting != "" {
-		if data, err := os.ReadFile(verifyKeySetting); err == nil {
-			req.CacheVerify.PublicKeyPEM = data
-		} else {
-			req.CacheVerify.PublicKeyPEM = []byte(verifyKeySetting)
-		}
-	}
-
-	keylessSANSetting := flags.cacheKeylessIdentity
-	if keylessSANSetting == "" {
-		keylessSANSetting = os.Getenv("POKKUM_CACHE_KEYLESS_IDENTITY")
-	}
-	if keylessSANSetting != "" {
-		req.CacheVerify.KeylessIdentity.SAN = keylessSANSetting
-	}
-
-	keylessIssuerSetting := flags.cacheKeylessIssuer
-	if keylessIssuerSetting == "" {
-		keylessIssuerSetting = os.Getenv("POKKUM_CACHE_KEYLESS_ISSUER")
-	}
-	if keylessIssuerSetting != "" {
-		req.CacheVerify.KeylessIdentity.Issuer = keylessIssuerSetting
-	}
-
-	req.CacheVerify.Strict = flags.cacheVerifyStrict
-	if flags.sigstoreTrustedRoot != "" {
-		if data, err := os.ReadFile(flags.sigstoreTrustedRoot); err == nil {
-			req.CacheVerify.TrustedRootJSON = data
-		}
+		return err
 	}
 
 	// Execution-mode switches. They are not part of the request — both
@@ -550,7 +299,7 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 
 	// The result carries the full summary, but the reference has already gone
 	// to stdout by the time Build returns; everything here is a log line.
-	res, err := runCoreBuild(ctx, buildDeps(logger, os.Stdout), req, opts)
+	res, err := runCoreBuild(ctx, buildDeps(logger, os.Stdout), *req, opts)
 	if err != nil {
 		return err
 	}
@@ -633,6 +382,434 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		Version:   version,
 		UserAgent: "pokkum/" + version,
 	}
+}
+
+func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, flags *buildFlags, projectDir string) (*core.BuildRequest, error) {
+	// Load configuration
+	cfg, err := config.New(projectDir, logger)
+	if err != nil {
+		return nil, fmt.Errorf("config loader: %w", err)
+	}
+
+	projCfg, err := cfg.Load(projectDir)
+	if err != nil && !os.IsNotExist(err) {
+		logger.Warn("failed to load .pokkum.yaml", "error", err)
+	}
+
+	// Active profile resolution: --profile takes precedence; if unset and --local is set, look for 'local' profile
+	activeProfile := strings.TrimSpace(flags.profile)
+	if activeProfile != "" && projCfg == nil {
+		return nil, fmt.Errorf("profile %q requested but no %s found in project", activeProfile, config.ConfigFilename)
+	}
+	if activeProfile == "" && flags.local && projCfg != nil {
+		if _, ok := projCfg.Profiles["local"]; ok {
+			activeProfile = "local"
+		}
+	}
+	if activeProfile != "" && projCfg != nil {
+		merged, err := cfg.ApplyProfile(projCfg, activeProfile)
+		if err != nil {
+			return nil, fmt.Errorf("apply profile %q: %w", activeProfile, err)
+		}
+		projCfg = merged
+	}
+
+	// Build the request from flags, config, and environment
+	req := core.BuildRequest{
+		ProjectDir: projectDir,
+	}
+
+	// Repo: from env, then project config / profile, then viper config, then error if missing (for push mode)
+	repo := os.Getenv("POKKUM_DOCKER_REPO")
+	if repo == "" && projCfg != nil {
+		repo = projCfg.Docker.Repo
+	}
+	if repo == "" {
+		repo = cfg.GetString("docker.repo", "")
+	}
+	req.Repo = repo
+
+	// Platforms: explicit CLI flag > project config / profile > default flags
+	platformArgs := flags.platforms
+	if !flags.platformExplicit && projCfg != nil && len(projCfg.Platforms) > 0 {
+		platformArgs = projCfg.Platforms
+	}
+	platforms, err := core.ParsePlatforms(platformArgs)
+	if err != nil {
+		return nil, fmt.Errorf("invalid platforms: %w", err)
+	}
+	req.Platforms = platforms
+
+	// Base image options: explicit flag > hardened > project config / profile > default
+	basePreset := flags.base
+	if !flags.baseExplicit && basePreset == "" && projCfg != nil && projCfg.Base != "" {
+		basePreset = projCfg.Base
+	}
+	if flags.hardened {
+		basePreset = "chainguard"
+	}
+	if basePreset != "" {
+		parsed, err := core.ParseBaseImagePreset(basePreset)
+		if err != nil {
+			return nil, fmt.Errorf("invalid base image preset: %w", err)
+		}
+		req.BaseImage.Preset = parsed
+	}
+	req.BaseImage.UpdateBase = flags.updateBase
+	req.BaseImage.Offline = flags.offline
+
+	// Strategy: explicit flag / static > project config / profile > default
+	strategy := flags.strategy
+	if !flags.strategyExplicit && projCfg != nil && projCfg.Strategy != "" {
+		strategy = projCfg.Strategy
+	}
+
+	// SBOM format and attachment mode: explicit flag > project config / profile > default
+	sbomFmtStr := flags.sbom
+	if !flags.sbomExplicit && projCfg != nil && projCfg.SBOM.Format != "" {
+		sbomFmtStr = projCfg.SBOM.Format
+	}
+	if sbomFmtStr != "" {
+		sbomFmt, err := core.ParseSBOMFormat(sbomFmtStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid sbom format: %w", err)
+		}
+		req.SBOM.Format = sbomFmt
+	}
+
+	sbomAttachStr := flags.sbomAttach
+	if !flags.sbomAttachExplicit && projCfg != nil && projCfg.SBOM.Attach != "" {
+		sbomAttachStr = projCfg.SBOM.Attach
+	}
+	if sbomAttachStr != "" {
+		sbomAttachMode, err := core.ParseSBOMAttachMode(sbomAttachStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid sbom attach mode: %w", err)
+		}
+		req.SBOM.AttachMode = sbomAttachMode
+	}
+
+	// Output mode: explicit flag > active profile output > default push
+	if flags.local && flags.tarball != "" {
+		return nil, fmt.Errorf("cannot specify both --local and --tarball")
+	}
+	if flags.local {
+		req.Output.Mode = core.OutputLocal
+	} else if flags.tarball != "" {
+		req.Output.Mode = core.OutputTarball
+		req.Output.TarballPath = flags.tarball
+	} else if activeProfile != "" && projCfg != nil && projCfg.Profiles[activeProfile].Output != "" {
+		outMode, err := core.ParseOutputMode(projCfg.Profiles[activeProfile].Output)
+		if err != nil {
+			return nil, fmt.Errorf("profile %q invalid output: %w", activeProfile, err)
+		}
+		req.Output.Mode = outMode
+	} else {
+		req.Output.Mode = core.OutputPush
+	}
+
+	// Reconcile the --static shorthand with an explicit --strategy flag. A
+	// static build compiles a purely static site (no Bun runtime, no bundled
+	// executable) onto a minimal libc-free base, served by the embedded
+	// pokkum-static Go file server.
+	if flags.static && flags.strategyExplicit && strategy != "static" {
+		return nil, fmt.Errorf("--static cannot be combined with --strategy=%s (layered, static, or nothing must be used)", flags.strategy)
+	}
+	if flags.static {
+		strategy = "static"
+		// Unless the user pinned an explicit base (--base/--hardened), default
+		// to a fully static, libc-free image: the entire point of --static is a
+		// server with no dynamic dependencies. StaticBaseRef (chainguard/static)
+		// is signed with Chainguard's identity, not Distroless's — Preset must
+		// be BaseImageChainguard so signature verification and the pokkum.lock
+		// cache key both agree with the image actually being pulled, and so a
+		// plain build's "distroless"-keyed lock entry never collides with a
+		// --static build's base in the same project.
+		if basePreset == "" {
+			req.BaseImage.Preset = core.BaseImageChainguard
+			req.BaseImage.Ref = core.StaticBaseRef
+		}
+	}
+
+	// Compile options
+	if strategy == "exe" {
+		logger.Warn("packaging strategy 'exe' is deprecated and will be removed in a future release; migrate to '--strategy=layered' (default)")
+	}
+
+	sourcemapSetting := flags.sourcemap
+	if !flags.sourcemapExplicit {
+		if envVal := os.Getenv("POKKUM_SOURCEMAP"); envVal != "" {
+			sourcemapSetting = envVal == "1" || strings.EqualFold(envVal, "true") || strings.EqualFold(envVal, "yes")
+		} else if activeProfile != "" && projCfg != nil && projCfg.Profiles[activeProfile].Sourcemap != nil {
+			sourcemapSetting = *projCfg.Profiles[activeProfile].Sourcemap
+		} else {
+			sourcemapSetting = cfg.GetBool("compile.sourcemap", false)
+		}
+	}
+
+	noCacheSetting := flags.noCache
+	if !noCacheSetting && projCfg != nil && projCfg.Cache.Enabled != nil && !*projCfg.Cache.Enabled {
+		noCacheSetting = true
+	}
+
+	req.Compile = core.CompileOptions{
+		Strategy:      core.BuildStrategy(strategy),
+		Compression:   core.CompressionAlgorithm(flags.compression),
+		Sourcemap:     sourcemapSetting,
+		NoInject:      flags.noInject || !flags.inject,
+		NoPrune:       flags.noPrune,
+		KeepVendor:    flags.keepVendor,
+		NoPrecompress: flags.noPrecompress,
+		NoStrip:       flags.noStrip,
+		NoCache:       noCacheSetting,
+	}
+
+	// Runtime options
+	if len(flags.requireEnv) > 0 {
+		var reqEnvs []string
+		for _, re := range flags.requireEnv {
+			for _, part := range strings.Split(re, ",") {
+				if p := strings.TrimSpace(part); p != "" {
+					reqEnvs = append(reqEnvs, p)
+				}
+			}
+		}
+		req.Runtime.RequireEnv = reqEnvs
+	}
+
+	// Telemetry options
+	withSidecar := flags.withOtelSidecar
+	if !withSidecar && projCfg != nil && projCfg.OTel.Sidecar != nil {
+		withSidecar = *projCfg.OTel.Sidecar
+	}
+	telemetryEnabled := flags.telemetry && !flags.noTelemetry
+	if !flags.telemetry && !flags.noTelemetry && projCfg != nil {
+		if (projCfg.OTel.Tracing != nil && *projCfg.OTel.Tracing) || (projCfg.OTel.Metrics != nil && *projCfg.OTel.Metrics) || (projCfg.OTel.Sidecar != nil && *projCfg.OTel.Sidecar) {
+			telemetryEnabled = true
+		}
+	}
+	metricsOnly := flags.metricsOnly
+	if !metricsOnly && projCfg != nil && projCfg.OTel.Tracing != nil && !*projCfg.OTel.Tracing && projCfg.OTel.Metrics != nil && *projCfg.OTel.Metrics {
+		metricsOnly = true
+	}
+
+	req.Telemetry = core.TelemetryOptions{
+		Enabled:         telemetryEnabled,
+		TracesEndpoint:  flags.otelExport,
+		MetricsEndpoint: flags.otelExport,
+		SampleRate:      flags.traceSampleRate,
+		MetricsOnly:     metricsOnly,
+		Environment:     flags.telemetryEnv,
+		WithSidecar:     withSidecar,
+	}
+
+	// Signing options
+	req.Sign = flags.sign && !flags.noSign
+
+	// Bun runtime options
+	req.BunRuntime = core.BunRuntimeOptions{
+		CustomBinaryPath: flags.bunBinary,
+		Variant:          core.BunVariant(flags.bunVariant),
+	}
+
+	// Resolve SOURCE_DATE_EPOCH before label discovery: the "created" label
+	// must report exactly the timestamp the rest of the build actually uses
+	// (layer mtimes, image config, history entries), not a second,
+	// independently-resolved value that could disagree with it.
+	timestamp, err := cfg.ResolveBuildTimestamp()
+	if err != nil {
+		return nil, fmt.Errorf("source date epoch: %w", err)
+	}
+	req.SourceDateEpoch = timestamp
+
+	// Parse image labels
+	if req.Labels == nil {
+		req.Labels = make(map[string]string)
+	}
+
+	// Apply image metadata & runtime configuration from .pokkum.yaml
+	if projCfg != nil {
+		for k, v := range projCfg.Image.Labels {
+			req.Labels[k] = v
+		}
+		if len(projCfg.Image.Annotations) > 0 {
+			req.Annotations = make(map[string]string)
+			for k, v := range projCfg.Image.Annotations {
+				req.Annotations[k] = v
+			}
+		}
+		if len(projCfg.Image.Env) > 0 {
+			req.Runtime.Env = make(map[string]string)
+			for k, v := range projCfg.Image.Env {
+				req.Runtime.Env[k] = v
+			}
+		}
+		if len(projCfg.Image.RequireEnv) > 0 {
+			req.Runtime.RequireEnv = append(req.Runtime.RequireEnv, projCfg.Image.RequireEnv...)
+		}
+		if len(projCfg.Image.Ports) > 0 {
+			req.Runtime.ExposedPorts = append(req.Runtime.ExposedPorts, projCfg.Image.Ports...)
+		}
+		if projCfg.Image.Port != 0 {
+			req.Runtime.Port = projCfg.Image.Port
+		}
+		if projCfg.Image.ProbePort != 0 {
+			req.Runtime.ProbePort = projCfg.Image.ProbePort
+		}
+		if projCfg.Image.User != "" {
+			req.Runtime.User = projCfg.Image.User
+		}
+		if projCfg.Image.WorkingDir != "" {
+			req.Runtime.WorkingDir = projCfg.Image.WorkingDir
+		}
+		if projCfg.Image.ShutdownTimeout != "" {
+			d, err := time.ParseDuration(projCfg.Image.ShutdownTimeout)
+			if err != nil {
+				return nil, fmt.Errorf("invalid shutdown_timeout %q: %w", projCfg.Image.ShutdownTimeout, err)
+			}
+			req.Runtime.ShutdownTimeout = d
+		}
+	}
+
+	if len(flags.imageLabels) > 0 {
+		for _, lbl := range flags.imageLabels {
+			k, v, ok := strings.Cut(lbl, "=")
+			if !ok {
+				return nil, fmt.Errorf("invalid --image-label %q: expected key=value", lbl)
+			}
+			req.Labels[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	req.Labels = discoverGitMetadata(ctx, projectDir, req.Labels, timestamp)
+
+	if !flags.noVerifyBase && projCfg != nil && projCfg.Security.VerifyBase != nil && !*projCfg.Security.VerifyBase {
+		req.BaseImage.NoVerifyBase = true
+	} else {
+		req.BaseImage.NoVerifyBase = flags.noVerifyBase
+	}
+
+	if flags.baseVerifyMode != "" {
+		verifyMode, err := core.ParseBaseImageVerifyMode(flags.baseVerifyMode)
+		if err != nil {
+			return nil, fmt.Errorf("invalid base verify mode: %w", err)
+		}
+		req.BaseImage.VerifyMode = verifyMode
+	}
+	if flags.baseKeylessIdentity != "" {
+		req.BaseImage.KeylessSAN = flags.baseKeylessIdentity
+	}
+	if flags.baseKeylessIssuer != "" {
+		req.BaseImage.KeylessIssuer = flags.baseKeylessIssuer
+	}
+	if flags.sigstoreTrustedRoot != "" {
+		req.BaseImage.TrustedRootPath = flags.sigstoreTrustedRoot
+	}
+
+	req.AllowSecretPatterns = flags.allowSecretPatterns
+	if projCfg != nil && len(projCfg.Security.AllowSecretPatterns) > 0 {
+		req.AllowSecretPatterns = append(req.AllowSecretPatterns, projCfg.Security.AllowSecretPatterns...)
+	}
+
+	req.Hermetic = flags.hermetic
+	req.RegistryConfigPath = flags.registryConfig
+	req.PushConcurrency = flags.pushConcurrency
+
+	// FailOnCVE: flag > env > profile/config
+	failOnCVESetting := flags.failOnCVE
+	if failOnCVESetting == "" {
+		failOnCVESetting = os.Getenv("POKKUM_FAIL_ON_CVE")
+	}
+	if failOnCVESetting == "" && projCfg != nil {
+		failOnCVESetting = projCfg.Security.FailOnCVE
+	}
+	if failOnCVESetting == "" {
+		failOnCVESetting = cfg.GetString("security.fail_on_cve", "")
+	}
+	if failOnCVESetting != "" {
+		if failOnCVESetting == "1" || strings.EqualFold(failOnCVESetting, "true") || strings.EqualFold(failOnCVESetting, "yes") {
+			req.FailOnCVE = core.SeverityCritical
+		} else {
+			sev, err := core.ParseSeverity(failOnCVESetting)
+			if err != nil {
+				return nil, fmt.Errorf("invalid fail-on-cve severity %q: %w", failOnCVESetting, err)
+			}
+			req.FailOnCVE = sev
+		}
+	}
+
+	if !flags.allowIncomplete && projCfg != nil && projCfg.Security.AllowIncompleteScans != nil && *projCfg.Security.AllowIncompleteScans {
+		req.AllowIncompleteScan = true
+	} else {
+		req.AllowIncompleteScan = flags.allowIncomplete
+	}
+
+	// Cache verification configuration
+	if flags.noCacheVerify {
+		req.CacheVerify.VerifyMode = core.CacheVerifyNone
+		req.CacheVerify.VerifySignature = false
+	} else {
+		req.CacheVerify.VerifySignature = true
+		verifyModeSetting := flags.cacheVerifyMode
+		if verifyModeSetting == "" {
+			verifyModeSetting = os.Getenv("POKKUM_CACHE_VERIFY_MODE")
+		}
+		if verifyModeSetting == "" && projCfg != nil {
+			verifyModeSetting = projCfg.Cache.VerifyMode
+		}
+		if verifyModeSetting != "" {
+			mode, err := core.ParseCacheVerifyMode(verifyModeSetting)
+			if err != nil {
+				return nil, fmt.Errorf("invalid cache verify mode: %w", err)
+			}
+			req.CacheVerify.VerifyMode = mode
+		}
+	}
+
+	verifyKeySetting := flags.cacheVerifyKey
+	if verifyKeySetting == "" {
+		verifyKeySetting = os.Getenv("POKKUM_CACHE_PUBKEY")
+	}
+	if verifyKeySetting == "" && projCfg != nil {
+		verifyKeySetting = projCfg.Cache.Pubkey
+	}
+	if verifyKeySetting != "" {
+		if data, err := os.ReadFile(verifyKeySetting); err == nil {
+			req.CacheVerify.PublicKeyPEM = data
+		} else {
+			req.CacheVerify.PublicKeyPEM = []byte(verifyKeySetting)
+		}
+	}
+
+	keylessSANSetting := flags.cacheKeylessIdentity
+	if keylessSANSetting == "" {
+		keylessSANSetting = os.Getenv("POKKUM_CACHE_KEYLESS_IDENTITY")
+	}
+	if keylessSANSetting == "" && projCfg != nil {
+		keylessSANSetting = projCfg.Cache.KeylessIdentity
+	}
+	if keylessSANSetting != "" {
+		req.CacheVerify.KeylessIdentity.SAN = keylessSANSetting
+	}
+
+	keylessIssuerSetting := flags.cacheKeylessIssuer
+	if keylessIssuerSetting == "" {
+		keylessIssuerSetting = os.Getenv("POKKUM_CACHE_KEYLESS_ISSUER")
+	}
+	if keylessIssuerSetting == "" && projCfg != nil {
+		keylessIssuerSetting = projCfg.Cache.KeylessIssuer
+	}
+	if keylessIssuerSetting != "" {
+		req.CacheVerify.KeylessIdentity.Issuer = keylessIssuerSetting
+	}
+
+	req.CacheVerify.Strict = flags.cacheVerifyStrict
+	if flags.sigstoreTrustedRoot != "" {
+		if data, err := os.ReadFile(flags.sigstoreTrustedRoot); err == nil {
+			req.CacheVerify.TrustedRootJSON = data
+		}
+	}
+
+	return &req, nil
 }
 
 // buildRequestForPath constructs a push-mode BuildRequest for a SvelteKit
