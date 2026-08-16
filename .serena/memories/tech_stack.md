@@ -1,19 +1,20 @@
 # Technology Stack & Dependencies
 
-- **Language**: Go 1.26+ (go directive 1.26.5 in `go.mod`)
+- **Language**: Go 1.26+ (go directive 1.26.6 in `go.mod`)
 - **Application Framework**: SvelteKit 2.31+ (`@sveltejs/kit`)
-- **Runtime Compiler & Resolver**: Bun ≥ 1.2.0 (`internal/adapters/bunruntime` resolver, `--bun-binary`, `--bun-variant=standard|baseline`)
-- **Packaging Strategy & Adapter**: `--strategy=layered` (default, arch-independent layout via `@sveltejs/adapter-node`) / `--strategy=exe` (deprecated 2-layer single executable) / `--strategy=static` (new, via `@sveltejs/adapter-static`, served by `pokkum-static`)
+- **Runtime Compiler & Resolver**: Bun ≥ 1.2.0 (`internal/adapters/bunruntime` resolver, `--bun-binary`, `--bun-variant=standard|baseline`, `--stub-launcher` for compiled entrypoint launcher stubs)
+- **Packaging Strategy & Adapter**: `--strategy=layered` (default, arch-independent layout via `@sveltejs/adapter-node`) / `--strategy=exe` (deprecated 2-layer single executable) / `--strategy=static` (via `@sveltejs/adapter-static`, served by `pokkum-static`)
+- **Zero-Config Auto-Injection**: `sveltekitutils.TransformViteConfig` + `bunexec.Compiler.Prepare` via `.pokkum/vite.config.ts` wrapper and `bunx vite build --config .pokkum/vite.config.ts` (Option B), with `checkEffectiveAdapter` fail-fast backstop (Option C) when `--no-inject` is set.
 - **Embedded Static File Server**: `pokkum-static` (`supervisor/cmd/pokkum-static`) — a statically-linked PID-1 Go HTTP file server embedded zstd-compressed by `internal/adapters/staticserver` (`ports.StaticServerProvider`, built by `make static-server`), serving the `--strategy=static` `client` + `prerendered` trees with Range/ETag/Content-Encoding support. Base image for that path: `cgr.dev/chainguard/static` (libc-free), defaulted by the `--static` flag when no `--base`/`--hardened` is given.
 - **`sync.Pool` Buffer Recycling**: `poolutils` (`internal/adapters/poolutils/poolutils.go`) recycles 64KB I/O copy buffers and bounded `bytes.Buffer` instances across tar archiving, layer streaming, hashing, and pre-compression.
-- **Composite Remote OCI Input Caching**: `remotecacheutils` (`internal/adapters/remotecacheutils/remotecacheutils.go`) calculates composite input digests to achieve sub-100ms build avoidance against remote registries. Escape hatch: `--no-cache`.
+- **Composite Remote OCI Input Caching**: `remotecacheutils` (`internal/adapters/remotecacheutils/remotecacheutils.go`) calculates composite input digests (including `StubLauncher` sensitivity) to achieve sub-100ms build avoidance against remote registries. Escape hatch: `--no-cache`.
 - **Static Asset Pre-Compression**: `precompressutils` (`internal/adapters/precompressutils/precompressutils.go`) pre-compresses `/app/client` assets using pure-Go Brotli (`github.com/andybalholm/brotli`), Zstandard (`github.com/klauspost/compress/zstd`), and Gzip. Escape hatch: `--no-precompress`.
 - **ELF Native Addon Stripping**: `striputils` (`internal/adapters/striputils/striputils.go`) strips unneeded debug symbols from native `.node` modules and `.so` libraries in `/app/native` and `/app/vendor`. Escape hatch: `--no-strip`.
 - **Layer Assembly & Compression**: Single-pass streaming pipeline (`buildSinglePassLayer`) computing uncompressed `DiffID` and compressed `Digest` simultaneously; `--compression=gzip|zstd` (default: `gzip`, `application/vnd.oci.image.layer.v1.tar+zstd` when `zstd`).
-- **Layer Caching**: `layercacheutils` (`internal/adapters/layercacheutils/layercacheutils.go`) caches immutable compressed layer tarballs (`bun`, `supervisor`) in `~/.cache/pokkum/layers/`.
+- **Layer Caching**: `layercacheutils` (`internal/adapters/layercacheutils/layercacheutils.go`) caches immutable compressed layer tarballs (`bun`, `supervisor`, `stubs`) in `~/.cache/pokkum/layers/` and `~/.cache/pokkum/bun/stubs/`.
 - **Vendor Layer Optimization**: `pruneutils` (`internal/adapters/pruneutils/pruneutils.go`) automatically strips non-runtime files (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests) from `/app/vendor`, saving 15–35MB per image. Escape hatches: `--no-prune`, `--keep-vendor`.
 - **Native Addon Closure & Splitting**: `ClosuredNativeAdapter` (`internal/adapters/nativeinspect/closured.go`), ELF `.node` addon inspection, `/app/native` layer, and vendor chunking (`/app/vendor`).
-- **Security & Hardening**: Container `securityContext` defaults inject `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`.
+- **Security & Hardening**: Container `securityContext` defaults inject `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`. Optional compiled stub launcher (`--stub-launcher`) and supervisor pre-exec startup attestation (`POKKUM_ATTESTATION_DIGEST`).
 - **OCI Container Engine**: `github.com/google/go-containerregistry` (no Docker daemon required for builds)
 - **Local Dev Engine**: `pokkum dev` (`cmd/pokkum/dev.go`) for local Docker daemon load, `--debug` interactive shell, and file watching.
 - **Base Images**: Distroless (`gcr.io/distroless/cc-debian12:nonroot`) or Chainguard (`ghcr.io/chainguard-images/glibc-dynamic:latest`)

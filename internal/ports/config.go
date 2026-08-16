@@ -59,32 +59,34 @@ type OTelConfig struct {
 
 // BuildProfile defines partial overrides for build parameters.
 type BuildProfile struct {
-	Output    string         `yaml:"output,omitempty" json:"output,omitempty"`
-	Platforms []string       `yaml:"platforms,omitempty" json:"platforms,omitempty"`
-	Base      string         `yaml:"base,omitempty" json:"base,omitempty"`
-	Strategy  string         `yaml:"strategy,omitempty" json:"strategy,omitempty"`
-	Sourcemap *bool          `yaml:"sourcemap,omitempty" json:"sourcemap,omitempty"`
-	Docker    DockerConfig   `yaml:"docker,omitempty" json:"docker,omitempty"`
-	Image     ImageConfig    `yaml:"image,omitempty" json:"image,omitempty"`
-	Security  SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
-	SBOM      SBOMConfig     `yaml:"sbom,omitempty" json:"sbom,omitempty"`
-	Cache     CacheConfig    `yaml:"cache,omitempty" json:"cache,omitempty"`
-	OTel      OTelConfig     `yaml:"otel,omitempty" json:"otel,omitempty"`
+	Output       string         `yaml:"output,omitempty" json:"output,omitempty"`
+	Platforms    []string       `yaml:"platforms,omitempty" json:"platforms,omitempty"`
+	Base         string         `yaml:"base,omitempty" json:"base,omitempty"`
+	Strategy     string         `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	StubLauncher *bool          `yaml:"stub_launcher,omitempty" json:"stub_launcher,omitempty"`
+	Sourcemap    *bool          `yaml:"sourcemap,omitempty" json:"sourcemap,omitempty"`
+	Docker       DockerConfig   `yaml:"docker,omitempty" json:"docker,omitempty"`
+	Image        ImageConfig    `yaml:"image,omitempty" json:"image,omitempty"`
+	Security     SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
+	SBOM         SBOMConfig     `yaml:"sbom,omitempty" json:"sbom,omitempty"`
+	Cache        CacheConfig    `yaml:"cache,omitempty" json:"cache,omitempty"`
+	OTel         OTelConfig     `yaml:"otel,omitempty" json:"otel,omitempty"`
 }
 
 // ProjectConfig represents the root .pokkum.yaml configuration structure.
 type ProjectConfig struct {
-	Version   int                     `yaml:"version" json:"version"`
-	Docker    DockerConfig            `yaml:"docker,omitempty" json:"docker,omitempty"`
-	Strategy  string                  `yaml:"strategy,omitempty" json:"strategy,omitempty"`
-	Base      string                  `yaml:"base,omitempty" json:"base,omitempty"`
-	Platforms []string                `yaml:"platforms,omitempty" json:"platforms,omitempty"`
-	Image     ImageConfig             `yaml:"image,omitempty" json:"image,omitempty"`
-	Security  SecurityConfig          `yaml:"security,omitempty" json:"security,omitempty"`
-	SBOM      SBOMConfig              `yaml:"sbom,omitempty" json:"sbom,omitempty"`
-	Cache     CacheConfig             `yaml:"cache,omitempty" json:"cache,omitempty"`
-	OTel      OTelConfig              `yaml:"otel,omitempty" json:"otel,omitempty"`
-	Profiles  map[string]BuildProfile `yaml:"profiles,omitempty" json:"profiles,omitempty"`
+	Version      int                     `yaml:"version" json:"version"`
+	Docker       DockerConfig            `yaml:"docker,omitempty" json:"docker,omitempty"`
+	Strategy     string                  `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	StubLauncher *bool                   `yaml:"stub_launcher,omitempty" json:"stub_launcher,omitempty"`
+	Base         string                  `yaml:"base,omitempty" json:"base,omitempty"`
+	Platforms    []string                `yaml:"platforms,omitempty" json:"platforms,omitempty"`
+	Image        ImageConfig             `yaml:"image,omitempty" json:"image,omitempty"`
+	Security     SecurityConfig          `yaml:"security,omitempty" json:"security,omitempty"`
+	SBOM         SBOMConfig              `yaml:"sbom,omitempty" json:"sbom,omitempty"`
+	Cache        CacheConfig             `yaml:"cache,omitempty" json:"cache,omitempty"`
+	OTel         OTelConfig              `yaml:"otel,omitempty" json:"otel,omitempty"`
+	Profiles     map[string]BuildProfile `yaml:"profiles,omitempty" json:"profiles,omitempty"`
 }
 
 // InitConfigOptions provides parameters for bootstrapping a new .pokkum.yaml.

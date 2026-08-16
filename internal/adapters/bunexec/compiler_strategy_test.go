@@ -207,15 +207,14 @@ exit 0
 				t.Errorf("OutputDir = %q, want %q", result.OutputDir, wantOutputDir)
 			}
 
-			// targetAdapter selection: the virtual svelte.config.js Prepare
-			// injects must reference the strategy's adapter package.
-			virtualConfig, err := os.ReadFile(filepath.Join(dir, ".pokkum", "svelte.config.js"))
-			if err != nil {
-				t.Fatalf("read injected virtual svelte.config.js: %v", err)
-			}
-			if !strings.Contains(string(virtualConfig), tc.wantTargetAdapter) {
-				t.Errorf("virtual svelte.config.js does not reference target adapter %q:\n%s", tc.wantTargetAdapter, virtualConfig)
-			}
+			// targetAdapter selection: each case's svelteConfig fixture only
+			// references its own strategy's adapter package (see the field's
+			// doc comment above), so checkEffectiveAdapter would already have
+			// failed Prepare with core.ErrAdapterMisconfigured above (line
+			// ~196) had targetAdapter been computed wrong for this strategy —
+			// the now-removed PrepareVirtualConfig write this used to inspect
+			// was dead output nothing ever read (see Lessons.md 2026-08-17),
+			// dropped from Prepare rather than tested against.
 
 			// prerendered-handler patch dispatch: layered only. Non-layered
 			// strategies never get a handler.js fixture above, so if Prepare

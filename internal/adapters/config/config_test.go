@@ -561,3 +561,58 @@ func TestLoad_ExampleGoldenFixture(t *testing.T) {
 		t.Errorf("expected merged fail_on_cve overridden to critical, got %q", merged.Security.FailOnCVE)
 	}
 }
+
+func TestProjectConfig_StubLauncher_ProfileAndDeepCopy(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlContent := `version: 1
+strategy: layered
+stub_launcher: true
+docker:
+  repo: ghcr.io/test/app
+profiles:
+  nostub:
+    stub_launcher: false
+  withstub:
+    stub_launcher: true
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, ConfigFilename), []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	mgr, err := New(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	cfg, err := mgr.Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if cfg.StubLauncher == nil || !*cfg.StubLauncher {
+		t.Fatalf("expected root StubLauncher = true")
+	}
+
+	// Apply nostub profile
+	nostubMerged, err := mgr.ApplyProfile(cfg, "nostub")
+	if err != nil {
+		t.Fatalf("ApplyProfile nostub failed: %v", err)
+	}
+	if nostubMerged.StubLauncher == nil || *nostubMerged.StubLauncher != false {
+		t.Errorf("expected nostub profile to override StubLauncher to false, got %v", nostubMerged.StubLauncher)
+	}
+
+	// Verify root cfg was not mutated by ApplyProfile
+	if cfg.StubLauncher == nil || !*cfg.StubLauncher {
+		t.Errorf("root cfg StubLauncher was mutated")
+	}
+
+	// Apply withstub profile
+	withstubMerged, err := mgr.ApplyProfile(cfg, "withstub")
+	if err != nil {
+		t.Fatalf("ApplyProfile withstub failed: %v", err)
+	}
+	if withstubMerged.StubLauncher == nil || !*withstubMerged.StubLauncher {
+		t.Errorf("expected withstub profile StubLauncher = true")
+	}
+}

@@ -166,6 +166,10 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 	if profile.Strategy != "" {
 		merged.Strategy = profile.Strategy
 	}
+	if profile.StubLauncher != nil {
+		val := *profile.StubLauncher
+		merged.StubLauncher = &val
+	}
 	if len(profile.Platforms) > 0 {
 		merged.Platforms = append([]string{}, profile.Platforms...)
 	}
@@ -329,6 +333,11 @@ func deepCopyProjectConfig(src *ports.ProjectConfig) *ports.ProjectConfig {
 		return nil
 	}
 	dst := *src
+
+	if src.StubLauncher != nil {
+		v := *src.StubLauncher
+		dst.StubLauncher = &v
+	}
 
 	if len(src.Platforms) > 0 {
 		dst.Platforms = append([]string{}, src.Platforms...)

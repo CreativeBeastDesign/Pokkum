@@ -5,6 +5,22 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-17 — `TransformViteConfig` naive substring matching risked mutating commented-out code and string literals in Vite configs
+
+**Category:** logic-error / tokenizer (boundary condition in source-code transformations)
+
+**Where:** `internal/adapters/sveltekitutils/injector.go`'s `TransformViteConfig` (locating `sveltekit(...)` and `adapter: ...` properties).
+
+**What happened:** During the clean-context sub-agent verification of Option B (zero-config Vite configuration injection), adversarial testing revealed that `TransformViteConfig` used raw `strings.Index(result, "sveltekit(")` and `regexp.ReplaceAllString` for adapter property replacement without lexical token scanning. When a user's `vite.config.ts` had a commented-out call (e.g. `// sveltekit({ adapter: fakeAdapter() })`) or a helper plugin passing string literals containing `"sveltekit({ ... })"`, the transformer mutated the comment/string literal while leaving the genuine `sveltekit(...)` plugin unconfigured.
+
+**Root cause:** Naive regex and substring matches assume all occurrences of an identifier in a file are live JavaScript/TypeScript code. Comments and string literals easily fool basic index searches unless comment/string delimiters are parsed and skipped.
+
+**Fix:** Implemented `findLiveSvelteKitCall` and `findLiveAdapterProp` scanners in `injector.go` that explicitly track and skip single-line comments (`//`), block comments (`/* ... */`), and all quote forms (`'`, `"`, `` ` ``), with paren/bracket/brace depth tracking to accurately extract and replace only live property expressions.
+
+**Preventative rule:** When transforming user source files or config code, never rely on plain substring matching (`strings.Index`) or unanchored regular expressions across full file contents. Always use a minimal state scanner that accounts for JavaScript/TypeScript comments and string literals.
+
+---
+
 ## 2026-08-17 — A sub-agent's "captured verbatim from a real `bunx sv create` project" fixture doc comment was false, caught only by re-running the real command during adversarial review
 
 **Category:** test-fixture-fidelity (a meta-instance of this file's recurring theme: this time the false claim was about provenance itself, not about the artifact's pipeline stage)

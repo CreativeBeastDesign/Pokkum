@@ -42,6 +42,23 @@ const validPackageJSON = `{
 	}
 }`
 
+// viteBuildPackageJSON is validPackageJSON plus a "build": "vite build"
+// script — the shape checkEffectiveAdapter's Option B guard requires before
+// it will swap `bun run build` for `bun x vite build --config ...`, and the
+// real script a genuine `sv create` scaffold's package.json has.
+const viteBuildPackageJSON = `{
+	"name": "sveltekit-basic",
+	"dependencies": {
+		"@sveltejs/kit": "^2.5.0"
+	},
+	"devDependencies": {
+		"@jesterkit/exe-sveltekit": "^0.4.0"
+	},
+	"scripts": {
+		"build": "vite build"
+	}
+}`
+
 // newProjectDir writes package.json and svelte.config.js (when non-empty)
 // into a fresh temp directory and returns its path.
 func newProjectDir(t *testing.T, pkgJSON, svelteConfig string) string {
@@ -424,9 +441,8 @@ export default defineConfig({
 `
 
 func TestPrepare_FailsFastWhenAdapterNotConfigured(t *testing.T) {
-	// svelte.config.js real-shaped but naming the wrong adapter for
-	// StrategyLayered (@sveltejs/adapter-node); no vite.config.ts, so
-	// svelte.config.js governs and simply doesn't configure what's needed.
+	// With NoInject: true, svelte.config.js real-shaped but naming the wrong adapter
+	// fails fast with core.ErrAdapterMisconfigured before subprocess or sandbox write.
 	wrongSvelteConfig := `import adapter from '@sveltejs/adapter-auto';
 
 export default {
@@ -440,7 +456,7 @@ export default {
 	putFakeBunOnPath(t, `touch `+bunSentinel+`; exit 0`)
 	c := NewCompiler(discardLogger())
 
-	_, err := c.Prepare(context.Background(), ports.PrepareRequest{ProjectDir: dir, Strategy: ports.StrategyLayered, SourceDateEpoch: time.Unix(0, 0)})
+	_, err := c.Prepare(context.Background(), ports.PrepareRequest{ProjectDir: dir, Strategy: ports.StrategyLayered, NoInject: true, SourceDateEpoch: time.Unix(0, 0)})
 	if !errors.Is(err, core.ErrAdapterMisconfigured) {
 		t.Fatalf("err = %v, want wrapping core.ErrAdapterMisconfigured", err)
 	}
@@ -459,16 +475,14 @@ export default {
 }
 
 func TestPrepare_FailsFastWhenViteConfigOverridesAdapter(t *testing.T) {
-	// The compounding bug: svelte.config.js is entirely absent (current
-	// `sv create` scaffolds don't generate one), and the real vite.config.ts
-	// that governs configures @sveltejs/adapter-auto, not the
-	// StrategyLayered target @sveltejs/adapter-node.
+	// With NoInject: true, vite.config.ts configuring @sveltejs/adapter-auto
+	// fails fast with core.ErrAdapterMisconfigured before subprocess or sandbox write.
 	dir := newProjectDirWithVite(t, validPackageJSON, "", realSvCreateDefaultViteConfigTS)
 	bunSentinel := filepath.Join(t.TempDir(), "bun-was-invoked")
 	putFakeBunOnPath(t, `touch `+bunSentinel+`; exit 0`)
 	c := NewCompiler(discardLogger())
 
-	_, err := c.Prepare(context.Background(), ports.PrepareRequest{ProjectDir: dir, Strategy: ports.StrategyLayered, SourceDateEpoch: time.Unix(0, 0)})
+	_, err := c.Prepare(context.Background(), ports.PrepareRequest{ProjectDir: dir, Strategy: ports.StrategyLayered, NoInject: true, SourceDateEpoch: time.Unix(0, 0)})
 	if !errors.Is(err, core.ErrAdapterMisconfigured) {
 		t.Fatalf("err = %v, want wrapping core.ErrAdapterMisconfigured", err)
 	}
@@ -483,6 +497,48 @@ func TestPrepare_FailsFastWhenViteConfigOverridesAdapter(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, ".pokkum")); statErr == nil {
 		t.Error(".pokkum/ was written; checkEffectiveAdapter must fail before PrepareVirtualConfig runs")
+	}
+}
+
+func TestPrepare_ZeroConfigAutoInjection_EngagesViteWrapper(t *testing.T) {
+	// Option B: when NoInject is false, the project's build script is exactly
+	// "vite build" (checkEffectiveAdapter's guard requires this — see
+	// viteBuildPackageJSON), and vite.config.ts has @sveltejs/adapter-auto,
+	// Prepare generates .pokkum/vite.config.ts with @sveltejs/adapter-node
+	// and invokes vite build with --config.
+	dir := newProjectDirWithVite(t, viteBuildPackageJSON, "", realSvCreateDefaultViteConfigTS)
+	argsSentinel := filepath.Join(t.TempDir(), "bun-args.txt")
+	putFakeBunOnPath(t, `echo "$@" > `+argsSentinel+`; mkdir -p build; touch build/index.js; echo 'path.join(dir, "prerendered")' > build/handler.js; exit 0`)
+	c := NewCompiler(discardLogger())
+
+	res, err := c.Prepare(context.Background(), ports.PrepareRequest{ProjectDir: dir, Strategy: ports.StrategyLayered, SourceDateEpoch: time.Unix(0, 0)})
+	if err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+	if res.EntrypointPath == "" {
+		t.Errorf("expected non-empty EntrypointPath")
+	}
+
+	virtualConfigPath := filepath.Join(dir, ".pokkum", "vite.config.ts")
+	if _, err := os.Stat(virtualConfigPath); os.IsNotExist(err) {
+		t.Fatalf("expected virtual vite.config.ts at %s", virtualConfigPath)
+	}
+
+	cfgBytes, err := os.ReadFile(virtualConfigPath)
+	if err != nil {
+		t.Fatalf("failed to read virtual config: %v", err)
+	}
+	if !strings.Contains(string(cfgBytes), "@sveltejs/adapter-node") {
+		t.Errorf("expected virtual config to configure @sveltejs/adapter-node, got:\n%s", string(cfgBytes))
+	}
+
+	argsData, err := os.ReadFile(argsSentinel)
+	if err != nil {
+		t.Fatalf("failed to read captured bun args: %v", err)
+	}
+	argsStr := string(argsData)
+	if !strings.Contains(argsStr, "--config") || !strings.Contains(argsStr, "vite") {
+		t.Errorf("expected bun to invoke vite with --config, got argv: %s", argsStr)
 	}
 }
 

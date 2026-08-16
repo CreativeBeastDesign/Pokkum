@@ -536,6 +536,10 @@ type BunRuntimeOptions struct {
 
 	// CustomBinaryPath is an optional local path to a bun executable (--bun-binary).
 	CustomBinaryPath string
+
+	// StubLauncher indicates whether to compile a minimal entrypoint launcher stub
+	// instead of embedding stock Bun runtime (layered strategy hardening).
+	StubLauncher bool
 }
 
 // BuildRequest is the complete description of one `pokkum build`. It is
@@ -825,6 +829,10 @@ func (r BuildRequest) Validate() error {
 
 	if !r.Compile.Strategy.Valid() {
 		return fmt.Errorf("packaging strategy %q is invalid (supported: layered, exe, static): %w", r.Compile.Strategy, ErrInvalidRequest)
+	}
+
+	if r.BunRuntime.StubLauncher && r.Compile.Strategy != StrategyLayered {
+		return fmt.Errorf("stub launcher is only meaningful for --strategy=layered (embeds a Bun runtime); %q does not: %w", r.Compile.Strategy, ErrInvalidRequest)
 	}
 	return nil
 }

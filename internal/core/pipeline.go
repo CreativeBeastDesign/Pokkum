@@ -548,6 +548,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			BunVersion:          toolchain.BunVersion,
 			BunVariant:          string(req.BunRuntime.Variant),
 			BunCustomBinaryPath: req.BunRuntime.CustomBinaryPath,
+			StubLauncher:        req.BunRuntime.StubLauncher,
 			Platforms:           pStrs,
 			Strategy:            string(req.Compile.Strategy),
 			Compression:         string(req.Compile.Compression),
@@ -943,6 +944,7 @@ func fanOut(
 					Version:          req.BunRuntime.Version,
 					Variant:          req.BunRuntime.Variant,
 					CustomBinaryPath: req.BunRuntime.CustomBinaryPath,
+					StubLauncher:     req.BunRuntime.StubLauncher,
 					SourceDateEpoch:  req.SourceDateEpoch,
 				})
 				if err != nil {

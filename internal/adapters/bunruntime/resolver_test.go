@@ -137,8 +137,161 @@ func TestResolver_DownloadAndCache(t *testing.T) {
 	}
 }
 
+func TestResolver_StubLauncher_BypassedByCustomBinary(t *testing.T) {
+	tmpDir := t.TempDir()
+	customPath := filepath.Join(tmpDir, "custom-bun")
+	content := []byte("#!/bin/sh\necho 'custom'")
+	if err := os.WriteFile(customPath, content, 0755); err != nil {
+		t.Fatalf("failed to write custom binary: %v", err)
+	}
+
+	resolver := NewResolver(t.TempDir(), nil)
+	req := ports.BunResolverRequest{
+		Platform:         ports.LinuxAMD64,
+		CustomBinaryPath: customPath,
+		StubLauncher:     true,
+		SourceDateEpoch:  time.Unix(1700000000, 0),
+	}
+
+	res, err := resolver.Resolve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.BinaryPath != customPath {
+		t.Errorf("expected BinaryPath %s, got %s", customPath, res.BinaryPath)
+	}
+}
+
+func TestResolver_StubLauncher_CachedHit(t *testing.T) {
+	cacheDir := t.TempDir()
+	stubTargetDir := filepath.Join(cacheDir, "stubs", "1.2.2", "standard", "linux_amd64")
+	if err := os.MkdirAll(stubTargetDir, 0755); err != nil {
+		t.Fatalf("failed to create stub cache dir: %v", err)
+	}
+
+	cachedStubPath := filepath.Join(stubTargetDir, "bun")
+	content := []byte("compiled-stub-binary-bytes")
+	if err := os.WriteFile(cachedStubPath, content, 0755); err != nil {
+		t.Fatalf("failed to write cached stub: %v", err)
+	}
+
+	resolver := NewResolver(cacheDir, nil)
+	req := ports.BunResolverRequest{
+		Platform:        ports.LinuxAMD64,
+		Version:         "1.2.2",
+		Variant:         ports.BunVariantStandard,
+		StubLauncher:    true,
+		SourceDateEpoch: time.Unix(1700000000, 0),
+	}
+
+	res, err := resolver.Resolve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.BinaryPath != cachedStubPath {
+		t.Errorf("expected BinaryPath %s, got %s", cachedStubPath, res.BinaryPath)
+	}
+
+	expectedSHA := sha256.Sum256(content)
+	if res.SHA256 != hex.EncodeToString(expectedSHA[:]) {
+		t.Errorf("expected SHA256 %s, got %s", hex.EncodeToString(expectedSHA[:]), res.SHA256)
+	}
+}
+
 type roundTripperFunc func(req *http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestResolver_StubLauncher_AdversarialTargetAndCacheIsolation(t *testing.T) {
+	t.Run("unsupported_os_fails_fast", func(t *testing.T) {
+		resolver := NewResolver(t.TempDir(), nil)
+		req := ports.BunResolverRequest{
+			Platform:        ports.Platform{OS: "darwin", Arch: "arm64"},
+			Version:         "1.2.2",
+			Variant:         ports.BunVariantStandard,
+			StubLauncher:    true,
+			SourceDateEpoch: time.Unix(1700000000, 0),
+		}
+
+		_, err := resolver.Resolve(context.Background(), req)
+		if err == nil {
+			t.Fatal("expected error for unsupported OS with StubLauncher")
+		}
+		if !errors.Is(err, core.ErrUnsupportedPlatform) {
+			t.Errorf("expected ErrUnsupportedPlatform, got: %v", err)
+		}
+	})
+
+	t.Run("baseline_variant_on_arm64_fails_fast", func(t *testing.T) {
+		resolver := NewResolver(t.TempDir(), nil)
+		req := ports.BunResolverRequest{
+			Platform:        ports.LinuxARM64,
+			Version:         "1.2.2",
+			Variant:         ports.BunVariantBaseline,
+			StubLauncher:    true,
+			SourceDateEpoch: time.Unix(1700000000, 0),
+		}
+
+		_, err := resolver.Resolve(context.Background(), req)
+		if err == nil {
+			t.Fatal("expected error for baseline variant on arm64 with StubLauncher")
+		}
+		if !errors.Is(err, core.ErrBunResolutionFailed) {
+			t.Errorf("expected ErrBunResolutionFailed, got: %v", err)
+		}
+	})
+
+	t.Run("cache_path_isolation_between_stock_and_stub", func(t *testing.T) {
+		cacheDir := t.TempDir()
+
+		// Populate stock bun cache
+		stockDir := filepath.Join(cacheDir, "1.2.2", "standard", "linux_amd64")
+		_ = os.MkdirAll(stockDir, 0755)
+		stockBinary := filepath.Join(stockDir, "bun")
+		_ = os.WriteFile(stockBinary, []byte("stock-bun-bytes"), 0755)
+
+		// Populate stub bun cache
+		stubDir := filepath.Join(cacheDir, "stubs", "1.2.2", "standard", "linux_amd64")
+		_ = os.MkdirAll(stubDir, 0755)
+		stubBinary := filepath.Join(stubDir, "bun")
+		_ = os.WriteFile(stubBinary, []byte("stub-launcher-bytes"), 0755)
+
+		resolver := NewResolver(cacheDir, nil)
+
+		// Request stock
+		stockRes, err := resolver.Resolve(context.Background(), ports.BunResolverRequest{
+			Platform:        ports.LinuxAMD64,
+			Version:         "1.2.2",
+			Variant:         ports.BunVariantStandard,
+			StubLauncher:    false,
+			SourceDateEpoch: time.Unix(1700000000, 0),
+		})
+		if err != nil {
+			t.Fatalf("resolve stock failed: %v", err)
+		}
+		if stockRes.BinaryPath != stockBinary {
+			t.Errorf("expected stock binary %s, got %s", stockBinary, stockRes.BinaryPath)
+		}
+
+		// Request stub
+		stubRes, err := resolver.Resolve(context.Background(), ports.BunResolverRequest{
+			Platform:        ports.LinuxAMD64,
+			Version:         "1.2.2",
+			Variant:         ports.BunVariantStandard,
+			StubLauncher:    true,
+			SourceDateEpoch: time.Unix(1700000000, 0),
+		})
+		if err != nil {
+			t.Fatalf("resolve stub failed: %v", err)
+		}
+		if stubRes.BinaryPath != stubBinary {
+			t.Errorf("expected stub binary %s, got %s", stubBinary, stubRes.BinaryPath)
+		}
+
+		if stockRes.SHA256 == stubRes.SHA256 {
+			t.Errorf("stock and stub SHA256 should differ")
+		}
+	})
 }

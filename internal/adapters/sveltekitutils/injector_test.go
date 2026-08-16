@@ -153,3 +153,241 @@ export default {
 		t.Errorf("expected experimental.instrumentation flag in transformed config:\n%s", transformed)
 	}
 }
+
+func TestTransformViteConfig_AdapterAutoToAdapterNode(t *testing.T) {
+	input := `import adapter from '@sveltejs/adapter-auto';
+import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+	plugins: [
+		sveltekit({
+			compilerOptions: {
+				runes: ({ filename }) => filename.split(/[/\\]/).includes('node_modules') ? undefined : true
+			},
+			adapter: adapter()
+		})
+	]
+});`
+
+	opts := InjectorOptions{
+		TargetAdapter: "@sveltejs/adapter-node",
+	}
+
+	transformed, err := TransformViteConfig(input, opts)
+	if err != nil {
+		t.Fatalf("TransformViteConfig failed: %v", err)
+	}
+
+	if !strings.Contains(transformed, "import adapter from '@sveltejs/adapter-node';") {
+		t.Errorf("expected adapter-node import, got:\n%s", transformed)
+	}
+	if strings.Contains(transformed, "@sveltejs/adapter-auto") {
+		t.Errorf("expected adapter-auto to be removed, got:\n%s", transformed)
+	}
+	if !strings.Contains(transformed, "compilerOptions:") || !strings.Contains(transformed, "runes:") {
+		t.Errorf("expected compilerOptions.runes to be preserved, got:\n%s", transformed)
+	}
+}
+
+func TestTransformViteConfig_BareSvelteKitCall(t *testing.T) {
+	input := `import { defineConfig } from 'vite';
+import { sveltekit } from '@sveltejs/kit/vite';
+
+export default defineConfig({
+	plugins: [sveltekit()]
+});`
+
+	opts := InjectorOptions{
+		TargetAdapter: "@sveltejs/adapter-node",
+	}
+
+	transformed, err := TransformViteConfig(input, opts)
+	if err != nil {
+		t.Fatalf("TransformViteConfig failed: %v", err)
+	}
+
+	if !strings.Contains(transformed, "import adapter from '@sveltejs/adapter-node';") {
+		t.Errorf("expected adapter import injected, got:\n%s", transformed)
+	}
+	if !strings.Contains(transformed, "sveltekit({ adapter: adapter() })") {
+		t.Errorf("expected sveltekit({ adapter: adapter() }), got:\n%s", transformed)
+	}
+}
+
+func TestTransformViteConfig_MultiPluginPreserved(t *testing.T) {
+	input := `import tailwindcss from '@tailwindcss/vite';
+import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+	plugins: [
+		tailwindcss(),
+		sveltekit({
+			compilerOptions: { runes: true }
+		})
+	]
+});`
+
+	opts := InjectorOptions{
+		TargetAdapter: "@sveltejs/adapter-node",
+	}
+
+	transformed, err := TransformViteConfig(input, opts)
+	if err != nil {
+		t.Fatalf("TransformViteConfig failed: %v", err)
+	}
+
+	if !strings.Contains(transformed, "tailwindcss()") {
+		t.Errorf("expected tailwindcss() to be preserved, got:\n%s", transformed)
+	}
+	if !strings.Contains(transformed, "compilerOptions: { runes: true }") {
+		t.Errorf("expected compilerOptions to be preserved, got:\n%s", transformed)
+	}
+	if !strings.Contains(transformed, "adapter: adapter()") {
+		t.Errorf("expected adapter: adapter() injected, got:\n%s", transformed)
+	}
+}
+
+func TestTransformViteConfig_StaticAdapter(t *testing.T) {
+	input := `import adapter from '@sveltejs/adapter-auto';
+import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+	plugins: [sveltekit({ adapter: adapter() })]
+});`
+
+	opts := InjectorOptions{
+		TargetAdapter: "@sveltejs/adapter-static",
+	}
+
+	transformed, err := TransformViteConfig(input, opts)
+	if err != nil {
+		t.Fatalf("TransformViteConfig failed: %v", err)
+	}
+
+	if !strings.Contains(transformed, "import adapter from '@sveltejs/adapter-static';") {
+		t.Errorf("expected adapter-static import, got:\n%s", transformed)
+	}
+}
+
+func TestPrepareVirtualViteConfig(t *testing.T) {
+	tempDir := t.TempDir()
+
+	configContent := `import adapter from '@sveltejs/adapter-auto';
+import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+	plugins: [sveltekit({ adapter: adapter() })]
+});`
+
+	opts := InjectorOptions{
+		TargetAdapter: "@sveltejs/adapter-node",
+	}
+
+	res, err := PrepareVirtualViteConfig(tempDir, "vite.config.ts", configContent, opts)
+	if err != nil {
+		t.Fatalf("PrepareVirtualViteConfig failed: %v", err)
+	}
+
+	if !res.InjectedAdapter {
+		t.Errorf("expected InjectedAdapter = true")
+	}
+
+	if _, err := os.Stat(res.VirtualConfigPath); os.IsNotExist(err) {
+		t.Errorf("virtual config file was not created at %s", res.VirtualConfigPath)
+	}
+
+	data, err := os.ReadFile(res.VirtualConfigPath)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if !strings.Contains(string(data), "@sveltejs/adapter-node") {
+		t.Errorf("written virtual config missing target adapter:\n%s", string(data))
+	}
+}
+
+func TestTransformViteConfig_AdversarialComplexCases(t *testing.T) {
+	t.Run("commonjs_require_transformed", func(t *testing.T) {
+		input := `const adapter = require('@sveltejs/adapter-auto');
+const { sveltekit } = require('@sveltejs/kit/vite');
+module.exports = { plugins: [sveltekit({ compilerOptions: { runes: true }, adapter: adapter({ out: 'build' }) })] };`
+
+		opts := InjectorOptions{TargetAdapter: "@sveltejs/adapter-node"}
+		out, err := TransformViteConfig(input, opts)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(out, "require('@sveltejs/adapter-node')") {
+			t.Errorf("expected require of adapter-node, got:\n%s", out)
+		}
+		if strings.Contains(out, "@sveltejs/adapter-auto") {
+			t.Errorf("expected adapter-auto removed, got:\n%s", out)
+		}
+		if !strings.Contains(out, "adapter: adapter()") {
+			t.Errorf("expected adapter: adapter(), got:\n%s", out)
+		}
+		if !strings.Contains(out, "compilerOptions: { runes: true }") {
+			t.Errorf("expected compilerOptions preserved, got:\n%s", out)
+		}
+	})
+
+	t.Run("confusing_identifiers_and_comments", func(t *testing.T) {
+		input := `// sveltekit({ adapter: fakeAdapter() })
+import adapter from '@sveltejs/adapter-auto';
+import { sveltekit } from '@sveltejs/kit/vite';
+import { not_sveltekit } from './helper';
+
+export default {
+	plugins: [
+		not_sveltekit({ foo: "sveltekit({ adapter: fake })" }),
+		sveltekit({
+			// comment inside options
+			compilerOptions: { runes: true }
+		})
+	]
+};`
+
+		opts := InjectorOptions{TargetAdapter: "@sveltejs/adapter-node"}
+		out, err := TransformViteConfig(input, opts)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(out, "import adapter from '@sveltejs/adapter-node';") {
+			t.Errorf("expected import adapter-node, got:\n%s", out)
+		}
+		if !strings.Contains(out, "not_sveltekit({ foo: \"sveltekit({ adapter: fake })\" })") {
+			t.Errorf("expected not_sveltekit call preserved verbatim, got:\n%s", out)
+		}
+		if !strings.Contains(out, "adapter: adapter(),") {
+			t.Errorf("expected adapter: adapter(), injected, got:\n%s", out)
+		}
+		if !strings.Contains(out, "compilerOptions: { runes: true }") {
+			t.Errorf("expected compilerOptions preserved, got:\n%s", out)
+		}
+	})
+
+	t.Run("already_configured_is_idempotent", func(t *testing.T) {
+		input := `import adapter from '@sveltejs/adapter-node';
+import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+	plugins: [sveltekit({ adapter: adapter() })]
+});`
+
+		opts := InjectorOptions{TargetAdapter: "@sveltejs/adapter-node"}
+		out, err := TransformViteConfig(input, opts)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if count := strings.Count(out, "@sveltejs/adapter-node"); count != 1 {
+			t.Errorf("expected exactly 1 adapter-node import, got %d:\n%s", count, out)
+		}
+		if count := strings.Count(out, "adapter: adapter()"); count != 1 {
+			t.Errorf("expected exactly 1 adapter: adapter() invocation, got %d:\n%s", count, out)
+		}
+	})
+}

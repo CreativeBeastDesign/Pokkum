@@ -147,10 +147,11 @@ func BuildEnv(baseEnv []string, sourceEpoch string) []string {
 	return out
 }
 
-// Regular expressions for adapter import replacement
 var (
-	adapterImportRegex = regexp.MustCompile(`import\s+([a-zA-Z0-9_$]+)\s+from\s+['"]@sveltejs/adapter-[a-z-]+['"];?`)
-	requireRegex       = regexp.MustCompile(`const\s+([a-zA-Z0-9_$]+)\s*=\s*require\(['"]@sveltejs/adapter-[a-z-]+['"]\);?`)
+	adapterImportRegex     = regexp.MustCompile(`import\s+([a-zA-Z0-9_$]+)\s+from\s+['"]@sveltejs/adapter-[a-z-]+['"];?`)
+	requireRegex           = regexp.MustCompile(`const\s+([a-zA-Z0-9_$]+)\s*=\s*require\(['"]@sveltejs/adapter-[a-z-]+['"]\);?`)
+	viteAdapterImportRegex = regexp.MustCompile(`import\s+([a-zA-Z0-9_$]+)\s+from\s+['"](@sveltejs/adapter-[a-z-]+|@jesterkit/exe-sveltekit)['"];?`)
+	viteRequireRegex       = regexp.MustCompile(`const\s+([a-zA-Z0-9_$]+)\s*=\s*require\(['"](@sveltejs/adapter-[a-z-]+|@jesterkit/exe-sveltekit)['"]\);?`)
 )
 
 func replaceAdapterImport(source, targetAdapter string) string {
@@ -163,6 +164,292 @@ func replaceAdapterImport(source, targetAdapter string) string {
 
 	// If no standard adapter import was found, prepend the import at top of file
 	return fmt.Sprintf("import adapter from '%s';\n%s", targetAdapter, source)
+}
+
+func replaceViteAdapterImport(source, targetAdapter string) string {
+	if viteAdapterImportRegex.MatchString(source) {
+		return viteAdapterImportRegex.ReplaceAllString(source, fmt.Sprintf("import adapter from '%s';", targetAdapter))
+	}
+	if viteRequireRegex.MatchString(source) {
+		return viteRequireRegex.ReplaceAllString(source, fmt.Sprintf("const adapter = require('%s');", targetAdapter))
+	}
+
+	return fmt.Sprintf("import adapter from '%s';\n%s", targetAdapter, source)
+}
+
+// findLiveSvelteKitCall finds the byte index of a live, uncommented sveltekit( call in JS/TS source.
+func findLiveSvelteKitCall(source string) int {
+	const call = "sveltekit("
+	n := len(source)
+	for i := 0; i < n; {
+		c := source[i]
+		switch {
+		case c == '/' && i+1 < n && source[i+1] == '/':
+			i += 2
+			for i < n && source[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < n && source[i+1] == '*':
+			i += 2
+			for i < n && !(source[i] == '*' && i+1 < n && source[i+1] == '/') {
+				i++
+			}
+			if i < n {
+				i += 2
+			}
+		case c == '\'' || c == '"' || c == '`':
+			quote := c
+			i++
+			for i < n && source[i] != quote {
+				if source[i] == '\\' && i+1 < n {
+					i++
+				}
+				i++
+			}
+			if i < n {
+				i++
+			}
+		case strings.HasPrefix(source[i:], call):
+			if i == 0 || !isJSIdentByte(source[i-1]) {
+				return i
+			}
+			i += len(call)
+		default:
+			i++
+		}
+	}
+	return -1
+}
+
+// findLiveAdapterProp finds the byte range [start, end] of a live "adapter: <value>" property in args.
+func findLiveAdapterProp(args string) (int, int, bool) {
+	n := len(args)
+	for i := 0; i < n; {
+		c := args[i]
+		switch {
+		case c == '/' && i+1 < n && args[i+1] == '/':
+			i += 2
+			for i < n && args[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < n && args[i+1] == '*':
+			i += 2
+			for i < n && !(args[i] == '*' && i+1 < n && args[i+1] == '/') {
+				i++
+			}
+			if i < n {
+				i += 2
+			}
+		case c == '\'' || c == '"' || c == '`':
+			quote := c
+			i++
+			for i < n && args[i] != quote {
+				if args[i] == '\\' && i+1 < n {
+					i++
+				}
+				i++
+			}
+			if i < n {
+				i++
+			}
+		case strings.HasPrefix(args[i:], "adapter"):
+			if i > 0 && isJSIdentByte(args[i-1]) {
+				i += 7
+				continue
+			}
+			j := i + 7
+			for j < n && (args[j] == ' ' || args[j] == '\t' || args[j] == '\n' || args[j] == '\r') {
+				j++
+			}
+			if j < n && args[j] == ':' {
+				valStart := j + 1
+				// Skip whitespace (including newlines) between the colon and
+				// the value itself, e.g. "adapter:\n\tadapter()" — otherwise
+				// the break condition below fires on that leading newline
+				// before any value token is scanned, producing a zero-length
+				// match that corrupts the transform's splice.
+				for valStart < n && (args[valStart] == ' ' || args[valStart] == '\t' || args[valStart] == '\n' || args[valStart] == '\r') {
+					valStart++
+				}
+				parenDepth, braceDepth, bracketDepth := 0, 0, 0
+				k := valStart
+				for k < n {
+					kc := args[k]
+					if parenDepth == 0 && braceDepth == 0 && bracketDepth == 0 && (kc == ',' || kc == '}' || kc == '\n') {
+						break
+					}
+					switch {
+					case kc == '/' && k+1 < n && args[k+1] == '/':
+						k += 2
+						for k < n && args[k] != '\n' {
+							k++
+						}
+					case kc == '/' && k+1 < n && args[k+1] == '*':
+						k += 2
+						for k < n && !(args[k] == '*' && k+1 < n && args[k+1] == '/') {
+							k++
+						}
+						if k < n {
+							k += 2
+						}
+					case kc == '\'' || kc == '"' || kc == '`':
+						q := kc
+						k++
+						for k < n && args[k] != q {
+							if args[k] == '\\' && k+1 < n {
+								k++
+							}
+							k++
+						}
+						if k < n {
+							k++
+						}
+					case kc == '(':
+						parenDepth++
+						k++
+					case kc == ')':
+						if parenDepth > 0 {
+							parenDepth--
+						}
+						k++
+					case kc == '{':
+						braceDepth++
+						k++
+					case kc == '}':
+						if braceDepth > 0 {
+							braceDepth--
+						}
+						k++
+					case kc == '[':
+						bracketDepth++
+						k++
+					case kc == ']':
+						if bracketDepth > 0 {
+							bracketDepth--
+						}
+						k++
+					default:
+						k++
+					}
+				}
+				return i, k, true
+			}
+			i += 7
+		default:
+			i++
+		}
+	}
+	return -1, -1, false
+}
+
+// TransformViteConfig transforms a Vite config source string (vite.config.ts/js) in a single pass to
+// surgically inject/override the target adapter inside the sveltekit() plugin call while preserving
+// all other Vite plugins and sveltekit() options.
+func TransformViteConfig(source string, opts InjectorOptions) (string, error) {
+	if opts.TargetAdapter == "" {
+		opts.TargetAdapter = "@sveltejs/adapter-node"
+	}
+
+	result := source
+
+	// 1. Ensure target adapter is imported
+	if !AdapterConfigured(result, opts.TargetAdapter) {
+		result = replaceViteAdapterImport(result, opts.TargetAdapter)
+	}
+
+	// 2. Locate the live sveltekit(...) plugin call in the source
+	const call = "sveltekit("
+	idx := findLiveSvelteKitCall(result)
+	if idx < 0 {
+		// A silent no-op here would report injection as successful while the
+		// adapter was never actually changed — the caller (PrepareVirtualViteConfig)
+		// has no other way to detect that, and would proceed to build against
+		// a config that still doesn't configure the target adapter. Returning
+		// an error instead lets the existing fallback to Option C's fail-fast
+		// checkEffectiveAdapter error take over.
+		return result, fmt.Errorf("no live sveltekit() plugin call found to inject the adapter into")
+	}
+
+	openParen := idx + len(call) - 1
+	args, ok := scanCallArgs(result, openParen)
+	if !ok {
+		return result, fmt.Errorf("sveltekit() plugin call at byte offset %d has unbalanced parentheses", idx)
+	}
+
+	closeParen := openParen + 1 + len(args)
+	trimmedArgs := strings.TrimSpace(args)
+
+	var newArgs string
+	if trimmedArgs == "" {
+		newArgs = "{ adapter: adapter() }"
+	} else if strings.HasPrefix(trimmedArgs, "{") && strings.HasSuffix(trimmedArgs, "}") {
+		if start, end, found := findLiveAdapterProp(args); found {
+			newArgs = args[:start] + "adapter: adapter()" + args[end:]
+		} else {
+			firstBrace := strings.Index(args, "{")
+			newArgs = args[:firstBrace+1] + "\n\t\t\tadapter: adapter()," + args[firstBrace+1:]
+		}
+	} else {
+		newArgs = "{ adapter: adapter() }"
+	}
+
+	result = result[:openParen+1] + newArgs + result[closeParen:]
+	return result, nil
+}
+
+// relativeImportSpecifierRegex matches a relative module specifier ("./..."
+// or "../...") immediately following `from`, `import(`, or `require(` — the
+// contexts where a bare string literal is actually a module path, not
+// arbitrary config data. Used by rewriteRelativeImportSpecifiers to correct
+// for the virtual config living one directory level deeper than the file it
+// was copied from.
+var relativeImportSpecifierRegex = regexp.MustCompile(`(from\s+|import\(\s*|require\(\s*)(['"])(\.\.?/)`)
+
+// rewriteRelativeImportSpecifiers prefixes every relative import/require
+// specifier in source with an extra "../", compensating for
+// PrepareVirtualViteConfig writing the virtual config to
+// <projectDir>/.pokkum/<name> — one directory level below the real
+// vite.config.ts a relative specifier like "./local-plugin" or
+// "../../shared/vite-config-base" was written relative to. Without this, any
+// project whose vite.config.ts imports a relative/workspace-local module
+// fails to resolve it once copied into the sandbox.
+func rewriteRelativeImportSpecifiers(source string) string {
+	return relativeImportSpecifierRegex.ReplaceAllString(source, "${1}${2}../${3}")
+}
+
+// PrepareVirtualViteConfig inspects the project's Vite config, transforms it to configure targetAdapter,
+// and writes the virtual config file to <projectDir>/.pokkum/<viteConfigName>.
+func PrepareVirtualViteConfig(projectDir, viteConfigName, viteConfigSource string, opts InjectorOptions) (*VirtualConfigResult, error) {
+	if viteConfigName == "" {
+		viteConfigName = "vite.config.ts"
+	}
+	if viteConfigSource == "" {
+		viteConfigSource = fmt.Sprintf("import adapter from '%s';\nimport { sveltekit } from '@sveltejs/kit/vite';\nimport { defineConfig } from 'vite';\n\nexport default defineConfig({\n\tplugins: [sveltekit({ adapter: adapter() })]\n});\n", opts.TargetAdapter)
+	}
+
+	injectedAdapter := !AdapterConfigured(viteConfigSource, opts.TargetAdapter)
+
+	transformed, err := TransformViteConfig(viteConfigSource, opts)
+	if err != nil {
+		return nil, fmt.Errorf("transform %s: %w", viteConfigName, err)
+	}
+	transformed = rewriteRelativeImportSpecifiers(transformed)
+
+	pokkumDir := filepath.Join(projectDir, ".pokkum")
+	if err := os.MkdirAll(pokkumDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create .pokkum directory: %w", err)
+	}
+
+	virtualPath := filepath.Join(pokkumDir, viteConfigName)
+	if err := os.WriteFile(virtualPath, []byte(transformed), 0o600); err != nil {
+		return nil, fmt.Errorf("write virtual %s: %w", viteConfigName, err)
+	}
+
+	return &VirtualConfigResult{
+		TransformedSource: transformed,
+		VirtualConfigPath: virtualPath,
+		InjectedAdapter:   injectedAdapter,
+	}, nil
 }
 
 var kitBlockRegex = regexp.MustCompile(`kit\s*:\s*\{`)

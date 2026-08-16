@@ -22,6 +22,7 @@ type PackageJSON struct {
 	Name            string            `json:"name"`
 	Dependencies    map[string]string `json:"dependencies"`
 	DevDependencies map[string]string `json:"devDependencies"`
+	Scripts         map[string]string `json:"scripts"`
 }
 
 // ReadPackageJSON reads and parses <dir>/package.json. The returned error is

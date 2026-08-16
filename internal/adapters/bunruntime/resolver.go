@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -106,18 +107,31 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: resolve target name: %w: %w", err, core.ErrBunResolutionFailed)
 	}
 
+	// The lock only guards the cheap path computation and cache-hit check
+	// below, not the compile/download work that follows: each platform's
+	// cache path is distinct (platformSlug), so concurrent per-platform
+	// resolves from the pipeline's fan-out don't race on the same path, and
+	// holding the lock across a `bun build --compile` subprocess or a
+	// multi-second HTTP download would otherwise serialize per-platform work
+	// the fan-out is meant to run concurrently.
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	// 4. Construct cache path
 	platformSlug := strings.ReplaceAll(req.Platform.String(), "/", "_")
-	targetDir := filepath.Join(r.CacheDir, version, string(variant), platformSlug)
-	binaryPath := filepath.Join(targetDir, "bun")
+	var targetDir, binaryPath string
+	if req.StubLauncher {
+		targetDir = filepath.Join(r.CacheDir, "stubs", version, string(variant), platformSlug)
+		binaryPath = filepath.Join(targetDir, "bun")
+	} else {
+		targetDir = filepath.Join(r.CacheDir, version, string(variant), platformSlug)
+		binaryPath = filepath.Join(targetDir, "bun")
+	}
 
 	// Check if already cached & verified
 	if info, err := os.Stat(binaryPath); err == nil && !info.IsDir() {
 		sha, size, err := computeFileSHA256(binaryPath)
 		if err == nil {
+			r.mu.Unlock()
 			return ports.BunResolverResult{
 				BinaryPath: binaryPath,
 				Version:    version,
@@ -127,6 +141,12 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 				Size:       size,
 			}, nil
 		}
+	}
+	r.mu.Unlock()
+
+	// If stub launcher is requested, compile rather than download release archive
+	if req.StubLauncher {
+		return r.compileStub(ctx, version, variant, req.Platform, targetDir, binaryPath)
 	}
 
 	// 5. Download and extract
@@ -242,6 +262,24 @@ func resolveBunTargetName(p ports.Platform, variant ports.BunVariant) (string, e
 	}
 }
 
+// compileTargetName returns the value `bun build --compile --target=` expects
+// for platform/variant. This differs from resolveBunTargetName's GitHub
+// release-archive naming only for arm64: the release zip is named
+// bun-linux-aarch64.zip, but the compile flag expects "bun-linux-arm64" (see
+// ports.Platform.BunTarget's doc comment, which is the authoritative spelling
+// for this exact flag at the exe-strategy's own `bun build --compile`
+// call site, internal/adapters/bunexec/compiler.go).
+func compileTargetName(p ports.Platform, variant ports.BunVariant) (string, error) {
+	name, err := resolveBunTargetName(p, variant)
+	if err != nil {
+		return "", err
+	}
+	if p.Arch == "arm64" {
+		name = strings.Replace(name, "aarch64", "arm64", 1)
+	}
+	return name, nil
+}
+
 func computeFileSHA256(path string) (string, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -259,4 +297,73 @@ func computeFileSHA256(path string) (string, int64, error) {
 	_ = runtime.GOOS
 
 	return hex.EncodeToString(h.Sum(nil)), size, nil
+}
+
+func (r *Resolver) compileStub(ctx context.Context, version string, variant ports.BunVariant, platform ports.Platform, targetDir, binaryPath string) (ports.BunResolverResult, error) {
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: create stub cache dir %s: %w: %w", targetDir, err, core.ErrBunResolutionFailed)
+	}
+
+	targetName, err := compileTargetName(platform, variant)
+	if err != nil {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: resolve compile target: %w: %w", err, core.ErrBunResolutionFailed)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "pokkum-stub-*")
+	if err != nil {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: create temp dir for stub: %w: %w", err, core.ErrBunResolutionFailed)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	entryFile := filepath.Join(tmpDir, "stub-entry.ts")
+	// Non-foldable path expression prevents Bun bundler from constant-folding and inlining /app/server/index.js at compile time.
+	stubCode := "const p = \"/app/server/\" + \"index.js\";\nawait import(p);\n"
+	if err := os.WriteFile(entryFile, []byte(stubCode), 0600); err != nil {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: write stub entry: %w: %w", err, core.ErrBunResolutionFailed)
+	}
+
+	tmpBinary := filepath.Join(tmpDir, "bun-stub")
+	// targetName is one of a fixed, resolver-computed set of Bun target
+	// strings (see compileTargetName/resolveBunTargetName); tmpBinary and
+	// entryFile are paths this function created itself under a fresh
+	// os.MkdirTemp directory. None of these three arguments are derived from
+	// user or network input.
+	cmd := exec.CommandContext(ctx, "bun", "build", "--compile", "--target="+targetName, "--outfile="+tmpBinary, entryFile) //nolint:gosec // G204: fixed resolver-internal target name + self-created temp paths, not user-controlled
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Run(); err != nil {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: compile stub launcher for %s: %s: %w: %w", platform, strings.TrimSpace(stderrBuf.String()), err, core.ErrBunResolutionFailed)
+	}
+
+	if err := os.Rename(tmpBinary, binaryPath); err != nil {
+		in, openErr := os.Open(tmpBinary)
+		if openErr != nil {
+			return ports.BunResolverResult{}, fmt.Errorf("bunruntime: open compiled stub %s: %w: %w", tmpBinary, openErr, core.ErrBunResolutionFailed)
+		}
+		defer in.Close()
+		out, createErr := os.OpenFile(binaryPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+		if createErr != nil {
+			return ports.BunResolverResult{}, fmt.Errorf("bunruntime: create stub destination %s: %w: %w", binaryPath, createErr, core.ErrBunResolutionFailed)
+		}
+		_, copyErr := io.Copy(out, in)
+		out.Close()
+		if copyErr != nil {
+			return ports.BunResolverResult{}, fmt.Errorf("bunruntime: write stub destination %s: %w: %w", binaryPath, copyErr, core.ErrBunResolutionFailed)
+		}
+	}
+
+	sha, size, err := computeFileSHA256(binaryPath)
+	if err != nil {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: checksum calculation for %s: %w: %w", binaryPath, err, core.ErrBunResolutionFailed)
+	}
+
+	return ports.BunResolverResult{
+		BinaryPath: binaryPath,
+		Version:    version,
+		Variant:    variant,
+		Platform:   platform,
+		SHA256:     sha,
+		Size:       size,
+	}, nil
 }

@@ -263,6 +263,7 @@ func TestComputeInputHash_CoversPreviouslyMissingFields(t *testing.T) {
 		{"sbom attach mode", func(p *remotecacheutils.InputParams) { p.SBOMAttachMode = "tag" }},
 		{"sbom no-attach", func(p *remotecacheutils.InputParams) { p.SBOMNoAttach = true }},
 		{"bun custom binary", func(p *remotecacheutils.InputParams) { p.BunCustomBinaryPath = "/opt/bun/bin/bun" }},
+		{"stub launcher", func(p *remotecacheutils.InputParams) { p.StubLauncher = true }},
 	}
 
 	for _, tc := range cases {

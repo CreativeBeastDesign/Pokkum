@@ -110,6 +110,7 @@ type InputParams struct {
 	BunVersion          string                 `json:"bun_version"`
 	BunVariant          string                 `json:"bun_variant"`
 	BunCustomBinaryPath string                 `json:"bun_custom_binary_path"`
+	StubLauncher        bool                   `json:"stub_launcher"`
 	Platforms           []string               `json:"platforms"`
 	Strategy            string                 `json:"strategy"`
 	Compression         string                 `json:"compression"`
@@ -325,6 +326,7 @@ func (c *Cacher) ComputeInputHash(_ context.Context, req ports.RemoteCacheInputR
 		BunVersion:          req.BunVersion,
 		BunVariant:          req.BunVariant,
 		BunCustomBinaryPath: req.BunCustomBinaryPath,
+		StubLauncher:        req.StubLauncher,
 		Platforms:           slices.Clone(req.Platforms),
 		Strategy:            req.Strategy,
 		Compression:         req.Compression,

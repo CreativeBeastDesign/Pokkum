@@ -34,6 +34,10 @@ type BunResolverRequest struct {
 	// If set, resolution skips network/cache lookups and uses this binary directly.
 	CustomBinaryPath string
 
+	// StubLauncher indicates whether to compile a minimal entrypoint launcher stub
+	// instead of embedding stock Bun runtime (layered strategy hardening).
+	StubLauncher bool
+
 	// SourceDateEpoch is the deterministic timestamp for file headers/mtime derivation. Required.
 	SourceDateEpoch time.Time
 }

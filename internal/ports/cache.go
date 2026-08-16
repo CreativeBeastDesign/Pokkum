@@ -32,6 +32,7 @@ type RemoteCacheInputRequest struct {
 	BunVersion          string
 	BunVariant          string
 	BunCustomBinaryPath string
+	StubLauncher        bool
 	Platforms           []string
 	Strategy            string
 	Compression         string

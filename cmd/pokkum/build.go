@@ -79,12 +79,13 @@ type buildFlags struct {
 
 	imageLabels []string
 
-	profile            string
-	platformExplicit   bool
-	baseExplicit       bool
-	sbomExplicit       bool
-	sbomAttachExplicit bool
-	sourcemapExplicit  bool
+	profile              string
+	platformExplicit     bool
+	baseExplicit         bool
+	sbomExplicit         bool
+	sbomAttachExplicit   bool
+	sourcemapExplicit    bool
+	stubLauncherExplicit bool
 
 	noVerifyBase        bool
 	baseVerifyMode      string
@@ -103,6 +104,7 @@ type buildFlags struct {
 	noPrecompress       bool
 	noStrip             bool
 	noCache             bool
+	stubLauncher        bool
 
 	// Cache verification flags
 	noCacheVerify        bool
@@ -132,6 +134,7 @@ The project directory defaults to the current working directory.`,
 			flags.sbomExplicit = cmd.Flags().Changed("sbom")
 			flags.sbomAttachExplicit = cmd.Flags().Changed("sbom-attach")
 			flags.sourcemapExplicit = cmd.Flags().Changed("sourcemap")
+			flags.stubLauncherExplicit = cmd.Flags().Changed("stub-launcher")
 			return runBuild(ctx, logger, flags, args)
 		},
 	}
@@ -200,6 +203,8 @@ The project directory defaults to the current working directory.`,
 		"Local path to a bun executable escape hatch (skips download/resolution)")
 	cmd.Flags().StringVar(&flags.bunVariant, "bun-variant", "standard",
 		"Bun CPU variant (standard [AVX2 required on x86-64] or baseline)")
+	cmd.Flags().BoolVar(&flags.stubLauncher, "stub-launcher", false,
+		"Compile a minimal entrypoint launcher stub instead of embedding stock Bun runtime (layered strategy hardening)")
 	cmd.Flags().StringVar(&flags.strategy, "strategy", "layered",
 		"Packaging strategy: layered (5-layer arch-independent layout [default]), exe (single executable, deprecated), or static (purely static site served by an embedded Go file server, no Bun runtime)")
 	cmd.Flags().BoolVar(&flags.static, "static", false,
@@ -602,9 +607,21 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	req.Sign = flags.sign && !flags.noSign
 
 	// Bun runtime options
+	stubLauncherSetting := flags.stubLauncher
+	if !flags.stubLauncherExplicit {
+		if envVal := os.Getenv("POKKUM_STUB_LAUNCHER"); envVal != "" {
+			stubLauncherSetting = envVal == "1" || strings.EqualFold(envVal, "true") || strings.EqualFold(envVal, "yes")
+		} else if activeProfile != "" && projCfg != nil && projCfg.Profiles[activeProfile].StubLauncher != nil {
+			stubLauncherSetting = *projCfg.Profiles[activeProfile].StubLauncher
+		} else if projCfg != nil && projCfg.StubLauncher != nil {
+			stubLauncherSetting = *projCfg.StubLauncher
+		}
+	}
+
 	req.BunRuntime = core.BunRuntimeOptions{
 		CustomBinaryPath: flags.bunBinary,
 		Variant:          core.BunVariant(flags.bunVariant),
+		StubLauncher:     stubLauncherSetting,
 	}
 
 	// Resolve SOURCE_DATE_EPOCH before label discovery: the "created" label

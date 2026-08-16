@@ -248,17 +248,45 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		targetAdapter = "@sveltejs/adapter-static"
 	}
 
-	// Fail here, before any subprocess is spawned and before anything is
-	// written to .pokkum/: `bun run build` runs whatever adapter SvelteKit
-	// actually reads from the project's own config, and every post-build
-	// contract below (entrypoint path, output layout, handler patching) holds
-	// only for targetAdapter. Without this check a project configured for a
-	// different adapter — the @sveltejs/adapter-auto every fresh `sv create`
-	// ships, say — builds "successfully" and then fails several minutes later
-	// with an unrelated "expected entrypoint not found" message, or produces an
-	// image built from the wrong artifacts.
-	if err := checkEffectiveAdapter(req.ProjectDir, req.Strategy, targetAdapter); err != nil {
-		return ports.PrepareResult{}, err
+	// If target adapter is not configured, either apply Option B (zero-config
+	// virtual Vite config injection) or fail fast if --no-inject is set or
+	// injection fails.
+	var runViteWrapper bool
+	var viteWrapperConfigPath string
+
+	if checkErr := checkEffectiveAdapter(req.ProjectDir, req.Strategy, targetAdapter); checkErr != nil {
+		if req.NoInject {
+			return ports.PrepareResult{}, checkErr
+		}
+
+		// Option B is only safe to engage when it's equivalent to what the
+		// project's own build script would have done: swapping in
+		// `bun x vite build` instead of `bun run build` silently skips
+		// anything else that script does (env setup, a monorepo task
+		// runner, pre-build codegen). Require the script to be exactly
+		// `vite build` before taking over the build invocation; anything
+		// else falls back to Option C's clear, actionable error.
+		pkg, pkgErr := sveltekitutils.ReadPackageJSON(req.ProjectDir)
+		if pkgErr != nil || strings.TrimSpace(pkg.Scripts["build"]) != "vite build" {
+			return ports.PrepareResult{}, checkErr
+		}
+
+		viteSource, viteName := readViteConfigSource(req.ProjectDir)
+		opts := sveltekitutils.DefaultInjectorOptions()
+		opts.TargetAdapter = targetAdapter
+		opts.SourceEpoch = req.SourceDateEpoch.Format("20060102150405")
+		if req.SourceDateEpoch.IsZero() {
+			opts.SourceEpoch = "pokkum-reproducible-build"
+		}
+
+		vcVite, err := sveltekitutils.PrepareVirtualViteConfig(req.ProjectDir, viteName, viteSource, opts)
+		if err != nil {
+			log.Warn("bunexec: failed to prepare virtual vite config; falling back to error", "err", err)
+			return ports.PrepareResult{}, checkErr
+		}
+		runViteWrapper = true
+		viteWrapperConfigPath = vcVite.VirtualConfigPath
+		log.Info("bunexec: virtual vite config injected", "path", vcVite.VirtualConfigPath)
 	}
 
 	entrypoint := filepath.Join(req.ProjectDir, "build", "index.js")
@@ -276,24 +304,21 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		outputDir = filepath.Join(req.ProjectDir, ".svelte-kit", "output")
 	}
 
-	// Inject virtual svelte.config.js telemetry/adapter configuration
+	// SOURCE_DATE_EPOCH is exported for user code to read directly (e.g. a
+	// svelte.config.js pinning kit.version.name from it, matching
+	// testdata/fixtures/sveltekit-basic's convention) — this is not the same
+	// as the .pokkum/svelte.config.js virtual-config write PrepareVirtualConfig
+	// used to also perform here: that output is never read by either build
+	// path (bun run build reads the real svelte.config.js; the Option B
+	// wrapper points Vite at .pokkum/vite.config.ts instead), so it's dropped.
 	baseEnv := buildEnvWithEpoch(req.Env, req.SourceDateEpoch)
 
 	if !req.NoInject {
-		opts := sveltekitutils.DefaultInjectorOptions()
-		opts.TargetAdapter = targetAdapter
-		opts.SourceEpoch = req.SourceDateEpoch.Format("20060102150405")
+		sourceEpoch := req.SourceDateEpoch.Format("20060102150405")
 		if req.SourceDateEpoch.IsZero() {
-			opts.SourceEpoch = "pokkum-reproducible-build"
+			sourceEpoch = "pokkum-reproducible-build"
 		}
-
-		vcRes, err := sveltekitutils.PrepareVirtualConfig(req.ProjectDir, opts)
-		if err != nil {
-			log.Warn("bunexec: failed to prepare virtual config; falling back to original", "err", err)
-		} else {
-			log.Info("bunexec: virtual config injected", "path", vcRes.VirtualConfigPath, "adapter", vcRes.InjectedAdapter, "telemetry", vcRes.InjectedTelemetry)
-		}
-		baseEnv = sveltekitutils.BuildEnv(baseEnv, opts.SourceEpoch)
+		baseEnv = sveltekitutils.BuildEnv(baseEnv, sourceEpoch)
 	}
 
 	if req.Hermetic {
@@ -301,7 +326,16 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		log.Info("bunexec: hermetic environment active", "offline", true)
 	}
 
-	cmd := exec.CommandContext(ctx, "bun", "run", "build")
+	var cmd *exec.Cmd
+	if runViteWrapper {
+		relWrapper, err := filepath.Rel(req.ProjectDir, viteWrapperConfigPath)
+		if err != nil {
+			relWrapper = viteWrapperConfigPath
+		}
+		cmd = exec.CommandContext(ctx, "bun", "x", "vite", "build", "--config", relWrapper)
+	} else {
+		cmd = exec.CommandContext(ctx, "bun", "run", "build")
+	}
 	cmd.Dir = req.ProjectDir
 	cmd.Env = baseEnv
 	setNewProcessGroup(cmd)
