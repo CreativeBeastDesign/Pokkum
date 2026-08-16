@@ -157,12 +157,18 @@ all because it looks like coverage that isn't there.
 
 ## 8. SLSA provenance — verify with `cosign`, independent of `pokkum verify`
 
-**This is not just precaution — it's a confirmed finding.**
-`pokkum verify --no-rebuild`'s provenance summary currently comes from a
-stub that returns identical hardcoded data (signer identity, signature
-validity, SLSA presence) regardless of the image you point it at — see
-[Roadmap.md](Roadmap.md)'s Tier 0. Do not run `pokkum verify --no-rebuild`
-and trust its verdict for this step; use `cosign` directly as below.
+**Note:** this step used to warrant a "confirmed finding" banner because
+`pokkum verify --no-rebuild`'s provenance summary came from a stub that
+returned identical hardcoded data (signer identity, signature validity,
+SLSA presence) regardless of the image you pointed it at. That stub is
+gone: `pokkum verify --no-rebuild` now drives a real resolver
+(`internal/adapters/provenance/resolver.go`, Roadmap Tier 0) that pulls the
+remote manifest, verifies the Cosign signature (static-key or keyless),
+extracts and verifies the in-toto DSSE envelope and SLSA v1.0 statement, and
+enforces `--expect-source`. The "believe nothing" rule still applies — this
+move from stub to real logic is exactly the class of fix this guide exists
+to double-check — so do not trust `pokkum verify`'s own summary alone for
+this step; cross-check it against `cosign` directly, as below.
 
 ```bash
 cosign verify-attestation --type slsaprovenance \
