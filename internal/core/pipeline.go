@@ -972,6 +972,18 @@ func fanOut(
 				art = compiledArt
 				log.Info("compiled", "platform", p.String(), "size", art.Size, "sha256", art.SHA256)
 			}
+			// art.Platform must be set regardless of strategy: it is the map
+			// key used below (images[b.artifact.Platform] = b.image) to
+			// assemble the multi-platform index. Only StrategyExe's Compile
+			// call above populates it as a side effect (compiledArt.Platform
+			// is set from CompileRequest.Platform); StrategyLayered and
+			// StrategyStatic never call Compile, so art was otherwise left at
+			// its zero value here, and every platform's image would collide
+			// under the same zero-value ports.Platform{} key — the last
+			// platform processed silently wins, and Packager.Index then fails
+			// with "unsupported platform" on the resulting empty-string
+			// platform. See Lessons.md's 2026-08-16 entry.
+			art.Platform = p
 
 			var sup, staticSup []byte
 			var runnerErr error

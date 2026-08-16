@@ -5,6 +5,24 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-16 — `core.Build`'s `Normalize()` pre-defaults `Runtime.Entrypoint` to the exe shape before the strategy is known, so `StrategyLayered` images built through the real pipeline get an unrunnable entrypoint
+
+**Category:** boundary (strategy-dependent default computed before the strategy-aware code path runs)
+
+**Where:** `internal/core/model.go:688` (`BuildRequest.Normalize` calls `r.Runtime = r.Runtime.WithDefaults()` unconditionally, before per-platform strategy dispatch); `internal/ports/packager.go:212-232` (`RuntimeConfig.WithDefaults` defaults `Entrypoint` to `ports.DefaultEntrypoint()` — the StrategyExe shape — whenever it's nil, with no knowledge of `Compile.Strategy`); `internal/adapters/packager/packager.go:150-153` (the StrategyLayered branch's own default, `if req.Runtime.Entrypoint == nil { req.Runtime.Entrypoint = ports.DefaultLayeredEntrypoint() }`, is a dead guard by the time it runs, because `Normalize()` already claimed the nil).
+
+**What happened:** `tests/integration/strategy_e2e_test.go`'s new `TestFixtureDrivenE2E_AllStrategies` — the first test in the repo to drive the full `core.Build` pipeline (not `packager.Build` directly) with `Compile.Strategy = StrategyLayered` and assert on `Config.Entrypoint` — failed: the pushed image's `Config.Entrypoint` was `["/pokkum/init", "--", "/app/server"]` (the StrategyExe shape) instead of `["/pokkum/init", "--", "/usr/local/bin/bun", "/app/server/index.js"]` (`ports.DefaultLayeredEntrypoint()`). The layer *contents* were correct (8 layers: base, bun, supervisor, server, client, vendor, native, prerendered — matching `internal/adapters/packager/packager_strategy_test.go`'s `TestBuild_StrategyDispatch/layered` exactly), proving the layer-building dispatch works; only the entrypoint dispatch is broken. `cmd/pokkum/build.go` never sets `Runtime:` on its `core.BuildRequest` for any strategy, so this is not a test-only artifact — it is the exact code path a real `pokkum build --strategy layered` invocation takes.
+
+**Root cause:** `RuntimeConfig.WithDefaults()` was written as if every field it defaults (User, WorkingDir, Port, ProbePort, ShutdownTimeout, Entrypoint) is strategy-independent. Entrypoint isn't — its correct default depends on `Compile.Strategy`, which `WithDefaults()` has no access to and `Normalize()` calls it without knowing. Separately, `packager.Build`'s StrategyLayered branch was written assuming it would be the *first* code to see the request's `Runtime.Entrypoint`, so a nil-check was "good enough" — nobody traced the call chain back far enough to see `core.Build`'s `Normalize()` (pipeline.go:273) already ran `WithDefaults()` on the same struct earlier in the same request lifecycle. Only the static branch survives, and only by accident: it unconditionally overwrites `rc.Entrypoint` rather than checking for nil.
+
+**Impact (uncaught until this test):** any real `pokkum build --strategy layered` run would ship an image whose entrypoint execs `/app/server` directly — but StrategyLayered packages `/app/server` as a *directory* (containing `index.js`), not an executable. The container would fail to start (`exec: is a directory`) on every run. No prior test caught this because every existing StrategyLayered test either constructs `ports.PackageRequest` directly (bypassing `core.Build`'s `Normalize()` entirely — see `packager_strategy_test.go`) or never asserted on `Config.Entrypoint` at the `core.Build` level.
+
+**Fix:** `internal/adapters/packager/packager.go`'s StrategyLayered branch now sets `req.Runtime.Entrypoint = ports.DefaultLayeredEntrypoint()` unconditionally, dropping the nil-guard that `Normalize()`'s earlier pass could pre-empt — mirroring the static branch's existing unconditional overwrite. `RuntimeConfig.WithDefaults()` itself was left untouched (StrategyExe still legitimately relies on its generic `Entrypoint` default, and no code path anywhere sets a custom entrypoint that this could clobber — verified by grep before making the change unconditional instead of conditional). `tests/integration/strategy_e2e_test.go`'s `TestFixtureDrivenE2E_AllStrategies/layered` subtest was flipped from pinning the buggy exe-shaped entrypoint to asserting the correct `{SupervisorPath, "--", BunBinaryPath, AppServerIndexPath}`.
+
+**Preventative rule:** When one request field's correct default depends on another field of the *same* request (here: `Runtime.Entrypoint`'s default depends on `Compile.Strategy`), never default it inside a generic, strategy-agnostic `Normalize()`/`WithDefaults()` pass that runs before the strategy-aware code path sees the request. Either default it lazily, only once the dependent field is known, or make the strategy-aware defaulting unconditional (never gated on "is it still nil") — a nil-guard silently loses to any earlier generic pass that already claimed the zero value, and unit tests that construct the downstream port request directly (skipping the earlier pass) will never observe the interaction.
+
+---
+
 ## 2026-08-15 — The 4-step verification suite does not run `golangci-lint`, so a CI-breaking `errcheck` finding survived every "green" report
 
 **Where:** `internal/adapters/registry/mount_test.go`,
@@ -232,3 +250,62 @@ operation itself (`Clone()`, `Do()`, etc.) has documented side effects on the
 source — `go doc` and reading the stdlib source directly settled this in
 under five minutes and would have prevented writing the wrong assertion in
 the first place.
+
+## 2026-08-16 — Multi-platform Static/Layered builds silently collided on a zero-value platform key
+
+**Category:** multi-item / boundary
+
+**Root cause:** In `internal/core/pipeline.go`'s per-platform fan-out
+(inside `fanOut`), `art.Platform` was only ever set as a side effect of
+calling `deps.Compiler.Compile(...)` — which populates
+`compiledArt.Platform` from `CompileRequest.Platform` — and that call only
+happens on the `else if !req.Compile.Strategy.ApplyStatic()` branch, i.e.
+**only for `StrategyExe`**. `StrategyLayered` (which resolves a Bun runtime
+instead of compiling) and `StrategyStatic` (which has nothing to compile —
+the SvelteKit build output is the entire artifact) both leave `art` at its
+Go zero value, so `art.Platform` stayed `ports.Platform{}` (empty OS/Arch)
+for every platform in a Layered or Static build.
+
+Two lines later, `built[i] = platformBuild{artifact: art, image: img}` is
+built per platform, and back in `Build`, the map that becomes the packaged
+OCI index's platform set is constructed as:
+```go
+images := make(map[Platform]v1.Image, len(built))
+for i, b := range built {
+    images[b.artifact.Platform] = b.image
+}
+```
+For a Layered or Static build with more than one requested platform, every
+entry collided under the same zero-value key — the last platform processed
+silently overwrote all earlier ones in the map, then
+`Packager.Index` failed with `packager: index: platform "": unsupported
+platform` because `ports.Platform{}.Supported()` is false. A single-platform
+Layered/Static build never surfaced this (map has exactly one entry
+regardless of its key), which is exactly why it went uncaught: every
+existing test exercising `StrategyLayered` or `StrategyStatic` used a single
+platform.
+
+**Where:** `internal/core/pipeline.go`, `fanOut`'s per-platform goroutine
+(the block setting `art`/`bunResult` around what was originally lines
+934–974).
+
+**Fix:** Added `art.Platform = p` unconditionally, immediately after the
+strategy branch that may or may not have populated it, so every strategy
+(Exe, Layered, Static) gets a correctly keyed `ports.Artifact` regardless of
+whether that strategy's branch happens to set `Platform` as a side effect of
+some other field it needed anyway.
+
+**Preventative rule:** When a per-platform fan-out loop derives a
+downstream map/collection key from a field on a struct that's built up
+piecemeal across multiple conditional branches (here: `art.Platform`,
+populated only as an incidental side effect of the Exe branch's `Compile`
+call), don't trust that every branch populates it — set the key field
+explicitly and unconditionally, once, from the loop variable itself. This is
+the same failure shape as other multi-item bugs in this codebase: correct
+for N=1, silently wrong for N>1, because a single-element collection can't
+expose a colliding key. Any test added for a strategy that skips a
+per-platform field-populating call (no `Compile`, no `BunRuntime.Resolve`,
+etc.) should use `>1` platform specifically to catch this class of bug —
+single-platform coverage of a new strategy is not sufficient confidence that
+its multi-platform path works.
+

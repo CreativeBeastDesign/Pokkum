@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/CreativeBeastDesign/pokkum/internal/core"
 )
 
 func TestBuildCommandRequireEnvFlag(t *testing.T) {
@@ -34,6 +37,139 @@ func TestBuildCommandStaticStrategyLayeredConflictRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cannot be combined with --strategy=layered") {
 		t.Fatalf("expected a --static/--strategy conflict error, got: %v", err)
+	}
+}
+
+// reconcileStaticStrategy mirrors the --static/--strategy/--base reconciliation
+// block in runBuild (cmd/pokkum/build.go, from the "Reconcile the --static
+// shorthand" comment through the strategy=="exe" deprecation warning), plus
+// the basePreset derivation that precedes it (the "Base image options"
+// block). It's kept here as a pure function rather than driven through
+// newBuildCommand + cmd.Execute(), because runBuild goes on to call real
+// adapters — bun preflight, base image resolution over the network, and so
+// on — that a flag-reconciliation unit test has no business touching (the
+// existing conflict-error test above gets away with cmd.Execute() only
+// because that error path returns before any of that runs). Keep this in
+// sync with build.go if the mirrored block changes.
+func reconcileStaticStrategy(static, strategyExplicit bool, strategy, base string, hardened bool) (effectiveStrategy string, preset core.BaseImagePreset, ref string, err error) {
+	basePreset := base
+	if hardened {
+		basePreset = "chainguard"
+	}
+	var parsedPreset core.BaseImagePreset
+	if basePreset != "" {
+		parsedPreset, err = core.ParseBaseImagePreset(basePreset)
+		if err != nil {
+			return "", "", "", fmt.Errorf("invalid base image preset: %w", err)
+		}
+	}
+
+	if static && strategyExplicit && strategy != "static" {
+		return "", "", "", fmt.Errorf("--static cannot be combined with --strategy=%s (layered, static, or nothing must be used)", strategy)
+	}
+
+	effectiveStrategy = strategy
+	preset = parsedPreset
+	if static {
+		effectiveStrategy = "static"
+		if basePreset == "" {
+			preset = core.BaseImageChainguard
+			ref = core.StaticBaseRef
+		}
+	}
+	return effectiveStrategy, preset, ref, nil
+}
+
+func TestBuildStaticStrategyReconciliation(t *testing.T) {
+	tests := []struct {
+		name             string
+		static           bool
+		strategyExplicit bool
+		strategy         string
+		base             string
+		hardened         bool
+		wantErrContains  string
+		wantStrategy     string
+		wantPreset       core.BaseImagePreset
+		wantRef          string
+	}{
+		{
+			name:         "static alone defaults strategy and base to the Chainguard static preset",
+			static:       true,
+			strategy:     "layered", // cobra's default when --strategy isn't passed
+			wantStrategy: "static",
+			wantPreset:   core.BaseImageChainguard,
+			wantRef:      core.StaticBaseRef,
+		},
+		{
+			name:             "static with explicit --strategy=static is equivalent to static alone",
+			static:           true,
+			strategyExplicit: true,
+			strategy:         "static",
+			wantStrategy:     "static",
+			wantPreset:       core.BaseImageChainguard,
+			wantRef:          core.StaticBaseRef,
+		},
+		{
+			name:             "static with explicit --strategy=layered conflicts",
+			static:           true,
+			strategyExplicit: true,
+			strategy:         "layered",
+			wantErrContains:  "cannot be combined with --strategy=layered",
+		},
+		{
+			name:             "static with explicit --strategy=exe conflicts",
+			static:           true,
+			strategyExplicit: true,
+			strategy:         "exe",
+			wantErrContains:  "cannot be combined with --strategy=exe",
+		},
+		{
+			name:         "static with an explicit --base is not overridden by the static default",
+			static:       true,
+			strategy:     "layered",
+			base:         "distroless",
+			wantStrategy: "static",
+			wantPreset:   core.BaseImageDistroless,
+			wantRef:      "",
+		},
+		{
+			name:         "static with an explicit --hardened is not overridden by the static default's Ref",
+			static:       true,
+			strategy:     "layered",
+			hardened:     true,
+			wantStrategy: "static",
+			wantPreset:   core.BaseImageChainguard,
+			wantRef:      "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotStrategy, gotPreset, gotRef, err := reconcileStaticStrategy(tc.static, tc.strategyExplicit, tc.strategy, tc.base, tc.hardened)
+
+			if tc.wantErrContains != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErrContains)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Fatalf("expected error containing %q, got: %v", tc.wantErrContains, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if gotStrategy != tc.wantStrategy {
+				t.Errorf("strategy = %q, want %q", gotStrategy, tc.wantStrategy)
+			}
+			if gotPreset != tc.wantPreset {
+				t.Errorf("base preset = %q, want %q", gotPreset, tc.wantPreset)
+			}
+			if gotRef != tc.wantRef {
+				t.Errorf("base ref = %q, want %q", gotRef, tc.wantRef)
+			}
+		})
 	}
 }
 

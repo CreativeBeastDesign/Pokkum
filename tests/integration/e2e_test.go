@@ -2,6 +2,8 @@ package integration
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -29,8 +31,81 @@ func (m *mockCompiler) Preflight(_ context.Context, req ports.PreflightRequest) 
 }
 
 func (m *mockCompiler) Prepare(_ context.Context, req ports.PrepareRequest) (ports.PrepareResult, error) {
-	entrypoint := filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit", "temp-server", "index.ts")
-	outputDir := filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit")
+	var (
+		entrypoint string
+		outputDir  string
+	)
+
+	switch req.Strategy {
+	case ports.StrategyLayered:
+		// Mirrors bunexec.Compiler.Prepare's non-exe path shape:
+		// outputDir = <ProjectDir>/build, no single-file entrypoint.
+		outputDir = filepath.Join(req.ProjectDir, "build")
+		entrypoint = filepath.Join(outputDir, "index.js")
+	case ports.StrategyStatic:
+		// Mirrors bunexec.Compiler.Prepare's static path: no server
+		// entrypoint, outputDir is the SvelteKit static staging tree.
+		outputDir = filepath.Join(req.ProjectDir, ".svelte-kit", "output")
+		entrypoint = ""
+	default: // ports.StrategyExe
+		entrypoint = filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit", "temp-server", "index.ts")
+		outputDir = filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit")
+	}
+
+	// StrategyExe's packaging path never reads OutputDir — it only consumes
+	// the single compiled binary returned by Compile — so behavior there must
+	// stay exactly as before: no directories are created on disk. Only
+	// StrategyLayered and StrategyStatic need real fixture trees, since the
+	// packager unconditionally walks AppServerDir (layered) and
+	// AppPrerenderedDir (layered + static); see
+	// internal/adapters/packager/packager.go's validatePackageRequest and
+	// buildPrerenderedAddenda.
+	if req.Strategy != ports.StrategyExe {
+		if req.Strategy == ports.StrategyLayered {
+			serverDir := filepath.Join(outputDir, "server")
+			if err := os.MkdirAll(serverDir, 0o755); err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: mkdir server dir: %w", err)
+			}
+			if err := os.WriteFile(filepath.Join(serverDir, "index.js"), []byte("export default { fetch() {} };\n"), 0o644); err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: write server fixture: %w", err)
+			}
+
+			vendorDir := filepath.Join(outputDir, "vendor")
+			if err := os.MkdirAll(vendorDir, 0o755); err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: mkdir vendor dir: %w", err)
+			}
+			if err := os.WriteFile(filepath.Join(vendorDir, "package.json"), []byte(`{"name":"fixture-vendor"}`), 0o644); err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: write vendor fixture: %w", err)
+			}
+
+			nativeDir := filepath.Join(outputDir, "native")
+			if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: mkdir native dir: %w", err)
+			}
+			if err := os.WriteFile(filepath.Join(nativeDir, "fixture.node"), []byte("fake-native-module"), 0o644); err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: write native fixture: %w", err)
+			}
+		}
+
+		// Both StrategyLayered and StrategyStatic package a client dir and a
+		// prerendered dir.
+		clientDir := filepath.Join(outputDir, "client")
+		if err := os.MkdirAll(clientDir, 0o755); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: mkdir client dir: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(clientDir, "app.js"), []byte("console.log('fixture client bundle');\n"), 0o644); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: write client fixture: %w", err)
+		}
+
+		prerenderedDir := filepath.Join(outputDir, "prerendered")
+		if err := os.MkdirAll(prerenderedDir, 0o755); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: mkdir prerendered dir: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(prerenderedDir, "index.html"), fakePrerenderedHTML, 0o644); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: write prerendered fixture: %w", err)
+		}
+	}
+
 	return ports.PrepareResult{
 		EntrypointPath: entrypoint,
 		OutputDir:      outputDir,
@@ -82,6 +157,19 @@ func (m *mockSupervisorProvider) Binary(_ context.Context, _ ports.Platform) ([]
 }
 
 func (m *mockSupervisorProvider) Version(_ context.Context) (string, error) {
+	return "0.1.0-test", nil
+}
+
+// mockStaticServerProvider provides a fixed pokkum-static binary for testing,
+// so StrategyStatic builds can populate ports.PackageRequest.StaticServer
+// without exercising the real internal/adapters/staticserver embedding.
+type mockStaticServerProvider struct{}
+
+func (m *mockStaticServerProvider) Binary(_ context.Context, _ ports.Platform) ([]byte, error) {
+	return append([]byte(nil), fakeStaticServerContent...), nil
+}
+
+func (m *mockStaticServerProvider) Version(_ context.Context) (string, error) {
 	return "0.1.0-test", nil
 }
 

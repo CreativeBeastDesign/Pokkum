@@ -190,9 +190,10 @@ The single most important artifact — lets you scan the whole plan in seconds i
 | 5   | New regression tests               | `resolver_test.go`, `pipeline_test.go` | #3, #4     | Medium   |
 | 6   | Adversarial full-diff review       | (all changed files)                    | #1–#5      | High     |
 
-- Use DSH `subagent` / `subagent_fork` for delegated work (background by default); keep delegations self-contained.
+- Use DSH `subagent` / `subagent_fork` for each step to delegate work (background by default); keep delegations self-contained. --> The idea is to keep the context minimal and clean.
+- You do not have access to other models to use as sub-agents.
 - Use the `workflow` tool when work fans out across many independent pieces (audits, migrations, multi-angle review).
-- If a delegated result is corrected more than once for the same file, escalate or re-scope instead of re-prompting the same delegate a third time.
+- If a delegated result is corrected more than once for the same file, re-scope instead of re-prompting the same delegate a third time.
 - Use the `todo_write` tool: one entry per concrete step, keep statuses current (`pending` → `in_progress` → `completed`), and never mark a todo complete until its verification step has actually passed.
 
 ### 6.3 Long-running objectives

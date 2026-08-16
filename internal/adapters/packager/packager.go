@@ -148,9 +148,14 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 	}
 
 	if req.Strategy == ports.StrategyLayered {
-		if req.Runtime.Entrypoint == nil {
-			req.Runtime.Entrypoint = ports.DefaultLayeredEntrypoint()
-		}
+		// Unconditional, not nil-guarded: core.Build's Normalize() already runs
+		// RuntimeConfig.WithDefaults() once before the strategy is known (see
+		// internal/core/model.go), which claims a nil Entrypoint with the
+		// StrategyExe-shaped default before this code ever sees the request —
+		// silently defeating a nil-check here. Mirror the static strategy's own
+		// unconditional overwrite below instead of trusting a guard an earlier
+		// generic pass can pre-empt. See Lessons.md's 2026-08-16 entry.
+		req.Runtime.Entrypoint = ports.DefaultLayeredEntrypoint()
 	}
 	rc := req.Runtime.WithDefaults()
 	if req.Strategy.ApplyStatic() {
