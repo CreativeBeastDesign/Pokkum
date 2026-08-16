@@ -2,6 +2,7 @@ package bunexec
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,42 @@ export const assets = {
 const validHandlerJS = `const p = path.join(dir, "prerendered");
 `
 
+// svCreateSvelteConfigFmt is the standard SvelteKit svelte.config.js shape
+// (kit.adapter, vitePreprocess) for configuring an adapter directly in that
+// file rather than via vite.config.ts's sveltekit() plugin options.
+//
+// Correction (2026-08-17, found during adversarial review of the diff that
+// added this constant): its doc comment originally claimed this was
+// "captured verbatim from a real `bunx sv create` project" — checked
+// directly against real tooling and that claim is false. Neither
+// `bunx sv create --add sveltekit-adapter=adapter:node` nor
+// `bunx sv add sveltekit-adapter=adapter:node` against an existing project
+// (sv@0.17.0) ever writes a svelte.config.js at all; both configure the
+// adapter exclusively in vite.config.ts (see realSvCreateAdapterNodeViteConfig
+// in sveltekitutils/project_test.go for what that real output actually looks
+// like). This constant is therefore a hand-written-but-standard SvelteKit
+// config shape — the one any pre-migration or manually-authored project
+// would have, and syntactically identical to what SvelteKit's own docs show
+// for configuring an adapter in svelte.config.js — not a captured real-tool
+// artifact. It is still a valid input for what this test exercises (Prepare's
+// dispatch when svelte.config.js governs, i.e. no vite.config.ts is present
+// in the fixture dir), since AdapterConfigured only ever checks that the
+// package name is referenced, not this file's specific provenance; the
+// inaccurate claim is the only thing being corrected here, not the fixture's
+// suitability for its actual purpose. See Lessons.md's two 2026-08-16
+// fixture-fidelity post-mortems and mem:self_review_checklist row 12/14 for
+// why an unverified "captured verbatim" claim is worth catching on its own.
+const svCreateSvelteConfigFmt = `import adapter from '%s';
+import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+
+export default {
+	preprocess: vitePreprocess(),
+	kit: {
+		adapter: adapter()
+	}
+};
+`
+
 func TestPrepare_StrategyDispatch(t *testing.T) {
 	cases := []struct {
 		name string
@@ -52,6 +89,12 @@ func TestPrepare_StrategyDispatch(t *testing.T) {
 		// wantTargetAdapter is the npm package name Prepare must inject into
 		// the virtual svelte.config.js for this strategy.
 		wantTargetAdapter string
+
+		// svelteConfig is this case's svelte.config.js. Prepare fails fast
+		// unless it configures the strategy's own adapter (see
+		// checkEffectiveAdapter), so each strategy needs its own — one shared
+		// config cannot be correct for three different adapters.
+		svelteConfig string
 
 		// wantEntrypoint/wantOutputDir compute the expected
 		// PrepareResult.EntrypointPath/OutputDir from the project dir.
@@ -72,6 +115,7 @@ func TestPrepare_StrategyDispatch(t *testing.T) {
 			name:              "layered",
 			strategy:          ports.StrategyLayered,
 			wantTargetAdapter: "@sveltejs/adapter-node",
+			svelteConfig:      fmt.Sprintf(svCreateSvelteConfigFmt, "@sveltejs/adapter-node"),
 			wantEntrypoint: func(dir string) string {
 				return filepath.Join(dir, "build", "index.js")
 			},
@@ -99,6 +143,11 @@ exit 0
 			name:              "exe",
 			strategy:          ports.StrategyExe,
 			wantTargetAdapter: "@jesterkit/exe-sveltekit",
+			// The jesterkit adapter has no `sv create` template of its own;
+			// validSvelteConfig mirrors testdata/fixtures/sveltekit-basic's
+			// real, working svelte.config.js, which is what the real-bun e2e
+			// harness builds against.
+			svelteConfig: validSvelteConfig,
 			wantEntrypoint: func(dir string) string {
 				return filepath.Join(dir, ".svelte-kit", "jesterkit-sveltekit", "temp-server", "index.ts")
 			},
@@ -118,6 +167,7 @@ exit 0
 			name:              "static",
 			strategy:          ports.StrategyStatic,
 			wantTargetAdapter: "@sveltejs/adapter-static",
+			svelteConfig:      fmt.Sprintf(svCreateSvelteConfigFmt, "@sveltejs/adapter-static"),
 			wantEntrypoint: func(dir string) string {
 				return ""
 			},
@@ -134,7 +184,7 @@ exit 0
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := newProjectDir(t, validPackageJSON, validSvelteConfig)
+			dir := newProjectDir(t, validPackageJSON, tc.svelteConfig)
 			putFakeBunOnPath(t, tc.bunScript)
 			c := NewCompiler(discardLogger())
 

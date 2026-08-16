@@ -148,8 +148,8 @@ func TestPatchPrerenderedHandler_NoHandlerFoundReturnsError(t *testing.T) {
 }
 
 // wantedWrap is the exact wrapping patchPrerenderedEnv produces around the
-// single-quote "dir" pattern, matching the real adapter-node handler.js
-// fixtures below (both use `path.join(dir, 'prerendered')`).
+// single-quote "dir" pattern, matching every adapter-node handler.js fixture
+// below (all use `path.join(dir, 'prerendered')`).
 const wantedWrap = `(process.env.POKKUM_PRERENDERED_DIR || path.join(dir, 'prerendered'))`
 
 // literalDirPattern is the unwrapped literal this repo's real fixtures
@@ -161,13 +161,13 @@ const literalDirPattern = `path.join(dir, 'prerendered')`
 
 // repoRootTestdataDir locates the repo-root testdata/ directory from this
 // package's directory (internal/adapters/bunexec), since `go test` runs with
-// the package directory as its working directory. The real adapter-node
-// fixtures live at the repo-root testdata/adapter-node/{v3,v5}/handler.js
-// (see testdata/adapter-node/README.md), not under a package-local testdata/.
+// the package directory as its working directory. The adapter-node fixtures
+// live at the repo-root testdata/adapter-node/ (see its README.md), not
+// under a package-local testdata/.
 const repoRootTestdataDir = "../../../testdata"
 
 // testPatchPrerenderedEnvRealFixture is shared by the v3/v5 tests below: copy
-// the checked-in real adapter-node handler.js fixture into a temp dir (so the
+// the checked-in adapter-node handler.js fixture into a temp dir (so the
 // checked-in copy under testdata/ is never mutated), patch the copy, and
 // assert the result.
 func testPatchPrerenderedEnvRealFixture(t *testing.T, fixturePath string) {
@@ -226,15 +226,250 @@ func testPatchPrerenderedEnvRealFixture(t *testing.T, fixturePath string) {
 }
 
 // TestPatchPrerenderedEnv_RealAdapterNodeV3 exercises patchPrerenderedEnv
-// against a real @sveltejs/adapter-node@3.0.3 handler.js (see
-// testdata/adapter-node/README.md for sourcing provenance). It also asserts
-// the false-positive regression signal documented on literalDirPattern.
+// against @sveltejs/adapter-node@3.0.3's handler.js.
+//
+// Scope, stated plainly: this fixture is adapter-node's **pre-bundling source
+// template** (`npm pack` → `package/files/handler.js`), NOT the bundled
+// `build/handler.js` a real `bun run build` emits — see
+// testdata/adapter-node/README.md for provenance and Lessons.md's 2026-08-16
+// entry "patchPrerenderedHandler's 'real fixture' regression tests exercised
+// the wrong artifact". It proves the matcher handles the upstream template
+// shape (which some versions/configs still inline into build output), and
+// nothing about real build output; that coverage is
+// TestPatchPrerenderedEnv_RealBundledReExport below.
+//
+// It also asserts the false-positive regression signal documented on
+// literalDirPattern.
 func TestPatchPrerenderedEnv_RealAdapterNodeV3(t *testing.T) {
 	testPatchPrerenderedEnvRealFixture(t, filepath.Join(repoRootTestdataDir, "adapter-node", "v3", "handler.js"))
 }
 
 // TestPatchPrerenderedEnv_RealAdapterNodeV5 is the v5.5.7 counterpart of
-// TestPatchPrerenderedEnv_RealAdapterNodeV3.
+// TestPatchPrerenderedEnv_RealAdapterNodeV3 — same pre-bundling-template
+// scope and caveats.
 func TestPatchPrerenderedEnv_RealAdapterNodeV5(t *testing.T) {
 	testPatchPrerenderedEnvRealFixture(t, filepath.Join(repoRootTestdataDir, "adapter-node", "v5", "handler.js"))
+}
+
+// bundledReExportChunkRel is the chunk path the checked-in bundled fixture's
+// handler.js re-exports from, relative to that handler.js.
+var bundledReExportChunkRel = filepath.Join("server", "chunks", "handler-Cl6LqmpI.js")
+
+// copyTree copies the fixture directory rooted at src into dst, so a test can
+// patch a real two-file build-output shape without mutating the checked-in
+// fixture.
+func copyTree(t *testing.T, src, dst string) {
+	t.Helper()
+	if err := filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o600)
+	}); err != nil {
+		t.Fatalf("copy fixture tree %s: %v", src, err)
+	}
+}
+
+// TestPatchPrerenderedEnv_RealBundledReExport is the coverage the v3/v5 tests
+// above do NOT provide: the real, post-Vite/Rollup `build/` shape, where
+// handler.js is only a re-export barrel
+// (`export { h as handler } from './server/chunks/handler-<hash>.js';`) and
+// the prerendered-path join lives in the hashed chunk it points at. See
+// testdata/adapter-node/README.md's "bundled-real" section for provenance.
+//
+// It asserts the matcher follows the re-export, patches the chunk, and leaves
+// handler.js byte-identical — handler.js has nothing to patch, so patching it
+// would mean the matcher had matched something it should not have.
+func TestPatchPrerenderedEnv_RealBundledReExport(t *testing.T) {
+	fixtureDir := filepath.Join(repoRootTestdataDir, "adapter-node", "bundled-real")
+
+	originalHandler, err := os.ReadFile(filepath.Join(fixtureDir, "handler.js"))
+	if err != nil {
+		t.Fatalf("read fixture barrel: %v", err)
+	}
+	originalChunk, err := os.ReadFile(filepath.Join(fixtureDir, bundledReExportChunkRel))
+	if err != nil {
+		t.Fatalf("read fixture chunk: %v", err)
+	}
+
+	// Preconditions that make this fixture meaningful: the barrel must carry
+	// nothing to patch, and the chunk must carry the literal exactly once.
+	if strings.Contains(string(originalHandler), "prerendered") {
+		t.Fatalf("fixture barrel unexpectedly mentions prerendered; it is supposed to be a pure re-export shell:\n%s", originalHandler)
+	}
+	if n := strings.Count(string(originalChunk), literalDirPattern); n != 1 {
+		t.Fatalf("expected literal pattern %q exactly once in the bundled chunk fixture, found %d", literalDirPattern, n)
+	}
+
+	work := t.TempDir()
+	buildDir := filepath.Join(work, "build")
+	copyTree(t, fixtureDir, buildDir)
+
+	handlerPath := filepath.Join(buildDir, "handler.js")
+	chunkPath := filepath.Join(buildDir, bundledReExportChunkRel)
+	pokkumDir := filepath.Join(work, ".pokkum")
+
+	if err := patchPrerenderedEnv(handlerPath, pokkumDir, discLogger()); err != nil {
+		t.Fatalf("patchPrerenderedEnv on bundled re-export barrel: %v", err)
+	}
+
+	// The chunk — not handler.js — is what must have been rewritten.
+	gotChunk, err := os.ReadFile(chunkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(gotChunk), wantedWrap); n != 1 {
+		t.Fatalf("expected exactly one %q in the patched chunk, found %d", wantedWrap, n)
+	}
+
+	gotHandler, err := os.ReadFile(handlerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotHandler) != string(originalHandler) {
+		t.Fatalf("expected the re-export barrel to be left untouched, got:\n%s", gotHandler)
+	}
+
+	// The staged sandbox copy must record the file that actually changed.
+	staged, err := os.ReadFile(filepath.Join(pokkumDir, filepath.Base(chunkPath)))
+	if err != nil {
+		t.Fatalf("expected staged copy of the patched chunk in .pokkum sandbox: %v", err)
+	}
+	if !strings.Contains(string(staged), wantedWrap) {
+		t.Fatalf("expected staged chunk copy to carry the patch, got:\n%s", staged)
+	}
+
+	// The checked-in fixtures themselves must be untouched.
+	if cur, err := os.ReadFile(filepath.Join(fixtureDir, bundledReExportChunkRel)); err != nil || string(cur) != string(originalChunk) {
+		t.Fatalf("checked-in bundled chunk fixture was mutated by the test (err=%v)", err)
+	}
+}
+
+// TestPatchPrerenderedHandler_FollowsBundledReExport drives the same real
+// bundled shape through the locator, i.e. the way the compiler calls it.
+func TestPatchPrerenderedHandler_FollowsBundledReExport(t *testing.T) {
+	work := t.TempDir()
+	buildDir := filepath.Join(work, "build")
+	copyTree(t, filepath.Join(repoRootTestdataDir, "adapter-node", "bundled-real"), buildDir)
+
+	c := &Compiler{logger: discLogger()}
+	if err := c.patchPrerenderedHandler(buildDir, work); err != nil {
+		t.Fatalf("patchPrerenderedHandler: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(buildDir, bundledReExportChunkRel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), wantedWrap) {
+		t.Fatalf("expected the re-exported chunk to be patched, got:\n%s", got)
+	}
+}
+
+// TestPatchPrerenderedEnv_ReExportIdentifierAndHashAreNotHardcoded guards the
+// two per-build-unstable parts of the real shape: Rollup assigns both the
+// local export identifier and the chunk's content hash, so neither may be
+// baked into the matcher. Shape below is the real one from
+// testdata/adapter-node/bundled-real/handler.js with only those two varied.
+func TestPatchPrerenderedEnv_ReExportIdentifierAndHashAreNotHardcoded(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		export string
+		chunk  string
+	}{
+		{"different identifier and hash", `export { q as handler } from './server/chunks/handler-ZZ9aaaaa.js';`, filepath.Join("server", "chunks", "handler-ZZ9aaaaa.js")},
+		{"no alias", `export { handler } from './server/chunks/handler-ZZ9aaaaa.js';`, filepath.Join("server", "chunks", "handler-ZZ9aaaaa.js")},
+		{"flat chunk layout", `export { h as handler } from './handler-ZZ9aaaaa.js';`, "handler-ZZ9aaaaa.js"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			chunkPath := filepath.Join(dir, tc.chunk)
+			if err := os.MkdirAll(filepath.Dir(chunkPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(chunkPath, []byte("const handler = serve(path.join(dir, 'prerendered'));\nexport { handler as h };\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(dir, "handler.js")
+			if err := os.WriteFile(p, []byte("import './shims.js';\n"+tc.export+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := patchPrerenderedEnv(p, filepath.Join(dir, ".pokkum"), discLogger()); err != nil {
+				t.Fatalf("patchPrerenderedEnv: %v", err)
+			}
+			got, err := os.ReadFile(chunkPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(got), wantedWrap) {
+				t.Fatalf("expected chunk to be patched, got:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestPatchPrerenderedEnv_ReExportWithoutPatternStillHardFails is the
+// constraint the fallback must never erode: following a re-export that leads
+// nowhere useful still fails the build, rather than warning and continuing
+// with prerendered pages silently resolving to the adapter default.
+func TestPatchPrerenderedEnv_ReExportWithoutPatternStillHardFails(t *testing.T) {
+	dir := t.TempDir()
+	chunkDir := filepath.Join(dir, "server", "chunks")
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chunkPath := filepath.Join(chunkDir, "handler-ZZ9aaaaa.js")
+	const chunk = "const handler = serve(somewhereElse());\nexport { handler as h };\n"
+	if err := os.WriteFile(chunkPath, []byte(chunk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "handler.js")
+	const barrel = "export { h as handler } from './server/chunks/handler-ZZ9aaaaa.js';\n"
+	if err := os.WriteFile(p, []byte(barrel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := patchPrerenderedEnv(p, filepath.Join(dir, ".pokkum"), discLogger())
+	if err == nil {
+		t.Fatal("expected a hard failure when neither handler.js nor its re-export target has a recognizable pattern")
+	}
+	if !strings.Contains(err.Error(), "no recognizable prerendered path pattern") {
+		t.Fatalf("expected the unchanged no-match error, got: %v", err)
+	}
+
+	// Nothing may have been written to either file.
+	if got, _ := os.ReadFile(p); string(got) != barrel {
+		t.Fatalf("expected handler.js unchanged, got:\n%s", got)
+	}
+	if got, _ := os.ReadFile(chunkPath); string(got) != chunk {
+		t.Fatalf("expected chunk unchanged, got:\n%s", got)
+	}
+}
+
+// TestPatchPrerenderedEnv_BarePackageReExportIsNotFollowed keeps the fallback
+// scoped to files the build itself emitted: a non-relative specifier is a
+// node_modules package, not a sibling build artifact, so it must not be
+// resolved or written to.
+func TestPatchPrerenderedEnv_BarePackageReExportIsNotFollowed(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "handler.js")
+	if err := os.WriteFile(p, []byte(`export { h as handler } from '@sveltejs/some-pkg';`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchPrerenderedEnv(p, filepath.Join(dir, ".pokkum"), discLogger()); err == nil {
+		t.Fatal("expected a hard failure for a bare-package re-export")
+	}
 }

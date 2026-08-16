@@ -297,3 +297,200 @@ func TestStripJSComments(t *testing.T) {
 		})
 	}
 }
+
+// The three fixtures below are verbatim captures, not hand-crafted samples —
+// see Lessons.md's 2026-08-16 entries on why a fixture shaped to satisfy the
+// code under test, rather than to match a real tool's output, is worse than
+// no fixture at all.
+
+// realSvelteKitBasicViteConfig is testdata/fixtures/sveltekit-basic/vite.config.ts
+// verbatim: a bare `sveltekit()` call with no options, paired with that
+// fixture's own svelte.config.js (which names @jesterkit/exe-sveltekit). It is
+// the one fixture in this file proven to build successfully through the real
+// pipeline (tests/integration/reproducibility_e2e_test.go), so it is the
+// canonical "must not regress" case: a bare call must never be treated as
+// overriding svelte.config.js.
+const realSvelteKitBasicViteConfig = `import { defineConfig } from 'vite';
+import { sveltekit } from '@sveltejs/kit/vite';
+
+export default defineConfig({
+  plugins: [sveltekit()]
+});
+`
+
+// realSvCreateDefaultViteConfig is vite.config.ts exactly as emitted by
+// `bunx sv create --template minimal --types ts --no-add-ons` (sv@0.17.0,
+// @sveltejs/kit@2.63.0 range, @sveltejs/vite-plugin-svelte@7.1.2), captured
+// 2026-08-17. This is the default, totally unconfigured scaffold: no
+// svelte.config.js is generated at all, and the adapter is @sveltejs/adapter-auto
+// — not whatever strategy the caller actually wants.
+const realSvCreateDefaultViteConfig = `import adapter from '@sveltejs/adapter-auto';
+import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+	plugins: [
+		sveltekit({
+			compilerOptions: {
+				// Force runes mode for the project, except for libraries. Can be removed in svelte 6.
+				runes: ({ filename }) =>
+					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
+			},
+
+			// adapter-auto only supports some environments, see https://svelte.dev/docs/kit/adapter-auto for a list.
+			// If your environment is not supported, or you settled on a specific environment, switch out the adapter.
+			// See https://svelte.dev/docs/kit/adapters for more information about adapters.
+			adapter: adapter()
+		})
+	]
+});
+`
+
+// realSvCreateAdapterNodeViteConfig is vite.config.ts exactly as emitted by
+// `bunx sv create --template minimal --types ts --add sveltekit-adapter=adapter:node`
+// (same versions as above, plus @sveltejs/adapter-node@5.5.7), captured
+// 2026-08-17. Confirmed by a real `bun install` + `bun run build` against this
+// exact project (with a decoy svelte.config.js importing @sveltejs/adapter-static
+// placed alongside it) that the build genuinely uses adapter-node — printing
+// "svelte.config.js is ignored when options are passed via your Vite config"
+// and "> Using @sveltejs/adapter-node" — not the decoy.
+const realSvCreateAdapterNodeViteConfig = `import adapter from '@sveltejs/adapter-node';
+import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+	plugins: [
+		sveltekit({
+			compilerOptions: {
+				// Force runes mode for the project, except for libraries. Can be removed in svelte 6.
+				runes: ({ filename }) => filename.split(/[/\\]/).includes('node_modules') ? undefined : true
+			},
+			adapter: adapter()
+		})
+	]
+});
+`
+
+// realDecoySvelteConfig is the deliberately-wrong svelte.config.js placed
+// alongside realSvCreateAdapterNodeViteConfig during the real build described
+// above, to confirm empirically that Vite's config wins over it.
+const realDecoySvelteConfig = `import adapter from '@sveltejs/adapter-static';
+import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+
+export default {
+	preprocess: vitePreprocess(),
+	kit: {
+		adapter: adapter()
+	}
+};
+`
+
+func TestViteConfigOverridesSvelteConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   bool
+	}{
+		{"empty", ``, false},
+		{"bare sveltekit() call — real sveltekit-basic fixture", realSvelteKitBasicViteConfig, false},
+		{"sv create default scaffold — real capture, adapter-auto options", realSvCreateDefaultViteConfig, true},
+		{"sv create adapter-node scaffold — real capture", realSvCreateAdapterNodeViteConfig, true},
+		{"commented-out options object does not count", "sveltekit(/* { adapter: adapter() } */)", false},
+		{"non-plugin call of the same name is ignored", `mySveltekit({ adapter: adapter() })`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ViteConfigOverridesSvelteConfig(tt.source); got != tt.want {
+				t.Errorf("ViteConfigOverridesSvelteConfig() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveAdapterConfigured(t *testing.T) {
+	tests := []struct {
+		name            string
+		svelteConfigSrc string
+		viteConfigSrc   string
+		viteConfigName  string
+		pkgName         string
+		wantConfigured  bool
+		wantReadFrom    string
+		wantOverridden  bool
+	}{
+		{
+			name:            "real sveltekit-basic fixture: bare vite.config.ts, svelte.config.js governs and matches",
+			svelteConfigSrc: `import adapter from '@jesterkit/exe-sveltekit';`,
+			viteConfigSrc:   realSvelteKitBasicViteConfig,
+			viteConfigName:  "vite.config.ts",
+			pkgName:         "@jesterkit/exe-sveltekit",
+			wantConfigured:  true,
+			wantReadFrom:    "svelte.config.js",
+			wantOverridden:  false,
+		},
+		{
+			name:            "no vite.config.ts at all: svelte.config.js governs by default",
+			svelteConfigSrc: `import adapter from '@sveltejs/adapter-node';`,
+			viteConfigSrc:   "",
+			viteConfigName:  "",
+			pkgName:         "@sveltejs/adapter-node",
+			wantConfigured:  true,
+			wantReadFrom:    "svelte.config.js",
+			wantOverridden:  false,
+		},
+		{
+			name:            "sv create default scaffold: no svelte.config.js, vite.config.ts overrides with adapter-auto — target adapter-node not found",
+			svelteConfigSrc: "",
+			viteConfigSrc:   realSvCreateDefaultViteConfig,
+			viteConfigName:  "vite.config.ts",
+			pkgName:         "@sveltejs/adapter-node",
+			wantConfigured:  false,
+			wantReadFrom:    "vite.config.ts",
+			wantOverridden:  true,
+		},
+		{
+			name:            "sv create adapter-node scaffold: no svelte.config.js, vite.config.ts overrides and matches",
+			svelteConfigSrc: "",
+			viteConfigSrc:   realSvCreateAdapterNodeViteConfig,
+			viteConfigName:  "vite.config.ts",
+			pkgName:         "@sveltejs/adapter-node",
+			wantConfigured:  true,
+			wantReadFrom:    "vite.config.ts",
+			wantOverridden:  true,
+		},
+		{
+			name:            "compounding case: decoy svelte.config.js present, but real vite.config.ts governs and matches — proven by a real build",
+			svelteConfigSrc: realDecoySvelteConfig,
+			viteConfigSrc:   realSvCreateAdapterNodeViteConfig,
+			viteConfigName:  "vite.config.ts",
+			pkgName:         "@sveltejs/adapter-node",
+			wantConfigured:  true,
+			wantReadFrom:    "vite.config.ts",
+			wantOverridden:  true,
+		},
+		{
+			name:            "compounding case, wrong target: decoy svelte.config.js does name adapter-static, but vite.config.ts governs and does not — proven by the same real build using adapter-node, not adapter-static",
+			svelteConfigSrc: realDecoySvelteConfig,
+			viteConfigSrc:   realSvCreateAdapterNodeViteConfig,
+			viteConfigName:  "vite.config.ts",
+			pkgName:         "@sveltejs/adapter-static",
+			wantConfigured:  false,
+			wantReadFrom:    "vite.config.ts",
+			wantOverridden:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configured, readFrom, overridden := EffectiveAdapterConfigured(tt.svelteConfigSrc, tt.viteConfigSrc, tt.viteConfigName, tt.pkgName)
+			if configured != tt.wantConfigured {
+				t.Errorf("configured = %v, want %v", configured, tt.wantConfigured)
+			}
+			if readFrom != tt.wantReadFrom {
+				t.Errorf("readFrom = %q, want %q", readFrom, tt.wantReadFrom)
+			}
+			if overridden != tt.wantOverridden {
+				t.Errorf("overridden = %v, want %v", overridden, tt.wantOverridden)
+			}
+		})
+	}
+}

@@ -135,9 +135,9 @@ func NewCompiler(logger *slog.Logger) *Compiler {
 // Preflight verifies the host toolchain and the project layout without
 // touching the project directory or starting any compile work. See the
 // ports.Compiler doc for the sentinel-error mapping; this method additionally
-// returns core.ErrProjectNotFound when package.json or svelte.config.js is
-// missing, which is not one of the three sentinels ports.Compiler's doc
-// names explicitly but is declared in core/errors.go for exactly this case.
+// returns core.ErrProjectNotFound when package.json is missing, which is not
+// one of the three sentinels ports.Compiler's doc names explicitly but is
+// declared in core/errors.go for exactly this case.
 func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (ports.PreflightResult, error) {
 	log := c.logger
 	log.Debug("bunexec: preflight", "projectDir", req.ProjectDir)
@@ -162,12 +162,17 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 		return ports.PreflightResult{}, fmt.Errorf("bunexec: preflight %s: read package.json: %w: %w", req.ProjectDir, err, core.ErrProjectNotFound)
 	}
 
+	// svelte.config.js is optional, not required: current `sv create` scaffolds
+	// (sv@0.17.0 / @sveltejs/kit@2.63.0+) generate none at all and configure
+	// the adapter entirely via vite.config.ts's sveltekit() plugin options
+	// instead — see checkEffectiveAdapter in Prepare, and
+	// sveltekitutils.EffectiveAdapterConfigured, for the full detection this
+	// mirrors a strategy-unaware subset of. A real project's absence of this
+	// file is therefore not evidence it isn't a SvelteKit project; only a
+	// genuine read failure other than "does not exist" is treated as one.
 	cfgPath := filepath.Join(req.ProjectDir, "svelte.config.js")
 	cfgData, err := os.ReadFile(cfgPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ports.PreflightResult{}, fmt.Errorf("bunexec: preflight %s: svelte.config.js not found: %w", req.ProjectDir, core.ErrProjectNotFound)
-		}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return ports.PreflightResult{}, fmt.Errorf("bunexec: preflight %s: read svelte.config.js: %w: %w", req.ProjectDir, err, core.ErrProjectNotFound)
 	}
 	cfgSource := string(cfgData)
@@ -241,6 +246,19 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		targetAdapter = "@jesterkit/exe-sveltekit"
 	} else if req.Strategy.ApplyStatic() {
 		targetAdapter = "@sveltejs/adapter-static"
+	}
+
+	// Fail here, before any subprocess is spawned and before anything is
+	// written to .pokkum/: `bun run build` runs whatever adapter SvelteKit
+	// actually reads from the project's own config, and every post-build
+	// contract below (entrypoint path, output layout, handler patching) holds
+	// only for targetAdapter. Without this check a project configured for a
+	// different adapter — the @sveltejs/adapter-auto every fresh `sv create`
+	// ships, say — builds "successfully" and then fails several minutes later
+	// with an unrelated "expected entrypoint not found" message, or produces an
+	// image built from the wrong artifacts.
+	if err := checkEffectiveAdapter(req.ProjectDir, req.Strategy, targetAdapter); err != nil {
+		return ports.PrepareResult{}, err
 	}
 
 	entrypoint := filepath.Join(req.ProjectDir, "build", "index.js")
@@ -407,6 +425,80 @@ func readConfigSource(projectDir string) string {
 		return ""
 	}
 	return string(data)
+}
+
+// viteConfigNames are the Vite config filenames Prepare consults, in Vite's own
+// resolution order — the first one that exists is the one Vite loads, so the
+// scan must stop there rather than merge every candidate it finds.
+var viteConfigNames = []string{
+	"vite.config.js",
+	"vite.config.mjs",
+	"vite.config.ts",
+	"vite.config.cjs",
+	"vite.config.mts",
+	"vite.config.cts",
+}
+
+// readViteConfigSource returns the raw source text and filename of the
+// project's Vite config, or ("", "") when it has none. It mirrors
+// readConfigSource: a non-mutating read whose failure simply means "no Vite
+// config governs here".
+func readViteConfigSource(projectDir string) (source, name string) {
+	for _, candidate := range viteConfigNames {
+		data, err := os.ReadFile(filepath.Join(projectDir, candidate))
+		if err == nil {
+			return string(data), candidate
+		}
+	}
+	return "", ""
+}
+
+// checkEffectiveAdapter fails the build when targetAdapter — the adapter this
+// strategy's post-build contract depends on — is not configured in the file
+// SvelteKit will actually read for this project.
+//
+// The two failure shapes are reported differently on purpose, because they have
+// different fixes and only one of them is obvious:
+//
+//   - svelte.config.js governs and does not name the package: the ordinary
+//     "wrong or missing adapter" case.
+//   - vite.config.* governs (it passes options to the sveltekit() plugin, which
+//     makes SvelteKit ignore svelte.config.js entirely) and does not name the
+//     package: the fix belongs in the Vite config, and editing svelte.config.js
+//     — including a svelte.config.js that already names the package correctly —
+//     accomplishes nothing at all. This is the shape current `sv create`
+//     scaffolds produce.
+func checkEffectiveAdapter(projectDir string, strategy ports.BuildStrategy, targetAdapter string) error {
+	svelteSource := readConfigSource(projectDir)
+	viteSource, viteName := readViteConfigSource(projectDir)
+
+	configured, readFrom, overridden := sveltekitutils.EffectiveAdapterConfigured(svelteSource, viteSource, viteName, targetAdapter)
+	if configured {
+		return nil
+	}
+
+	// A zero-value Strategy is normalised to the default by core before it gets
+	// here; render it that way rather than printing an empty flag value.
+	shownStrategy := strategy
+	if shownStrategy == "" {
+		shownStrategy = ports.DefaultBuildStrategy
+	}
+
+	if overridden {
+		alsoInSvelteConfig := ""
+		if sveltekitutils.AdapterConfigured(svelteSource, targetAdapter) {
+			alsoInSvelteConfig = " (svelte.config.js does reference it, but SvelteKit never reads that file here)"
+		}
+		return fmt.Errorf(
+			"bunexec: prepare %s: --strategy=%s requires %s, but %s passes options to its sveltekit() plugin call, so SvelteKit ignores svelte.config.js entirely (\"svelte.config.js is ignored when options are passed via your Vite config\") and takes the adapter from %s — which does not reference %s%s; fix it in %s: run `bun add -D %s`, then `import adapter from '%s'` and pass `adapter: adapter()` inside sveltekit({ ... }). If the adapter is re-exported from a local module, import it directly so pokkum can see it: %w",
+			projectDir, shownStrategy, targetAdapter, readFrom, readFrom, targetAdapter, alsoInSvelteConfig, readFrom, targetAdapter, targetAdapter, core.ErrAdapterMisconfigured,
+		)
+	}
+
+	return fmt.Errorf(
+		"bunexec: prepare %s: --strategy=%s requires %s, but svelte.config.js does not reference it (a fresh `sv create` project ships @sveltejs/adapter-auto, which does not produce the build output pokkum packages); fix it in svelte.config.js: run `bun add -D %s`, then `import adapter from '%s'` and set `kit.adapter: adapter()`. If the adapter is re-exported from a local module, import it directly so pokkum can see it: %w",
+		projectDir, shownStrategy, targetAdapter, targetAdapter, targetAdapter, core.ErrAdapterMisconfigured,
+	)
 }
 
 // Compile runs `bun build --compile` once, for req.Platform, producing

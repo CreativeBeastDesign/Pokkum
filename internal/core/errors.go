@@ -63,6 +63,17 @@ var (
 	// to compile, and the fix is a one-line install the message should name.
 	ErrAdapterMissing = errors.New("sveltekit adapter missing")
 
+	// ErrAdapterMisconfigured reports that the adapter the requested build
+	// strategy needs is not configured in the file SvelteKit will actually
+	// read. It is deliberately narrower than ErrAdapterMissing: the package may
+	// be installed, and may even be named in svelte.config.js, and SvelteKit
+	// still never sees it — passing any options to the sveltekit() plugin in
+	// vite.config.ts makes SvelteKit ignore svelte.config.js entirely, and
+	// current `sv create` scaffolds configure the adapter exactly that way.
+	// The message must name the strategy, the required package, and the one
+	// file the fix belongs in, because editing the other file changes nothing.
+	ErrAdapterMisconfigured = errors.New("sveltekit adapter misconfigured")
+
 	// ErrPrepareFailed reports that the SvelteKit build (stage one) failed or
 	// did not produce the expected entrypoint.
 	ErrPrepareFailed = errors.New("sveltekit build failed")

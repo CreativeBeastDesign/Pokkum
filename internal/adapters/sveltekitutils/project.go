@@ -73,6 +73,145 @@ func AdapterConfigured(svelteConfigSource, pkgName string) bool {
 	return strings.Contains(svelteConfigSource, pkgName)
 }
 
+// isJSIdentByte reports whether b can appear in a JavaScript identifier, so a
+// call-site scan can tell `sveltekit(` apart from `notSveltekit(`.
+func isJSIdentByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	case b == '_', b == '$':
+		return true
+	}
+	return false
+}
+
+// scanCallArgs returns the source text between the parenthesis at
+// source[open] and its matching close parenthesis, reporting false when the
+// call is unbalanced (truncated or malformed source).
+//
+// It skips over '...', "..." and `...` string literals wholesale — honoring
+// backslash escapes — so a parenthesis inside a string (a regex-ish route
+// pattern, a URL) never unbalances the count. Indexing is by byte, which is
+// safe because every byte of a multi-byte UTF-8 rune is >= 0x80 and can
+// therefore never collide with the ASCII delimiters scanned for here.
+func scanCallArgs(source string, open int) (string, bool) {
+	depth := 0
+	for i := open; i < len(source); i++ {
+		switch c := source[i]; c {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return source[open+1 : i], true
+			}
+		case '\'', '"', '`':
+			j := i + 1
+			for j < len(source) && source[j] != c {
+				if source[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if j >= len(source) {
+				return "", false
+			}
+			i = j
+		}
+	}
+	return "", false
+}
+
+// sveltekitPluginOptions returns the argument text of every `sveltekit(...)`
+// plugin call in comment-stripped Vite config source, in source order. A bare
+// `sveltekit()` contributes an empty string; a call whose parentheses never
+// close contributes nothing at all.
+func sveltekitPluginOptions(source string) []string {
+	const call = "sveltekit("
+	var out []string
+	for i := 0; i < len(source); {
+		rel := strings.Index(source[i:], call)
+		if rel < 0 {
+			break
+		}
+		start := i + rel
+		i = start + len(call)
+		if start > 0 && isJSIdentByte(source[start-1]) {
+			// A suffix of a longer identifier, e.g. `mySveltekit(` — not the
+			// @sveltejs/kit/vite plugin.
+			continue
+		}
+		if args, ok := scanCallArgs(source, start+len(call)-1); ok {
+			out = append(out, args)
+		}
+	}
+	return out
+}
+
+// ViteConfigOverridesSvelteConfig reports whether a project's vite.config.{ts,js}
+// passes an options object to its `sveltekit()` plugin call — the condition
+// under which SvelteKit stops reading svelte.config.js altogether and takes its
+// configuration (the adapter included) from the Vite config instead.
+//
+// This is not a heuristic about what "should" happen: SvelteKit itself prints
+//
+//	svelte.config.js is ignored when options are passed via your Vite config
+//
+// at both `svelte-kit sync` (which the scaffold's `prepare` script runs during
+// `bun install`) and `vite build` time, and a real build confirms the Vite
+// config wins — a project whose vite.config.ts passes `adapter: adapter()` from
+// @sveltejs/adapter-node builds with adapter-node even when svelte.config.js
+// names a different adapter entirely.
+//
+// Current `sv create` scaffolds emit no svelte.config.js at all and configure
+// the adapter exclusively this way, so this is the common shape, not an exotic
+// one. Any non-empty options object counts (SvelteKit's own message says
+// "options", not "an adapter option"); a bare `sveltekit()` — what
+// testdata/fixtures/sveltekit-basic has — does not, and leaves svelte.config.js
+// governing as before.
+//
+// Like the rest of this file it is a plain textual scan, deliberately not a JS
+// parse: comments are stripped first (see stripJSComments) so a commented-out
+// options object is not mistaken for a live one.
+func ViteConfigOverridesSvelteConfig(viteConfigSource string) bool {
+	for _, args := range sveltekitPluginOptions(stripJSComments(viteConfigSource)) {
+		if strings.TrimSpace(args) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// EffectiveAdapterConfigured answers the only question worth asking before a
+// `bun run build`: will SvelteKit see pkgName configured as this project's
+// adapter, in the file it will actually read?
+//
+// viteConfigName is the filename of the project's Vite config
+// ("vite.config.ts", "vite.config.js", ...) or "" when it has none;
+// viteConfigSource is that file's text. svelteConfigSource is
+// svelte.config.js's text, or "" when that file is absent (current `sv create`
+// scaffolds ship none).
+//
+// The returned values are:
+//
+//   - configured: pkgName is referenced by whichever file governs.
+//   - readFrom: the name of the file that governs — the one a caller's error
+//     message must tell the user to edit. Editing the other one has no effect.
+//   - overridden: the Vite config governs and svelte.config.js is dead text,
+//     whether it exists or not (see ViteConfigOverridesSvelteConfig).
+//
+// "Referenced" is the same plain substring test AdapterConfigured uses, applied
+// to comment-stripped source so a commented-out import never counts. It cannot
+// see through an adapter re-exported from a local module
+// (`import adapter from './shared-adapter.js'`); callers should say so in their
+// error message rather than silently guessing.
+func EffectiveAdapterConfigured(svelteConfigSource, viteConfigSource, viteConfigName, pkgName string) (configured bool, readFrom string, overridden bool) {
+	if viteConfigName != "" && ViteConfigOverridesSvelteConfig(viteConfigSource) {
+		return AdapterConfigured(stripJSComments(viteConfigSource), pkgName), viteConfigName, true
+	}
+	return AdapterConfigured(stripJSComments(svelteConfigSource), pkgName), "svelte.config.js", false
+}
+
 // targetLinuxX64Pattern matches an adapter options object containing
 // `target: "linux-x64"` (single or double quoted, any amount of whitespace
 // around the colon).

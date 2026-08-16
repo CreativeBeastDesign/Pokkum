@@ -1,13 +1,25 @@
 # adapter-node `handler.js` fixtures
 
-Real, unmodified `handler.js` files shipped by `@sveltejs/adapter-node`, checked
-in as regression-test fixtures for
+Regression-test fixtures for
 `internal/adapters/bunexec/prerendered_patch.go`'s pattern matcher (which
 patches the generated handler to read prerendered pages from
-`POKKUM_PRERENDERED_DIR`). These are byte-for-byte copies of the npm package
-contents — no manual edits.
+`POKKUM_PRERENDERED_DIR`).
 
-## Why these two versions
+Two distinct pipeline stages are represented here, and the difference matters:
+
+| Directory | Pipeline stage | Sourced from |
+|---|---|---|
+| `v3/`, `v5/` | adapter-node's **pre-bundling source template**, before Vite/Rollup ever sees it | `npm pack` → `package/files/handler.js` |
+| `bundled-real/` | the **post-bundle build output** a real `bun run build` emits into `build/` — i.e. the artifact `prerendered_patch.go` actually opens at build time | a real `sv create` + `bun run build` |
+
+`v3/` and `v5/` are byte-for-byte copies of the npm package contents (no
+manual edits), but they are **not** what Pokkum patches at build time — see
+`Lessons.md`'s 2026-08-16 entry "`patchPrerenderedHandler`'s 'real fixture'
+regression tests exercised the wrong artifact". They are kept as honest
+coverage of the upstream template shape, which the matcher must also keep
+handling (some versions/configs still inline that shape into build output).
+
+## Why these two upstream-template versions
 
 Pokkum does not pin an `@sveltejs/adapter-node` version itself: it always
 injects `@sveltejs/adapter-node` as `targetAdapter`
@@ -21,7 +33,7 @@ as directed, covering an older major still plausibly installed in the wild
 and the current latest stable major (5.x; a 6.0.0-next prerelease exists on
 npm but is not yet stable, so 5 remains "current" for this purpose).
 
-## Sourcing
+## Sourcing (`v3/`, `v5/` — upstream template)
 
 | | v3 | v5 |
 |---|---|---|
@@ -52,14 +64,16 @@ cp v5/package/files/handler.js <repo>/testdata/adapter-node/v5/handler.js
 
 `npm pack` writes a `.tgz` whose contents are rooted at `package/`; the
 runtime handler template lives at `files/handler.js` inside the package (not
-under a `dist/` or build-output directory) and is copied by adapter-node's own
-`index.js` into the user's build output as the project's generated
-`handler.js` essentially verbatim (SvelteKit's build embeds it via its own
-bundler substitutions for import specifiers like `'SHIMS'`, `'MANIFEST'`,
-`'SERVER'`, `'PRERENDERED'` — the prerendered-path logic itself is untouched
-by that substitution).
+under a `dist/` or build-output directory). adapter-node's own `index.js`
+feeds it through Rollup, substituting import specifiers like `'SHIMS'`,
+`'MANIFEST'`, `'SERVER'`, `'PRERENDERED'`.
 
-## Prerendered-path pattern found
+> **These two fixtures are the input to that bundling step, not its output.**
+> They do not prove the matcher works against a real build — `bundled-real/`
+> below is what does. Bundling can and does relocate the prerendered-path
+> logic out of `handler.js` entirely (see that section).
+
+## Prerendered-path pattern found (`v3/`, `v5/`)
 
 Both versions build the prerendered-file server root with:
 
@@ -85,3 +99,68 @@ code (env parsing, static-file serving helpers) into `./chunks/vendor.js`,
 `prerendered_patch.go` patches). The `path.join(dir, 'prerendered')` line
 itself is unaffected by this refactor and matches the same pattern in both
 versions.
+
+## `bundled-real/` — real post-bundle build output
+
+```
+bundled-real/handler.js                              <- thin re-export barrel
+bundled-real/server/chunks/handler-Cl6LqmpI.js       <- the real handler implementation
+```
+
+Date sourced: **2026-08-17**. Toolchain: `@sveltejs/adapter-node@5.5.7`,
+`@sveltejs/kit@2.70.2`, built with `bun`.
+
+Commands used:
+
+```bash
+# fresh scaffold with adapter-node selected, plus a real prerendered route
+bunx sv create --add sveltekit-adapter=adapter:node <scratch-dir>
+# (added a src/routes/about/+page.js exporting `export const prerender = true;`)
+bun install
+bun run build
+```
+
+### What the real build emits
+
+`build/handler.js` — the file `patchPrerenderedHandler` locates and opens —
+**no longer contains the prerendered-path logic at all**. It is a thin
+re-export barrel:
+
+```js
+export { h as handler } from './server/chunks/handler-Cl6LqmpI.js';
+```
+
+The real implementation lives in a **content-hashed chunk** under
+`build/server/chunks/`. Both the local identifier (`h`) and the hash
+(`Cl6LqmpI`) are Rollup-assigned and vary per build, so
+`prerendered_patch.go` matches the shape, never those literals. That chunk
+does contain one of the 8 known patterns completely unchanged —
+`path.join(dir, 'prerendered')` — which is why the fix was "follow the
+re-export", not "add new patterns". The chunk is **not minified** (Vite's
+default Node SSR output keeps real names and comments), so literal string
+matching stays valid. `dir` itself is imported from `build/env.js` via
+`import { env, dir, env_prefix } from '../../env.js';`.
+
+The build tree, as observed:
+
+```
+build/handler.js
+build/env.js
+build/index.js
+build/server/chunks/handler-Cl6LqmpI.js
+build/server/chunks/index.js-smFCi7sU.js
+build/server/chunks/manifest.js-BFl5iliz.js
+build/prerendered/about.html
+```
+
+### Fidelity of each checked-in file (read this before trusting them)
+
+| File | Fidelity |
+|---|---|
+| `bundled-real/handler.js` | **Verbatim** capture of the real emitted barrel, with trailing side-effect `import` lines beyond the ones shown elided (they are irrelevant to the matcher and reference more per-build hashed chunk names). |
+| `bundled-real/server/chunks/handler-Cl6LqmpI.js` | **Synthesized trim, not a verbatim byte capture.** The `serve_prerendered()` function — including the load-bearing `const handler = serve(path.join(dir, 'prerendered'));` line — and the `../../env.js` import line are verbatim from the real chunk. The surrounding code is the real `v5/handler.js` template (above) trimmed to a plausible bundled form: `export { handler as h }` (matching what the barrel imports), `PRERENDERED`/`BASE`/`PRECOMPRESS` specifiers resolved to their post-substitution values, and the `ssr` body elided. Nothing here was shaped to satisfy the matcher — the matched line is real. |
+
+The directory nesting (`server/chunks/`) is preserved from the real build so
+the fixture exercises the actual relative-path resolution
+(`./server/chunks/...` against `handler.js`'s own directory), not a flattened
+approximation.

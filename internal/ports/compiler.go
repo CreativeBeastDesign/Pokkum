@@ -460,6 +460,12 @@ type CompileRequest struct {
 //     core.ErrBunTooOld when the version is below the minimum, and
 //     core.ErrAdapterMissing when @jesterkit/exe-sveltekit is not a dependency
 //     of the project.
+//   - Prepare returns core.ErrAdapterMisconfigured when the adapter the
+//     requested BuildStrategy needs is not configured in the file SvelteKit
+//     will actually read (a vite.config.* that passes options to the
+//     sveltekit() plugin overrides svelte.config.js completely). This is
+//     checked before any subprocess starts, so it must not have written
+//     anything to the project directory when it returns.
 //   - Prepare returns core.ErrPrepareFailed when `bun run build` exits non-zero
 //     or the expected entrypoint is absent afterwards. The wrapped error must
 //     carry the captured subprocess output — a bare exit status is useless to a

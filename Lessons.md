@@ -5,6 +5,70 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-17 — A sub-agent's "captured verbatim from a real `bunx sv create` project" fixture doc comment was false, caught only by re-running the real command during adversarial review
+
+**Category:** test-fixture-fidelity (a meta-instance of this file's recurring theme: this time the false claim was about provenance itself, not about the artifact's pipeline stage)
+
+**Where:** `internal/adapters/bunexec/compiler_strategy_test.go`'s `svCreateSvelteConfigFmt` constant, added the same day as the `checkEffectiveAdapter` fix it supports.
+
+**What happened:** a sub-agent implementing `TestPrepare_StrategyDispatch`'s per-strategy fixtures wrote a `svelte.config.js`-shaped constant with a doc comment stating it was "captured verbatim from a real `bunx sv create` project ... when its adapter is configured there rather than inline in vite.config.ts." Adversarial review re-ran both `bunx sv create --add sveltekit-adapter=adapter:node` and `bunx sv add sveltekit-adapter=adapter:node` (sv@0.17.0) against real, fresh projects specifically to check this claim — neither ever writes a `svelte.config.js`; both configure the adapter exclusively in `vite.config.ts`. The claimed source scenario ("adapter configured in svelte.config.js rather than vite.config.ts, via `sv create`") does not exist in current tooling at all.
+
+**Root cause:** the fixture content itself was reasonable (a syntactically valid, standard SvelteKit `svelte.config.js` shape, and a legitimate input for what the test actually needed — Prepare's dispatch when svelte.config.js governs) — but the sub-agent's doc comment asserted a specific, checkable provenance ("captured verbatim from a real ... project") that was never actually verified against the real CLI, only assumed plausible. A confident, specific claim written to satisfy this repo's own "no fixture may be hand-crafted, must trace to real content" rule is not the same as the claim being true — and a false provenance claim is more dangerous than an honest "hand-written, standard shape" label, because it reads as already-verified and discourages the next reader from checking.
+
+**Fix:** corrected the doc comment to state plainly that this is a hand-written-but-standard SvelteKit config shape, not a captured real-tool artifact, and to name the real vite.config.ts-only shape (`realSvCreateAdapterNodeViteConfig` in `sveltekitutils/project_test.go`) that current tooling actually produces instead. The fixture's *use* in the test was unaffected — it remains a valid, syntactically real SvelteKit config shape for what `TestPrepare_StrategyDispatch` exercises; only the false claim about where it came from needed fixing.
+
+**Preventative rule:** a "captured from a real run" or "verified against real tooling" claim in a fixture's doc comment is itself a testable assertion, not documentation — before trusting it (as a reviewer) or writing it (as an author), actually re-run the claimed command and diff the output, the same way you'd verify any other fact in a diff. This applies with extra force to sub-agent-authored fixtures: a sub-agent instructed to "source from real content" has every incentive to write a confident provenance claim whether or not it actually did the verification, and nothing downstream catches the gap unless someone re-runs the real command.
+
+---
+
+## 2026-08-17 — `Preflight` hard-required `svelte.config.js` to exist, blocking every real `sv create` project independently of two other fixes landed the same day
+
+**Category:** boundary / test-fixture-fidelity (a third, previously-undiscovered instance of the same root shape as this file's other 2026-08 entries — a check written when a file was assumed mandatory, never revisited after it stopped being mandatory)
+
+**Where:** `internal/adapters/bunexec/compiler.go`'s `Preflight` (the `os.ReadFile(cfgPath)` block preceding the adapter-configured check, ~line 165-172 before the fix).
+
+**What happened:** the same day's fixes to `Prepare`'s adapter detection (`checkEffectiveAdapter`, see the two entries below) were verified by running `core.Build` end to end against a real `sv create --add sveltekit-adapter=adapter:node` project (`testdata/fixtures/sveltekit-adapter-node`, `tests/integration/layered_prerendered_e2e_test.go`) — the first test in the repo to drive the *full* pipeline against such a project rather than `Prepare` in isolation. It failed immediately, before `Prepare` ever ran, at `Preflight`: `"svelte.config.js not found: sveltekit project not found"`. `Preflight` — a separate, strategy-agnostic check that runs earlier in `core.Build` — unconditionally required `svelte.config.js` to exist, treating its absence as proof the directory "does not look like a SvelteKit project." Current `sv create` scaffolds generate no such file at all (confirmed empirically the same day), so this genuinely blocked every real project this whole day's other two fixes were built to unblock.
+
+**Root cause:** `Preflight` was written when `svelte.config.js` was, in practice, always present in any real SvelteKit project — a correct assumption at the time that silently stopped being true once `sv create` moved adapter configuration into `vite.config.ts`. Nothing forced a re-check of that assumption because `Preflight` was never exercised against a project without the file: every existing fixture and every existing test supplied one. The same day's `Prepare`-level fix (`checkEffectiveAdapter`) was unit- and Prepare-level-tested thoroughly, but no test called `core.Build` (which calls `Preflight` before `Prepare`) against a `svelte.config.js`-less project until the end-to-end test was written specifically to raise confidence beyond the unit level — and it immediately earned that effort back.
+
+**Fix:** `Preflight` no longer treats a missing `svelte.config.js` as `core.ErrProjectNotFound`; only a genuine read failure (permission error, not "does not exist") does. The existing package.json-dependency fallback in `Preflight`'s adapter check (`pkg.HasDependency(adapterPackage) || pkg.HasDependency("@sveltejs/adapter-node")`) already tolerated an empty/missing config source once the hard gate was removed — no further change to that check was needed. See `TestPreflight_MissingSvelteConfig_NotAnError`.
+
+**Preventative rule:** a same-day, well-tested fix to one function in a call chain does not prove the chain works — if a caller runs other checks before or after the fixed function, at least one test must exercise the *caller*, with the same real-world input shape the fix was built around, not just the fixed function in isolation. This is a variant of this file's recurring theme (fixture-vs-reality mismatch) at the integration-test level rather than the unit-fixture level: the "fixture" that was stale here wasn't test data, it was an unstated assumption in a *different* function than the one being fixed.
+
+---
+
+## 2026-08-17 — Zero-Config Auto-Injection had no effect on real builds; two compounding causes, both traced to code that never ran a real `bun run build` against a project it wasn't allowed to hand-configure first
+
+**Category:** boundary / test-fixture-fidelity
+
+**Where:** `internal/adapters/bunexec/compiler.go`'s `Prepare` (the `bun run build` invocation always targeted the real, unmodified `svelte.config.js`/`vite.config.ts` — `PrepareVirtualConfig`'s `.pokkum/svelte.config.js` output and `POKKUM_AUTO_INJECT` env var were both write-only, read by nothing); no code anywhere accounted for Vite's own "svelte.config.js is ignored when options are passed via your Vite config" rule.
+
+**What happened:** documented in full in `concepts/zero-config-injection-concept.md` (written the same day this was found, before the fix). In short: v0.2 shipped "Zero-Config Auto-Injection" claiming Pokkum auto-injects the correct adapter without manual `svelte.config.js` edits. It never did — the transformed config Pokkum computed was written to a file nothing read, and separately, current `sv create` scaffolds (`sv@0.17.0`+) don't even generate a `svelte.config.js`, configuring the adapter entirely via `vite.config.ts` instead, which real SvelteKit ignores `svelte.config.js` for. Both gaps were invisible to every existing test because the repo's one real-`bun` fixture (`sveltekit-basic`) ships with its adapter already hand-configured correctly — sidestepping the exact question "does Pokkum's injection make an incorrectly-configured project buildable" that the feature claims to answer.
+
+**Root cause:** the feature was built and tested against a fixture that could never exhibit the failure it was written to prevent. `VirtualConfigResult.VirtualConfigPath` being read only for a log line, and `POKKUM_AUTO_INJECT` being read by nothing, are the kind of gaps a fixture with the *wrong* adapter configured (or none) would have caught immediately — no such fixture existed until this investigation added one.
+
+**Fix:** per the concept doc's recommendation, shipped Option C (detect-and-fail-clearly) rather than Option B (a real fix that would make the build adapter-agnostic — deferred, scoped separately) or Option A (real-file swap — rejected, source-mutation risk). New `sveltekitutils.EffectiveAdapterConfigured`/`ViteConfigOverridesSvelteConfig` determine, from real captured `vite.config.ts`/`svelte.config.js` shapes (a genuine `bunx sv create` scaffold, both with and without an adapter add-on, real content captured verbatim into test fixtures — not hand-written), which file SvelteKit will actually read; `Prepare`'s new `checkEffectiveAdapter` calls it before any subprocess is spawned or `.pokkum/` is written, failing with a message naming the exact file and fix. `Roadmap.md`'s v0.2 entry now carries a correction note rather than silently continuing to overstate what shipped.
+
+**Preventative rule:** a "auto-fix" or "auto-inject" feature's regression tests must include at least one fixture the feature is supposed to *fix*, not only fixtures that are already correct. A fixture that never needs the feature to do anything can't tell you whether the feature does anything.
+
+---
+
+## 2026-08-17 — `patchPrerenderedHandler`'s matcher was fixed, not by adding new patterns, but by pointing the existing ones at the right file
+
+**Category:** multi-item / test-fixture-fidelity (the fix for the gap logged in the entry immediately below)
+
+**Where:** `internal/adapters/bunexec/prerendered_patch.go`'s `patchPrerenderedEnv`.
+
+**What happened:** the entry below found that real bundled `build/handler.js` contains none of the 8 known prerendered-path patterns. Empirical follow-up (a real `bunx sv create --add sveltekit-adapter=adapter:node` project with a real prerendered route, real `bun install` + `bun run build`) found why: `@sveltejs/adapter-node@5.5.7`'s bundled `handler.js` is a thin re-export barrel (`export { h as handler } from './server/chunks/handler-<hash>.js';`); the actual `path.join(dir, 'prerendered')` expression — an exact, byte-identical match of one of the existing 8 patterns — lives in that content-hashed chunk file. The pattern-matching logic was never wrong; it was reading the one file in the build output guaranteed not to contain what it was looking for.
+
+**Root cause:** the original patcher (and the 2026-08-16 fixture-sourcing effort that "verified" it) both assumed `build/handler.js` was a single, self-contained file, because that was true of whatever adapter-node version or bundler configuration was last observed directly. Nothing re-checked that assumption against a genuinely fresh real build until this investigation did.
+
+**Fix:** `patchPrerenderedEnv` now tries a direct match inside `handler.js` first (byte-for-byte the old behavior, kept as the first attempt since some adapter-node versions/configs may still inline the logic), and only on no-match parses `handler.js`'s re-export statement, resolves the referenced chunk file relative to `handler.js`'s own directory, and retries there — patching and staging that file instead. The re-export identifier and chunk hash are matched structurally (`export\s*\{[^}]*\bhandler\b[^}]*\}\s*from\s*['"]([^'"]+)['"]`), never hardcoded, since Rollup assigns both per build. A genuine no-match in both stays a hard failure — this is a correctness gate, not a best-effort transform. New fixtures under `testdata/adapter-node/bundled-real/` capture the real re-export-barrel shape; the existing `v3`/`v5` fixtures are kept (still real, still useful as coverage of the pre-bundling template) with corrected doc comments.
+
+**Preventative rule:** when a "wrong file" bug is found, check whether the *matching logic itself* is actually broken before rewriting it — sometimes the fix is routing, not detection. Conflating the two here would have meant guessing at new literal patterns for a shape that was never actually broken, while leaving the real bug (never looking at the chunk file) unfixed.
+
+---
+
 ## 2026-08-16 — `patchPrerenderedHandler`'s "real fixture" regression tests exercised the wrong artifact — the checked-in npm template, not real bundled build output
 
 **Category:** multi-item / test-fixture-fidelity (same root shape as the assets.generated.ts entry immediately below — a fixture that doesn't match real tool output masking a real gap)

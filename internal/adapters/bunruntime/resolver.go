@@ -24,9 +24,9 @@ import (
 // Known pinned SHA256 digests for official Bun zip release archives.
 // Key format: "<version>/<target-name>" (e.g. "1.2.2/bun-linux-x64").
 var pinnedReleaseChecksums = map[string]string{
-	"1.2.2/bun-linux-x64":          "4538805fdbd21bd7ad653f5d52cfc235ef98cf8593a207ba7efab3d274bf4184",
-	"1.2.2/bun-linux-x64-baseline": "8b51d6dbaccc3ec3bdca5cae5f31920677ad45e7f225d301ae4fdbbdf3e0cf55",
-	"1.2.2/bun-linux-aarch64":      "d7aeceaaeb37ff1adfe8f5c353ea2eb0498cfc9c7df62df27f818d6a78280f49",
+	"1.2.2/bun-linux-x64":          "3f4efb8afd1f84ac2a98c04661c898561d1d35527d030cb4571e99b7c85f5079",
+	"1.2.2/bun-linux-x64-baseline": "cad7756a6ee16f3432a328f8023fc5cd431106822eacfa6d6d3afbad6fdc24db",
+	"1.2.2/bun-linux-aarch64":      "d1dbaa3e9af24549fad92bdbe4fb21fa53302cd048a8f004e85a240984c93d4d",
 }
 
 var _ ports.BunRuntimeResolver = (*Resolver)(nil)

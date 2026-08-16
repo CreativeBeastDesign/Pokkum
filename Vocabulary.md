@@ -73,8 +73,8 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--with-otel-sidecar` | — | — | `false` | Inject an OTEL Collector sidecar spec into generated Kubernetes manifests. |
 | `--sign` | — | — | `true` | Enable SLSA, Cosign, and DSSE signing. |
 | `--no-sign` | — | — | `false` | Explicitly disable signing; wins over `--sign` if both are set. |
-| `--inject` | — | — | `true` | Enable zero-config auto-injection (`svelte.config.js`, `SOURCE_DATE_EPOCH` pinning). |
-| `--no-inject` | — | — | `false` | Explicitly disable auto-injection; wins over `--inject` if both are set. |
+| `--inject` | — | — | `true` | Write a transformed `svelte.config.js`/`SOURCE_DATE_EPOCH` pinning to `.pokkum/` for diagnostics. Does not change what SvelteKit's own build actually reads — no file under the project's real config is rewritten or overridden. |
+| `--no-inject` | — | — | `false` | Skip the `.pokkum/` config write above; wins over `--inject` if both are set. |
 | `--update-base` | — | — | `false` | Force re-resolving base image tags against remote registry and update `pokkum.lock`. |
 | `--offline` | — | — | `false` | Strictly enforce using `pokkum.lock` and local cache without remote registry calls. |
 | `--bun-binary` | — | — | (none) | Local filesystem path escape hatch to a `bun` executable (skips resolution/download). |
