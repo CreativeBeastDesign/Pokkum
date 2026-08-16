@@ -45,6 +45,11 @@ const (
 	// @sveltejs/adapter-node does) can be pointed at it via EnvPrerenderedDir.
 	AppPrerenderedDirPrefix = "/app/prerendered"
 
+	// AppServerDirPrefix is the in-image mount point for the layered-strategy
+	// server JS tree (the staged build/ output). Distinct from AppBinaryPath,
+	// which is the single-file exe-strategy artifact.
+	AppServerDirPrefix = "/app/server"
+
 	// StaticServerPath is where the pokkum-static binary is placed in the
 	// image, and argv[0] of the entrypoint for StrategyStatic.
 	StaticServerPath = "/pokkum/static"
@@ -76,6 +81,22 @@ const (
 	DefaultShutdownTimeout = 30 * time.Second
 )
 
+// AttestationRoots is the fixed set of in-image directories the layered
+// startup attestation covers. Both the packager (which computes the expected
+// digest at build time) and pokkum-init (which re-derives it from the live
+// tree at runtime) iterate exactly this set, so a directory that was never
+// packaged is simply absent on both sides and contributes nothing. The set,
+// not its order, is what matters: the aggregate digest is sorted by relative
+// path before hashing, so iteration order cannot leak into it. A var, not a
+// const, because it is an array literal rather than a typed constant.
+var AttestationRoots = [...]string{
+	AppServerDirPrefix,
+	AppClientDirPrefix,
+	AppPrerenderedDirPrefix,
+	AppVendorDirPrefix,
+	AppNativeDirPrefix,
+}
+
 // Environment variables read by pokkum-init and by the application at runtime.
 const (
 	// EnvPort is read by the SvelteKit server to choose its listen port.
@@ -105,6 +126,16 @@ const (
 	// It defaults to AppClientDirPrefix + os.PathListSeparator +
 	// AppPrerenderedDirPrefix.
 	EnvStaticRoots = "POKKUM_STATIC_ROOTS"
+
+	// EnvAttestationDigest is read by pokkum-init as the expected SHA-256 root
+	// digest of the layered-strategy /app runtime tree (server, client,
+	// prerendered, vendor, native). It is stamped by the packager into the
+	// image config at build time. When present and non-empty, pokkum-init
+	// verifies the live /app tree matches before exec'ing the child and refuses
+	// to start on mismatch (startup attestation, layered hardening Option C).
+	// When absent, no verification runs — the escape hatch for an operator who
+	// deliberately disables it by overriding this env var.
+	EnvAttestationDigest = "POKKUM_ATTESTATION_DIGEST"
 )
 
 // Probe endpoints served by pokkum-init on the probe port.

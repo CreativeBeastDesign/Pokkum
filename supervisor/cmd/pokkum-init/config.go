@@ -19,14 +19,15 @@ import (
 // go-containerregistry's v1 types (and their transitive dependencies) into a
 // program whose entire job is to fork one child and count signals. The
 // constants below must stay in lockstep with ports.EnvPort,
-// ports.EnvProbePort, ports.EnvShutdownTimeout, ports.DefaultPort,
-// ports.DefaultProbePort and ports.DefaultShutdownTimeout.
+// ports.EnvProbePort, ports.EnvShutdownTimeout, ports.EnvAttestationDigest,
+// ports.DefaultPort, ports.DefaultProbePort and ports.DefaultShutdownTimeout.
 const (
-	envPort            = "PORT"
-	envProbePort       = "POKKUM_PROBE_PORT"
-	envShutdownTimeout = "POKKUM_SHUTDOWN_TIMEOUT"
-	envLogLevel        = "POKKUM_LOG_LEVEL"
-	envRequiredEnv     = "POKKUM_REQUIRED_ENV"
+	envPort              = "PORT"
+	envProbePort         = "POKKUM_PROBE_PORT"
+	envShutdownTimeout   = "POKKUM_SHUTDOWN_TIMEOUT"
+	envLogLevel          = "POKKUM_LOG_LEVEL"
+	envRequiredEnv       = "POKKUM_REQUIRED_ENV"
+	envAttestationDigest = "POKKUM_ATTESTATION_DIGEST"
 
 	defaultPort      = 3000
 	defaultProbePort = 8081
@@ -74,6 +75,13 @@ type Config struct {
 
 	// RequireEnv lists environment variable keys required to be present at runtime.
 	RequireEnv []string
+
+	// AttestationDigest is the expected SHA-256 root digest of the /app runtime
+	// tree, stamped by the packager for layered builds (startup attestation,
+	// hardening Option C). When non-empty, verifyAttestation re-derives the
+	// digest from the live /app tree before exec and refuses to start on
+	// mismatch. When empty, no verification runs.
+	AttestationDigest string
 }
 
 // parseConfig resolves configuration from the environment and then applies flag
@@ -125,6 +133,14 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 				cfg.RequireEnv = append(cfg.RequireEnv, k)
 			}
 		}
+	}
+	// Attestation is image-config-driven (the packager stamps it), so it is
+	// read from the environment only — never from a flag a human could pin to
+	// a stale value. A blank or malformed digest simply leaves
+	// AttestationDigest empty, which disables verification (fail-open escape
+	// hatch).
+	if raw := strings.TrimSpace(getenv(envAttestationDigest)); isHexDigest(raw) {
+		cfg.AttestationDigest = raw
 	}
 
 	flagArgs, childArgs, sawSeparator := splitArgs(args)

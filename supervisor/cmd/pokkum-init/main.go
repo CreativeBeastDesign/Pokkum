@@ -46,6 +46,16 @@ func main() {
 		log.Warn(w)
 	}
 
+	// Startup attestation (layered hardening Option C): if the packager stamped
+	// an expected digest, verify the live /app tree matches it before the child
+	// ever runs. This is the tamper-evidence gate — a modified /app fails fast
+	// here, before resolveChildPath, before the probe binds and before any app
+	// code is reached. A mismatch is a hard refusal to start (fail closed).
+	if err := verifyAttestation(log, cfg.AttestationDigest); err != nil {
+		log.Error("startup attestation failed", "error", err)
+		os.Exit(126)
+	}
+
 	// Resolve the child executable to an absolute path up front, so the fork in
 	// Run never waits on a PATH walk. This is the parallelization the probe
 	// server's own goroutine rides on: once Run is entered, start() forks

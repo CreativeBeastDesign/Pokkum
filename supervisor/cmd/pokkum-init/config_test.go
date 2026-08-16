@@ -253,3 +253,42 @@ func TestParseConfigRequiredEnv_FlagOverride(t *testing.T) {
 	}
 	_ = cfg
 }
+
+// TestParseConfigAttestationDigest pins the image-config-driven attestation
+// env: a well-formed hex digest is carried into Config, a malformed or blank
+// one leaves it empty (attestation disabled) — a bad value must never wedge a
+// container that would otherwise start.
+func TestParseConfigAttestationDigest(t *testing.T) {
+	good := strings.Repeat("ab", 32)
+
+	// Valid digest -> carried through.
+	cfg, _, err := parseConfig([]string{"--", "/app/server"}, env(map[string]string{
+		envAttestationDigest: good,
+	}), io.Discard)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.AttestationDigest != good {
+		t.Fatalf("AttestationDigest = %q, want %q", cfg.AttestationDigest, good)
+	}
+
+	// Malformed (uppercase) -> left empty, no error.
+	cfg, _, err = parseConfig([]string{"--", "/app/server"}, env(map[string]string{
+		envAttestationDigest: strings.Repeat("AB", 32),
+	}), io.Discard)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.AttestationDigest != "" {
+		t.Fatalf("malformed digest should disable attestation, got %q", cfg.AttestationDigest)
+	}
+
+	// Blank -> left empty (default).
+	cfg, _, err = parseConfig([]string{"--", "/app/server"}, env(nil), io.Discard)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.AttestationDigest != "" {
+		t.Fatalf("blank digest should disable attestation, got %q", cfg.AttestationDigest)
+	}
+}

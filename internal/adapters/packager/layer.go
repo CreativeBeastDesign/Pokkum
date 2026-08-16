@@ -25,6 +25,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/attestutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/layercacheutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/poolutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
@@ -691,21 +692,31 @@ func BuildCustomFileLayer(ctx context.Context, platform ports.Platform, targetPa
 // which logs a summary). Pruning here never touches the host filesystem — a junk file is
 // simply omitted from the tar stream being built, unlike pruneutils' own on-disk deletion
 // helpers.
-func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time, compression ports.CompressionAlgorithm, pruneOpts pruneutils.PruneOptions) (v1.Layer, pruneutils.PruneResult, error) {
+//
+// The returned []attestutils.Record is the authoritative view of exactly what this layer
+// archives to the image: one record per regular file actually written into the tar, keyed
+// by its in-image path relative to /app with the SHA-256 of its (post-processing) bytes.
+// This is what startup attestation (hardening Option C) hashes — the packager aggregates
+// these per /app tree into the expected digest, and pokkum-init re-derives the same value
+// from the extracted tree at runtime. It is authoritative specifically because it is
+// computed on the pruned, post-preprocessing walk, so it matches the container's view by
+// construction, not by re-derivation.
+func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time, compression ports.CompressionAlgorithm, pruneOpts pruneutils.PruneOptions) (v1.Layer, pruneutils.PruneResult, []attestutils.Record, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, pruneutils.PruneResult{}, fmt.Errorf("packager: build %s: %w", platform, err)
+		return nil, pruneutils.PruneResult{}, nil, fmt.Errorf("packager: build %s: %w", platform, err)
 	}
 
 	info, err := os.Stat(hostDir)
 	if err != nil {
-		return nil, pruneutils.PruneResult{}, fmt.Errorf("packager: build %s: stat directory %q: %w: %w", platform, hostDir, err, core.ErrPackageFailed)
+		return nil, pruneutils.PruneResult{}, nil, fmt.Errorf("packager: build %s: stat directory %q: %w: %w", platform, hostDir, err, core.ErrPackageFailed)
 	}
 	if !info.IsDir() {
-		return nil, pruneutils.PruneResult{}, fmt.Errorf("packager: build %s: source path %q is not a directory: %w", platform, hostDir, core.ErrPackageFailed)
+		return nil, pruneutils.PruneResult{}, nil, fmt.Errorf("packager: build %s: source path %q is not a directory: %w", platform, hostDir, core.ErrPackageFailed)
 	}
 
 	var files []layerFile
 	var pruned pruneutils.PruneResult
+	var records []attestutils.Record
 	err = filepath.WalkDir(hostDir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -732,6 +743,14 @@ func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Plat
 		if err != nil {
 			return err
 		}
+		if !fi.Mode().IsRegular() {
+			// Non-regular entries (symlinks to dirs, sockets, devices) are not
+			// surfaced by the layer's own fileOpener as plain regular content in
+			// a way the runtime view can re-derive, so they are excluded from
+			// the attestation records exactly as the supervisor's runtime walk
+			// excludes them.
+			return nil
+		}
 
 		inImagePath := path.Join(targetPrefix, relSlash)
 		files = append(files, layerFile{
@@ -739,27 +758,52 @@ func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Plat
 			size: fi.Size(),
 			open: fileOpener(p),
 		})
+		// relToApp is the file's path relative to /app, e.g. "client/index.js"
+		// for /app/client/index.js — the namespace the supervisor walks.
+		relToApp := strings.TrimPrefix(inImagePath, ports.WorkingDir+"/")
+		sha, err := hashFileSHA256(p)
+		if err != nil {
+			return fmt.Errorf("packager: hash %s for attestation: %w", p, err)
+		}
+		records = append(records, attestutils.Record{Rel: relToApp, SHA: sha})
 		return nil
 	})
 
 	if err != nil {
-		return nil, pruneutils.PruneResult{}, fmt.Errorf("packager: build %s: walk directory %q: %w: %w", platform, hostDir, err, core.ErrPackageFailed)
+		return nil, pruneutils.PruneResult{}, nil, fmt.Errorf("packager: build %s: walk directory %q: %w: %w", platform, hostDir, err, core.ErrPackageFailed)
 	}
 
 	entries, err := tarEntries(files)
 	if err != nil {
-		return nil, pruneutils.PruneResult{}, fmt.Errorf("packager: build %s: %w: %w", platform, err, core.ErrPackageFailed)
+		return nil, pruneutils.PruneResult{}, nil, fmt.Errorf("packager: build %s: %w: %w", platform, err, core.ErrPackageFailed)
 	}
 
 	layer, err := buildSinglePassLayer(ctx, platform, entries, modTime, compression)
 	if err != nil {
-		return nil, pruneutils.PruneResult{}, err
+		return nil, pruneutils.PruneResult{}, nil, err
 	}
-	return layer, pruned, nil
+	return layer, pruned, records, nil
 }
 
 // BuildDirectoryTreeLayer builds an OCI layer from a directory tree on host disk with default options.
 func BuildDirectoryTreeLayer(ctx context.Context, platform ports.Platform, hostDir string, targetPrefix string, modTime time.Time, compression ports.CompressionAlgorithm) (v1.Layer, error) {
-	layer, _, err := BuildDirectoryTreeLayerWithPruning(ctx, platform, hostDir, targetPrefix, modTime, compression, pruneutils.PruneOptions{NoPrune: true})
+	layer, _, _, err := BuildDirectoryTreeLayerWithPruning(ctx, platform, hostDir, targetPrefix, modTime, compression, pruneutils.PruneOptions{NoPrune: true})
 	return layer, err
+}
+
+// hashFileSHA256 returns the lowercase hex SHA-256 of a file's bytes, used to
+// build attestation records. The bytes hashed are the same bytes the layer's
+// fileOpener streams into the tar (it opens the same path), so the record's
+// digest is guaranteed to match what the extracted file contains at runtime.
+func hashFileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

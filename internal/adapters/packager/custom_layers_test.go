@@ -138,7 +138,7 @@ func TestBuildDirectoryTreeLayerWithPruning(t *testing.T) {
 		KeepSourcemap: false,
 	}
 
-	layer, pruned, err := BuildDirectoryTreeLayerWithPruning(ctx, ports.LinuxAMD64, tmpDir, "/app/vendor", modTime, ports.CompressionGzip, pruneOpts)
+	layer, pruned, _, err := BuildDirectoryTreeLayerWithPruning(ctx, ports.LinuxAMD64, tmpDir, "/app/vendor", modTime, ports.CompressionGzip, pruneOpts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

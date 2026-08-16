@@ -95,6 +95,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/attestutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/precompressutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/striputils"
@@ -200,6 +201,15 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 
 	var addenda []mutate.Addendum
 
+	// attestRecords accumulates the authoritative post-processing file records
+	// for every layered-strategy /app tree as its layer is built. They are the
+	// single input to the startup-attestation digest (hardening Option C):
+	// stamped into the image config so pokkum-init can verify the extracted
+	// /app tree matches at runtime. Only the layered branch fills it — the exe
+	// strategy has no /app tree (the app is a sealed binary) and the static
+	// strategy has no supervisor to run the check.
+	var attestRecords []attestutils.Record
+
 	layerMediaType := types.OCILayer
 	if req.Compression.Normalize() == ports.CompressionZstd {
 		layerMediaType = types.OCILayerZStd
@@ -214,10 +224,11 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		if err != nil {
 			return nil, err
 		}
-		serverLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppServerDir, "/app/server", ts, req.Compression)
+		serverLayer, _, serverRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppServerDir, ports.AppServerDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true})
 		if err != nil {
 			return nil, fmt.Errorf("packager: build %s: server layer: %w", req.Platform, err)
 		}
+		attestRecords = append(attestRecords, serverRecs...)
 
 		addenda = append(addenda,
 			mutate.Addendum{Layer: bunLayer, MediaType: layerMediaType, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.BunBinaryPath}},
@@ -230,10 +241,11 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 				if !req.NoPrecompress {
 					_ = precompressutils.PrecompressDirectory(req.AppClientDir, ts)
 				}
-				clientLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppClientDir, ports.AppClientDirPrefix, ts, req.Compression)
+				clientLayer, _, clientRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppClientDir, ports.AppClientDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true})
 				if err != nil {
 					return nil, fmt.Errorf("packager: build %s: client layer: %w", req.Platform, err)
 				}
+				attestRecords = append(attestRecords, clientRecs...)
 				addenda = append(addenda, mutate.Addendum{
 					Layer:     clientLayer,
 					MediaType: layerMediaType,
@@ -253,10 +265,11 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 					KeepSourcemap: req.Sourcemap,
 					KeepPatterns:  req.KeepVendor,
 				}
-				vendorLayer, pruned, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppVendorDir, ports.AppVendorDirPrefix, ts, req.Compression, pruneOpts)
+				vendorLayer, pruned, vendorRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppVendorDir, ports.AppVendorDirPrefix, ts, req.Compression, pruneOpts)
 				if err != nil {
 					return nil, fmt.Errorf("packager: build %s: vendor layer: %w", req.Platform, err)
 				}
+				attestRecords = append(attestRecords, vendorRecs...)
 				if pruned.FilesPruned > 0 {
 					p.logger().Info("pruned vendor layer junk files",
 						"platform", req.Platform.String(),
@@ -277,10 +290,11 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 					stripped, skipped, stripErr := striputils.StripDirectory(ctx, req.AppNativeDir, ts)
 					p.warnUnstripped(req.AppNativeDir, stripped, skipped, stripErr)
 				}
-				nativeLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppNativeDir, ports.AppNativeDirPrefix, ts, req.Compression)
+				nativeLayer, _, nativeRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppNativeDir, ports.AppNativeDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true})
 				if err != nil {
 					return nil, fmt.Errorf("packager: build %s: native layer: %w", req.Platform, err)
 				}
+				attestRecords = append(attestRecords, nativeRecs...)
 				addenda = append(addenda, mutate.Addendum{
 					Layer:     nativeLayer,
 					MediaType: layerMediaType,
@@ -288,9 +302,11 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 				})
 			}
 		}
-		if addenda, err = appendPrerenderedLayer(ctx, req, ts, layerMediaType, addenda); err != nil {
+		var prerenderedRecs []attestutils.Record
+		if addenda, prerenderedRecs, err = appendPrerenderedLayer(ctx, req, ts, layerMediaType, addenda); err != nil {
 			return nil, err
 		}
+		attestRecords = append(attestRecords, prerenderedRecs...)
 	} else if req.Strategy.ApplyStatic() {
 		// Static images carry no Bun runtime, no server JS and no supervisor:
 		// pokkum-static is PID 1 and serves the client + prerendered trees.
@@ -321,7 +337,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 			}
 		}
 
-		if addenda, err = appendPrerenderedLayer(ctx, req, ts, layerMediaType, addenda); err != nil {
+		if addenda, _, err = appendPrerenderedLayer(ctx, req, ts, layerMediaType, addenda); err != nil {
 			return nil, err
 		}
 	} else {
@@ -342,6 +358,33 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 	img, err = mutate.Append(img, addenda...)
 	if err != nil {
 		return nil, fmt.Errorf("packager: build %s: append layers: %w: %w", req.Platform, err, core.ErrPackageFailed)
+	}
+
+	// Startup attestation (hardening Option C): stamp the expected digest of the
+	// layered /app tree into the image config so pokkum-init can verify it at
+	// runtime before exec. The digest is computed from the authoritative
+	// post-processing records accumulated while the layers were built (pruning,
+	// precompression sidecars and stripping already applied), so it matches
+	// exactly what the container will extract — by construction, not
+	// re-derivation. attestRecords is empty for the exe and static strategies,
+	// which have no /app tree for this check, so this block is a no-op there.
+	// The supervisor layer itself is untouched, so its immutable cache is
+	// preserved.
+	if len(attestRecords) > 0 {
+		digest := attestutils.RootDigest(attestRecords)
+		imgCfg, cfgErr := img.ConfigFile()
+		if cfgErr != nil {
+			return nil, fmt.Errorf("packager: build %s: read config for attestation: %w: %w", req.Platform, cfgErr, core.ErrPackageFailed)
+		}
+		imgCfg.Config.Env = mergeEnv(imgCfg.Config.Env, []envVar{{ports.EnvAttestationDigest, digest}})
+		img, cfgErr = mutate.ConfigFile(img, imgCfg)
+		if cfgErr != nil {
+			return nil, fmt.Errorf("packager: build %s: stamp attestation digest: %w: %w", req.Platform, cfgErr, core.ErrPackageFailed)
+		}
+		p.logger().Info("startup attestation digest stamped",
+			"platform", req.Platform.String(),
+			"files", len(attestRecords),
+			"digest", digest)
 	}
 
 	// Redundant with cfg.Created, which applyRuntime already set, but it is the
@@ -387,26 +430,26 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 // static-strategy branches of Build, which both ship prerendered pages in
 // their own dedicated layer rather than folded into the client/server tree.
 // A no-op (returns addenda unchanged) when the directory is unset or absent.
-func appendPrerenderedLayer(ctx context.Context, req ports.PackageRequest, ts time.Time, layerMediaType types.MediaType, addenda []mutate.Addendum) ([]mutate.Addendum, error) {
+func appendPrerenderedLayer(ctx context.Context, req ports.PackageRequest, ts time.Time, layerMediaType types.MediaType, addenda []mutate.Addendum) ([]mutate.Addendum, []attestutils.Record, error) {
 	if req.AppPrerenderedDir == "" {
-		return addenda, nil
+		return addenda, nil, nil
 	}
 	info, err := os.Stat(req.AppPrerenderedDir)
 	if err != nil || !info.IsDir() {
-		return addenda, nil
+		return addenda, nil, nil
 	}
 	if !req.NoPrecompress {
 		_ = precompressutils.PrecompressDirectory(req.AppPrerenderedDir, ts)
 	}
-	prerenderedLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppPrerenderedDir, ports.AppPrerenderedDirPrefix, ts, req.Compression)
+	prerenderedLayer, _, prerenderedRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppPrerenderedDir, ports.AppPrerenderedDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true})
 	if err != nil {
-		return nil, fmt.Errorf("packager: build %s: prerendered layer: %w", req.Platform, err)
+		return nil, nil, fmt.Errorf("packager: build %s: prerendered layer: %w", req.Platform, err)
 	}
 	return append(addenda, mutate.Addendum{
 		Layer:     prerenderedLayer,
 		MediaType: layerMediaType,
 		History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppPrerenderedDirPrefix},
-	}), nil
+	}), prerenderedRecs, nil
 }
 
 // Index implements ports.Packager.
