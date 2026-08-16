@@ -72,6 +72,10 @@ These are hard constraints. Never regress them.
 - Code injections (SvelteKit adapter config, OpenTelemetry instrumentation) occur in `.pokkum/` virtual memory / sandbox space.
 - User-authored source files in the working directory must never be overwritten or mutated during build or image compilation.
 
+### Toolchain version stability
+
+- **Never downgrade the Go version.** `go.mod`'s `go` directive and every `go-version:` pin in `.github/workflows/*.yml` must never decrease — only hold steady or raise. If a change appears to need lowering either, that's a signal to fix the actual incompatibility or ask the user, not to quietly regress the pin. Check `git diff -- go.mod '.github/workflows/*.yml'` for a lowered version before declaring any change complete.
+
 ---
 
 ## 3. Go engineering & quality standards
@@ -101,7 +105,7 @@ The verification protocol applies **ONLY when Go source code (`.go` files, build
 > [!IMPORTANT]
 > Do **NOT** run the verification suite for simple questions, code exploration, planning, or documentation updates (`.md` files, docstrings, or memory graph edits). Run it only before declaring completion of actual code modifications.
 
-Run the canonical 4-step suite with the consolidated make target:
+Run the canonical 5-step suite with the consolidated make target:
 
 ```bash
 make verify
@@ -110,9 +114,12 @@ make verify
 `make verify` executes, in order:
 
 1. **Formatting & static analysis:** `gofmt -s -w . && go vet ./...`
-2. **Adapter unit tests:** `go test ./internal/adapters/...`
-3. **CLI compilation check:** `go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test`
-4. **Full internal test suite** (includes architecture purity `internal/architecture_test.go`): `go test ./internal/...`
+2. **golangci-lint:** `golangci-lint run ./...` — `gofmt`/`go vet`/`go test` alone miss findings this catches (`errcheck`, `staticcheck`, ...); see `Lessons.md`'s "4-step verification suite does not run golangci-lint" entry.
+3. **Adapter unit tests:** `go test ./internal/adapters/...`
+4. **CLI compilation check:** `go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test`
+5. **Full internal test suite** (includes architecture purity `internal/architecture_test.go`): `go test ./internal/...`
+
+`supervisor/` (the `pokkum-init`/`pokkum-static` PID-1 binaries) shares the root `go.mod` but isn't covered by any of the five steps above. If a diff touches anything under `supervisor/`, also run `go build ./supervisor/... && go test ./supervisor/...`.
 
 Before declaring a non-trivial feature or refactor complete, review your own diff (`git diff`) line by line against the functional intent. Use the §5.1 checklist below to do this — read it as a set of things to _mechanically verify_, not a paragraph to keep in mind while skimming. A checklist you don't actually run against the diff catches nothing more than the paragraph it replaced.
 
@@ -174,14 +181,14 @@ Required sections, in order:
 
 The single most important artifact — lets you scan the whole plan in seconds instead of reading prose.
 
-| #   | Step                               | File(s)                                | Agent / Model | Depends on | Risk     |
-| --- | ---------------------------------- | -------------------------------------- | ------------- | ---------- | -------- |
-| 1   | Add stub method to mocks           | `pipeline_test.go`, `e2e_test.go`      | Sub-agent     | —          | Low      |
-| 2   | Add interface method + field       | `ports/baseimage.go`                   | Sub-agent     | —          | Low      |
-| 3   | Security-sensitive resolver change | `resolver.go`                          | Sub-agent     | #2         | **High** |
-| 4   | Pipeline restructuring             | `pipeline.go`                          | Sub-agent     | #2, #3     | Medium   |
-| 5   | New regression tests               | `resolver_test.go`, `pipeline_test.go` | Sub-agent     | #3, #4     | Medium   |
-| 6   | Adversarial full-diff review       | (all changed files)                    | Sub-agent     | #1–#5      | High     |
+| #   | Step                               | File(s)                                | Depends on | Risk     |
+| --- | ---------------------------------- | -------------------------------------- | ---------- | -------- |
+| 1   | Add stub method to mocks           | `pipeline_test.go`, `e2e_test.go`      | —          | Low      |
+| 2   | Add interface method + field       | `ports/baseimage.go`                   | —          | Low      |
+| 3   | Security-sensitive resolver change | `resolver.go`                          | #2         | **High** |
+| 4   | Pipeline restructuring             | `pipeline.go`                          | #2, #3     | Medium   |
+| 5   | New regression tests               | `resolver_test.go`, `pipeline_test.go` | #3, #4     | Medium   |
+| 6   | Adversarial full-diff review       | (all changed files)                    | #1–#5      | High     |
 
 - Use DSH `subagent` / `subagent_fork` for delegated work (background by default); keep delegations self-contained.
 - Use the `workflow` tool when work fans out across many independent pieces (audits, migrations, multi-angle review).

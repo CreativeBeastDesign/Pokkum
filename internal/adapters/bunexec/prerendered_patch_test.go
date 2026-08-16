@@ -26,7 +26,7 @@ export function handle() {
 		t.Fatal(err)
 	}
 
-	if err := patchPrerenderedEnv(p, discLogger()); err != nil {
+	if err := patchPrerenderedEnv(p, filepath.Join(dir, ".pokkum"), discLogger()); err != nil {
 		t.Fatalf("patchPrerenderedEnv: %v", err)
 	}
 
@@ -51,7 +51,7 @@ func TestPatchPrerenderedEnv_ReplacesSingleQuotePattern(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := patchPrerenderedEnv(p, discLogger()); err != nil {
+	if err := patchPrerenderedEnv(p, filepath.Join(dir, ".pokkum"), discLogger()); err != nil {
 		t.Fatalf("patchPrerenderedEnv: %v", err)
 	}
 
@@ -64,7 +64,7 @@ func TestPatchPrerenderedEnv_ReplacesSingleQuotePattern(t *testing.T) {
 	}
 }
 
-func TestPatchPrerenderedEnv_UnknownPatternLeavesFileUntouched(t *testing.T) {
+func TestPatchPrerenderedEnv_UnknownPatternErrorsAndLeavesFileUntouched(t *testing.T) {
 	const handler = `somethingElse()`
 	dir := t.TempDir()
 	p := filepath.Join(dir, "handler.js")
@@ -72,8 +72,8 @@ func TestPatchPrerenderedEnv_UnknownPatternLeavesFileUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := patchPrerenderedEnv(p, discLogger()); err != nil {
-		t.Fatalf("patchPrerenderedEnv should not error on unknown pattern, got: %v", err)
+	if err := patchPrerenderedEnv(p, filepath.Join(dir, ".pokkum"), discLogger()); err == nil {
+		t.Fatal("expected error for a handler with no recognizable prerendered path pattern")
 	}
 
 	got, err := os.ReadFile(p)
@@ -86,8 +86,31 @@ func TestPatchPrerenderedEnv_UnknownPatternLeavesFileUntouched(t *testing.T) {
 }
 
 func TestPatchPrerenderedEnv_MissingFileReturnsError(t *testing.T) {
-	if err := patchPrerenderedEnv(filepath.Join(t.TempDir(), "nope.js"), discLogger()); err == nil {
+	dir := t.TempDir()
+	if err := patchPrerenderedEnv(filepath.Join(dir, "nope.js"), filepath.Join(dir, ".pokkum"), discLogger()); err == nil {
 		t.Fatal("expected error for missing handler file")
+	}
+}
+
+func TestPatchPrerenderedEnv_StagesTransformInPokkumSandbox(t *testing.T) {
+	const handler = `x = path.join(dir, "prerendered")`
+	dir := t.TempDir()
+	p := filepath.Join(dir, "handler.js")
+	if err := os.WriteFile(p, []byte(handler), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pokkumDir := filepath.Join(dir, ".pokkum")
+
+	if err := patchPrerenderedEnv(p, pokkumDir, discLogger()); err != nil {
+		t.Fatalf("patchPrerenderedEnv: %v", err)
+	}
+
+	staged, err := os.ReadFile(filepath.Join(pokkumDir, "handler.js"))
+	if err != nil {
+		t.Fatalf("expected staged copy in .pokkum sandbox: %v", err)
+	}
+	if !strings.Contains(string(staged), "POKKUM_PRERENDERED_DIR") {
+		t.Fatalf("expected staged copy to carry the patch, got:\n%s", staged)
 	}
 }
 
@@ -103,7 +126,9 @@ func TestPatchPrerenderedHandler_LocatesNestedHandler(t *testing.T) {
 	}
 
 	c := &Compiler{logger: discLogger()}
-	c.patchPrerenderedHandler(dir) // dir is outputDir; handler is nested under server/
+	if err := c.patchPrerenderedHandler(dir, dir); err != nil { // dir is both outputDir and projectDir; handler is nested under server/
+		t.Fatalf("patchPrerenderedHandler: %v", err)
+	}
 
 	got, err := os.ReadFile(p)
 	if err != nil {
@@ -111,5 +136,13 @@ func TestPatchPrerenderedHandler_LocatesNestedHandler(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "POKKUM_PRERENDERED_DIR") {
 		t.Fatalf("expected nested handler to be patched, got:\n%s", got)
+	}
+}
+
+func TestPatchPrerenderedHandler_NoHandlerFoundReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	c := &Compiler{logger: discLogger()}
+	if err := c.patchPrerenderedHandler(dir, dir); err == nil {
+		t.Fatal("expected error when no handler.js exists under outputDir")
 	}
 }

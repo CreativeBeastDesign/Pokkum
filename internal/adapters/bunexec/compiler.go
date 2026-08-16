@@ -234,7 +234,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	targetAdapter := "@sveltejs/adapter-node"
 	if req.Strategy == ports.StrategyExe {
 		targetAdapter = "@jesterkit/exe-sveltekit"
-	} else if req.Strategy == ports.StrategyStatic {
+	} else if req.Strategy.ApplyStatic() {
 		targetAdapter = "@sveltejs/adapter-static"
 	}
 
@@ -243,7 +243,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	if req.Strategy == ports.StrategyExe {
 		entrypoint = filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit", "temp-server", "index.ts")
 		outputDir = filepath.Join(req.ProjectDir, ".svelte-kit", "jesterkit-sveltekit")
-	} else if req.Strategy == ports.StrategyStatic {
+	} else if req.Strategy.ApplyStatic() {
 		// A static build has no server entrypoint: the entire artifact is
 		// SvelteKit's .svelte-kit/output staging (client + prerendered), which
 		// every adapter populates before it runs. pokkum-static serves those two
@@ -305,7 +305,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		)
 	}
 
-	if req.Strategy == ports.StrategyStatic {
+	if req.Strategy.ApplyStatic() {
 		// A static build has no server entrypoint; the artifact we contract on is
 		// SvelteKit's prerendered output staging, which the fan-out packages.
 		if _, err := os.Stat(filepath.Join(outputDir, "prerendered")); err != nil {
@@ -342,7 +342,9 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	// packager). Patch the generated handler in the build sandbox so prerendered
 	// pages actually serve (layered strategy only; static has its own server).
 	if req.Strategy == ports.StrategyLayered {
-		c.patchPrerenderedHandler(outputDir)
+		if err := c.patchPrerenderedHandler(outputDir, req.ProjectDir); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w: %w", req.ProjectDir, err, core.ErrPrepareFailed)
+		}
 	}
 
 	log.Info("bunexec: prepare complete", "entrypoint", entrypoint, "outputDir", outputDir)

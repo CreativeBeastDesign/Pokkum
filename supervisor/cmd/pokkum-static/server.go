@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Static server path/traversal and negotiation constants.
@@ -38,7 +39,12 @@ const (
 // precompressutils at build time.
 type staticServer struct {
 	roots []string
-	log   *slog.Logger
+	// canonicalRoots[i] is roots[i] with symlinks resolved once, at server
+	// construction — the roots are fixed for the process lifetime, so
+	// resolving them per request (as withinRoot used to) was pure redundant
+	// syscall work repeated on every single request.
+	canonicalRoots []string
+	log            *slog.Logger
 }
 
 // newStaticServer builds a static server serving the given roots in order. A
@@ -47,7 +53,26 @@ func newStaticServer(roots []string, log *slog.Logger) *staticServer {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &staticServer{roots: append([]string(nil), roots...), log: log}
+	rootsCopy := append([]string(nil), roots...)
+	canonicalRoots := make([]string, len(rootsCopy))
+	for i, root := range rootsCopy {
+		canonicalRoots[i] = canonicalizeRoot(root)
+	}
+	return &staticServer{roots: rootsCopy, canonicalRoots: canonicalRoots, log: log}
+}
+
+// canonicalizeRoot resolves root's symlinks once. If root doesn't exist yet
+// or EvalSymlinks otherwise fails, it falls back to an absolute, cleaned form
+// — the same fallback withinRoot used to apply per call.
+func canonicalizeRoot(root string) string {
+	if rc, err := filepath.EvalSymlinks(root); err == nil {
+		return rc
+	}
+	rc := filepath.Clean(root)
+	if a, err := filepath.Abs(root); err == nil {
+		rc = a
+	}
+	return rc
 }
 
 // handler returns the http.Handler serving the static tree.
@@ -70,26 +95,27 @@ func (s *staticServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, root := range s.roots {
-		if handled := s.tryServe(w, r, root, rel); handled {
+	for i, root := range s.roots {
+		if handled := s.tryServe(w, r, root, s.canonicalRoots[i], rel); handled {
 			return
 		}
 	}
 	http.NotFound(w, r)
 }
 
-// tryServe attempts to serve rel from root. It reports whether it produced a
-// response. Any move that is not a successful stream (file absent, broken
-// symlink, symlink escaping the root, directory with no index) returns false so
-// the caller can fall through to the next root; the final 404 happens only
-// after every root has been tried.
-func (s *staticServer) tryServe(w http.ResponseWriter, r *http.Request, root, rel string) bool {
+// tryServe attempts to serve rel from root (canonicalRoot is root with
+// symlinks pre-resolved, see canonicalizeRoot). It reports whether it
+// produced a response. Any move that is not a successful stream (file
+// absent, broken symlink, symlink escaping the root, directory with no
+// index) returns false so the caller can fall through to the next root; the
+// final 404 happens only after every root has been tried.
+func (s *staticServer) tryServe(w http.ResponseWriter, r *http.Request, root, canonicalRoot, rel string) bool {
 	full := filepath.Join(root, rel)
 	resolved, err := filepath.EvalSymlinks(full)
 	if err != nil {
 		return false // absent (or broken symlink) in this root
 	}
-	if !withinRoot(root, resolved) {
+	if !withinRoot(canonicalRoot, resolved) {
 		s.log.Warn("refusing to serve path outside root", "root", root, "path", rel)
 		return false
 	}
@@ -100,13 +126,22 @@ func (s *staticServer) tryServe(w http.ResponseWriter, r *http.Request, root, re
 	}
 	if fi.IsDir() {
 		// Serve index.html when present; otherwise fall through (no directory
-		// listing is ever generated).
-		idx := filepath.Join(resolved, indexFile)
-		if ifi, ierr := os.Stat(idx); ierr == nil && !ifi.IsDir() {
-			resolved, fi = idx, ifi
-		} else {
+		// listing is ever generated). Re-run the same symlink-escape check used
+		// for the top-level path above: index.html can itself be a symlink, and
+		// os.Stat alone would follow it without verifying it stays within root.
+		idx, ierr := filepath.EvalSymlinks(filepath.Join(resolved, indexFile))
+		if ierr != nil {
 			return false
 		}
+		if !withinRoot(canonicalRoot, idx) {
+			s.log.Warn("refusing to serve index path outside root", "root", root, "path", rel)
+			return false
+		}
+		ifi, ierr := os.Stat(idx)
+		if ierr != nil || ifi.IsDir() {
+			return false
+		}
+		resolved = idx
 	}
 
 	s.serveFile(w, r, resolved)
@@ -229,8 +264,25 @@ func parseAcceptEncoding(header string) map[string]bool {
 	return accepted
 }
 
-// fileETag computes a strong ETag (hex SHA-256) and the byte size of the file.
+// fileETagCache caches fileETag results by resolved path. Every served path is
+// immutable for the container's whole lifetime (baked into the image at build
+// time), so a strong ETag computed once never needs recomputing — this avoids
+// a full sequential read+SHA-256 pass on every single request, including a
+// byte-Range request for a few bytes of a large file.
+var fileETagCache sync.Map // path string -> fileETagEntry
+
+type fileETagEntry struct {
+	etag string
+	size int64
+}
+
+// fileETag computes a strong ETag (hex SHA-256) and the byte size of the
+// file, caching the result for the life of the process.
 func fileETag(path string) (string, int64, error) {
+	if v, ok := fileETagCache.Load(path); ok {
+		e := v.(fileETagEntry)
+		return e.etag, e.size, nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", 0, err
@@ -241,7 +293,9 @@ func fileETag(path string) (string, int64, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), n, nil
+	etag := hex.EncodeToString(h.Sum(nil))
+	fileETagCache.Store(path, fileETagEntry{etag: etag, size: n})
+	return etag, n, nil
 }
 
 // parseSingleRange parses a single "bytes=start-end" range against size.
@@ -379,23 +433,18 @@ func cleanRelPath(rawPath string) (string, error) {
 	return clean, nil
 }
 
-// withinRoot reports whether the resolved path p is inside root. Both sides are
-// canonicalised (symlinks resolved, fallback to abs+clean) so that a root like
+// withinRoot reports whether the resolved path p is inside canonicalRoot — an
+// already-canonicalized root (see canonicalizeRoot, computed once at server
+// construction rather than per request). p is still canonicalised here
+// (symlinks resolved, fallback to abs+clean) so that a root like
 // /var/folders/... on macOS, whose symlink resolves to /private/var/folders/...,
 // still matches a candidate EvalSymlinks already resolved.
-func withinRoot(root, p string) bool {
-	rc, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		rc = filepath.Clean(root)
-		if a, aerr := filepath.Abs(root); aerr == nil {
-			rc = a
-		}
-	}
+func withinRoot(canonicalRoot, p string) bool {
 	c := filepath.Clean(p)
 	if a, aerr := filepath.Abs(p); aerr == nil {
 		c = a
 	}
-	rel, err := filepath.Rel(rc, c)
+	rel, err := filepath.Rel(canonicalRoot, c)
 	if err != nil {
 		return false
 	}

@@ -153,7 +153,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		}
 	}
 	rc := req.Runtime.WithDefaults()
-	if req.Strategy == ports.StrategyStatic {
+	if req.Strategy.ApplyStatic() {
 		// A static image is its own init: pokkum-static is PID 1, so it is both
 		// the entrypoint and the probe server, and its static roots are the
 		// client and prerendered trees Pokkum mounts.
@@ -283,23 +283,10 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 				})
 			}
 		}
-		if req.AppPrerenderedDir != "" {
-			if info, err := os.Stat(req.AppPrerenderedDir); err == nil && info.IsDir() {
-				if !req.NoPrecompress {
-					_ = precompressutils.PrecompressDirectory(req.AppPrerenderedDir, ts)
-				}
-				prerenderedLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppPrerenderedDir, ports.AppPrerenderedDirPrefix, ts, req.Compression)
-				if err != nil {
-					return nil, fmt.Errorf("packager: build %s: prerendered layer: %w", req.Platform, err)
-				}
-				addenda = append(addenda, mutate.Addendum{
-					Layer:     prerenderedLayer,
-					MediaType: layerMediaType,
-					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppPrerenderedDirPrefix},
-				})
-			}
+		if addenda, err = appendPrerenderedLayer(ctx, req, ts, layerMediaType, addenda); err != nil {
+			return nil, err
 		}
-	} else if req.Strategy == ports.StrategyStatic {
+	} else if req.Strategy.ApplyStatic() {
 		// Static images carry no Bun runtime, no server JS and no supervisor:
 		// pokkum-static is PID 1 and serves the client + prerendered trees.
 		staticLayer, err := buildStaticServerLayer(ctx, req, ts)
@@ -329,21 +316,8 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 			}
 		}
 
-		if req.AppPrerenderedDir != "" {
-			if info, err := os.Stat(req.AppPrerenderedDir); err == nil && info.IsDir() {
-				if !req.NoPrecompress {
-					_ = precompressutils.PrecompressDirectory(req.AppPrerenderedDir, ts)
-				}
-				prerenderedLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppPrerenderedDir, ports.AppPrerenderedDirPrefix, ts, req.Compression)
-				if err != nil {
-					return nil, fmt.Errorf("packager: build %s: prerendered layer: %w", req.Platform, err)
-				}
-				addenda = append(addenda, mutate.Addendum{
-					Layer:     prerenderedLayer,
-					MediaType: layerMediaType,
-					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppPrerenderedDirPrefix},
-				})
-			}
+		if addenda, err = appendPrerenderedLayer(ctx, req, ts, layerMediaType, addenda); err != nil {
+			return nil, err
 		}
 	} else {
 		supervisorLayer, err := buildSupervisorLayer(ctx, req, ts)
@@ -401,6 +375,33 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		"created", ts.Format(time.RFC3339))
 
 	return img, nil
+}
+
+// appendPrerenderedLayer appends a standalone /app/prerendered layer to
+// addenda when req.AppPrerenderedDir exists, shared by the layered- and
+// static-strategy branches of Build, which both ship prerendered pages in
+// their own dedicated layer rather than folded into the client/server tree.
+// A no-op (returns addenda unchanged) when the directory is unset or absent.
+func appendPrerenderedLayer(ctx context.Context, req ports.PackageRequest, ts time.Time, layerMediaType types.MediaType, addenda []mutate.Addendum) ([]mutate.Addendum, error) {
+	if req.AppPrerenderedDir == "" {
+		return addenda, nil
+	}
+	info, err := os.Stat(req.AppPrerenderedDir)
+	if err != nil || !info.IsDir() {
+		return addenda, nil
+	}
+	if !req.NoPrecompress {
+		_ = precompressutils.PrecompressDirectory(req.AppPrerenderedDir, ts)
+	}
+	prerenderedLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppPrerenderedDir, ports.AppPrerenderedDirPrefix, ts, req.Compression)
+	if err != nil {
+		return nil, fmt.Errorf("packager: build %s: prerendered layer: %w", req.Platform, err)
+	}
+	return append(addenda, mutate.Addendum{
+		Layer:     prerenderedLayer,
+		MediaType: layerMediaType,
+		History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppPrerenderedDirPrefix},
+	}), nil
 }
 
 // Index implements ports.Packager.

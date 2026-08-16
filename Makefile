@@ -96,16 +96,18 @@ check-fmt:  ##  Check code formatting with gofmt
 	@echo "Checking code formatting..."
 	@test -z "$$(gofmt -s -l .)"
 
-verify:  ##  Full agent verification suite: fmt+vet, adapter tests, CLI build, internal tests
-	@echo "Step 0/4 - Compiler build optimization flags regression guard..."
+verify:  ##  Full agent verification suite: fmt+vet, lint, adapter tests, CLI build, internal tests
+	@echo "Step 0/5 - Compiler build optimization flags regression guard..."
 	@bash scripts/check-build-flags.sh
-	@echo "Step 1/4 - Formatting & static analysis..."
+	@echo "Step 1/5 - Formatting & static analysis..."
 	@gofmt -s -w . && go vet ./...
-	@echo "Step 2/4 - Adapter unit tests..."
+	@echo "Step 2/5 - golangci-lint (catches findings gofmt/vet/test don't, e.g. errcheck, staticcheck)..."
+	@golangci-lint run ./...
+	@echo "Step 3/5 - Adapter unit tests..."
 	@go test ./internal/adapters/...
-	@echo "Step 3/4 - CLI compilation check..."
+	@echo "Step 4/5 - CLI compilation check..."
 	@go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test
-	@echo "Step 4/4 - Full internal test suite (incl. architecture purity)..."
+	@echo "Step 5/5 - Full internal test suite (incl. architecture purity)..."
 	@go test ./internal/...
 
 clean:  ##  Clean build artifacts

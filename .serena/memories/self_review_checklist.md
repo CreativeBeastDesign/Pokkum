@@ -20,10 +20,14 @@ Shared across every agent/harness working this codebase (each has Serena access)
 | 4 | Non-first-item failure injection | For every new error path inside a loop or fan-out, does a test trigger the error on a *non-first* item, not just the first/only one? A single-item error test can pass while a real multi-item failure leaks resources. |
 | 5 | Ordering / determinism | Are map iterations, directory traversals, and concurrently-produced results consumed in an explicitly sorted or otherwise deterministic order (bit-for-bit reproducibility invariant, `mem:core`)? |
 | 6 | Clock / timestamp access | Does the diff introduce any `time.Now()` or system clock read outside `req.SourceDateEpoch`? |
+| 7 | Go version regression | Does the diff touch `go.mod`'s `go` directive or any `go-version:` line in `.github/workflows/*.yml`? If so, `git diff` those exact lines and confirm the version only holds steady or increases — never decreases. |
+| 8 | golangci-lint clean | Has `golangci-lint run ./...` (or `make lint`, folded into `make verify` as of the step below) actually been run against this diff — not just `go vet`? `gofmt`/`go vet`/`go test` all pass on findings golangci-lint alone catches (`errcheck`, `staticcheck`, ...); see the Origin note below. |
 
 ## Origin
 
 Rows 1 and 4 were added after a real goroutine-leak bug in `internal/adapters/k8s/resolver.go`'s monorepo affected-detection fan-out loop (`mem:core`'s Monorepo Affected-Detection entry): an `AffectedDetector` error on a non-first project path returned before `g.Wait()`, orphaning already-dispatched build goroutines. The only existing test for that error path used a single-project manifest, so it passed without ever exercising the leak — the bug survived a prior instruction that told agents, in prose, to "scan for goroutine leaks," because nothing forced a concrete check against the specific lines where it mattered. Row 3 generalizes the same lesson from an independently-found multi-document YAML annotation cross-contamination bug in the same code area.
+
+Row 8 was added after a `Lessons.md` entry ("The 4-step verification suite does not run golangci-lint") documented a CI-breaking `errcheck` finding that survived every "green" report from the then-current verification protocol — `make verify` ran fmt/vet/tests/build but never lint, so a change could pass every step described in `mem:task_completion` and still fail CI on the first push. `make verify` now runs `golangci-lint run ./...` as Step 2/5 (see the Makefile), closing the gap the row exists to catch if that step is ever skipped or bypassed. Row 7 was added directly (not from a `Lessons.md` incident) per an explicit user instruction: never downgrade the Go toolchain version.
 
 ## Maintenance rule
 

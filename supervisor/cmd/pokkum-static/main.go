@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -86,9 +87,11 @@ func main() {
 		errc <- nil
 	}()
 
+	var shuttingDown atomic.Bool
+
 	if cfg.Port != cfg.ProbePort {
 		probe := &http.Server{
-			Handler:           probeHandler(),
+			Handler:           probeHandler(&shuttingDown),
 			ReadHeaderTimeout: probeHeaderTimeout,
 		}
 		go func() {
@@ -98,7 +101,11 @@ func main() {
 				log.Warn("probe server failed", "addr", addr, "error", err)
 			}
 		}()
-		defer probe.Shutdown(context.Background())
+		defer func() {
+			if err := probe.Shutdown(context.Background()); err != nil {
+				log.Warn("probe server did not shut down cleanly", "error", err)
+			}
+		}()
 	}
 
 	// SIGTERM is the container runtime's way of asking for a graceful stop;
@@ -118,6 +125,12 @@ func main() {
 		}
 	}
 
+	// Flip readiness before starting the drain so a load balancer stops
+	// routing new connections here for the whole shutdown window, not just
+	// once the listener actually closes — mirroring pokkum-init's
+	// readiness-drain-on-SIGTERM behavior.
+	shuttingDown.Store(true)
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := svc.Shutdown(shutdownCtx); err != nil {
@@ -125,14 +138,20 @@ func main() {
 	}
 }
 
-// probeHandler serves liveness and readiness. A static server is conceptually
-// ready as soon as it is serving, so both answer 200 once the process is up.
-func probeHandler() http.Handler {
+// probeHandler serves liveness and readiness. Liveness always answers 200
+// once the process is up. Readiness answers 200 until shuttingDown is set,
+// then 503 — so a load balancer stops routing new traffic here for the whole
+// shutdown grace window, not just once the listener actually closes.
+func probeHandler(shuttingDown *atomic.Bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if shuttingDown.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	return mux

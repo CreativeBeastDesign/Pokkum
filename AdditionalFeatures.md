@@ -41,6 +41,8 @@
 | Built-in Metrics Endpoint (supervisor)      | 7         | 2               | 3           | Supervisor-level `/metrics` only; app metrics already shipped via OTel           | None                              | Done     |
 | Image Provenance Timeline                   | 6         | 5               | 5           | Registry API reliance; partially subsumed by `verify` + OCI annotations          | Registry (SLSA lookup)            | Done     |
 | Verify Base on Cache Hit                    | 3         | 7               | 2           | One Cosign/keyless verify per cache hit; opt-in strict; decoupled from `--cache-verify` | None (sigstore already vendored) | Backlog  |
+| Layered-Strategy Runtime Hardening (new 2026-08-16) | 5 | 8               | 5           | Compiled stub launcher (needs a spike: verify runtime-import of external files) + ~100 LOC supervisor startup attestation | None | Medium-High |
+| Dedicated `chainguard-static` Preset (new 2026-08-16) | 4 | 5             | 2           | Small enum-driven change; one self-healing orphaned `pokkum.lock` entry per existing `--static` user | None | Low-Medium |
 
 ### Shipped (removed from matrix)
 
@@ -304,4 +306,17 @@ property "every emitted/promoted image traces to a verified base, hit or miss":
   SBOM/SLSA attestation requirement) asks for it, to avoid feature-creep in the already-dense verification
   surface. Opt-in so the sub-100ms fast path is preserved by default. (new flag: `--verify-base-on-cache-hit`
   on `build`)
+
+### Layered-Strategy Runtime Hardening
+
+- `--strategy=layered` (default since v0.3) ships stock `bun`, which exposes its full CLI via `BUN_BE_BUN=1` — an attacker with an existing exec primitive can run arbitrary scripts, unlike v0.1's sealed compiled-exe strategy
+- Two composable mitigations, both from the original v0.3 hardening analysis but never built: a compiled stub launcher (Option A — closes the `BUN_BE_BUN`/`bunx` surface entirely) and supervisor startup attestation (Option C — a SHA-256 manifest check before `pokkum-init` execs the app, restoring tamper-evidence without depending on cluster-level readonly-fs policy)
+- Unlike most items in this document, this closes a gap in the **default** build path, not an opt-in feature — see `Roadmap.md`'s "Recommended Next Steps" and `concepts/archive/pokkum-layer-caching-concept.md` §5.2
+- Tracking: Recommended Next Steps (Medium-High Priority) on `Roadmap.md`
+
+### Dedicated `chainguard-static` Base Image Preset
+
+- `--static`'s default base currently reuses the `BaseImageChainguard` preset (fixed 2026-08-16 from an original `BaseImageDistroless` misassignment that broke signature verification on every default `--static` build) — correct for signature identity, but leaves a narrow `pokkum.lock` collision between an explicit `--base cgr.dev/chainguard/glibc-dynamic` build and a `--static` build in the same project
+- A dedicated `BaseImageChainguardStatic` preset would eliminate the collision entirely, at the cost of one new CLI-visible preset name and a self-healing orphaned-lockfile-entry migration note for existing `--static` users
+- Tracking: Recommended Next Steps (Low-Medium Priority) on `Roadmap.md`; full design in `concepts/new-chainguard-static-preset-concept.md`
 

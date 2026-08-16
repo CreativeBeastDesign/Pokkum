@@ -130,13 +130,6 @@ const (
 
 	// AnnotationRequiredEnv is the manifest annotation key for required env contract.
 	AnnotationRequiredEnv = "pokkum.dev/required-env"
-
-	// AnnotationPrerenderedImmutable is the manifest and image annotation pinned
-	// to layered images that extract prerendered pages into their own
-	// /app/prerendered layer. Its value records the path of that layer so that
-	// registry tooling and the static/prerendered server can rely on the pages
-	// being served with immutable cache semantics.
-	AnnotationPrerenderedImmutable = "pokkum.dev/prerendered-immutable"
 )
 
 // DefaultLayeredEntrypoint returns the image entrypoint for StrategyLayered:

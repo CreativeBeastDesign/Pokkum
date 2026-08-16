@@ -25,18 +25,25 @@ func jsonPrerenderedDirPattern(dirVar string) string {
 	return `path.join(` + dirVar + `, 'prerendered')`
 }
 
-// patchPrerenderedEnv rewrites a generated adapter-node handler.js (in place,
-// in the .pokkum/ build sandbox) so the prerendered tree is resolved from
-// POKKUM_PRERENDERED_DIR when set, falling back to the handler's default path
-// otherwise. This lets the image serve prerendered pages from their own
-// /app/prerendered layer.
+// patchPrerenderedEnv rewrites a generated adapter-node handler.js so the
+// prerendered tree is resolved from POKKUM_PRERENDERED_DIR when set, falling
+// back to the handler's default path otherwise. This lets the image serve
+// prerendered pages from their own /app/prerendered layer.
 //
-// The patch is deliberately defensive: adapter-node is an external artifact
-// whose internals vary across versions, so if the expected pattern is not found
-// the file is left untouched and a warning is returned rather than an error —
-// an unpatched handler still builds and runs, it just resolves prerendered
-// pages from the adapter's default location (which Pokkum no longer mounts).
-func patchPrerenderedEnv(handlerPath string, log *slog.Logger) error {
+// The transform itself is staged under pokkumDir (<projectDir>/.pokkum), the
+// same sandbox convention used for the virtual svelte.config.js injection —
+// the injected content is decided and written there first. It is then
+// materialized into handlerPath because the packager reads handler.js
+// directly from the real build output when assembling the image layer, so
+// the patched bytes must exist there for prerendered pages to actually serve.
+//
+// adapter-node is an external artifact whose internals vary across versions,
+// so several known variable-name/quoting variants are tried. Unlike a soft,
+// warn-only outcome, a build whose handler doesn't match any of them is
+// failed outright: an unpatched handler still builds and runs, but silently
+// serves prerendered pages from a directory Pokkum no longer mounts, which
+// 404s in production with nothing but a log line to explain it.
+func patchPrerenderedEnv(handlerPath, pokkumDir string, log *slog.Logger) error {
 	data, err := os.ReadFile(handlerPath)
 	if err != nil {
 		return fmt.Errorf("bunexec: read handler %s: %w", handlerPath, err)
@@ -58,21 +65,31 @@ func patchPrerenderedEnv(handlerPath string, log *slog.Logger) error {
 	}
 
 	if !patched {
-		log.Warn("bunexec: adapter-node handler has no recognizable prerendered path; prerendered pages will resolve from the adapter default (not /app/prerendered)", "handler", handlerPath)
-		return nil
+		return fmt.Errorf("bunexec: handler %s has no recognizable prerendered path pattern; prerendered pages would silently resolve from the adapter default instead of /app/prerendered", handlerPath)
+	}
+
+	if err := os.MkdirAll(pokkumDir, 0o700); err != nil {
+		return fmt.Errorf("bunexec: create sandbox dir %s: %w", pokkumDir, err)
+	}
+	staged := filepath.Join(pokkumDir, "handler.js")
+	if err := os.WriteFile(staged, []byte(src), 0o600); err != nil {
+		return fmt.Errorf("bunexec: write staged handler %s: %w", staged, err)
 	}
 
 	if err := os.WriteFile(handlerPath, []byte(src), 0o600); err != nil {
 		return fmt.Errorf("bunexec: write patched handler %s: %w", handlerPath, err)
 	}
-	log.Debug("bunexec: handler patched to honor POKKUM_PRERENDERED_DIR", "handler", handlerPath)
+	log.Debug("bunexec: handler patched to honor POKKUM_PRERENDERED_DIR", "handler", handlerPath, "staged", staged)
 	return nil
 }
 
 // patchPrerenderedHandler locates the generated adapter-node handler.js under
-// outputDir and applies the POKKUM_PRERENDERED_DIR patch defensively. Missing
-// handler is not an error (still version-sensitive); a warning is logged.
-func (c *Compiler) patchPrerenderedHandler(outputDir string) {
+// outputDir and applies the POKKUM_PRERENDERED_DIR patch, staging the
+// transform under projectDir's .pokkum/ sandbox (see patchPrerenderedEnv).
+// Returns an error if no handler.js can be found, or if the patch itself
+// fails — either means prerendered pages would silently 404 in the shipped
+// image, so this is not a soft/optional step.
+func (c *Compiler) patchPrerenderedHandler(outputDir, projectDir string) error {
 	log := c.logger
 	candidates := []string{
 		filepath.Join(outputDir, "handler.js"),
@@ -99,10 +116,10 @@ func (c *Compiler) patchPrerenderedHandler(outputDir string) {
 		})
 	}
 	if found == "" {
-		log.Warn("bunexec: no adapter-node handler.js found to patch for POKKUM_PRERENDERED_DIR; prerendered pages may 404", "outputDir", outputDir)
-		return
+		return fmt.Errorf("bunexec: no adapter-node handler.js found under %s to patch for POKKUM_PRERENDERED_DIR", outputDir)
 	}
-	if err := patchPrerenderedEnv(found, log); err != nil {
-		log.Warn("bunexec: failed to patch handler for POKKUM_PRERENDERED_DIR", "handler", found, "error", err)
+	if err := patchPrerenderedEnv(found, filepath.Join(projectDir, ".pokkum"), log); err != nil {
+		return fmt.Errorf("bunexec: patch handler %s for POKKUM_PRERENDERED_DIR: %w", found, err)
 	}
+	return nil
 }

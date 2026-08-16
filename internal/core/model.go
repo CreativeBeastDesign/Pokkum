@@ -936,8 +936,15 @@ type Toolchain struct {
 	// SvelteKitVersion is the @sveltejs/kit version.
 	SvelteKitVersion string
 
-	// SupervisorVersion is the pokkum-init version.
+	// SupervisorVersion is the pokkum-init version. Only set for strategies
+	// that actually embed the supervisor (layered, exe) — a static build ships
+	// pokkum-static instead, recorded in StaticServerVersion.
 	SupervisorVersion string
+
+	// StaticServerVersion is the pokkum-static version. Only set for
+	// --strategy=static builds, which ship pokkum-static as PID 1 instead of
+	// the pokkum-init supervisor.
+	StaticServerVersion string
 }
 
 // BuildResult is everything one `pokkum build` produced. It is returned even

@@ -15,8 +15,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/klauspost/compress/zstd"
-
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/embeddedbinaryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -31,31 +30,18 @@ var binaries embed.FS
 var errStaticServerCorrupt = errors.New("static server binary corrupt")
 
 // decodeStaticServer decompresses the zstd-framed embedded representation of a
-// pokkum-static binary back to the raw ELF. It is a directly-testable seam over
-// the single-shot zstd.DecodeAll (mirroring decodeSupervisor).
-//
-// An empty input is treated as corrupt rather than passed to the decoder, so a
-// broken embed cannot come through as an empty (nil-error) binary and violate
-// the port contract "never nil or empty on a nil error".
+// pokkum-static binary back to the raw ELF, via the shared decode mechanism in
+// embeddedbinaryutils (also used by internal/adapters/supervisor). It is a
+// directly-testable seam over the underlying compression round-trip.
 func decodeStaticServer(compressed []byte) ([]byte, error) {
-	if len(compressed) == 0 {
-		return nil, errStaticServerCorrupt
-	}
-	return staticServerDecoder().DecodeAll(compressed, nil)
+	return embeddedbinaryutils.Decode(staticServerDecoder(), compressed, errStaticServerCorrupt)
 }
 
-// staticServerDecoder lazily builds the single shared zstd decoder used for all
-// on-the-fly static server decompression. A single process-wide decoder is
-// concurrency-safe (Binary may be called concurrently for different platforms)
-// and is never closed (stateless DecodeAll holds no per-call resources).
-var staticServerDecoder = sync.OnceValue(func() *zstd.Decoder {
-	d, err := zstd.NewReader(nil)
-	if err != nil {
-		// NewReader(nil, ...) only fails if an option is invalid; none are set here.
-		panic(err)
-	}
-	return d
-})
+// staticServerDecoder lazily builds the single shared zstd decoder used for
+// all on-the-fly static server decompression (Binary may be called
+// concurrently for different platforms; see embeddedbinaryutils.NewDecoder
+// for why one process-wide decoder is safe here).
+var staticServerDecoder = sync.OnceValue(embeddedbinaryutils.NewDecoder)
 
 var _ ports.StaticServerProvider = (*Provider)(nil)
 

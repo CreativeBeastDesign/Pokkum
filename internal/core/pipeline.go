@@ -173,6 +173,9 @@ func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 	if d.Supervisor == nil {
 		return missing("supervisor provider")
 	}
+	if req.Compile.Strategy.ApplyStatic() && d.StaticServer == nil {
+		return missing("static server provider")
+	}
 	if d.NativeInspector == nil {
 		return missing("native inspector")
 	}
@@ -308,9 +311,19 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		AdapterVersion:   pf.AdapterVersion,
 		SvelteKitVersion: pf.SvelteKitVersion,
 	}
-	// A supervisor with no version is explicitly legal ("unknown"), so a
-	// failure to report one is a warning and never fails a build.
-	if v, err := deps.Supervisor.Version(ctx); err != nil {
+	// A supervisor/static-server with no version is explicitly legal
+	// ("unknown"), so a failure to report one is a warning and never fails a
+	// build. Only one of the two is ever embedded in the image, so only its
+	// version is recorded — reporting Supervisor's version for a static build
+	// (which ships pokkum-static, not pokkum-init) would misdescribe what's
+	// actually running.
+	if req.Compile.Strategy.ApplyStatic() {
+		if v, err := deps.StaticServer.Version(ctx); err != nil {
+			log.Warn("static server version unavailable", "err", err)
+		} else {
+			toolchain.StaticServerVersion = v
+		}
+	} else if v, err := deps.Supervisor.Version(ctx); err != nil {
 		log.Warn("supervisor version unavailable", "err", err)
 	} else {
 		toolchain.SupervisorVersion = v
@@ -352,7 +365,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		// (which rejects distroless/static and scratch) must stay armed for them;
 		// AllowStatic lifts it for --strategy=static so the libc-free default
 		// base is permitted.
-		AllowStatic: req.Compile.Strategy == StrategyStatic,
+		AllowStatic: req.Compile.Strategy.ApplyStatic(),
 	}
 	base, err := deps.BaseImages.Resolve(ctx, baseReq)
 	if err != nil {
@@ -826,11 +839,12 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			},
 			OutputDigest: pub.Digest,
 			Toolchain: ports.SLSAToolchain{
-				PokkumVersion:     deps.Version,
-				GoVersion:         runtime.Version(),
-				BuilderOSArch:     runtime.GOOS + "/" + runtime.GOARCH,
-				BunVersion:        toolchain.BunVersion,
-				SupervisorVersion: toolchain.SupervisorVersion,
+				PokkumVersion:       deps.Version,
+				GoVersion:           runtime.Version(),
+				BuilderOSArch:       runtime.GOOS + "/" + runtime.GOARCH,
+				BunVersion:          toolchain.BunVersion,
+				SupervisorVersion:   toolchain.SupervisorVersion,
+				StaticServerVersion: toolchain.StaticServerVersion,
 			},
 			SourceDateEpoch: req.SourceDateEpoch,
 		})
@@ -936,7 +950,7 @@ func fanOut(
 				}
 				bunResult = res
 				log.Info("resolved bun runtime", "platform", p.String(), "version", bunResult.Version, "sha256", bunResult.SHA256)
-			} else if req.Compile.Strategy != StrategyStatic {
+			} else if !req.Compile.Strategy.ApplyStatic() {
 				// Static builds have nothing to compile: the SvelteKit build
 				// output (.svelte-kit/output) is the entire artifact, served by
 				// pokkum-static with no Bun runtime and no bundled executable.
@@ -961,7 +975,7 @@ func fanOut(
 
 			var sup, staticSup []byte
 			var runnerErr error
-			if req.Compile.Strategy == StrategyStatic {
+			if req.Compile.Strategy.ApplyStatic() {
 				if deps.StaticServer == nil {
 					return fmt.Errorf("core: static server provider unavailable for static strategy: %w", ErrPackageFailed)
 				}

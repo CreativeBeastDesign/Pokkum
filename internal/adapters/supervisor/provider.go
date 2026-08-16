@@ -14,8 +14,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/klauspost/compress/zstd"
-
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/embeddedbinaryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -31,38 +30,20 @@ var binaries embed.FS
 var errSupervisorCorrupt = errors.New("supervisor binary corrupt")
 
 // decodeSupervisor decompresses the zstd-framed embedded representation of a
-// pokkum-init binary back to the raw ELF. It is a thin seam over the single-shot
-// zstd.DecodeAll so the compression round-trip and corruption paths are directly
-// testable without requiring the generated .zst assets to be present at build time.
-//
-// An empty input is treated as corrupt rather than passed to the decoder: a real
-// supervisor blob compresses to ~2 MB, never zero bytes, and zstd's stateless
-// DecodeAll silently succeeds on empty input, which would otherwise let a broken
-// embed come through as an empty (nil-error) binary and violate the port contract
-// "never nil or empty on a nil error".
+// pokkum-init binary back to the raw ELF, via the shared decode mechanism in
+// embeddedbinaryutils (also used by internal/adapters/staticserver). It is a
+// thin seam so the compression round-trip and corruption paths are directly
+// testable without requiring the generated .zst assets to be present at build
+// time.
 func decodeSupervisor(compressed []byte) ([]byte, error) {
-	if len(compressed) == 0 {
-		return nil, errSupervisorCorrupt
-	}
-	return supervisorDecoder().DecodeAll(compressed, nil)
+	return embeddedbinaryutils.Decode(supervisorDecoder(), compressed, errSupervisorCorrupt)
 }
 
 // supervisorDecoder lazily builds the single shared zstd decoder used for all
-// on-the-fly supervisor decompression. The klauspost zstd Decoder supports
-// multiple concurrent stateless DecodeAll calls on one instance, so a single
-// process-wide decoder is both concurrency-safe (Provider.Binary may be called
-// concurrently for different platforms) and avoids reconstructing a decoder per
-// build. It is never used in stream mode, so it is intentionally never closed:
-// a stateless DecodeAll holds no per-call resources, sidestepping the zstd
-// decoder io.Closer trap documented in internal/adapters/packager/layer.go.
-var supervisorDecoder = sync.OnceValue(func() *zstd.Decoder {
-	d, err := zstd.NewReader(nil)
-	if err != nil {
-		// NewReader(nil, ...) only fails if an option is invalid; none are set here.
-		panic(err)
-	}
-	return d
-})
+// on-the-fly supervisor decompression (Provider.Binary may be called
+// concurrently for different platforms; see embeddedbinaryutils.NewDecoder
+// for why one process-wide decoder is safe here).
+var supervisorDecoder = sync.OnceValue(embeddedbinaryutils.NewDecoder)
 
 var _ ports.SupervisorProvider = (*Provider)(nil)
 

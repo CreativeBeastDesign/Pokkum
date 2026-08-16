@@ -64,6 +64,10 @@ Use Serena's `write_memory` or `edit_memory` tools to keep memories concise, inv
 - Code injections (such as SvelteKit adapter configuration or OpenTelemetry instrumentation) must occur in `.pokkum/` virtual memory / sandbox space.
 - User-authored source files in the working directory must **never** be overwritten or mutated during build or image compilation.
 
+### Toolchain Version Stability
+
+- **Never downgrade the Go version.** `go.mod`'s `go` directive and every `go-version:` pin in `.github/workflows/*.yml` must never decrease — only hold steady or raise. If a change appears to require lowering either (a tool that only supports an older Go, an editor/IDE mismatch, a dependency conflict), that is a signal to fix the actual incompatibility or ask the user, not to quietly regress the pin. Check both `git diff -- go.mod` and `git diff -- '.github/workflows/*.yml'` for a lowered version before declaring any change complete.
+
 ---
 
 ## 3. Go Engineering & Quality Standards
@@ -95,12 +99,15 @@ The verification protocol applies **ONLY when Go source code (`.go` files, build
 > - Do **NOT** run the verification test suite for simple user questions, code exploration, planning, or documentation updates (e.g. `Roadmap.md`, `AGENTS.md`, `CLAUDE.md`, `Lessons.md`, `.md` files, docstrings, or memory graph edits).
 > - Tests should be executed **only before declaring completion of actual code modifications**.
 
-When code changes have occurred, agents **MUST** execute the following 4-step verification suite before declaring completion:
+When code changes have occurred, agents **MUST** execute the following 5-step verification suite before declaring completion (`make verify` runs all five in order):
 
 1. **Formatting & Static Analysis**: `gofmt -s -w . && go vet ./...`
-2. **Adapter Unit Tests**: `go test ./internal/adapters/...`
-3. **CLI Compilation Check**: `go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test`
-4. **Full Internal Test Suite** (includes Architecture Purity Verification `internal/architecture_test.go`): `go test ./internal/...`
+2. **golangci-lint**: `golangci-lint run ./...` — `gofmt`/`go vet`/`go test` alone miss findings this catches (`errcheck`, `staticcheck`, ...); see `Lessons.md`'s "4-step verification suite does not run golangci-lint" entry.
+3. **Adapter Unit Tests**: `go test ./internal/adapters/...`
+4. **CLI Compilation Check**: `go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test`
+5. **Full Internal Test Suite** (includes Architecture Purity Verification `internal/architecture_test.go`): `go test ./internal/...`
+
+`supervisor/` (the `pokkum-init`/`pokkum-static` PID-1 binaries) shares the root `go.mod` but isn't covered by any of the five steps above. If a diff touches anything under `supervisor/`, also run `go build ./supervisor/... && go test ./supervisor/...`.
 
 Before declaring any non-trivial feature or refactor complete, review your own diff (`git diff`) line by line against the functional spec. Use the Self-Review Checklist below to do this — treat it as a set of things to *mechanically verify* against the actual diff, not a paragraph to keep in mind while skimming.
 

@@ -511,7 +511,166 @@ hand: mirror a signed base, then resolve with both flags and confirm it succeeds
 hand-edit a mirrored `.sig` tag to reference a different digest than the mirror actually serves
 and confirm resolution still fails closed.
 
-## 22. Cleanup
+## 22. Static / Prerendered (`--static`) — verify the zero-JS image end-to-end
+
+This exercises the `--static` build path (Roadmap §1): a purely prerendered
+SvelteKit site compiled onto a libc-free `chainguard/static` base and served
+by Pokkum's own embedded `pokkum-static` Go PID-1 file server — **no Bun
+runtime, no compiled executable, no separate supervisor**. "Believe nothing"
+matters extra here because the HTTP-serving layer is Pokkum's own code, not
+an off-the-shelf nginx, and this is the newest surface in the codebase.
+
+### 22a. Preflight — make the CLI tell you what `--static` actually did
+
+```bash
+# 1. The shorthand must map to the static strategy and reject the conflicting one.
+./pokkum-test build . --static --strategy=exe --print-manifest 2>&1 | head -5
+#      → expect a hard error: "--static cannot be combined with --strategy=exe"
+
+# 2. With no --base/--hardened, --static must pick the libc-free static base.
+./pokkum-test build . --static --print-manifest --output=json 2>/dev/null | jq '.data.base' 
+#      → expect cgr.dev/chainguard/static (or its resolved digest), NOT distroless cc-debian12
+```
+
+**Verify independently:** don't trust the flag description — confirm the base
+ref *changed* from what a default `layered` build emits, and confirm the error
+in (1) really is an exit-code failure, not a printed warning.
+
+### 22b. Build a genuinely prerendered app
+
+`--static` requires an all-prerendered site (every route static; no SSR-only
+endpoints). Use a fixture that is *truly* prerenderable, or force it:
+
+```bash
+# Minimal route that is fully static:
+#   src/routes/+page.ts  ->  export const prerender = true;
+# plus, if the whole site should be static-by-default:
+#   src/routes/+layout.ts -> export const prerender = true;
+npx sv create static-app --template minimal --types ts
+cd static-app && bun install
+# Tell the adapter there must be no fallback/SSR surprises:
+cat >> svelte.config.js <<'EOF'
+const config = {
+  // ...existing...
+  kit: { prerender: { entries: ['/'] } }
+};
+EOF
+
+cd /path/to/pokkum
+export POKKUM_DOCKER_REPO=ghcr.io/<you>/pokkum-paranoid-test
+./pokkum-test build /path/to/static-app --static --tag static-v1 --output=json 2>static.log | tee static.json
+```
+
+If the app has an unprerendered (SSR-only) route, `--static` should **fail the
+build** — that is correct guarded behavior, not a bug. If it unexpectedly
+succeeds on an SSR-only route, you've found a gap.
+
+### 22c. Inspect the image independently — this is where "no Bun, no supervisor" is proven
+
+```bash
+# Pull the exact built digest (read it from static.json, don't trust memory).
+DIGEST=$(jq -r '.data.digest // .data.image.digest // .data.image' static.json | sed 's/.*://')
+IMAGE="$POKKUM_DOCKER_REPO@$DIGEST"
+docker pull "$IMAGE"
+
+# Config: entrypoint + no USER change + service port
+docker inspect "$IMAGE" --format '{{json .Config.Entrypoint}} {{.Config.ExposedPorts}}'
+
+# Layer history: expect ONLY base + /app/client + /app/prerendered + /pokkum/static.
+# There must be NO /usr/local/bin/bun layer and NO /pokkum/init supervisor layer.
+docker history "$IMAGE"
+
+# Independent structural look (crane if you installed it):
+crane manifest "$IMAGE" | jq '.layers | length'
+crane config "$IMAGE" | jq '{entrypoint:.config.Entrypoint, env:.config.Env, created_by:.history[-1].created_by}'
+```
+
+**Verify independently:** `crane config` env should include
+`POKKUM_STATIC_ROOTS=/app/client:/app/prerendered` and the entrypoint should
+name `/pokkum/static` (not `/pokkum/init`, not `bun`). A lack of the Bun
+layer in `docker history` is the single most important "it's really static"
+signal.
+
+### 22d. Runtime — prove `pokkum-static` serves correctly
+
+```bash
+crane pull "$IMAGE" /tmp/static-img.tar >/dev/null 2>&1
+docker run -d --rm -p 3000:3000 -p 8081:8081 --name pokkum-static-test "$IMAGE"
+sleep 2
+
+BASE=http://127.0.0.1:3000
+
+# 1. Index serves and is HTML
+curl -s -D- "$BASE/" -o /tmp/static-index.html | head -1
+grep -i '<html' /tmp/static-index.html
+
+# 2. Probe endpoints respond (pokkum-static doubles as the probe server)
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8081/healthz   # → 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8081/readyz    # → 200
+
+# 3. Range request → 206 with correct Content-Range
+curl -s -D- -H 'Range: bytes=0-9' "$BASE/" -o /tmp/range.bin | grep -Ei 'HTTP/|content-range'
+
+# 4. Strong ETag present and usable for 304
+ETAG=$(curl -s -D- -o /dev/null "$BASE/" | grep -i '^etag:' | tr -d '\r' | awk '{print $2}')
+curl -s -o /dev/null -w '%{http_code}\n' -H "If-None-Match: $ETAG" "$BASE/"   # → 304
+
+# 5. Content-Encoding: request gzip and confirm the served bytes are gzip.
+#    The build pre-compresses /app/client assets to .gz/.br/.zst; the server
+#    must hand back the sidecar, not compress on the fly.
+curl -s -D- -H 'Accept-Encoding: gzip' "$BASE/" -o /tmp/served.bin | grep -i 'content-encoding'
+file /tmp/served.bin        # → 'gzip compressed data', and NOT the on-the-fly variant
+
+# 6. Unknown route → 404 (pure static site has no fallback unless configured)
+curl -s -o /dev/null -w '%{http_code}\n' "$BASE/does-not-exist"          # → 404
+
+docker stop pokkum-static-test
+```
+
+**Verify independently:** don't trust `curl` exit 0 on its own — read the actual
+`Content-Range`, `ETag`, and `Content-Encoding` **headers** you printed above,
+and `file` the served body so you know you really got gzip bytes and not the
+plain file. A missing/garbled `Content-Encoding` or a `200` where `206`/`304`
+was asked is a real failing claim.
+
+### 22e. Reproducibility — static builds must still be bit-for-bit
+
+```bash
+./pokkum-test build /path/to/static-app --static --tag static-v1 --output=json 2>/dev/null | jq -r '.data.digest // .data.image' > /tmp/static1.txt
+./pokkum-test build /path/to/static-app --static --tag static-v2 --output=json 2>/dev/null | jq -r '.data.digest // .data.image' > /tmp/static2.txt
+diff /tmp/static1.txt /tmp/static2.txt && echo "STATIC REPRODUCIBLE"
+```
+
+### 22f. Layered prerendered pages (the other half of §1)
+
+For a normal `--strategy=layered` build, prerendered pages now live in their
+own `/app/prerendered` layer (Roadmap §1, part 1), and the generated
+adapter-node `handler.js` is patched to serve them via `POKKUM_PRERENDERED_DIR`.
+
+```bash
+# Build a predominantly-prerendered app with the default layered strategy.
+./pokkum-test build /path/to/app --output=json 2>layered.log | tee layered.json
+DIGEST=$(jq -r '.data.digest // .data.image.digest // .data.image' layered.json | sed 's/.*://')
+IMAGE="$POKKUM_DOCKER_REPO@$DIGEST"
+docker pull "$IMAGE"
+
+# 1. A prerendered route is served as real static HTML from /app/prerendered
+docker run -d --rm -p 3001:3000 --name pokkum-layered-test "$IMAGE"; sleep 2
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3001/my-prerendered-page   # → 200
+curl -s http://127.0.0.1:3001/my-prerendered-page | grep -i '<html'
+docker stop pokkum-layered-test
+
+# 2. The image mount/env point at that layer
+crane config "$IMAGE" | jq '.config.Env[] | select(startswith("POKKUM_PRERENDERED_DIR"))'   # → /app/prerendered
+docker history "$IMAGE" | grep -i prerendered    # → a layer created_by naming /app/prerendered
+```
+
+**Verify independently:** the prerendered page should return the *static
+pre-rendered HTML* — not a client-side SPA shell. If it 404s or returns the
+empty SPA bootstrap, the handler patch isn't pointing at the right layer (a
+version-sensitive gap — see Roadmap §1 follow-ups).
+
+## 23. Cleanup
 
 ```bash
 docker rmi "$POKKUM_DOCKER_REPO@$DIGEST" 2>/dev/null
@@ -544,6 +703,9 @@ rm -f ./pokkum-test
 | Multi-generation rollback survives >1 hop | `-g 2` lands on the right digest, not "some" digest | 19 |
 | Runtime Env Contract fails fast, bakes no values | container exit code + `docker inspect` | 20 |
 | Base image mirror actually wrote the blob | `crane manifest` against the mirror, not the log line | 21 |
+| `--static` really produced a zero-JS image (no Bun/supervisor, static base) | `docker history`, `crane config` entrypoint/env | 22c |
+| `pokkum-static` serves correctly (Range/ETag/Content-Encoding/probes/404) | `curl` headers + `file` on the served body | 22d |
+| Prerendered pages served as real static HTML from `/app/prerendered` | `curl` + `crane config` env + `docker history` | 22f |
 
 If every row above checks out via the independent tool, not just Pokkum's
 own exit code, you have real evidence — not just Pokkum's word for it.

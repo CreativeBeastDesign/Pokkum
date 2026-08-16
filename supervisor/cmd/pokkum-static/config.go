@@ -100,13 +100,7 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 	cfg.Port = envPortValue(getenv, envPort, cfg.Port, warnf)
 	cfg.ProbePort = envPortValue(getenv, envProbePort, cfg.ProbePort, warnf)
 	if raw := getenv(envStaticRoot); raw != "" {
-		var roots []string
-		for _, part := range strings.Split(raw, string(filepath.ListSeparator)) {
-			if p := strings.TrimSpace(part); p != "" {
-				roots = append(roots, p)
-			}
-		}
-		if len(roots) > 0 {
+		if roots := parseRootsList(raw); len(roots) > 0 {
 			cfg.Roots = roots
 		} else {
 			warnf("ignoring empty %s=%q", envStaticRoot, raw)
@@ -146,14 +140,10 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 	cfg.ProbePort = *flagProbe
 
 	if *flagRoots != "" {
-		var roots []string
-		for _, part := range strings.Split(*flagRoots, string(filepath.ListSeparator)) {
-			if p := strings.TrimSpace(part); p != "" {
-				roots = append(roots, p)
-			}
-		}
-		if len(roots) > 0 {
+		if roots := parseRootsList(*flagRoots); len(roots) > 0 {
 			cfg.Roots = roots
+		} else {
+			warnf("ignoring empty -roots=%q", *flagRoots)
 		}
 	}
 
@@ -182,6 +172,19 @@ func (c Config) validate() error {
 		}
 	}
 	return nil
+}
+
+// parseRootsList splits a filepath.ListSeparator-delimited path list (as
+// carried by both POKKUM_STATIC_ROOTS and -roots) into trimmed, non-empty
+// root entries.
+func parseRootsList(raw string) []string {
+	var roots []string
+	for _, part := range strings.Split(raw, string(filepath.ListSeparator)) {
+		if p := strings.TrimSpace(part); p != "" {
+			roots = append(roots, p)
+		}
+	}
+	return roots
 }
 
 func envPortValue(getenv func(string) string, key string, fallback int, warnf func(string, ...any)) int {

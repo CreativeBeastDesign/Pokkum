@@ -577,18 +577,22 @@ func platformMatches(cp *v1.Platform, want ports.Platform) bool {
 
 // staticBaseReason reports whether ref obviously cannot run a dynamically
 // linked Bun binary, and if so, why. It recognises distroless/static (any
-// -debianNN suffix) and scratch, the two mistakes users actually make; it is
-// not a general glibc-presence check, which would require pulling and
-// inspecting layers.
+// -debianNN suffix), chainguard/static, and scratch, the mistakes users
+// actually make; it is not a general glibc-presence check, which would
+// require pulling and inspecting layers.
 func staticBaseReason(ref string) (string, bool) {
 	const (
-		staticReason  = "distroless/static ships no dynamic loader or libc; Bun binaries are dynamically linked against libc.so.6, libstdc++.so.6, libgcc_s.so.1 and libm.so.6 and cannot execute without them — use the distroless/cc-debian12 default or the chainguard glibc-dynamic base instead"
-		scratchReason = "scratch is an empty filesystem with no dynamic loader or libc; Bun binaries are dynamically linked against libc.so.6, libstdc++.so.6, libgcc_s.so.1 and libm.so.6 and cannot execute in it — use the distroless/cc-debian12 default or the chainguard glibc-dynamic base instead"
+		staticReason           = "distroless/static ships no dynamic loader or libc; Bun binaries are dynamically linked against libc.so.6, libstdc++.so.6, libgcc_s.so.1 and libm.so.6 and cannot execute without them — use the distroless/cc-debian12 default or the chainguard glibc-dynamic base instead"
+		chainguardStaticReason = "chainguard/static ships no dynamic loader or libc; Bun binaries are dynamically linked against libc.so.6, libstdc++.so.6, libgcc_s.so.1 and libm.so.6 and cannot execute without them — use the distroless/cc-debian12 default or the chainguard glibc-dynamic base instead"
+		scratchReason          = "scratch is an empty filesystem with no dynamic loader or libc; Bun binaries are dynamically linked against libc.so.6, libstdc++.so.6, libgcc_s.so.1 and libm.so.6 and cannot execute in it — use the distroless/cc-debian12 default or the chainguard glibc-dynamic base instead"
 	)
 
 	lower := strings.ToLower(strings.TrimSpace(ref))
 	if strings.Contains(lower, "distroless/static") {
 		return staticReason, true
+	}
+	if strings.Contains(lower, "chainguard/static") {
+		return chainguardStaticReason, true
 	}
 
 	repo := lower

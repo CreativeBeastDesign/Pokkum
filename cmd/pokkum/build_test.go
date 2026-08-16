@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -17,6 +18,22 @@ func TestBuildCommandRequireEnvFlag(t *testing.T) {
 	// Validate flag was registered and parses correctly
 	if flag := cmd.Flags().Lookup("require-env"); flag == nil {
 		t.Fatalf("expected --require-env flag to be registered")
+	}
+}
+
+func TestBuildCommandStaticStrategyLayeredConflictRejected(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cmd := newBuildCommand(context.Background(), logger)
+	cmd.SetArgs([]string{"--static", "--strategy=layered", "--dry-run"})
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected --static combined with an explicit --strategy=layered to error")
+	}
+	if !strings.Contains(err.Error(), "cannot be combined with --strategy=layered") {
+		t.Fatalf("expected a --static/--strategy conflict error, got: %v", err)
 	}
 }
 

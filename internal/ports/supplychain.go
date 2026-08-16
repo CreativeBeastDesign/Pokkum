@@ -69,13 +69,14 @@ type SLSAStatement struct {
 
 // SLSAToolchain records the tool versions involved in the build for SLSA provenance.
 type SLSAToolchain struct {
-	PokkumVersion     string
-	PokkumCommit      string
-	GoVersion         string
-	BuilderOSArch     string
-	BunVersion        string
-	BunBinaryHash     string
-	SupervisorVersion string
+	PokkumVersion       string
+	PokkumCommit        string
+	GoVersion           string
+	BuilderOSArch       string
+	BunVersion          string
+	BunBinaryHash       string
+	SupervisorVersion   string
+	StaticServerVersion string
 }
 
 // SLSABaseImage records the base image information for SLSA provenance.

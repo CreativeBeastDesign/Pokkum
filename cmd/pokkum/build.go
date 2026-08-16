@@ -64,12 +64,17 @@ type buildFlags struct {
 	noInject bool
 
 	// Bun runtime & strategy flags
-	bunBinary   string
-	bunVariant  string
-	strategy    string
-	static      bool
-	compression string
-	sourcemap   bool
+	bunBinary  string
+	bunVariant string
+	strategy   string
+	// strategyExplicit records whether --strategy was actually passed on the
+	// command line, as opposed to sitting at its "layered" default — needed
+	// to detect a genuine --strategy=layered --static conflict, since
+	// "layered" can't be distinguished from "unset" by value alone.
+	strategyExplicit bool
+	static           bool
+	compression      string
+	sourcemap        bool
 
 	imageLabels []string
 
@@ -112,7 +117,8 @@ and multiple output modes (push to registry, load into Docker daemon, or export 
 
 The project directory defaults to the current working directory.`,
 		Args: cobra.MaximumNArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flags.strategyExplicit = cmd.Flags().Changed("strategy")
 			return runBuild(ctx, logger, flags, args)
 		},
 	}
@@ -322,18 +328,21 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	// static build compiles a purely static site (no Bun runtime, no bundled
 	// executable) onto a minimal libc-free base, served by the embedded
 	// pokkum-static Go file server.
-	if flags.static && flags.strategy == "exe" {
-		return fmt.Errorf("--static cannot be combined with --strategy=exe (layered, static, or nothing must be used)")
+	if flags.static && flags.strategyExplicit && flags.strategy != "static" {
+		return fmt.Errorf("--static cannot be combined with --strategy=%s (layered, static, or nothing must be used)", flags.strategy)
 	}
 	if flags.static {
 		flags.strategy = "static"
 		// Unless the user pinned an explicit base (--base/--hardened), default
 		// to a fully static, libc-free image: the entire point of --static is a
-		// server with no dynamic dependencies. Keep the distroless preset so the
-		// preset's keyless signature-verification defaults still apply; the Ref
-		// merely overrides the preset's cc-debian12 default ref.
+		// server with no dynamic dependencies. StaticBaseRef (chainguard/static)
+		// is signed with Chainguard's identity, not Distroless's — Preset must
+		// be BaseImageChainguard so signature verification and the pokkum.lock
+		// cache key both agree with the image actually being pulled, and so a
+		// plain build's "distroless"-keyed lock entry never collides with a
+		// --static build's base in the same project.
 		if basePreset == "" {
-			req.BaseImage.Preset = core.BaseImageDistroless
+			req.BaseImage.Preset = core.BaseImageChainguard
 			req.BaseImage.Ref = core.StaticBaseRef
 		}
 	}
