@@ -283,12 +283,42 @@ func TestParseConfigAttestationDigest(t *testing.T) {
 		t.Fatalf("malformed digest should disable attestation, got %q", cfg.AttestationDigest)
 	}
 
-	// Blank -> left empty (default).
-	cfg, _, err = parseConfig([]string{"--", "/app/server"}, env(nil), io.Discard)
+	// Blank -> left empty (default), and silent: an operator who never opted
+	// into attestation must not be warned about it.
+	cfg, warnings, err := parseConfig([]string{"--", "/app/server"}, env(nil), io.Discard)
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
 	}
 	if cfg.AttestationDigest != "" {
 		t.Fatalf("blank digest should disable attestation, got %q", cfg.AttestationDigest)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("blank digest should not warn, got %v", warnings)
+	}
+}
+
+// TestParseConfigMalformedAttestationDigestWarns pins Gap 1 of the startup
+// attestation hardening review: a non-empty but malformed
+// POKKUM_ATTESTATION_DIGEST (the build pipeline set the env and failed to
+// stamp it correctly) must produce a visible warning through the same warnf
+// mechanism as envShutdownTimeout, distinguishing "misconfigured" from "never
+// configured" (which stays silent, see TestParseConfigAttestationDigest).
+// Without this, attestation can be silently defeated with zero operator
+// signal.
+func TestParseConfigMalformedAttestationDigestWarns(t *testing.T) {
+	cfg, warnings, err := parseConfig([]string{"--", "/app/server"}, env(map[string]string{
+		envAttestationDigest: strings.Repeat("AB", 32), // uppercase: fails isHexDigest
+	}), io.Discard)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.AttestationDigest != "" {
+		t.Fatalf("malformed digest should disable attestation, got %q", cfg.AttestationDigest)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one about the malformed digest", warnings)
+	}
+	if !strings.Contains(warnings[0], envAttestationDigest) {
+		t.Fatalf("warning %q should name %s", warnings[0], envAttestationDigest)
 	}
 }

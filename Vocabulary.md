@@ -292,12 +292,30 @@ These configure the image's *runtime* behavior inside the container (read by `/p
 | `POKKUM_SHUTDOWN_TIMEOUT` | `30s` | Grace period after `SIGTERM` before `SIGKILL`. |
 | `POKKUM_REQUIRED_ENV` | (none) | Comma-separated list of required environment variable names that must be present and non-empty at container boot; supervisor fails fast if any are missing. |
 | `POKKUM_PRERENDERED_DIR` | (none) | Path (in the image) of the mounted prerendered pages tree. Set by the packager to `/app/prerendered` for `--strategy=layered`; the patched adapter-node handler serves prerendered pages from here. |
-| `POKKUM_ATTESTATION_DIGEST` | (none) | Expected SHA-256 root digest of the layered `/app` runtime tree (startup attestation, hardening Option C). Set by the packager at build time for `--strategy=layered`. When present, `pokkum-init` re-derives the digest from the live `/app` tree before exec and refuses to start (exit 126) on mismatch — tamper-evidence without cluster-level readonly-rootfs. Absent or malformed ⇒ verification disabled (escape hatch). Only applies to the layered strategy. |
+| `POKKUM_ATTESTATION_DIGEST` | (none) | Expected SHA-256 root digest of the layered `/app` runtime tree (startup attestation, hardening Option C). Set by the packager at build time for `--strategy=layered`. When present, `pokkum-init` re-derives the digest from the live `/app` tree before exec and refuses to start (exit **125** — see "Supervisor Exit Codes" below) on mismatch — tamper-evidence without cluster-level readonly-rootfs. Absent ⇒ verification silently disabled (deliberate escape hatch, no log). Malformed (non-empty but not 64 lowercase hex chars) ⇒ verification also disabled, but `pokkum-init` logs a `Warn`-level message naming the variable, since this means the build pipeline failed to stamp the env correctly and the security control is silently not running. Only applies to the layered strategy. |
 | `POKKUM_STATIC_ROOTS` | `/app/client:/app/prerendered` | Colon-separated list of static roots that `pokkum-static` serves (via Content-Encoding/Range/ETag) for `--strategy=static` images. Set by the packager at build time. |
+| `POKKUM_STATIC_FALLBACK` | (none) | **Opt-in SPA fallback** for `--strategy=static`: an in-image file path (e.g. `/app/client/200.html`) that `pokkum-static` serves with `200` for any unmatched `GET`/`HEAD` route (same ETag/Range/Content-Encoding negotiation as any served file). Set by the packager only when the source project configures an `@sveltejs/adapter-static` `fallback` page that was actually emitted into the client staging. Absent/empty (the default) means unmatched routes keep returning a plain `404`; the server logs a one-per-process `Warn` on the first such `404` pointing at this doc. Mirrors the `-fallback` flag on the `pokkum-static` binary. |
 
 ---
 
-## 19. Beyond v1.0 / Backlog
+## 19. Supervisor Exit Codes (`pokkum-init`)
+
+`pokkum-init` (PID 1 in every Pokkum-built image) terminates with one of the codes below, whether it refuses to start the child at all or is reporting the child's own termination. This is the only signal available to an operator triaging a crash-looping pod from a dashboard that shows exit status but not full logs, so each code below is deliberately distinct — none of the rows may ever be collapsed onto another.
+
+| Exit code | Meaning | Source |
+|---|---|---|
+| `0` | Child exited cleanly (or caught its termination signal and exited 0). | `exitCode` in `supervisor.go` |
+| `1` | Child could not be started for a reason other than the specific cases below (uncommon). | `startExitCode` in `supervisor.go` |
+| `2` | `pokkum-init` itself was invoked with a bad flag or missing command (usage error). | `exitUsage` in `main.go` |
+| `<N>` (0–255) | Child ran and exited on its own with status `N`, propagated verbatim. | `exitCode` in `supervisor.go` |
+| `125` | **Startup attestation mismatch.** `POKKUM_ATTESTATION_DIGEST` was set (non-empty, well-formed) and the live `/app` tree's re-derived digest does not match it — the filesystem was tampered with after the image was built, or the image is corrupted. The child is never exec'd. | `exitAttestationMismatch` in `main.go` |
+| `126` | Child binary exists but could not be exec'd (`EACCES`/`EPERM`/`ENOEXEC` — e.g. missing execute bit, wrong architecture). **Not** used for attestation failures (see `125` above); the two were split apart specifically so this code keeps its single, pre-existing meaning. | `startExitCode` in `supervisor.go` |
+| `127` | Child binary not found (`ENOENT` / not on `PATH`). | `startExitCode` in `supervisor.go` |
+| `128+N` | Child was killed by signal `N` (e.g. `137` = `128+SIGKILL`, `143` = `128+SIGTERM`), including the shutdown-timeout escalation to `SIGKILL` when the child ignores the forwarded termination signal past `POKKUM_SHUTDOWN_TIMEOUT`. | `exitCode` in `supervisor.go` |
+
+---
+
+## 20. Beyond v1.0 / Backlog
 
 Post-v1.0 items from [Roadmap.md](Roadmap.md):
 
@@ -316,6 +334,6 @@ Post-v1.0 items from [Roadmap.md](Roadmap.md):
 
 ---
 
-## 20. Open Naming Questions
+## 21. Open Naming Questions
 
 Two proposed backlog flags above collide with already-shipped flags of the same short name (`--telemetry`, `--env`) because backlog notes in `AdditionalFeatures.md` predate the OTel work landing in v0.2. Resolve these before implementing the corresponding backlog item — do not ship a second, differently-scoped `--telemetry` or `--env`.

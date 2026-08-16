@@ -26,8 +26,27 @@ import (
 	"os"
 )
 
-// exitUsage is the conventional shell exit code for a usage error.
-const exitUsage = 2
+const (
+	// exitUsage is the conventional shell exit code for a usage error.
+	exitUsage = 2
+
+	// exitAttestationMismatch is returned when startup attestation is enabled
+	// (cfg.AttestationDigest non-empty) and the live /app tree does not match
+	// the build-time digest. It is deliberately distinct from 126: that code
+	// is already owned by startExitCode below for a child binary that exists
+	// but cannot be exec'd (EACCES/EPERM/ENOEXEC), and collapsing the two
+	// would make "the filesystem was tampered with" and "bad permissions on
+	// the entrypoint" indistinguishable from exit code alone — exactly the
+	// ambiguity an operator triaging a crash-looping pod from a dashboard
+	// (status code only, no logs) cannot resolve. 125 is unclaimed by any
+	// other exit path in this binary (1, 2, 126, 127 and the 128+signum range
+	// are all already spoken for; see startExitCode and exitCode in
+	// supervisor.go). See Vocabulary.md's "Environment Variables (Runtime,
+	// Read by Supervisor)" section for the documented, operator-facing
+	// scheme; 126 remains reserved there for the pre-existing exec-failure
+	// case this constant was split out from.
+	exitAttestationMismatch = 125
+)
 
 func main() {
 	cfg, warnings, err := parseConfig(os.Args[1:], os.Getenv, os.Stderr)
@@ -53,7 +72,7 @@ func main() {
 	// code is reached. A mismatch is a hard refusal to start (fail closed).
 	if err := verifyAttestation(log, cfg.AttestationDigest); err != nil {
 		log.Error("startup attestation failed", "error", err)
-		os.Exit(126)
+		os.Exit(exitAttestationMismatch)
 	}
 
 	// Resolve the child executable to an absolute path up front, so the fork in

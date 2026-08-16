@@ -136,11 +136,20 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 	}
 	// Attestation is image-config-driven (the packager stamps it), so it is
 	// read from the environment only — never from a flag a human could pin to
-	// a stale value. A blank or malformed digest simply leaves
-	// AttestationDigest empty, which disables verification (fail-open escape
-	// hatch).
-	if raw := strings.TrimSpace(getenv(envAttestationDigest)); isHexDigest(raw) {
-		cfg.AttestationDigest = raw
+	// a stale value. A blank or malformed digest both leave AttestationDigest
+	// empty, which disables verification (fail-open escape hatch) — but the
+	// two cases are not equally interesting. Blank means "never configured",
+	// which is fine and stays silent. Malformed means the build pipeline set
+	// the env and failed to stamp it correctly, which silently defeats the
+	// security control unless something says so; that case gets the same
+	// warnf treatment as envShutdownTimeout above so it surfaces at Warn
+	// level once main.go relays the returned warnings.
+	if raw := strings.TrimSpace(getenv(envAttestationDigest)); raw != "" {
+		if isHexDigest(raw) {
+			cfg.AttestationDigest = raw
+		} else {
+			warnf("ignoring malformed %s (want 64 lowercase hex chars), startup attestation is disabled", envAttestationDigest)
+		}
 	}
 
 	flagArgs, childArgs, sawSeparator := splitArgs(args)

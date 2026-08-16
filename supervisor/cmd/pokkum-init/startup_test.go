@@ -148,6 +148,35 @@ func TestResolveChildPathFailureMapsToStartCodes(t *testing.T) {
 	}
 }
 
+// TestExitAttestationMismatchDistinctFromOtherExitCodes pins Gap 2 of the
+// startup attestation hardening review: exitAttestationMismatch (main.go)
+// must never collide with any other exit code this binary can produce, so an
+// operator triaging a crash-looping pod by exit code alone can tell "startup
+// attestation refused to start" apart from "the child binary couldn't be
+// exec'd" (126, startExitCode's EACCES/EPERM/ENOEXEC mapping) or any other
+// path listed here. This is a regression guard on the constant itself, not an
+// end-to-end run of main() - main() has no seam to invoke it without an
+// os.Exit, and the mapping this test pins is what actually determines
+// collision, wherever it is called from.
+func TestExitAttestationMismatchDistinctFromOtherExitCodes(t *testing.T) {
+	claimed := map[int]string{
+		0:         "success",
+		1:         "startExitCode default (unrecognized start failure)",
+		exitUsage: "usage error",
+		126:       "startExitCode EACCES/EPERM/ENOEXEC (child exists but cannot be exec'd)",
+		127:       "startExitCode ENOENT/exec.ErrNotFound (child not found)",
+	}
+	if name, collides := claimed[exitAttestationMismatch]; collides {
+		t.Fatalf("exitAttestationMismatch (%d) collides with the existing %q exit code", exitAttestationMismatch, name)
+	}
+	// 128+signum is the child-signalled range (exitCode in supervisor.go);
+	// SIGRTMAX on Linux tops out well under 128+128, so treat the whole upper
+	// half as reserved rather than pinning an exact signal count.
+	if exitAttestationMismatch >= 128 {
+		t.Fatalf("exitAttestationMismatch (%d) falls in the 128+signum range reserved for a signalled child", exitAttestationMismatch)
+	}
+}
+
 // waitHealthz polls the probe server over HTTP until it answers want, proving
 // the server is bound and serving on the given address. It mirrors waitReadyz
 // but drives a real socket (like TestServeAndShutdown) because the point here
