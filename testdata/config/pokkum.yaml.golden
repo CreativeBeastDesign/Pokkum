@@ -1,0 +1,127 @@
+# Canonical example .pokkum.yaml — every field this schema version (1)
+# supports, with commentary on anything non-obvious.
+#
+# This file is parsed and validated end-to-end by
+# internal/adapters/config/config_test.go (TestLoad_ExampleGoldenFixture) and
+# cmd/pokkum/config_test.go (TestConfigValidateCommand_ExampleGoldenFixture),
+# so it can never silently drift out of sync with the real schema
+# (internal/ports/config.go) or with `pokkum config validate`'s rules.
+#
+# Precedence for every setting below, when more than one source sets it:
+#   explicit CLI flag > environment variable > profile override > this
+#   top-level config > built-in default.
+# A field only has an environment variable override if Vocabulary.md's
+# "Conventions" section lists one for it — most fields (including everything
+# under image/security/sbom/otel below) are config-file/flag only.
+
+version: 1
+
+# Push target. Required for the default push output mode; not required for
+# --local or --tarball builds. May be overridden per-profile (see
+# "production" below) — useful when, say, staging and production push to
+# different registries entirely.
+docker:
+  repo: ghcr.io/example/my-sveltekit-app
+
+# "layered" (default) is an N-layer image with a pinned Bun runtime;
+# "static" is a zero-JS, zero-runtime image for fully prerendered sites,
+# served by the embedded pokkum-static file server instead of Bun.
+strategy: layered
+
+# Base image tier: "distroless" (gcr.io/distroless), "chainguard" (glibc,
+# keyless-Sigstore-verified), or "chainguard-static" (libc-free, used
+# automatically by --strategy=static unless overridden here).
+base: distroless
+
+platforms:
+  - linux/amd64
+  - linux/arm64
+
+image:
+  # Custom OCI labels merged with the auto-populated
+  # org.opencontainers.image.* set (revision/source/version/created).
+  labels:
+    org.opencontainers.image.vendor: "Example Corp"
+  annotations:
+    com.example.team: "platform"
+  # Runtime environment variables baked into the image config.
+  env:
+    NODE_ENV: production
+  # Names that MUST be present and non-empty at container boot; the
+  # supervisor fails fast (before serving traffic) if any are missing.
+  require_env:
+    - DATABASE_URL
+  ports:
+    - 3000
+  user: "1000:1000"
+  working_dir: /app
+  port: 3000
+  probe_port: 8081
+  # Grace period after SIGTERM before the supervisor sends SIGKILL.
+  shutdown_timeout: 30s
+
+security:
+  # Fail the build if the resolved base image has a vulnerability at or
+  # above this severity (low/medium/high/critical). Unset = warn-only.
+  fail_on_cve: high
+  # Verify the base image's Sigstore/Cosign signature before use.
+  verify_base: true
+  # Fail-closed by default: an incomplete vulnerability scan (e.g. OSV.dev
+  # unreachable) blocks the build unless this is explicitly true.
+  allow_incomplete_scans: false
+  # Secret-scanner allowlist entries (glob patterns), for known false
+  # positives in vendored files.
+  allow_secret_patterns: []
+
+sbom:
+  # spdx-json (default) or cyclonedx-json; "none" disables SBOM generation.
+  format: spdx-json
+  # "referrer" (default, OCI 1.1 referrers API) or "tag" (legacy `.sbom` tag,
+  # for registries without referrers support).
+  attach: referrer
+
+cache:
+  enabled: true
+  # Signature verification mode for remote build-cache hits: "auto"
+  # (default), "static-key", or "keyless".
+  verify_mode: auto
+
+otel:
+  # Inject an OpenTelemetry Collector sidecar spec into generated Kubernetes
+  # manifests (see `pokkum resolve`/`pokkum apply --with-otel-sidecar`).
+  sidecar: false
+  tracing: true
+  metrics: true
+
+# Named, partial overrides on top of everything above. Activate with
+# `pokkum build --profile <name>` (or `--local`, which auto-selects a
+# profile literally named "local" if one exists). Only set the fields that
+# should actually differ — anything omitted from a profile falls through to
+# the top-level value.
+profiles:
+  # A fast, unsigned, unverified local dev loop: build straight into the
+  # local Docker daemon, skip base-image signature verification and SBOM
+  # generation, and keep source maps for debugging.
+  local:
+    output: local
+    platforms:
+      - local
+    sourcemap: true
+    security:
+      verify_base: false
+    sbom:
+      format: none
+    cache:
+      enabled: false
+
+  # Stricter production posture: push to a dedicated prod repo, gate the
+  # build on any high-or-above CVE (tighter than the top-level "high"),
+  # and keep everything else (SBOM, signature verification, OTel) at the
+  # secure defaults above.
+  production:
+    docker:
+      repo: ghcr.io/example/my-sveltekit-app-prod
+    security:
+      fail_on_cve: critical
+    otel:
+      sidecar: true

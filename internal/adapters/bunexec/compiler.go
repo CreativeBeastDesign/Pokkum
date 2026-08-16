@@ -229,6 +229,11 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 // the same req.ProjectDir — see the package doc.
 func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports.PrepareResult, error) {
 	log := c.logger
+	// staticFallbackRel is the leaf filename of the opt-in SPA fallback page
+	// adapter-static emitted for a static build, empty otherwise. It is
+	// populated in the StrategyStatic branch below and threaded into the
+	// result so the packager can stage it and stamp POKKUM_STATIC_FALLBACK.
+	var staticFallbackRel string
 	log.Info("bunexec: prepare: running sveltekit build", "projectDir", req.ProjectDir, "strategy", req.Strategy)
 
 	targetAdapter := "@sveltejs/adapter-node"
@@ -314,25 +319,66 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 				req.ProjectDir, filepath.Join(outputDir, "prerendered"), err, core.ErrPrepareFailed,
 			)
 		}
+
+		// Opt-in SPA fallback: if the project's svelte.config.js configures an
+		// adapter-static `fallback` page, adapter-static emits it at the client
+		// output root (outputDir/client/<rel>). The source of truth for WHAT was
+		// configured is the user's config (read non-mutatingly here); the source
+		// of truth for WHAT WAS EMITTED is the staged output, verified below.
+		// A fallback that was configured but not emitted is a hard failure — the
+		// packager would otherwise silently drop the SPA shell from the image.
+		if rel, configured := sveltekitutils.StaticFallbackFilename(readConfigSource(req.ProjectDir)); configured {
+			emitted := filepath.Join(outputDir, "client", rel)
+			// Guard against a config-escape: a fallback name containing a path
+			// separator or ".." (Base != itself) would let the config read
+			// outside the client output root.
+			if filepath.Base(rel) != rel {
+				return ports.PrepareResult{}, fmt.Errorf(
+					"bunexec: prepare %s: adapter-static fallback %q is not a plain filename (cannot be staged safely): %w",
+					req.ProjectDir, rel, core.ErrPrepareFailed,
+				)
+			}
+			if fi, err := os.Stat(emitted); err != nil || fi.IsDir() {
+				return ports.PrepareResult{}, fmt.Errorf(
+					"bunexec: prepare %s: adapter-static fallback %q was configured but not emitted at %s (is the site actually in SPA mode?): %w: %w",
+					req.ProjectDir, rel, emitted, err, core.ErrPrepareFailed,
+				)
+			}
+			staticFallbackRel = rel
+			log.Info("bunexec: static SPA fallback detected", "rel", rel, "emitted", emitted)
+		}
 	} else {
 		if _, err := os.Stat(entrypoint); err != nil {
+			expectedAdapter := "@sveltejs/adapter-node"
+			if req.Strategy == ports.StrategyExe {
+				expectedAdapter = "@jesterkit/exe-sveltekit"
+			}
 			return ports.PrepareResult{}, fmt.Errorf(
-				"bunexec: prepare %s: expected entrypoint %s not found after build (was @jesterkit/exe-sveltekit configured as the adapter?): %w: %w",
-				req.ProjectDir, entrypoint, err, core.ErrPrepareFailed,
+				"bunexec: prepare %s: expected entrypoint %s not found after build (was %s configured as the adapter?): %w: %w",
+				req.ProjectDir, entrypoint, expectedAdapter, err, core.ErrPrepareFailed,
 			)
 		}
 
-		// @jesterkit/exe-sveltekit's discoverClientAssets walks the filesystem
-		// without sorting, so assets.generated.ts (which temp-server/index.ts
-		// imports and Compile bundles) can list the same set of assets in a
-		// different order between two otherwise-identical builds. That reordering
-		// alone changes the compiled binary's bytes. Normalize it here, once, right
-		// after the SvelteKit build that generated it and before any Compile call
-		// reads it, so every platform compiles against an identically-ordered
-		// entrypoint.
-		assetsPath := filepath.Join(filepath.Dir(entrypoint), assetsGeneratedFilename)
-		if err := normalizeGeneratedAssetsFile(assetsPath); err != nil {
-			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, err)
+		if req.Strategy == ports.StrategyExe {
+			// @jesterkit/exe-sveltekit's discoverClientAssets walks the filesystem
+			// without sorting, so assets.generated.ts (which temp-server/index.ts
+			// imports and Compile bundles) can list the same set of assets in a
+			// different order between two otherwise-identical builds. That reordering
+			// alone changes the compiled binary's bytes. Normalize it here, once, right
+			// after the SvelteKit build that generated it and before any Compile call
+			// reads it, so every platform compiles against an identically-ordered
+			// entrypoint.
+			//
+			// assets.generated.ts is exclusively a @jesterkit/exe-sveltekit artifact
+			// (its adapt() step generates it) — @sveltejs/adapter-node (StrategyLayered)
+			// never produces one, so this must not run for any other strategy. It used
+			// to run unconditionally for every non-static strategy, which meant a real
+			// StrategyLayered build against the correctly-documented adapter-node adapter
+			// always failed here with "no such file or directory". See Lessons.md.
+			assetsPath := filepath.Join(filepath.Dir(entrypoint), assetsGeneratedFilename)
+			if err := normalizeGeneratedAssetsFile(assetsPath); err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, err)
+			}
 		}
 	}
 
@@ -347,8 +393,20 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		}
 	}
 
-	log.Info("bunexec: prepare complete", "entrypoint", entrypoint, "outputDir", outputDir)
-	return ports.PrepareResult{EntrypointPath: entrypoint, OutputDir: outputDir}, nil
+	log.Info("bunexec: prepare complete", "entrypoint", entrypoint, "outputDir", outputDir, "staticFallback", staticFallbackRel)
+	return ports.PrepareResult{EntrypointPath: entrypoint, OutputDir: outputDir, StaticFallbackRelPath: staticFallbackRel}, nil
+}
+
+// readConfigSource returns the raw source text of <projectDir>/svelte.config.js,
+// or "" if it cannot be read. It is a non-mutating read used to extract the
+// adapter-static `fallback` name; an unreadable config simply yields no SPA
+// fallback (the build already validated the project layout by this point).
+func readConfigSource(projectDir string) string {
+	data, err := os.ReadFile(filepath.Join(projectDir, "svelte.config.js"))
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // Compile runs `bun build --compile` once, for req.Platform, producing

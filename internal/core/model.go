@@ -4,8 +4,10 @@
 //
 // core imports internal/ports and the standard library, plus
 // github.com/google/go-containerregistry/pkg/v1 for the OCI value types that
-// are genuinely part of this tool's domain and golang.org/x/sync/errgroup for
-// the platform fan-out in pipeline.go. It must never import an adapter.
+// are genuinely part of this tool's domain, github.com/google/go-containerregistry/pkg/name
+// for registry-reference syntax validation (ValidateDockerRepo), and
+// golang.org/x/sync/errgroup for the platform fan-out in pipeline.go. It must
+// never import an adapter.
 //
 // # Where types live
 //
@@ -37,6 +39,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -363,6 +366,28 @@ func ParseCacheVerifyMode(s string) (RemoteCacheVerifyMode, error) {
 		return "", fmt.Errorf("cache verify mode %q: %w", s, ErrInvalidRequest)
 	}
 	return m, nil
+}
+
+// ValidateDockerRepo checks that repo is a syntactically valid OCI registry
+// repository reference (e.g. "ghcr.io/org/app"), without a tag or digest. An
+// empty repo is not an error here: docker.repo is optional in .pokkum.yaml
+// for non-push builds (--local/--tarball), and BuildRequest.Validate already
+// enforces ErrNoDockerRepo when push mode actually needs one.
+//
+// This reuses go-containerregistry's own reference parser with the same
+// name.WeakValidation option internal/adapters/registry and
+// internal/adapters/baseimage use to build every reference this tool
+// actually pushes to or pulls from, so a config value that fails here would
+// also fail at push time — just later, and with a worse error.
+func ValidateDockerRepo(repo string) error {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return nil
+	}
+	if _, err := name.NewRepository(repo, name.WeakValidation); err != nil {
+		return fmt.Errorf("docker repo %q: %w: %v", repo, ErrInvalidRequest, err)
+	}
+	return nil
 }
 
 // ParseSourceDateEpoch parses a SOURCE_DATE_EPOCH value: a decimal count of

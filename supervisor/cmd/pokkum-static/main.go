@@ -14,7 +14,9 @@
 //	pokkum-static [flags]
 //
 // See internal/ports/packager.go, which builds the entrypoint
-// [/pokkum/static] and sets PORT, POKKUM_PROBE_PORT and POKKUM_STATIC_ROOTS.
+// [/pokkum/static] and sets PORT, POKKUM_PROBE_PORT, POKKUM_STATIC_ROOTS and,
+// for SPA sites, POKKUM_STATIC_FALLBACK (an opt-in fallback page served with
+// 200 for unmatched GET/HEAD routes).
 package main
 
 import (
@@ -70,7 +72,7 @@ func main() {
 	// content port there is nothing to serve, so that is fatal, whereas a
 	// probe-port bind failure is logged and the server still runs.
 	svc := &http.Server{
-		Handler:           newStaticServer(cfg.Roots, log).handler(),
+		Handler:           newStaticServer(cfg.Roots, cfg.Fallback, log).handler(),
 		ReadHeaderTimeout: serverHeaderTimeout,
 		ReadTimeout:       serverReadTimeout,
 		WriteTimeout:      serverWriteTimeout,

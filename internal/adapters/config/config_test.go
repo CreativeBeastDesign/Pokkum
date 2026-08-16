@@ -223,48 +223,6 @@ func TestGenerateDefault(t *testing.T) {
 	}
 }
 
-func TestGetString(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	cfg, err := New(".", logger)
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-
-	// Test getting a value that doesn't exist - should return default
-	result := cfg.GetString("nonexistent", "default_value")
-	if result != "default_value" {
-		t.Errorf("expected 'default_value', got %q", result)
-	}
-
-	// Test environment variable precedence
-	os.Setenv("POKKUM_TEST_VAR", "env_value")
-	defer os.Unsetenv("POKKUM_TEST_VAR")
-
-	result = cfg.GetString("test.var", "default_value")
-	if result != "env_value" {
-		t.Errorf("expected 'env_value' from environment, got %q", result)
-	}
-}
-
-func TestGetBool(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	cfg, err := New(".", logger)
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-
-	// Test getting a value that doesn't exist - should return default
-	result := cfg.GetBool("nonexistent", false)
-	if result != false {
-		t.Errorf("expected false, got %v", result)
-	}
-
-	result = cfg.GetBool("nonexistent", true)
-	if result != true {
-		t.Errorf("expected true, got %v", result)
-	}
-}
-
 func TestResolveBuildTimestamp(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	cfg, err := New(".", logger)
@@ -303,31 +261,6 @@ func TestResolveBuildTimestamp(t *testing.T) {
 	} else if ts.Before(time.Now().Add(-365 * 24 * time.Hour)) {
 		// Reasonable git timestamp
 		t.Logf("ResolveBuildTimestamp resolved git timestamp: %v", ts)
-	}
-}
-
-func TestConfigPrecedence(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	cfg, err := New(".", logger)
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-
-	// Test precedence: explicit env var should win over default
-	os.Setenv("POKKUM_TEST_PRECEDENCE", "env_wins")
-	defer os.Unsetenv("POKKUM_TEST_PRECEDENCE")
-
-	result := cfg.GetString("test.precedence", "default")
-	if result != "env_wins" {
-		t.Errorf("expected 'env_wins' from env var, got %q", result)
-	}
-
-	// Clear env var and test default
-	os.Unsetenv("POKKUM_TEST_PRECEDENCE")
-
-	result = cfg.GetString("test.precedence", "default")
-	if result != "default" {
-		t.Errorf("expected 'default', got %q", result)
 	}
 }
 
@@ -451,5 +384,180 @@ func TestApplyProfile_AdversarialDeepCopyIsolation(t *testing.T) {
 	}
 	if baseCfg.Security.AllowSecretPatterns[0] != "pat1" {
 		t.Errorf("baseCfg.Security.AllowSecretPatterns was mutated through merged config")
+	}
+}
+
+// TestLoad_KnownFieldsRejectsTypo verifies that Load fails fast on an
+// unknown/misspelled top-level key (e.g. "strategey:" instead of
+// "strategy:") instead of silently dropping it, matching this repo's
+// fail-fast-before-any-network-call convention.
+func TestLoad_KnownFieldsRejectsTypo(t *testing.T) {
+	tmpDir := t.TempDir()
+	mgr, err := New(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	badCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+strategey: layered
+`
+	cfgPath := filepath.Join(tmpDir, ConfigFilename)
+	if err := os.WriteFile(cfgPath, []byte(badCfg), 0644); err != nil {
+		t.Fatalf("failed to write %s: %v", ConfigFilename, err)
+	}
+
+	if _, err := mgr.Load(tmpDir); err == nil {
+		t.Fatal("expected Load to reject unknown field 'strategey', got nil error")
+	}
+}
+
+// TestLoad_KnownFieldsRejectsNestedTypo checks the same enforcement applies
+// to a misspelled key nested inside a profile, not just at the top level.
+func TestLoad_KnownFieldsRejectsNestedTypo(t *testing.T) {
+	tmpDir := t.TempDir()
+	mgr, err := New(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	badCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+profiles:
+  local:
+    securty:
+      fail_on_cve: high
+`
+	cfgPath := filepath.Join(tmpDir, ConfigFilename)
+	if err := os.WriteFile(cfgPath, []byte(badCfg), 0644); err != nil {
+		t.Fatalf("failed to write %s: %v", ConfigFilename, err)
+	}
+
+	if _, err := mgr.Load(tmpDir); err == nil {
+		t.Fatal("expected Load to reject unknown nested field 'securty', got nil error")
+	}
+}
+
+// TestLoad_EmptyFileStillParses ensures the KnownFields switch to
+// yaml.Decoder didn't regress the pre-existing behavior of a present but
+// empty .pokkum.yaml (Decoder.Decode returns io.EOF on an empty document,
+// unlike yaml.Unmarshal, which silently no-ops).
+func TestLoad_EmptyFileStillParses(t *testing.T) {
+	tmpDir := t.TempDir()
+	mgr, err := New(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	cfgPath := filepath.Join(tmpDir, ConfigFilename)
+	if err := os.WriteFile(cfgPath, []byte(""), 0644); err != nil {
+		t.Fatalf("failed to write %s: %v", ConfigFilename, err)
+	}
+
+	cfg, err := mgr.Load(tmpDir)
+	if err != nil {
+		t.Fatalf("expected empty config file to parse without error, got: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil zero-value config for empty file")
+	}
+}
+
+// TestApplyProfile_DockerRepoOverride verifies a profile can override the
+// base config's docker.repo (e.g. a "production" profile pushing to a
+// different registry than the default/local profile).
+func TestApplyProfile_DockerRepoOverride(t *testing.T) {
+	mgr, err := New(".", nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	baseCfg := &ports.ProjectConfig{
+		Version: 1,
+		Docker:  ports.DockerConfig{Repo: "ghcr.io/test/app-staging"},
+		Profiles: map[string]ports.BuildProfile{
+			"production": {
+				Docker: ports.DockerConfig{Repo: "ghcr.io/test/app-prod"},
+			},
+		},
+	}
+
+	merged, err := mgr.ApplyProfile(baseCfg, "production")
+	if err != nil {
+		t.Fatalf("ApplyProfile failed: %v", err)
+	}
+	if merged.Docker.Repo != "ghcr.io/test/app-prod" {
+		t.Errorf("expected Docker.Repo overridden to ghcr.io/test/app-prod, got %q", merged.Docker.Repo)
+	}
+	if baseCfg.Docker.Repo != "ghcr.io/test/app-staging" {
+		t.Errorf("baseCfg.Docker.Repo was unexpectedly mutated: %q", baseCfg.Docker.Repo)
+	}
+}
+
+// TestLoad_ExampleGoldenFixture parses the canonical example config
+// (testdata/config/pokkum.yaml.golden) end-to-end through Load, so the
+// documented example can never silently drift out of sync with the real
+// schema (KnownFields(true) would reject it outright on any typo'd or
+// removed field) or with the "local"/"production" profile-merge behavior it
+// demonstrates.
+func TestLoad_ExampleGoldenFixture(t *testing.T) {
+	goldenPath := filepath.Join("..", "..", "..", "testdata", "config", "pokkum.yaml.golden")
+	data, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("failed to read golden fixture %s: %v", goldenPath, err)
+	}
+
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, ConfigFilename), data, 0644); err != nil {
+		t.Fatalf("failed to stage golden fixture as %s: %v", ConfigFilename, err)
+	}
+
+	mgr, err := New(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	cfg, err := mgr.Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load failed on golden fixture: %v", err)
+	}
+
+	if cfg.Docker.Repo != "ghcr.io/example/my-sveltekit-app" {
+		t.Errorf("expected base docker.repo, got %q", cfg.Docker.Repo)
+	}
+	if len(cfg.Profiles) != 2 {
+		t.Fatalf("expected 2 profiles (local, production), got %d", len(cfg.Profiles))
+	}
+
+	local, ok := cfg.Profiles["local"]
+	if !ok {
+		t.Fatal("expected 'local' profile in golden fixture")
+	}
+	if local.Output != "local" || local.Security.VerifyBase == nil || *local.Security.VerifyBase {
+		t.Errorf("unexpected 'local' profile contents: %+v", local)
+	}
+
+	prod, ok := cfg.Profiles["production"]
+	if !ok {
+		t.Fatal("expected 'production' profile in golden fixture")
+	}
+	if prod.Docker.Repo != "ghcr.io/example/my-sveltekit-app-prod" {
+		t.Errorf("expected 'production' profile docker.repo override, got %q", prod.Docker.Repo)
+	}
+
+	// Applying the "production" profile must actually change the resolved
+	// repo and fail_on_cve relative to the base config, proving the two
+	// profiles demonstrate meaningfully different overrides end-to-end.
+	merged, err := mgr.ApplyProfile(cfg, "production")
+	if err != nil {
+		t.Fatalf("ApplyProfile(production) failed: %v", err)
+	}
+	if merged.Docker.Repo != "ghcr.io/example/my-sveltekit-app-prod" {
+		t.Errorf("expected merged repo to reflect production override, got %q", merged.Docker.Repo)
+	}
+	if merged.Security.FailOnCVE != "critical" {
+		t.Errorf("expected merged fail_on_cve overridden to critical, got %q", merged.Security.FailOnCVE)
 	}
 }

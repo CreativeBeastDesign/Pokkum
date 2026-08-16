@@ -1039,6 +1039,14 @@ func fanOut(
 				// trees that pokkum-static serves.
 				pkgReq.AppClientDir = filepath.Join(prep.OutputDir, "client")
 				pkgReq.AppPrerenderedDir = filepath.Join(prep.OutputDir, "prerendered")
+				// Optional SPA fallback: the leaf filename adapter-static emitted
+				// in the client staging. Only set for static builds that actually
+				// configured one (Prepare returns it non-empty just for those).
+				// The packager stamps POKKUM_STATIC_FALLBACK to the in-image path
+				// AppClientDirPrefix/<rel> and verifies the file was staged.
+				if rel := prep.StaticFallbackRelPath; rel != "" {
+					pkgReq.StaticFallback = ports.AppClientDirPrefix + "/" + rel
+				}
 			}
 
 			img, err := deps.Packager.Build(gctx, pkgReq)

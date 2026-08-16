@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,7 +30,14 @@ func writeTree(t *testing.T, files map[string]string) string {
 func newTestServer(t *testing.T, roots ...string) *staticServer {
 	t.Helper()
 	// Use a discarding logger to keep output quiet.
-	return newStaticServer(roots, nil)
+	return newStaticServer(roots, "", nil)
+}
+
+// newTestServerFallback builds a test server with an opt-in SPA fallback file
+// path configured.
+func newTestServerFallback(t *testing.T, roots []string, fallback string, log *slog.Logger) *staticServer {
+	t.Helper()
+	return newStaticServer(roots, fallback, log)
 }
 
 func TestStaticServer_ServesIndexFromRoot(t *testing.T) {
@@ -302,5 +311,297 @@ func TestStaticServer_404(t *testing.T) {
 	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/missing.txt", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("missing = %d, want 404", rec.Code)
+	}
+}
+
+func TestStaticServer_Fallback_OnMiss(t *testing.T) {
+	root := writeTree(t, map[string]string{"index.html": "<h1>home</h1>"})
+	fallback := filepath.Join(root, "index.html")
+	srv := newTestServerFallback(t, []string{root}, fallback, nil)
+
+	// An unknown route gets the fallback shell with 200, not a 404.
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/some/client/route", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unknown route with fallback = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "<h1>home</h1>" {
+		t.Errorf("fallback body = %q, want the fallback shell content", got)
+	}
+}
+
+func TestStaticServer_Fallback_NotForExistingRoute(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"index.html": "<h1>home</h1>",
+		"about.html": "<h1>about</h1>",
+	})
+	fallback := filepath.Join(root, "index.html")
+	srv := newTestServerFallback(t, []string{root}, fallback, nil)
+
+	// An existing route must still serve its own file, not the fallback.
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/about.html", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("existing route = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "<h1>about</h1>" {
+		t.Errorf("existing route body = %q, want its own content, not the fallback", got)
+	}
+}
+
+func TestStaticServer_Fallback_MethodNotAllowed(t *testing.T) {
+	root := writeTree(t, map[string]string{"index.html": "<h1>home</h1>"})
+	fallback := filepath.Join(root, "index.html")
+	srv := newTestServerFallback(t, []string{root}, fallback, nil)
+
+	// A non-GET/HEAD method to an unknown route must still be 405, never a
+	// 200 fallback — the fallback concept only applies to GET/HEAD.
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(method, "/unknown", nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s unknown route = %d, want 405", method, rec.Code)
+		}
+	}
+}
+
+func TestStaticServer_Fallback_TraversalRejected(t *testing.T) {
+	root := writeTree(t, map[string]string{"index.html": "<h1>home</h1>"})
+	fallback := filepath.Join(root, "index.html")
+	srv := newTestServerFallback(t, []string{root}, fallback, nil)
+
+	// A traversal-requested unknown route must never be served the fallback:
+	// the fallback serves on a *clean* route miss only.
+	for _, p := range []string{"/..", "/../index.html", "/..%2Findex.html", "/a/../../index.html"} {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code == http.StatusOK {
+			t.Errorf("traversal path %q was served fallback (200)", p)
+		}
+	}
+}
+
+func TestStaticServer_Fallback_OutsideRootRejected(t *testing.T) {
+	outside := writeTree(t, map[string]string{"index.html": "<h1>outside</h1>"})
+	root := writeTree(t, map[string]string{"index.html": "<h1>inside</h1>"})
+
+	// A fallback path that resolves outside the served root must be rejected
+	// at construction (fallback disabled, Warn logged), never served.
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	srv := newTestServerFallback(t, []string{root}, filepath.Join(outside, "index.html"), logger)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/unknown", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown route with out-of-root fallback = %d, want 404 (fallback rejected)", rec.Code)
+	}
+	if rec.Body.String() == "<h1>outside</h1>" {
+		t.Errorf("served fallback file from outside the served root; must be rejected")
+	}
+	if !strings.Contains(buf.String(), "outside every served root") {
+		t.Errorf("expected a construction-time Warn about the out-of-root fallback, got: %s", buf.String())
+	}
+}
+
+func TestStaticServer_Fallback_NegotiationWithSidecar(t *testing.T) {
+	root := writeTree(t, map[string]string{"index.html": strings.Repeat("SPA shell ", 8)})
+	// A real gzip sidecar for the fallback, simulating precompressutils.
+	if err := os.WriteFile(filepath.Join(root, "index.html.gz"), []byte("gzbytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fallback := filepath.Join(root, "index.html")
+	srv := newTestServerFallback(t, []string{root}, fallback, nil)
+
+	// The fallback must honour Content-Encoding negotiation like any file.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/unknown/route", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	srv.handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unknown route with fallback (gzip) = %d, want 200", rec.Code)
+	}
+	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+		t.Errorf("fallback Content-Encoding = %q, want gzip", enc)
+	}
+	if got := rec.Body.String(); got != "gzbytes" {
+		t.Errorf("fallback gzip body = %q, want the gzip sidecar bytes", got)
+	}
+	if rec.Header().Get("ETag") == "" {
+		t.Error("fallback response should carry an ETag")
+	}
+}
+
+func TestStaticServer_Fallback_DefaultStill404(t *testing.T) {
+	root := writeTree(t, map[string]string{"index.html": "<h1>home</h1>"})
+	// No fallback configured (default behavior preserved).
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/unknown", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown route without fallback = %d, want 404", rec.Code)
+	}
+	// The 404 body must remain the clean default — no dev-marker HTML comment.
+	if body := rec.Body.String(); strings.Contains(body, "<!--") || strings.Contains(body, "SPA") {
+		t.Errorf("unset-fallback 404 body leaked a dev marker: %q", body)
+	}
+	if got := rec.Body.String(); got == "" || strings.Contains(got, "pokkum") {
+		t.Errorf("404 body = %q, want the standard clean 404 page", got)
+	}
+}
+
+func TestStaticServer_Fallback_DeletedAtRequestTimeIsMiss(t *testing.T) {
+	root := writeTree(t, map[string]string{"index.html": "<h1>home</h1>"})
+	fallback := filepath.Join(root, "index.html")
+	srv := newTestServerFallback(t, []string{root}, fallback, nil)
+
+	// Serve normally while the fallback exists.
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/unknown", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unknown route with fallback = %d, want 200", rec.Code)
+	}
+
+	// Delete the fallback file: the configured fallback is no longer a regular
+	// file, so an unmatched route must be an honest 404 miss, never a 500.
+	if err := os.Remove(fallback); err != nil {
+		t.Fatal(err)
+	}
+	rec2 := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/unknown", nil))
+	if rec2.Code != http.StatusNotFound {
+		t.Errorf("unknown route after fallback deleted = %d, want 404 (miss, not 500)", rec2.Code)
+	}
+}
+
+func TestStaticServer_Fallback_WarnOnceOn404WhenUnset(t *testing.T) {
+	root := writeTree(t, map[string]string{"a.txt": "x"})
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	// Each server owns its own one-per-server (one-per-process) once, so a
+	// fresh instance warns exactly once regardless of prior servers/tests.
+	srv := newStaticServer([]string{root}, "", logger)
+
+	for i := 0; i < 5; i++ {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/missing.txt", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("iteration %d = %d, want 404", i, rec.Code)
+		}
+	}
+	if got := strings.Count(buf.String(), "SPA fallback is available"); got != 1 {
+		t.Errorf("warned %d time(s), want exactly 1 (one-per-process)", got)
+	}
+}
+
+// TestStaticServer_Fallback_SymlinkSwapAfterConstructionRejected is a
+// regression test for the TOCTOU gap where fallbackFileOK only re-checked
+// os.Stat at serve time, not the same EvalSymlinks + root-containment check
+// configureFallback performs at construction. If the file at the validated
+// fallback path is later replaced by a symlink pointing outside every served
+// root (e.g. an emptyDir mount swap), the server must fall back to an honest
+// 404 rather than serving the escaped content.
+func TestStaticServer_Fallback_SymlinkSwapAfterConstructionRejected(t *testing.T) {
+	outside := writeTree(t, map[string]string{"secret.html": "<h1>secret</h1>"})
+	root := writeTree(t, map[string]string{"index.html": "<h1>home</h1>"})
+	fallback := filepath.Join(root, "index.html")
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	srv := newTestServerFallback(t, []string{root}, fallback, logger)
+
+	// Sanity: the fallback works normally before the swap.
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/unknown", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("before swap: unknown route = %d, want 200", rec.Code)
+	}
+
+	// Simulate a mount swap after construction: the file at the validated
+	// fallback path becomes a symlink escaping the served root.
+	if err := os.Remove(fallback); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.html"), fallback); err != nil {
+		t.Fatal(err)
+	}
+
+	rec2 := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/unknown", nil))
+	if rec2.Code != http.StatusNotFound {
+		t.Errorf("after symlink swap outside root: unknown route = %d, want 404 (miss)", rec2.Code)
+	}
+	if strings.Contains(rec2.Body.String(), "secret") {
+		t.Errorf("served content from outside the root after a symlink swap: %q", rec2.Body.String())
+	}
+}
+
+// TestStaticServer_Fallback_BrokenLogsDistinctMessageOnce is a regression
+// test for warnFallbackOnce firing the wrong ("you might want this feature")
+// message when a fallback WAS configured but broke at serve time. The
+// broken-fallback case must log its own distinct message, exactly once, and
+// must never emit the discovery message meant for the "nothing configured"
+// case.
+func TestStaticServer_Fallback_BrokenLogsDistinctMessageOnce(t *testing.T) {
+	root := writeTree(t, map[string]string{"index.html": "<h1>home</h1>"})
+	fallback := filepath.Join(root, "index.html")
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	srv := newTestServerFallback(t, []string{root}, fallback, logger)
+
+	if err := os.Remove(fallback); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 3; i++ {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/unknown", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("iteration %d = %d, want 404", i, rec.Code)
+		}
+	}
+
+	logged := buf.String()
+	if got := strings.Count(logged, "no longer resolves to a valid file"); got != 1 {
+		t.Errorf("broken-fallback warning logged %d time(s), want exactly 1 (one-per-process): %s", got, logged)
+	}
+	if strings.Contains(logged, "SPA fallback is available via") {
+		t.Errorf("the unconfigured-mode discovery message fired for a broken, already-configured fallback: %s", logged)
+	}
+}
+
+// TestStaticServer_Fallback_HashLookingFilenameStillNoCache is a regression
+// test for the fallback shell getting a year-long immutable Cache-Control
+// purely because its configured filename happens to match SvelteKit's
+// "name-<hash>.ext" convention (e.g. fallback: 'fallback-abc123.html'). The
+// fallback is an SPA entry point that must revalidate on every deploy.
+func TestStaticServer_Fallback_HashLookingFilenameStillNoCache(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"fallback-abc123.html": "<h1>spa shell</h1>",
+	})
+	fallback := filepath.Join(root, "fallback-abc123.html")
+	srv := newTestServerFallback(t, []string{root}, fallback, nil)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/some/unknown/route", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unknown route with fallback = %d, want 200", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("hash-looking fallback filename Cache-Control = %q, want no-cache (never immutable)", cc)
+	}
+}
+
+// TestCachePolicy_FallbackForcesNoCacheEvenWhenHashLooking directly exercises
+// cachePolicy's isFallback override, and confirms the override is actually
+// load-bearing (the same path without it would get immutable caching).
+func TestCachePolicy_FallbackForcesNoCacheEvenWhenHashLooking(t *testing.T) {
+	path := "/app/client/fallback-abc123.html"
+	if got := cachePolicy(path, true); got != "no-cache" {
+		t.Errorf("cachePolicy(%q, isFallback=true) = %q, want no-cache", path, got)
+	}
+	if got := cachePolicy(path, false); got == "no-cache" {
+		t.Errorf("cachePolicy(%q, isFallback=false) = %q, expected the hash-looking heuristic to apply here (otherwise this test no longer proves the override matters)", path, got)
 	}
 }

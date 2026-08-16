@@ -627,8 +627,17 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "If-None-Match: $ETAG" "$BASE/"   # 
 curl -s -D- -H 'Accept-Encoding: gzip' "$BASE/" -o /tmp/served.bin | grep -i 'content-encoding'
 file /tmp/served.bin        # → 'gzip compressed data', and NOT the on-the-fly variant
 
-# 6. Unknown route → 404 (pure static site has no fallback unless configured)
+# 6. Unknown route → 404 (pure static site has no fallback by default)
 curl -s -o /dev/null -w '%{http_code}\n' "$BASE/does-not-exist"          # → 404
+#    The 404 is honest and clean (no dev-marker HTML comment), though the
+#    server logs a one-per-process Warn noting that an opt-in SPA fallback
+#    exists via POKKUM_STATIC_FALLBACK / -fallback.
+
+# 6b. (Optional) Opt-in SPA fallback — rebuild with a fallback page:
+#     a static project whose svelte.config.js sets adapter({ fallback: '200.html' })
+#     emits client/200.html; the packager stamps POKKUM_STATIC_FALLBACK=/app/client/200.html.
+#     Then an unmatched GET/HEAD returns the shell with 200:
+#     curl -s -D- -H 'Accept-Encoding: gzip' "$BASE/unknown-route" | grep -iE 'HTTP|content-type'
 
 docker stop pokkum-static-test
 ```

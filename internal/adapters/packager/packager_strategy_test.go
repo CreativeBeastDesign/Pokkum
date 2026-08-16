@@ -271,3 +271,86 @@ func TestBuild_LayeredPrerenderedEnvSetEvenWhenDirAbsent(t *testing.T) {
 		t.Errorf("history CreatedBy = %v, want %v (no prerendered layer should have been added for a missing directory)", got, want)
 	}
 }
+
+// TestBuild_StrategyStatic_FallbackEnv covers the opt-in SPA-fallback staging
+// contract in the static branch: with req.StaticFallback set to an in-image
+// path whose file is staged under the client root, Build stamps
+// ports.EnvStaticFallback to that exact path; with the file absent it fails
+// (never silently drops the SPA shell); layered/exe never stamp it.
+func TestBuild_StrategyStatic_FallbackEnv(t *testing.T) {
+	t.Run("stamps env when fallback staged", func(t *testing.T) {
+		clientDir := writeStrategyDir(t, map[string]string{
+			"app.js":   "client asset",
+			"200.html": "<h1>spa shell</h1>",
+		})
+		req := newRequest(t, ports.LinuxAMD64)
+		req.Strategy = ports.StrategyStatic
+		req.StaticServer = []byte("fake-pokkum-static-binary")
+		req.AppClientDir = clientDir
+		req.AppPrerenderedDir = writeStrategyDir(t, map[string]string{"index.html": "prerendered page"})
+		req.StaticFallback = ports.AppClientDirPrefix + "/" + "200.html"
+
+		img, err := NewPackager(testLogger()).Build(context.Background(), req)
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		cfg := configOf(t, img)
+		got, ok := envValue(cfg.Config.Env, ports.EnvStaticFallback)
+		if !ok || got != ports.AppClientDirPrefix+"/200.html" {
+			t.Errorf("env %s = %q (ok=%v), want %q", ports.EnvStaticFallback, got, ok, ports.AppClientDirPrefix+"/200.html")
+		}
+	})
+
+	t.Run("fails when fallback configured but not staged", func(t *testing.T) {
+		req := newRequest(t, ports.LinuxAMD64)
+		req.Strategy = ports.StrategyStatic
+		req.StaticServer = []byte("fake-pokkum-static-binary")
+		req.AppClientDir = writeStrategyDir(t, map[string]string{"app.js": "client asset"})
+		req.AppPrerenderedDir = writeStrategyDir(t, map[string]string{"index.html": "prerendered page"})
+		// Configured fallback path whose file was never emitted in the client
+		// staging: the packager must fail, not silently drop it.
+		req.StaticFallback = ports.AppClientDirPrefix + "/" + "200.html"
+
+		_, err := NewPackager(testLogger()).Build(context.Background(), req)
+		if err == nil {
+			t.Fatal("build succeeded, want error for a fallback configured but not staged")
+		}
+		if !strings.Contains(err.Error(), "not staged") {
+			t.Errorf("error = %v, want to name the unstaged fallback", err)
+		}
+	})
+
+	t.Run("rejects fallback outside client root", func(t *testing.T) {
+		req := newRequest(t, ports.LinuxAMD64)
+		req.Strategy = ports.StrategyStatic
+		req.StaticServer = []byte("fake-pokkum-static-binary")
+		req.AppClientDir = writeStrategyDir(t, map[string]string{"app.js": "client asset"})
+		req.AppPrerenderedDir = writeStrategyDir(t, map[string]string{"index.html": "prerendered page"})
+		// An in-image path not under the client root is a config error.
+		req.StaticFallback = "/etc/passwd"
+
+		_, err := NewPackager(testLogger()).Build(context.Background(), req)
+		if err == nil {
+			t.Fatal("build succeeded, want error for a fallback outside the client root")
+		}
+	})
+
+	t.Run("layered and exe never stamp fallback env", func(t *testing.T) {
+		for _, strategy := range []ports.BuildStrategy{ports.StrategyLayered, ports.StrategyExe} {
+			req := newRequest(t, ports.LinuxAMD64)
+			req.Strategy = strategy
+			if strategy == ports.StrategyLayered {
+				req.BunRuntime = ports.BunResolverResult{BinaryPath: writeBinary(t, "bun", []byte("bun"))}
+				req.AppServerDir = writeStrategyDir(t, map[string]string{"index.js": "server entry"})
+			}
+			req.StaticFallback = ports.AppClientDirPrefix + "/200.html"
+			img, err := NewPackager(testLogger()).Build(context.Background(), req)
+			if err != nil {
+				t.Fatalf("build %s: %v", strategy, err)
+			}
+			if _, ok := envValue(configOf(t, img).Config.Env, ports.EnvStaticFallback); ok {
+				t.Errorf("%s image must not carry %s env", strategy, ports.EnvStaticFallback)
+			}
+		}
+	})
+}

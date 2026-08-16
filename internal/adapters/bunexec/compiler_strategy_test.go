@@ -78,11 +78,17 @@ func TestPrepare_StrategyDispatch(t *testing.T) {
 			wantOutputDir: func(dir string) string {
 				return filepath.Join(dir, "build")
 			},
+			// Deliberately does NOT write build/assets.generated.ts: that file
+			// is exclusively a @jesterkit/exe-sveltekit artifact (the exe
+			// strategy's adapter). A real @sveltejs/adapter-node build (what
+			// StrategyLayered actually uses) never produces one — an earlier
+			// version of this fixture wrote a fake one anyway, which
+			// accidentally satisfied a normalization step that was, at the
+			// time, incorrectly applied to every non-static strategy instead
+			// of StrategyExe only, masking that bug entirely. See Lessons.md.
 			bunScript: `set -e
 mkdir -p build
 printf 'export default {};\n' > build/index.js
-cat > build/assets.generated.ts <<'EOF'
-` + validAssetsGenerated + `EOF
 cat > build/handler.js <<'EOF'
 ` + validHandlerJS + `EOF
 exit 0
@@ -183,5 +189,124 @@ exit 0
 				}
 			}
 		})
+	}
+}
+
+// --- Prepare: opt-in SPA-fallback detection (StrategyStatic) ----------------
+//
+// These tests drive Prepare's static branch through real projects whose
+// svelte.config.js configures (or not) an adapter-static `fallback`, using the
+// same fake-bun harness as TestPrepare_StrategyDispatch. They pin the
+// config-driven + output-verified detection contract: the fallback leaf name
+// comes from the user's config (readConfigSource), the emitted file must exist
+// in the client staging, and a configured-but-unemitted (or path-escaping)
+// fallback is a hard Prepare failure — never a silently dropped SPA shell.
+
+// fallbackStaticConfig is a minimal static svelte.config.js with an
+// adapter-static SPA fallback set.
+const fallbackStaticConfig = `
+import adapter from "@sveltejs/adapter-static";
+
+export default {
+	kit: {
+		adapter: adapter({ fallback: "200.html" })
+	}
+};
+`
+
+// noFallbackStaticConfig is a static config with no SPA fallback.
+const noFallbackStaticConfig = `
+import adapter from "@sveltejs/adapter-static";
+
+export default {
+	kit: {
+		adapter: adapter({})
+	}
+};
+`
+
+// staticBuildScript returns a fake `bun run build` body that emits the
+// .svelte-kit/output staging tree Prepare expects for a static build. extra is
+// emitted verbatim after the prerendered dir is created (used to optionally
+// add client/<fallback>).
+func staticBuildScript(extra string) string {
+	return "set -e\nmkdir -p .svelte-kit/output/prerendered\n" + extra + "exit 0\n"
+}
+
+func TestPrepare_StaticFallback_Emitted(t *testing.T) {
+	dir := newProjectDir(t, validPackageJSON, fallbackStaticConfig)
+	putFakeBunOnPath(t, staticBuildScript("mkdir -p .svelte-kit/output/client\nprintf '<h1>spa</h1>' > .svelte-kit/output/client/200.html\n"))
+	c := NewCompiler(discardLogger())
+
+	res, err := c.Prepare(context.Background(), ports.PrepareRequest{
+		ProjectDir:      dir,
+		Strategy:        ports.StrategyStatic,
+		SourceDateEpoch: time.Unix(0, 0),
+	})
+	if err != nil {
+		t.Fatalf("Prepare() error = %v, want nil", err)
+	}
+	if res.StaticFallbackRelPath != "200.html" {
+		t.Errorf("StaticFallbackRelPath = %q, want %q", res.StaticFallbackRelPath, "200.html")
+	}
+}
+
+func TestPrepare_StaticFallback_ConfiguredButNotEmitted(t *testing.T) {
+	dir := newProjectDir(t, validPackageJSON, fallbackStaticConfig)
+	// The bun build emits prerendered but NOT client/200.html — the SPA shell
+	// was configured yet never produced.
+	putFakeBunOnPath(t, staticBuildScript(""))
+	c := NewCompiler(discardLogger())
+
+	_, err := c.Prepare(context.Background(), ports.PrepareRequest{
+		ProjectDir:      dir,
+		Strategy:        ports.StrategyStatic,
+		SourceDateEpoch: time.Unix(0, 0),
+	})
+	if err == nil {
+		t.Fatal("Prepare succeeded, want error for a configured-but-unemitted fallback")
+	}
+	if !strings.Contains(err.Error(), "not emitted") {
+		t.Errorf("error = %v, want to name the unemitted fallback", err)
+	}
+}
+
+func TestPrepare_StaticFallback_None(t *testing.T) {
+	dir := newProjectDir(t, validPackageJSON, noFallbackStaticConfig)
+	putFakeBunOnPath(t, staticBuildScript(""))
+	c := NewCompiler(discardLogger())
+
+	res, err := c.Prepare(context.Background(), ports.PrepareRequest{
+		ProjectDir:      dir,
+		Strategy:        ports.StrategyStatic,
+		SourceDateEpoch: time.Unix(0, 0),
+	})
+	if err != nil {
+		t.Fatalf("Prepare() error = %v, want nil", err)
+	}
+	if res.StaticFallbackRelPath != "" {
+		t.Errorf("StaticFallbackRelPath = %q, want empty when no fallback is configured", res.StaticFallbackRelPath)
+	}
+}
+
+func TestPrepare_StaticFallback_PathEscapeRejected(t *testing.T) {
+	cfg := `
+import adapter from "@sveltejs/adapter-static";
+export default { kit: { adapter: adapter({ fallback: "../../../etc/passwd" }) } };
+`
+	dir := newProjectDir(t, validPackageJSON, cfg)
+	putFakeBunOnPath(t, staticBuildScript(""))
+	c := NewCompiler(discardLogger())
+
+	_, err := c.Prepare(context.Background(), ports.PrepareRequest{
+		ProjectDir:      dir,
+		Strategy:        ports.StrategyStatic,
+		SourceDateEpoch: time.Unix(0, 0),
+	})
+	if err == nil {
+		t.Fatal("Prepare succeeded, want error for a path-escaping fallback name")
+	}
+	if !strings.Contains(err.Error(), "not a plain filename") {
+		t.Errorf("error = %v, want to reject the non-plain fallback name", err)
 	}
 }

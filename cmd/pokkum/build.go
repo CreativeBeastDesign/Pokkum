@@ -419,13 +419,10 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 		ProjectDir: projectDir,
 	}
 
-	// Repo: from env, then project config / profile, then viper config, then error if missing (for push mode)
+	// Repo: from env, then project config / profile, then error if missing (for push mode)
 	repo := os.Getenv("POKKUM_DOCKER_REPO")
 	if repo == "" && projCfg != nil {
 		repo = projCfg.Docker.Repo
-	}
-	if repo == "" {
-		repo = cfg.GetString("docker.repo", "")
 	}
 	req.Repo = repo
 
@@ -542,8 +539,6 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 			sourcemapSetting = envVal == "1" || strings.EqualFold(envVal, "true") || strings.EqualFold(envVal, "yes")
 		} else if activeProfile != "" && projCfg != nil && projCfg.Profiles[activeProfile].Sourcemap != nil {
 			sourcemapSetting = *projCfg.Profiles[activeProfile].Sourcemap
-		} else {
-			sourcemapSetting = cfg.GetBool("compile.sourcemap", false)
 		}
 	}
 
@@ -721,9 +716,6 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	}
 	if failOnCVESetting == "" && projCfg != nil {
 		failOnCVESetting = projCfg.Security.FailOnCVE
-	}
-	if failOnCVESetting == "" {
-		failOnCVESetting = cfg.GetString("security.fail_on_cve", "")
 	}
 	if failOnCVESetting != "" {
 		if failOnCVESetting == "1" || strings.EqualFold(failOnCVESetting, "true") || strings.EqualFold(failOnCVESetting, "yes") {

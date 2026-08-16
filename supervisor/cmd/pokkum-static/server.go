@@ -44,12 +44,37 @@ type staticServer struct {
 	// resolving them per request (as withinRoot used to) was pure redundant
 	// syscall work repeated on every single request.
 	canonicalRoots []string
-	log            *slog.Logger
+	// fallbackPath is the resolved in-image path of the opt-in SPA-fallback
+	// file, non-empty only when a fallback was configured AND successfully
+	// validated at construction (a regular file within one of the served
+	// roots). Unmatched GET/HEAD routes are served this file with 200.
+	fallbackPath string
+	// fallbackRel is the path of the fallback relative to the served root it
+	// lives in (informational, used for logging).
+	fallbackRel string
+	// fallbackCanonicalRoot is the canonical root (see canonicalizeRoot) that
+	// fallbackPath was validated to lie within at construction time. Retained
+	// so fallbackFileOK can re-run that same containment check on every
+	// serve-time miss, not just once at startup — see fallbackFileOK.
+	fallbackCanonicalRoot string
+	// fallbackWarnOnce gates the one-per-server (one-per-process) discovery
+	// log emitted on the first 404 while fallback mode is unset entirely.
+	fallbackWarnOnce sync.Once
+	// fallbackBrokenWarnOnce gates a distinct, one-per-server log emitted the
+	// first time a *configured* fallback fails its serve-time validity check
+	// (fallbackFileOK) — a real operational regression, not the "you might
+	// want this feature" discovery message fallbackWarnOnce covers.
+	fallbackBrokenWarnOnce sync.Once
+	log                    *slog.Logger
 }
 
 // newStaticServer builds a static server serving the given roots in order. A
-// nil logger discards output.
-func newStaticServer(roots []string, log *slog.Logger) *staticServer {
+// nil logger discards output. fallback is the opt-in SPA-fallback file (an
+// in-image path); empty disables it. If fallback is non-empty but cannot be
+// resolved to a regular file within one of the roots, it is rejected with a
+// construction-time Warn and disabled — the server keeps running and keeps
+// returning honest 404s rather than ever serving content outside the roots.
+func newStaticServer(roots []string, fallback string, log *slog.Logger) *staticServer {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -58,7 +83,50 @@ func newStaticServer(roots []string, log *slog.Logger) *staticServer {
 	for i, root := range rootsCopy {
 		canonicalRoots[i] = canonicalizeRoot(root)
 	}
-	return &staticServer{roots: rootsCopy, canonicalRoots: canonicalRoots, log: log}
+	s := &staticServer{roots: rootsCopy, canonicalRoots: canonicalRoots, log: log}
+	if fallback != "" {
+		s.configureFallback(fallback)
+	}
+	return s
+}
+
+// configureFallback resolves and validates the configured fallback file and
+// stores it on s. A path that cannot be resolved to a regular file lying within
+// one of the served roots is rejected and disables the fallback with a Warn —
+// security-critical: an attacker-controlled fallback path must never serve
+// bytes from outside the roots. Resolving and checking once at construction
+// (not per request) mirrors canonicalizeRoot's approach for the roots.
+func (s *staticServer) configureFallback(fallback string) {
+	resolved, err := filepath.EvalSymlinks(fallback)
+	if err != nil {
+		s.log.Warn("SPA fallback path could not be resolved; disabled",
+			"fallback", fallback, "error", err)
+		return
+	}
+	fi, err := os.Stat(resolved)
+	if err != nil || !fi.Mode().IsRegular() {
+		s.log.Warn("SPA fallback path is not a regular file; disabled",
+			"fallback", fallback, "resolved", resolved)
+		return
+	}
+	for i, root := range s.roots {
+		if !withinRoot(s.canonicalRoots[i], resolved) {
+			continue
+		}
+		rel, err := filepath.Rel(root, resolved)
+		if err != nil {
+			s.log.Warn("SPA fallback path could not be made relative to a root; disabled",
+				"fallback", fallback, "root", root, "error", err)
+			return
+		}
+		s.fallbackPath = resolved
+		s.fallbackRel = rel
+		s.fallbackCanonicalRoot = s.canonicalRoots[i]
+		s.log.Info("SPA fallback enabled", "path", fallback, "root", root, "rel", rel)
+		return
+	}
+	s.log.Warn("SPA fallback path is outside every served root; disabled",
+		"fallback", fallback)
 }
 
 // canonicalizeRoot resolves root's symlinks once. If root doesn't exist yet
@@ -81,7 +149,8 @@ func (s *staticServer) handler() http.Handler {
 }
 
 // serveHTTP resolves the request path against each root in order and serves the
-// first hit. Requests that resolve to no file get 404.
+// first hit. Requests that resolve to no file get the configured SPA fallback
+// (if any), else a plain 404.
 func (s *staticServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
@@ -100,7 +169,99 @@ func (s *staticServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// No root served the path. In opt-in SPA-fallback mode (a fallback file
+	// was configured and validated at construction), serve that shell for any
+	// unmatched GET/HEAD route instead of a 404. This is intentionally a
+	// per-request re-entry into serveFile so the fallback gets exactly the
+	// same ETag / Content-Encoding / Range negotiation as any other file.
+	// The fallback is re-validated — as a regular file AND as still safely
+	// contained within its root — here so that if it is removed, replaced,
+	// or (security-critical) swapped for a symlink escaping the root after
+	// construction, we fall through to an honest 404 (a miss), never a 500
+	// or, worse, serving bytes from outside every served root.
+	if s.fallbackPath != "" {
+		if resolved, ok := s.fallbackFileOK(); ok {
+			s.serveFile(w, r, resolved, true)
+			return
+		}
+		// Configured, but broke at serve time: a real operational
+		// regression, distinct from "fallback mode isn't configured at all".
+		s.warnFallbackBrokenOnce()
+		http.NotFound(w, r)
+		return
+	}
+	s.warnFallbackUnconfiguredOnce()
 	http.NotFound(w, r)
+}
+
+// fallbackFileOK reports whether the configured fallback path still resolves,
+// right now, to a regular file safely within the root it was validated
+// against at construction, returning the resolved path to serve. This
+// re-runs the SAME EvalSymlinks + containment check configureFallback
+// performed once at startup — not just an os.Stat — because the file at
+// fallbackPath could have been replaced by a symlink after construction
+// (e.g. an emptyDir mount swap in a deployment where
+// readOnlyRootFilesystem isn't actually enforced); os.Stat alone follows
+// symlinks silently, which would let such a swap serve arbitrary filesystem
+// content with 200 for every unmatched route.
+//
+// This runs on every unmatched route (a miss), not the common-case hit
+// path for a working SPA, so the extra EvalSymlinks syscall per miss is an
+// accepted, deliberate cost — caching the result would reintroduce exactly
+// the TOCTOU gap this re-check exists to close, and misses are not expected
+// to be the hot path for a correctly configured site.
+func (s *staticServer) fallbackFileOK() (resolved string, ok bool) {
+	resolved, err := filepath.EvalSymlinks(s.fallbackPath)
+	if err != nil {
+		return "", false
+	}
+	if !withinRoot(s.fallbackCanonicalRoot, resolved) {
+		s.log.Warn("SPA fallback path resolved outside its root at serve time; refusing",
+			"path", s.fallbackPath, "resolved", resolved)
+		return "", false
+	}
+	fi, err := os.Stat(resolved)
+	if err != nil || !fi.Mode().IsRegular() {
+		return "", false
+	}
+	return resolved, true
+}
+
+// warnFallbackUnconfiguredOnce logs (once) that the opt-in SPA-fallback mode
+// exists, only when no fallback was configured at all (s.fallbackPath == "").
+// It never mutates the response. The per-server once gates the log so a
+// developer who hits an unexpected route on an SPA site is told the opt-in
+// mode exists without spamming every 404; the 404 response body itself stays
+// clean — no dev-marker HTML is ever injected into production responses.
+func (s *staticServer) warnFallbackUnconfiguredOnce() {
+	s.fallbackWarnOnce.Do(func() {
+		s.log.Warn("unmatched route returned 404; SPA fallback is available via " +
+			"POKKUM_STATIC_FALLBACK / -fallback (see Vocabulary.md) when adapter-static " +
+			"emits a fallback page for this site")
+	})
+}
+
+// warnFallbackBrokenOnce logs (once) that a fallback WAS configured and
+// passed construction-time validation, but its file no longer resolves to a
+// valid, safely-contained regular file at serve time — a real operational
+// problem (the shell disappeared, or the mount underneath it changed), not
+// the "you might want this feature" discovery message
+// warnFallbackUnconfiguredOnce covers. It is deliberately its own sync.Once,
+// separate from warnFallbackUnconfiguredOnce, so the two conditions never
+// produce a misleading message for one another.
+//
+// Gated once-per-process rather than logged on every miss: the condition is
+// persistent once it occurs (a deleted/swapped file does not un-break
+// itself), so a single clear log line is sufficient operator signal, and
+// repeating it on every subsequent unmatched request would reproduce the
+// same log-flooding problem the original shared sync.Once was designed to
+// avoid.
+func (s *staticServer) warnFallbackBrokenOnce() {
+	s.fallbackBrokenWarnOnce.Do(func() {
+		s.log.Warn("configured SPA fallback no longer resolves to a valid file within its root; serving plain 404",
+			"fallback", s.fallbackPath)
+	})
 }
 
 // tryServe attempts to serve rel from root (canonicalRoot is root with
@@ -144,12 +305,15 @@ func (s *staticServer) tryServe(w http.ResponseWriter, r *http.Request, root, ca
 		resolved = idx
 	}
 
-	s.serveFile(w, r, resolved)
+	s.serveFile(w, r, resolved, false)
 	return true
 }
 
 // serveFile streams one regular file (resolved path) with negotiation.
-func (s *staticServer) serveFile(w http.ResponseWriter, r *http.Request, path string) {
+// isFallback marks a call serving the configured opt-in SPA-fallback shell
+// (see cachePolicy's isFallback parameter for why this needs to be threaded
+// through explicitly rather than inferred from path).
+func (s *staticServer) serveFile(w http.ResponseWriter, r *http.Request, path string, isFallback bool) {
 	// Content-Encoding negotiation: prefer a pre-built sidecar the client
 	// accepts, falling back to identity (the source file itself).
 	bodyPath, enc := s.pickEncoding(r, path)
@@ -168,7 +332,7 @@ func (s *staticServer) serveFile(w http.ResponseWriter, r *http.Request, path st
 		h.Add("Vary", "Accept-Encoding")
 	}
 	h.Set("Content-Type", ctype)
-	h.Set("Cache-Control", cachePolicy(path))
+	h.Set("Cache-Control", cachePolicy(path, isFallback))
 
 	// Strong ETag over the bytes actually served, so Range, Content-Encoding
 	// and precondition matches stay consistent with the payload.
@@ -373,7 +537,19 @@ func writeRange(w io.Writer, path string, start, end int64) error {
 // Files under /immutable/ or matching SvelteKit's content-hashed
 // "name-<hash>.<ext>" convention are served as immutable for a year; everything
 // else (HTML in particular) gets no-cache so it revalidates via its ETag.
-func cachePolicy(path string) string {
+//
+// isFallback forces no-cache regardless of the filename-shape heuristic below.
+// The configured SPA-fallback shell is an entry point that must be
+// re-fetched on every deploy so clients pick up new asset references — same
+// as index.html, which already gets no-cache "naturally" because its name
+// doesn't look hash-suffixed. A fallback filename that happens to look
+// hash-suffixed (e.g. a project configuring fallback: 'fallback-abc123.html')
+// must not fall through to looksHashed's immutable, year-long caching: that
+// would pin a stale deploy's shell in every intermediate cache.
+func cachePolicy(path string, isFallback bool) string {
+	if isFallback {
+		return "no-cache"
+	}
 	if strings.Contains(path, immutableAssetMarker) {
 		return "public, max-age=" + strconv.Itoa(immutableMaxAge) + ", immutable"
 	}

@@ -64,6 +64,7 @@ type BuildProfile struct {
 	Base      string         `yaml:"base,omitempty" json:"base,omitempty"`
 	Strategy  string         `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 	Sourcemap *bool          `yaml:"sourcemap,omitempty" json:"sourcemap,omitempty"`
+	Docker    DockerConfig   `yaml:"docker,omitempty" json:"docker,omitempty"`
 	Image     ImageConfig    `yaml:"image,omitempty" json:"image,omitempty"`
 	Security  SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
 	SBOM      SBOMConfig     `yaml:"sbom,omitempty" json:"sbom,omitempty"`

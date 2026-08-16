@@ -26,6 +26,11 @@ const (
 	envProbePort  = "POKKUM_PROBE_PORT"
 	envLogLevel   = "POKKUM_LOG_LEVEL"
 	envStaticRoot = "POKKUM_STATIC_ROOTS"
+	// envStaticFallback is the opt-in SPA-fallback file. When set to an
+	// in-image path, unmatched GET/HEAD routes are served that file with 200
+	// (same ETag/Content-Encoding/Range negotiation as any other served file).
+	// Default (empty) preserves the current plain-404 behavior.
+	envStaticFallback = "POKKUM_STATIC_FALLBACK"
 
 	defaultPort = 3000
 	// defaultProbePort mirrors ports.DefaultProbePort, deliberately distinct
@@ -63,6 +68,13 @@ type Config struct {
 	// root that contains the requested path wins. Written from
 	// POKKUM_STATIC_ROOTS (envStaticRoot).
 	Roots []string
+
+	// Fallback is the opt-in SPA-fallback file: an in-image path served with
+	// 200 for any unmatched GET/HEAD route (see envStaticFallback and
+	// -fallback). Empty means no fallback — unmatched routes keep returning a
+	// plain 404, the default and previously-tested contract. The path must live
+	// within one of the served Roots (validated at server construction).
+	Fallback string
 
 	// LogLevel is the minimum level for the stderr text handler.
 	LogLevel slog.Level
@@ -106,6 +118,10 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 			warnf("ignoring empty %s=%q", envStaticRoot, raw)
 		}
 	}
+	// Fallback is a plain string with no parse step: any non-empty value is
+	// taken verbatim (validation against the served roots happens at server
+	// construction, not config parse).
+	cfg.Fallback = getenv(envStaticFallback)
 
 	fs := flag.NewFlagSet("pokkum-static", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -121,6 +137,7 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 		flagPort  = fs.Int("port", cfg.Port, "static content listen port (env "+envPort+")")
 		flagProbe = fs.Int("probe-port", cfg.ProbePort, "port for /healthz and /readyz (env "+envProbePort+")")
 		flagRoots = fs.String("roots", strings.Join(cfg.Roots, string(filepath.ListSeparator)), "read-only static roots, path-list separated (env "+envStaticRoot+")")
+		flagFall  = fs.String("fallback", cfg.Fallback, "SPA fallback file served with 200 on unmatched GET/HEAD routes; empty disables (env "+envStaticFallback+")")
 		flagVer   = fs.Bool("version", false, "print the static server version and exit")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -146,6 +163,7 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 			warnf("ignoring empty -roots=%q", *flagRoots)
 		}
 	}
+	cfg.Fallback = *flagFall
 
 	if err := cfg.validate(); err != nil {
 		return cfg, warnings, err

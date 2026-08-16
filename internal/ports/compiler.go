@@ -398,6 +398,16 @@ type PrepareResult struct {
 	// embeds the static files. Informational; provided for diagnostics and for
 	// cleanup decisions made by core.
 	OutputDir string
+
+	// StaticFallbackRelPath is the leaf filename @sveltejs/adapter-static
+	// emitted as the SPA fallback page, relative to the static client output
+	// root (OutputDir/client). Non-empty only for StrategyStatic builds whose
+	// source configured an adapter-static fallback and where the file was
+	// genuinely emitted (verified by the Compiler during Prepare). core turns
+	// it into PackageRequest.StaticFallback (the in-image path
+	// AppClientDirPrefix/<rel>) and the packager stamps EnvStaticFallback.
+	// Empty means the project has no SPA fallback.
+	StaticFallbackRelPath string
 }
 
 // CompileRequest drives stage two: `bun build --compile --target=…` against the

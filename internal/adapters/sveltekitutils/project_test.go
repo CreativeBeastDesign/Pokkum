@@ -148,3 +148,152 @@ func TestCheckTelemetrySupported(t *testing.T) {
 		t.Errorf("expected supported=true for @sveltejs/kit %s", ver)
 	}
 }
+
+func TestStaticFallbackFilename(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     string
+		want    string
+		enabled bool
+	}{
+		{
+			name:    "single-quoted string",
+			cfg:     `import adapter from '@sveltejs/adapter-static'; export default { kit: { adapter: adapter({ fallback: '200.html' }) } };`,
+			want:    "200.html",
+			enabled: true,
+		},
+		{
+			name:    "double-quoted string",
+			cfg:     `adapter({ fallback: "index.html" })`,
+			want:    "index.html",
+			enabled: true,
+		},
+		{
+			name:    "backtick string",
+			cfg:     "adapter({ fallback: `app.html` })",
+			want:    "app.html",
+			enabled: true,
+		},
+		{
+			name:    "boolean true maps to adapter-static default 200.html",
+			cfg:     `adapter({ fallback: true })`,
+			want:    "200.html",
+			enabled: true,
+		},
+		{
+			name:    "explicit false disables",
+			cfg:     `adapter({ fallback: false })`,
+			want:    "",
+			enabled: false,
+		},
+		{
+			name:    "no fallback option",
+			cfg:     `adapter({})`,
+			want:    "",
+			enabled: false,
+		},
+		{
+			name:    "false beats a later true",
+			cfg:     `adapter({ fallback: true, fallback: false })`,
+			want:    "",
+			enabled: false,
+		},
+		{
+			// Regression: a commented-out mention must never be treated as
+			// live config. Before the comment-stripping fix, this made
+			// bunexec.Prepare hard-fail every build of a project whose
+			// config merely mentions "fallback" in a comment, since
+			// adapter-static never actually emits a fallback file for it.
+			name:    "commented single-line mention does not enable",
+			cfg:     "// fallback: '200.html'  // uncomment for SPA mode\nadapter({})",
+			want:    "",
+			enabled: false,
+		},
+		{
+			// Regression: a commented `fallback: false` must never suppress
+			// a real, live `fallback: '...'` elsewhere in the file. Before
+			// the fix, staticFallbackFalsePattern short-circuited on the
+			// comment text alone, silently shipping an SPA project with no
+			// fallback shell staged at all.
+			name:    "commented false does not suppress real live fallback",
+			cfg:     "// set fallback: false to disable\nadapter({ fallback: '200.html' })",
+			want:    "200.html",
+			enabled: true,
+		},
+		{
+			name:    "block comment around false does not suppress real live fallback",
+			cfg:     "/* fallback: false */\nadapter({ fallback: '200.html' })",
+			want:    "200.html",
+			enabled: true,
+		},
+		{
+			// String-literal awareness: the "//" inside the URL must not be
+			// misread as a line-comment opener, which would otherwise eat
+			// the real config that follows on the same line.
+			name:    "string literal with slashes does not break real config detection",
+			cfg:     `const help = "see https://example.com/docs#fallback"; adapter({ fallback: '200.html' })`,
+			want:    "200.html",
+			enabled: true,
+		},
+		{
+			// A string literal merely containing the substring "fallback:"
+			// (a route path / log message, not a real option) must not
+			// enable detection on its own.
+			name:    "string literal mention alone does not enable",
+			cfg:     `const help = "path is /docs/fallback: see the manual"; adapter({})`,
+			want:    "",
+			enabled: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, enabled := StaticFallbackFilename(tt.cfg)
+			if enabled != tt.enabled {
+				t.Errorf("enabled = %v, want %v", enabled, tt.enabled)
+			}
+			if got != tt.want {
+				t.Errorf("filename = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStripJSComments(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{"no comments", `adapter({ fallback: '200.html' })`, `adapter({ fallback: '200.html' })`},
+		{"line comment stripped", "adapter({}) // trailing note", "adapter({}) "},
+		{"block comment stripped to a space", "x/*comment*/y", "x y"},
+		{"multiline block comment stripped", "a/*\nmulti\nline\n*/b", "a b"},
+		{
+			"line comment inside single-quoted string preserved",
+			`const u = 'http://example.com';`,
+			`const u = 'http://example.com';`,
+		},
+		{
+			"line comment inside double-quoted string preserved",
+			`const u = "http://example.com";`,
+			`const u = "http://example.com";`,
+		},
+		{
+			"block-comment-looking text inside backtick string preserved",
+			"const s = `/* not a comment */`;",
+			"const s = `/* not a comment */`;",
+		},
+		{
+			"escaped quote inside string does not end the literal early",
+			`const s = "a \"quoted\" // word"; // real comment`,
+			`const s = "a \"quoted\" // word"; `,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripJSComments(tt.source); got != tt.want {
+				t.Errorf("stripJSComments(%q) = %q, want %q", tt.source, got, tt.want)
+			}
+		})
+	}
+}

@@ -28,3 +28,4 @@ testdata/fixtures/*/dist/
 # Editor
 .idea/
 .vscode/
+.gomodcache/cache/download/

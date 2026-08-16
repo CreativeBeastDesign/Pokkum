@@ -167,6 +167,139 @@ sbom:
 	if err == nil {
 		t.Fatal("expected error on invalid sbom format, got nil")
 	}
+
+	// 7. Invalid docker.repo (top-level)
+	badRepoCfg := `version: 1
+docker:
+  repo: "not a valid repo ref!!"
+`
+	_ = os.WriteFile(cfgPath, []byte(badRepoCfg), 0644)
+	err = runConfigValidate(nil, opts)
+	if err == nil {
+		t.Fatal("expected error on invalid top-level docker.repo, got nil")
+	}
+}
+
+// TestConfigValidateCommand_ProfileValidation exercises the profile
+// validation path of runConfigValidate: a valid top-level config with an
+// invalid field buried in a named profile must fail validation, name the
+// offending profile in the error, and a config with multiple profiles must
+// still catch an error on a non-first profile (regression coverage for the
+// map-iteration-order / multi-item pitfalls called out in the self-review
+// checklist).
+func TestConfigValidateCommand_ProfileValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, ports.ConfigFilename)
+	opts := &configValidateOptions{dir: tmpDir, output: "json"}
+
+	// 1. A single bad profile: invalid strategy.
+	badProfileCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+strategy: layered
+profiles:
+  local:
+    strategy: not-a-real-strategy
+`
+	_ = os.WriteFile(cfgPath, []byte(badProfileCfg), 0644)
+	err := runConfigValidate(nil, opts)
+	if err == nil {
+		t.Fatal("expected error when a profile has an invalid strategy, got nil")
+	}
+
+	// 2. Multiple profiles, only the second (non-first, alphabetically last)
+	// one is broken — must still be caught, and the error must name it.
+	multiProfileCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+strategy: layered
+profiles:
+  local:
+    base: chainguard
+  zzz-production:
+    base: not-a-real-base-preset
+`
+	_ = os.WriteFile(cfgPath, []byte(multiProfileCfg), 0644)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err = runConfigValidate(nil, opts)
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	if err == nil {
+		t.Fatal("expected error when a non-first profile has an invalid base preset, got nil")
+	}
+
+	var outBuf bytes.Buffer
+	_, _ = io.Copy(&outBuf, r)
+	var env ports.JSONEnvelope
+	if jsonErr := json.Unmarshal(outBuf.Bytes(), &env); jsonErr != nil {
+		t.Fatalf("expected valid JSON error envelope, got: %v", jsonErr)
+	}
+	if env.Error == nil || !strings.Contains(env.Error.Message, `profile "zzz-production"`) {
+		t.Errorf(`expected error to name profile "zzz-production", got: %v`, env.Error)
+	}
+
+	// 3. A profile with an invalid docker.repo override.
+	badProfileRepoCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+profiles:
+  production:
+    docker:
+      repo: "not a valid repo ref!!"
+`
+	_ = os.WriteFile(cfgPath, []byte(badProfileRepoCfg), 0644)
+	err = runConfigValidate(nil, opts)
+	if err == nil {
+		t.Fatal("expected error when a profile has an invalid docker.repo, got nil")
+	}
+
+	// 4. All profiles valid: must pass.
+	validProfilesCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+strategy: layered
+profiles:
+  local:
+    base: chainguard
+    strategy: static
+  production:
+    docker:
+      repo: ghcr.io/example/app-prod
+    security:
+      fail_on_cve: critical
+`
+	_ = os.WriteFile(cfgPath, []byte(validProfilesCfg), 0644)
+	if err := runConfigValidate(nil, opts); err != nil {
+		t.Fatalf("expected all-valid profiles to pass validation, got: %v", err)
+	}
+}
+
+// TestConfigValidateCommand_ExampleGoldenFixture proves `pokkum config
+// validate` actually accepts the documented canonical example
+// (testdata/config/pokkum.yaml.golden), including its "local" and
+// "production" profiles, end-to-end through the real CLI command path.
+func TestConfigValidateCommand_ExampleGoldenFixture(t *testing.T) {
+	goldenPath := filepath.Join("..", "..", "testdata", "config", "pokkum.yaml.golden")
+	data, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("failed to read golden fixture %s: %v", goldenPath, err)
+	}
+
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, ports.ConfigFilename), data, 0644); err != nil {
+		t.Fatalf("failed to stage golden fixture: %v", err)
+	}
+
+	opts := &configValidateOptions{dir: tmpDir, output: "json"}
+	if err := runConfigValidate(nil, opts); err != nil {
+		t.Fatalf("expected golden fixture to pass validation, got: %v", err)
+	}
 }
 
 func TestConfigView_AdversarialErrors(t *testing.T) {

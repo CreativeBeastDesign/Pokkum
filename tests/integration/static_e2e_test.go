@@ -34,6 +34,11 @@ var (
 	// fakeFaviconSVG simulates a plain, non-hashed static asset served
 	// straight from the client root.
 	fakeFaviconSVG = bytes.Repeat([]byte("<svg xmlns=\"http://www.w3.org/2000/svg\"><circle r=\"1\"/></svg>\n"), 20)
+
+	// fakeSPAFallbackHTML simulates the SPA fallback shell @sveltejs/
+	// adapter-static emits (e.g. client/200.html). It is large and repetitive
+	// so precompressutils genuinely produces .gz/.br/.zst sidecars for it.
+	fakeSPAFallbackHTML = bytes.Repeat([]byte("<!doctype html><html><body><div id=\"app\">SPA shell</div></body></html>\n"), 20)
 )
 
 // staticFixtureCompiler is a StrategyStatic-only ports.Compiler double, local
@@ -43,7 +48,14 @@ var (
 // may also be editing. Its Prepare mirrors mockCompiler's StrategyStatic
 // branch (outputDir = <ProjectDir>/.svelte-kit/output, no entrypoint) but
 // additionally populates client/immutable/chunks/ and a root-level asset.
-type staticFixtureCompiler struct{}
+type staticFixtureCompiler struct {
+	// fallback, when non-empty, is the leaf filename of an opt-in SPA fallback
+	// page to stage in the client output (e.g. "200.html") and report via
+	// PrepareResult.StaticFallbackRelPath, exercising the packager's
+	// POKKUM_STATIC_FALLBACK stamping. Empty (the zero value) means no fallback
+	// — the default static build fixture's behavior is unchanged.
+	fallback string
+}
 
 func (m *staticFixtureCompiler) Preflight(_ context.Context, _ ports.PreflightRequest) (ports.PreflightResult, error) {
 	return ports.PreflightResult{
@@ -90,9 +102,20 @@ func (m *staticFixtureCompiler) Prepare(_ context.Context, req ports.PrepareRequ
 		return ports.PrepareResult{}, fmt.Errorf("staticFixtureCompiler: prepare: write prerendered fixture: %w", err)
 	}
 
+	// Optional SPA fallback: stage it in the client output root and report the
+	// leaf name so the packager stamps POKKUM_STATIC_FALLBACK.
+	staticFallbackRel := ""
+	if m.fallback != "" {
+		if err := os.WriteFile(filepath.Join(clientDir, m.fallback), fakeSPAFallbackHTML, 0o644); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf("staticFixtureCompiler: prepare: write SPA fallback fixture: %w", err)
+		}
+		staticFallbackRel = m.fallback
+	}
+
 	return ports.PrepareResult{
-		EntrypointPath: "",
-		OutputDir:      outputDir,
+		EntrypointPath:        "",
+		OutputDir:             outputDir,
+		StaticFallbackRelPath: staticFallbackRel,
 	}, nil
 }
 
@@ -456,4 +479,102 @@ func envContains(env []string, key, val string) bool {
 		}
 	}
 	return false
+}
+
+// TestFixtureDrivenE2E_Static_SPAFallback is the SPA-fallback counterpart to
+// TestFixtureDrivenE2E_Static: it drives the same full core.Build static
+// pipeline, but the fixture compiles a project that configures an
+// adapter-static SPA fallback (client/200.html), and it asserts that the SPA
+// shell is staged into the client layer (with real .gz/.br/.zst sidecars) and
+// surfaced to pokkum-static via the POKKUM_STATIC_FALLBACK image env — never
+// silently dropped.
+func TestFixtureDrivenE2E_Static_SPAFallback(t *testing.T) {
+	harness := NewRegistryHarness(t)
+	fixtureDir, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fixtures", "sveltekit-basic"))
+	if err != nil {
+		t.Fatalf("Abs fixture path: %v", err)
+	}
+
+	repoName := harness.Repo("sveltekit-static-spa-app")
+
+	deps := core.Deps{
+		Compiler:   &staticFixtureCompiler{fallback: "200.html"},
+		BaseImages: &recordingBaseResolver{t: t},
+		// Deps.validate requires Supervisor to be non-nil even though a static
+		// build never calls it — see TestFixtureDrivenE2E_Static's notes.
+		Supervisor:      &mockSupervisorProvider{},
+		StaticServer:    &mockStaticServerProvider{},
+		Packager:        packager.NewPackager(testLogger()),
+		Registry:        registry.NewAdapter(testLogger()),
+		SBOM:            sbom.NewGenerator(testLogger()),
+		NativeInspector: nativeinspect.NewClosuredAdapter(),
+		Logger:          testLogger(),
+		Version:         "0.1.0-integration-test",
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: fixtureDir,
+		Repo:       repoName,
+		Tags:       []string{"latest"},
+		// Two platforms so the push produces a multi-platform image index
+		// (FetchIndex below expects an index, matching the original static e2e).
+		Platforms: []ports.Platform{ports.LinuxAMD64, ports.LinuxARM64},
+		Compile:   core.CompileOptions{Strategy: core.StrategyStatic},
+		Output:    core.OutputOptions{Mode: core.OutputPush},
+		Insecure:  true,
+		BaseImage: core.BaseImageOptions{
+			Preset: core.BaseImageChainguard,
+			Ref:    core.StaticBaseRef,
+		},
+		SBOM:            core.SBOMOptions{Format: ports.SBOMFormatSPDXJSON, AttachMode: ports.SBOMAttachTag, NoAttach: false},
+		SourceDateEpoch: testEpoch,
+	}
+
+	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err != nil {
+		t.Fatalf("core.Build failed: %v", err)
+	}
+	if res.Image.Digest.Hex == "" {
+		t.Errorf("BuildResult image digest is empty")
+	}
+
+	// Fetch the pushed amd64 child image.
+	imageRef := repoName + ":latest"
+	idx := harness.FetchIndex(t, imageRef)
+	idxManifest, err := idx.IndexManifest()
+	if err != nil {
+		t.Fatalf("FetchIndex IndexManifest: %v", err)
+	}
+	childRef := repoName + "@" + idxManifest.Manifests[0].Digest.String()
+	img := harness.FetchImage(t, childRef)
+	cfg, _ := harness.FetchConfigFile(t, img)
+
+	// 1. The SPA fallback is surfaced to pokkum-static via image env.
+	if !envContains(cfg.Config.Env, ports.EnvStaticFallback, ports.AppClientDirPrefix+"/200.html") {
+		t.Errorf("Child image Env = %v, want an entry %s=%s", cfg.Config.Env, ports.EnvStaticFallback, ports.AppClientDirPrefix+"/200.html")
+	}
+	// Static roots are still stamped alongside the fallback.
+	if !envContains(cfg.Config.Env, ports.EnvStaticRoots, ports.AppClientDirPrefix+":"+ports.AppPrerenderedDirPrefix) {
+		t.Errorf("Child image Env = %v, want the static roots entry unchanged", cfg.Config.Env)
+	}
+
+	// 2. The SPA shell is staged in the client layer (with real sidecars) — not
+	// silently dropped. Layer order for static: base, static-server, client,
+	// prerendered (see packager.go's static branch).
+	layers, err := img.Layers()
+	if err != nil {
+		t.Fatalf("img.Layers: %v", err)
+	}
+	if len(layers) != 4 {
+		t.Fatalf("img.Layers count = %d, want 4 (base, static-server, client, prerendered)", len(layers))
+	}
+	clientMembers := harness.FetchLayerMembers(t, layers[2])
+	for _, want := range []string{
+		"app/client/200.html",
+		"app/client/200.html.gz",
+		"app/client/200.html.br",
+		"app/client/200.html.zst",
+	} {
+		assertMemberContains(t, clientMembers, want)
+	}
 }

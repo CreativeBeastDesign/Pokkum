@@ -86,6 +86,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -168,6 +169,21 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 			rc.Env = map[string]string{}
 		}
 		rc.Env[ports.EnvStaticRoots] = ports.AppClientDirPrefix + ":" + ports.AppPrerenderedDirPrefix
+		if req.StaticFallback != "" {
+			// Optional SPA fallback: verify the configured in-image path is a
+			// regular file staged under the client root (never silently drop the
+			// SPA shell), then stamp POKKUM_STATIC_FALLBACK so pokkum-static
+			// serves it with 200 on unmatched GET/HEAD routes.
+			rel := strings.TrimPrefix(req.StaticFallback, ports.AppClientDirPrefix+"/")
+			if rel == req.StaticFallback || filepath.Base(rel) != rel {
+				return nil, fmt.Errorf("packager: build %s: invalid static fallback path %q (must live under %s): %w", req.Platform, req.StaticFallback, ports.AppClientDirPrefix, core.ErrPackageFailed)
+			}
+			staged := filepath.Join(req.AppClientDir, rel)
+			if fi, err := os.Stat(staged); err != nil || !fi.Mode().IsRegular() {
+				return nil, fmt.Errorf("packager: build %s: static fallback %q configured but not staged at %s (SPA shell would be silently dropped): %w", req.Platform, req.StaticFallback, staged, core.ErrPackageFailed)
+			}
+			rc.Env[ports.EnvStaticFallback] = req.StaticFallback
+		}
 	} else if req.Strategy == ports.StrategyLayered && req.AppPrerenderedDir != "" {
 		// Let the patched adapter-node handler locate the prerendered tree Pokkum
 		// mounts at /app/prerendered (see Prepare and the fan-out in core). The

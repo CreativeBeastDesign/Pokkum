@@ -82,3 +82,35 @@ func TestParseConfig_VersionFlag(t *testing.T) {
 		t.Fatalf("want errVersionRequested, got %v", err)
 	}
 }
+
+func TestParseConfig_FallbackFromEnv(t *testing.T) {
+	env := map[string]string{"POKKUM_STATIC_FALLBACK": "/app/client/200.html"}
+	cfg, _, err := parseConfig(nil, func(k string) string { return env[k] }, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.Fallback != "/app/client/200.html" {
+		t.Errorf("Fallback = %q, want /app/client/200.html", cfg.Fallback)
+	}
+}
+
+func TestParseConfig_FallbackFlagOverridesEnv(t *testing.T) {
+	env := map[string]string{"POKKUM_STATIC_FALLBACK": "/app/client/fromenv.html"}
+	cfg, _, err := parseConfig([]string{"-fallback", "/app/client/fromflag.html"}, func(k string) string { return env[k] }, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.Fallback != "/app/client/fromflag.html" {
+		t.Errorf("Fallback = %q, want flag value to win (flag > env)", cfg.Fallback)
+	}
+}
+
+func TestParseConfig_FallbackEmptyByDefault(t *testing.T) {
+	cfg, _, err := parseConfig(nil, func(string) string { return "" }, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.Fallback != "" {
+		t.Errorf("Fallback = %q, want empty default (plain-404 behavior preserved)", cfg.Fallback)
+	}
+}

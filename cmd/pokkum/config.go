@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
@@ -152,32 +153,37 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 		validationErrors = append(validationErrors, fmt.Sprintf("unsupported schema version %d (expected %d)", cfg.Version, ports.ConfigSchemaVersion))
 	}
 
-	if cfg.Strategy != "" && cfg.Strategy != "layered" && cfg.Strategy != "static" && cfg.Strategy != "exe" {
-		validationErrors = append(validationErrors, fmt.Sprintf("invalid strategy %q (must be layered or static)", cfg.Strategy))
-	}
+	// Base (top-level) config fields.
+	validationErrors = append(validationErrors, validateConfigFields(configFieldsToValidate{
+		strategy:   cfg.Strategy,
+		base:       cfg.Base,
+		platforms:  cfg.Platforms,
+		dockerRepo: cfg.Docker.Repo,
+		failOnCVE:  cfg.Security.FailOnCVE,
+		sbomFormat: cfg.SBOM.Format,
+	})...)
 
-	if cfg.Base != "" {
-		if _, err := core.ParseBaseImagePreset(cfg.Base); err != nil {
-			validationErrors = append(validationErrors, fmt.Sprintf("invalid base preset %q: %v", cfg.Base, err))
-		}
+	// Every named profile, using the exact same field validation logic as the
+	// base config above — a profile with an invalid strategy/base/sbom/repo
+	// must not pass validation silently just because only the top-level
+	// config was checked. Iterated in sorted order so error output (and test
+	// assertions on it) is deterministic despite cfg.Profiles being a map.
+	profileNames := make([]string, 0, len(cfg.Profiles))
+	for name := range cfg.Profiles {
+		profileNames = append(profileNames, name)
 	}
-
-	if len(cfg.Platforms) > 0 {
-		if _, err := core.ParsePlatforms(cfg.Platforms); err != nil {
-			validationErrors = append(validationErrors, fmt.Sprintf("invalid platforms %v: %v", cfg.Platforms, err))
-		}
-	}
-
-	if cfg.Security.FailOnCVE != "" {
-		if _, err := core.ParseSeverity(cfg.Security.FailOnCVE); err != nil {
-			validationErrors = append(validationErrors, fmt.Sprintf("invalid fail_on_cve %q: %v", cfg.Security.FailOnCVE, err))
-		}
-	}
-
-	if cfg.SBOM.Format != "" {
-		if _, err := core.ParseSBOMFormat(cfg.SBOM.Format); err != nil {
-			validationErrors = append(validationErrors, fmt.Sprintf("invalid sbom format %q: %v", cfg.SBOM.Format, err))
-		}
+	sort.Strings(profileNames)
+	for _, name := range profileNames {
+		profile := cfg.Profiles[name]
+		validationErrors = append(validationErrors, validateConfigFields(configFieldsToValidate{
+			profileName: name,
+			strategy:    profile.Strategy,
+			base:        profile.Base,
+			platforms:   profile.Platforms,
+			dockerRepo:  profile.Docker.Repo,
+			failOnCVE:   profile.Security.FailOnCVE,
+			sbomFormat:  profile.SBOM.Format,
+		})...)
 	}
 
 	if len(validationErrors) > 0 {
@@ -205,4 +211,68 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 
 	fmt.Printf("✓ Configuration %s is valid (version %d, %d profiles defined)\n", cfgPath, cfg.Version, len(cfg.Profiles))
 	return nil
+}
+
+// configFieldsToValidate carries the subset of ports.ProjectConfig /
+// ports.BuildProfile fields that validateConfigFields checks. profileName is
+// empty for the base (top-level) config and set to the profile's key
+// otherwise, so a single validation implementation serves both call sites in
+// runConfigValidate without duplicating the checks.
+type configFieldsToValidate struct {
+	profileName string
+	strategy    string
+	base        string
+	platforms   []string
+	dockerRepo  string
+	failOnCVE   string
+	sbomFormat  string
+}
+
+// validateConfigFields runs the schema/value checks shared by the base
+// .pokkum.yaml config and every named profile within it. Errors are prefixed
+// with the profile name (`profile "production": ...`) when profileName is
+// set, so a user with multiple profiles can tell which one is broken.
+func validateConfigFields(f configFieldsToValidate) []string {
+	prefix := ""
+	if f.profileName != "" {
+		prefix = fmt.Sprintf("profile %q: ", f.profileName)
+	}
+
+	var errs []string
+
+	if f.strategy != "" && f.strategy != "layered" && f.strategy != "static" && f.strategy != "exe" {
+		errs = append(errs, fmt.Sprintf("%sinvalid strategy %q (must be layered or static)", prefix, f.strategy))
+	}
+
+	if f.base != "" {
+		if _, err := core.ParseBaseImagePreset(f.base); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid base preset %q: %v", prefix, f.base, err))
+		}
+	}
+
+	if len(f.platforms) > 0 {
+		if _, err := core.ParsePlatforms(f.platforms); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid platforms %v: %v", prefix, f.platforms, err))
+		}
+	}
+
+	if f.dockerRepo != "" {
+		if err := core.ValidateDockerRepo(f.dockerRepo); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid docker repo %q: %v", prefix, f.dockerRepo, err))
+		}
+	}
+
+	if f.failOnCVE != "" {
+		if _, err := core.ParseSeverity(f.failOnCVE); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid fail_on_cve %q: %v", prefix, f.failOnCVE, err))
+		}
+	}
+
+	if f.sbomFormat != "" {
+		if _, err := core.ParseSBOMFormat(f.sbomFormat); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid sbom format %q: %v", prefix, f.sbomFormat, err))
+		}
+	}
+
+	return errs
 }

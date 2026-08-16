@@ -127,6 +127,16 @@ const (
 	// AppPrerenderedDirPrefix.
 	EnvStaticRoots = "POKKUM_STATIC_ROOTS"
 
+	// EnvStaticFallback is read by pokkum-static as the opt-in SPA-fallback
+	// file: an in-image path served with 200 for any unmatched GET/HEAD route
+	// (same ETag/Content-Encoding/Range negotiation as other served files).
+	// It is stamped by the packager only for StrategyStatic builds where the
+	// source project configured an adapter-static fallback page. Absent (or
+	// empty) means no fallback — unmatched routes keep returning a plain 404.
+	// The path always lives under one of the served static roots (typically
+	// AppClientDirPrefix/<rel>).
+	EnvStaticFallback = "POKKUM_STATIC_FALLBACK"
+
 	// EnvAttestationDigest is read by pokkum-init as the expected SHA-256 root
 	// digest of the layered-strategy /app runtime tree (server, client,
 	// prerendered, vendor, native). It is stamped by the packager into the
@@ -318,6 +328,16 @@ type PackageRequest struct {
 	// handler) or as a root of pokkum-static. Optional: when empty, no
 	// prerendered layer is added.
 	AppPrerenderedDir string
+
+	// StaticFallback is the in-image path of the opt-in SPA-fallback page for a
+	// StrategyStatic build, e.g. AppClientDirPrefix + "/" + <rel> where <rel>
+	// is the leaf filename @sveltejs/adapter-static emitted (set by core from
+	// PrepareResult.StaticFallbackRelPath). When non-empty, the packager stamps
+	// ports.EnvStaticFallback to this path so pokkum-static serves it with 200
+	// on unmatched GET/HEAD routes; the packager also hard-fails if the file is
+	// not actually staged under AppClientDir (it must never be silently
+	// dropped). Empty (the default) means no SPA fallback.
+	StaticFallback string
 
 	// StaticServer is the pokkum-static PID-1 static file server binary for
 	// Platform, from StaticServerProvider.Binary. Required and non-empty for

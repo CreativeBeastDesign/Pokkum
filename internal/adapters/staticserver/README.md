@@ -44,6 +44,13 @@ roots listed in `POKKUM_STATIC_ROOTS` (set by the packager to
 - Immutable cache headers on hashed/versioned assets.
 - Health/readiness probes on `POKKUM_PROBE_PORT` (default `8081`), graceful
   shutdown on `SIGTERM`/`SIGINT`.
+- **Opt-in SPA fallback** (`POKKUM_STATIC_FALLBACK` / `-fallback`): when set to
+  an in-image file path, unmatched `GET`/`HEAD` routes serve that file with
+  `200` (same negotiation as other files). Default (empty) keeps plain-404
+  behavior; a one-per-process `Warn` on the first 404 (while unset) points
+  operators at `Vocabulary.md`. The fallback path is validated at construction
+  to be a regular file within a served root — an out-of-root or missing path is
+  rejected and disables the fallback (never serves content outside the roots).
 
 ## Determinism
 

@@ -5,6 +5,104 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-16 — `patchPrerenderedHandler`'s "real fixture" regression tests exercised the wrong artifact — the checked-in npm template, not real bundled build output
+
+**Category:** multi-item / test-fixture-fidelity (same root shape as the assets.generated.ts entry immediately below — a fixture that doesn't match real tool output masking a real gap)
+
+**Where:** `internal/adapters/bunexec/prerendered_patch.go` (`patchPrerenderedEnv`'s 8 literal patterns); `internal/adapters/bunexec/prerendered_patch_test.go`'s `TestPatchPrerenderedEnv_RealAdapterNodeV3`/`V5` (added earlier the same day); `testdata/adapter-node/{v3,v5}/handler.js` (sourced via `npm pack`, straight from each package's `files/handler.js`).
+
+**What happened:** verifying the `assets.generated.ts` fix (below) against a genuinely fresh `sv create` scaffold with a real prerendered page, `patchPrerenderedHandler` failed with "no recognizable prerendered path pattern" against the **actual** `build/handler.js` Vite/Rollup emitted — even though `TestPatchPrerenderedEnv_RealAdapterNodeV5` (checked in the same day) asserts the patcher succeeds against `testdata/adapter-node/v5/handler.js`, sourced from the same adapter-node version. `grep -c "prerendered\|path.join"` against the real build's `handler.js` returns zero matches; the checked-in fixture contains `path.join(dir, 'prerendered')` verbatim. The two files are not the same artifact: `testdata/adapter-node/v5/handler.js` is adapter-node's **pre-bundling source template** (`package/files/handler.js`, copied close to verbatim into a project's build output today, but not a promise upstream makes); the file `patchPrerenderedHandler` actually opens at build time is **post-Vite/Rollup-bundled** output, and bundling appears to restructure or rename the prerendered-serving code path enough that none of the 8 literal string patterns survive.
+
+**Root cause:** the fixture-sourcing task (same day) reasoned "get the real npm package's handler.js, not a synthetic one" and stopped there — a real npm package artifact felt like a strong enough proxy for "real build output" not to need a real build to confirm it. But the actual consumer (`patchPrerenderedHandler`) never reads the npm package directly; it reads whatever the project's own bundler produced from that template. A fixture one build step removed from what the code under test actually consumes is still a synthetic fixture, even when it's byte-for-byte real content sourced from a real package.
+
+**Impact:** unknown how many real adapter-node projects' bundled `handler.js` actually retains one of the 8 patterns — this specific `sv create --template minimal` scaffold's output does not, meaning `--strategy=layered` (already broken by the `assets.generated.ts` bug below) hits a **second**, independent hard-failure immediately after that one is fixed, for what may be the common case, not an edge case.
+
+**Fix:** not fixed in this entry — flagged for a separate task. The regression tests added earlier the same day give false confidence and should be either supplemented with a fixture built via a real `bun run build` (not `npm pack`) or clearly re-labeled as "tests the upstream template, not build output" so nobody mistakes them for proof the patcher works end-to-end.
+
+**Preventative rule:** when sourcing a "real" fixture to regression-test code that operates on a build *artifact* (not a source file), source it from an actual run of the tool chain that produces that artifact — not from the nearest real-but-upstream file that resembles it. "Real, but from the wrong pipeline stage" fails silently the same way a synthetic fixture does, and is more dangerous because it reads as verified.
+
+---
+
+## 2026-08-16 — `assets.generated.ts` normalization ran for `StrategyLayered`, but that file is exclusively a `@jesterkit/exe-sveltekit` artifact `@sveltejs/adapter-node` never produces
+
+**Category:** boundary (strategy-gated logic applied outside its own strategy)
+
+**Where:** `internal/adapters/bunexec/compiler.go`'s `Prepare`, the non-static `else` branch (~line 350-369 before the fix): `normalizeGeneratedAssetsFile` ran unconditionally for every non-static strategy instead of `StrategyExe` only; `internal/adapters/bunexec/compiler_strategy_test.go`'s "layered" fake-bun fixture (~line 84) wrote a synthetic `build/assets.generated.ts` that a real `@sveltejs/adapter-node` build never produces, so the golden-master test added the same day passed despite the bug being present the whole time.
+
+**What happened:** manually verifying the readOnlyRootFilesystem question against a genuinely fresh `sv create` scaffold with `@sveltejs/adapter-node` correctly configured, `pokkum build` failed every time at `bunexec: normalize .../build/assets.generated.ts: no such file or directory` — even though the SvelteKit/Vite build itself succeeded cleanly (`build/index.js`, `build/handler.js` all present and correct). `--strategy=layered` is `DefaultBuildStrategy`; this means the default build path could not complete a real build against its own documented, correct adapter at all.
+
+**Root cause:** the non-static `else` branch was written as if "not static" meant "must be exe" — a leftover from before `StrategyLayered` existed as a distinct, adapter-node-based path, never revisited when it was added. The golden-master test written the same day (`TestPrepare_StrategyDispatch`) exists specifically to catch exactly this class of bug, but its own "layered" fixture fabricated a fake `assets.generated.ts` file to get the fake-bun harness past this line — masking the very bug the test was built to catch. Nobody had run a real `bun run build` with a correctly-configured adapter-node project against `--strategy=layered` since this branch was last touched.
+
+**Fix:** gated the `normalizeGeneratedAssetsFile` call to `req.Strategy == ports.StrategyExe` only; also fixed the adjacent "expected entrypoint ... not found" error's hint to name `@sveltejs/adapter-node` for non-exe strategies instead of always naming `@jesterkit/exe-sveltekit`. Removed the fake `assets.generated.ts` write from the golden-master test's "layered" fixture so it now genuinely regression-guards this (a real `@sveltejs/adapter-node`-shaped fixture, not one hand-crafted to satisfy whatever the code currently checks for).
+
+**Preventative rule:** when a test fixture (fake-bun script, mock adapter output, etc.) exists to get a unit test past a real dependency, its content must model what the REAL tool would produce for that exact code path — not just whatever satisfies the current implementation. A fixture that's shaped to pass the test, rather than shaped to match reality, will happily keep passing after the production code drifts from reality too. When adding a strategy-specific (or any mode-specific) fixture to a table-driven test, ask "would the real tool actually produce this for this exact strategy?" before writing it — and periodically prove it by running the real path at least once, which is what surfaced this.
+
+---
+
+## 2026-08-16 — .pokkum.yaml config validation had three silent-failure gaps: dead Viper wiring, no per-profile validation, no strict key parsing
+
+**Category:** boundary / dead-code / validation-gap
+
+**Root cause:** The config loader was built incrementally: `viper.Viper` was wired up first (a generic dotted-key → `POKKUM_*` env-binding scheme), then `Load()` was switched to parse YAML directly via `yaml.Unmarshal` without anyone removing the now-unreachable Viper construction or its `GetString`/`GetBool` fallback call sites in `build.go` — each fallback ran only *after* an explicit `os.Getenv` had already handled the same key (or, for `compile.sourcemap`, a dotted key that was never a real schema field at all), so the fallback looked defensive but was provably dead. Separately, `pokkum config validate` was written to check only the top-level `ProjectConfig` fields and was never revisited when profile support was added, so a profile with an invalid `strategy`/`base`/`sbom` passed validation silently. And `Load` called plain `yaml.Unmarshal`, which drops unknown keys instead of erroring, so a typo like `strategey:` silently produced a zero-value field — contradicting this repo's own fail-fast-before-any-network-call convention.
+
+**Where:** `internal/adapters/config/config.go` (`New`, `Load`), `cmd/pokkum/build.go:428,546,726` (removed), `cmd/pokkum/config.go` (`runConfigValidate`)
+
+**Fix:** Removed the `viper.Viper` field/construction and the three dead fallback call sites; `go mod tidy` dropped `spf13/viper` and 7 exclusive transitive deps (`fsnotify`, `pelletier/go-toml/v2`, `sagikazarmark/locafero`, `sourcegraph/conc`, `spf13/afero`, `spf13/cast`, `subosito/gotenv`). Extracted `validateConfigFields` in `cmd/pokkum/config.go` and now call it once for the base config and once per profile (profile names sorted before iterating the `map[string]BuildProfile`, so error ordering is deterministic), prefixing errors with `profile %q:` so a multi-profile config names the offending one. Switched `Load` to `yaml.NewDecoder(...).KnownFields(true)`, special-casing `io.EOF` so a present-but-empty `.pokkum.yaml` still parses to a valid zero-value config exactly as `yaml.Unmarshal` did before.
+
+**Preventative rule:** When a fallback/legacy code path only fires after an earlier check on the same value already ran, that is a signal it is dead — grep for every prior check on the same key before trusting a "belt and suspenders" layer is actually reachable. When a config schema grows a `profiles`/nested-override section, any validation written against the top-level struct must be re-audited (or, better, extracted into a shared helper from the start) so nested overrides get equal coverage automatically — this codebase now enforces that via the checklist (see `mem:self_review_checklist` row 10). Any hand-rolled YAML/JSON `Unmarshal` on user-authored config should default to strict/unknown-field-rejecting decoding unless there is a documented reason not to.
+
+---
+
+## 2026-08-16 — docker.repo (registry ref) was read from config but never validated for shape
+
+**Category:** validation-gap
+
+**Root cause:** `Docker.Repo` was plumbed all the way from `.pokkum.yaml` into `BuildRequest.Repo` without any shape validation at the config layer — the only check happening anywhere was `BuildRequest.Validate`'s late, narrow whitespace/tag-suffix check immediately before a real build. A malformed repo (e.g. containing characters the registry API would reject) passed `pokkum config validate` cleanly and only failed much later in the pipeline, or not until the actual registry HTTP call rejected it — one indirection later and with a worse error than the config layer could have given directly. Profiles additionally had no way to override `docker.repo` at all, despite every other override-relevant field on `ProjectConfig` (`base`, `strategy`, `security.*`, `sbom.*`, ...) already existing on `BuildProfile`.
+
+**Where:** `internal/ports/config.go` (`BuildProfile.Docker`, new field), `internal/core/model.go` (`ValidateDockerRepo`), `cmd/pokkum/config.go` (`validateConfigFields`), `internal/adapters/config/config.go` (`ApplyProfile` merge)
+
+**Fix:** Added `core.ValidateDockerRepo`, reusing `go-containerregistry/pkg/name.NewRepository` with the same `name.WeakValidation` option `internal/adapters/registry` and `internal/adapters/baseimage` already use for every reference this tool actually builds — so a config value that fails here fails identically to (and earlier than) how it would fail at push time. Wired into both base-config and per-profile validation. Added a `Docker` override field to `BuildProfile` and wired its merge into `ApplyProfile`, so a `production` profile can now push to a different repo than `local`/the base config.
+
+**Preventative rule:** A field that is read from config but only reaches a "real" check deep in the pipeline or in a third-party call should get an explicit, early check in `pokkum config validate` too — validate at the boundary where the user can see and fix the mistake, not just where the failure eventually surfaces. When adding validation for a value this tool already builds `go-containerregistry` references from elsewhere, reuse that exact parser/option set rather than inventing a new regex — two independent notions of "valid repo ref" is itself a bug waiting to happen.
+
+---
+
+## 2026-08-16 — Opt-in SPA-fallback: serving a fallback file that became non-regular at request time surfaced a 500 instead of an honest 404 miss
+
+**Category:** boundary / resource (request-time re-validation vs construction-time-only validation)
+
+**Where:** `supervisor/cmd/pokkum-static/server.go` (`serveHTTP` fallback branch)
+
+**What happened:** The opt-in SPA-fallback mode validated at construction that the configured fallback path resolves (via `EvalSymlinks`) to a regular file within a served root, and stored the canonical path. The documented contract said that if the fallback file is *not* a regular file at request time (e.g. removed or replaced after construction), the server should treat it as a miss and return an honest 404. The implementation unconditionally re-entered `serveFile(w, r, s.fallbackPath)` on any clean route miss, so `fileETag(bodyPath)` → open failed → returned **500 "internal error"** instead of a 404 (and in the narrower case of a surviving `.gz` sidecar, would even serve a stale 200). An adversarial clean-context sub-agent confirmed this with a request-time deletion test (actual 500, spec requires 404).
+
+**Root cause:** Validation was treated as a one-shot construction step; the fallback branch assumed the validated file would remain a regular file forever, so it never re-checked the *runtime* precondition it actually depends on. The construction-time check (a policy decision) was conflated with the request-time invariant (a liveness/type precondition).
+
+**Fix:** Add a request-time `fallbackFileOK()` re-check (`os.Stat` + `Mode().IsRegular()`) before serving the fallback; on failure fall through to `warnFallbackOnce` + `http.NotFound`, so a gone/degraded fallback is a clean 404, never a 500. The stored path is already canonical, so this is a direct stat, not a re-resolve. Added regression test `TestStaticServer_Fallback_DeletedAtRequestTimeIsMiss`.
+
+**Preventative rule:** When a code path depends on a precondition that can change at runtime (a file's existence/type, a resource's openness), validate it at the point of use — a construction-time check only proves the state at construction. Never let a resource that can vanish between validation and use flow unguarded into an operation that escalates to a 5xx or serves stale state; degrade to the same fallback the normal-miss path uses.
+
+---
+
+## 2026-08-16 — Adversarial review of SPA-fallback config detector: whole-file regex makes `fallback` detection scoping-fragile (F2/F3, hardening gap, not fixed in-scope)
+
+**Category:** boundary / parsing (whole-file regex vs scoped match)
+
+**Where:** `internal/adapters/sveltekitutils/project.go` (`StaticFallbackFilename`)
+
+**What happened:** An adversarial clean-context sub-agent confirmed two config-detector edge cases:
+- **F2 (false-negative):** any occurrence of `fallback: false` anywhere in the adapter-static config source — including inside a comment or an unrelated key — returns `("", false)` and silently disables a genuine `fallback: 'index.html'` SPA shell.
+- **F3 (false-positive):** a `fallback: true` in an unrelated key (e.g. `routing: { fallback: true }`) matches and guesses `"200.html"`, which either wrongly marks a non-SPA site (compiler then hard-fails "configured but not emitted") or injects a guessed fallback the site never opted into.
+
+Both are the direct consequence of the plain whole-file-regex approach. Severity: minor (contrived configs), no security impact, not a regression in this diff — but they can flip the SPA-fallback decision for otherwise-valid configs.
+
+**Root cause:** Detection scans raw source text without scoping to the `adapter({...})` call or stripping comments, so `fallback` tokens outside the intended object/scope are treated as authoritative.
+
+**Fix (NOT applied in this scope — recorded for follow-up):** scope detection to the adapter-static call — strip `//` and `/* */` comments before scanning, and/or match the `adapter({...})` block — rather than whole-file regex.
+
+**Preventative rule:** When parsing a declarative config from source text, scope the matcher to the construct that actually owns the key (the containing call/object), and strip comments first; a whole-file regex for a common key name will be fooled by tokens in unrelated or commented positions.
+
+---
+
 ## 2026-08-16 — Requesting an explicit `--profile` without a `.pokkum.yaml` file silently ignored the profile because `projCfg != nil` guarded profile merging
 
 **Category:** logic / boundary (silent failure on missing prerequisite configuration)

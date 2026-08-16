@@ -2,12 +2,11 @@
 
 Welcome to **Pokkum**, a Go-based zero-dependency OCI container image compiler for SvelteKit applications.
 
-This is the **single, self-contained** instruction file for DeepSeek Harness (DSH) agents working on this codebase. It is the only project instruction file DSH reads (`instructionFileCandidates`). Everything relevant is contained inline — do not assume knowledge of other agent tooling formats.
+This is the **single, self-contained** instruction file for DeepSeek Harness (DSH) agents working on this codebase. It is the only project instruction file DSH reads. Everything relevant is contained inline — do not assume knowledge of other agent tooling formats.
 
 > [!IMPORTANT]
 >
 > - **Serena MCP is the single source of truth** for project knowledge. The `.md` docs in this repo are for humans; the `mem:*` graph is for agents. When prose and memories conflict, **follow the memories** and update the docs to match.
-> - DSH loads this file automatically only if `DSH.md` is in the loader's `instructionFileCandidates`. If you are reading this, it already is.
 > - These instructions are guidance. They never override system, developer, or direct user instructions; more specific instructions take precedence over broader ones.
 
 ---
@@ -18,16 +17,17 @@ This is the **single, self-contained** instruction file for DeepSeek Harness (DS
 
 ### Startup protocol
 
-At the beginning of any non-trivial task you MUST:
+At the beginning of any non-trivial task you MUST read exactly these sources, in order:
 
-1. Read `mem:core` via the `read_memory` tool.
-2. Follow references to domain-specific memories — `mem:conventions`, `mem:tech_stack`, `mem:telemetry`, `mem:task_completion` — as needed for the task.
+1. **This file (`DSH.md`)** — the operating instructions. It is already loaded at conversation start via `instructionFileCandidates`; do not re-read it, but treat its rules as binding.
+2. **Serena MCP contents** — read `mem:core` via the `read_memory` tool, then follow references to the domain-specific memories (`mem:conventions`, `mem:tech_stack`, `mem:telemetry`, `mem:task_completion`, `mem:self_review_checklist`) as needed for the task. Memory is the machine-readable source of truth; always prefer it over any `.md` prose that conflicts.
+3. **`Lessons.md`** — read (or at minimum grep) it for entries tied to the packages/files/behavior about to be touched, **before** writing any code. A prior incident in the same area is a strong signal you are about to repeat it ([`Lessons.md`](file:///Users/andrebarlocher/Documents/Go/Pokkum/Lessons.md), entries newest-first; see §5.2 for the format).
 
 ### Pre-task checklist
 
 Before writing any code, in addition to the Serena startup protocol above:
 
-1. **Search `Lessons.md` for related entries.** Grep it for keywords tied to the packages/files/behavior you're about to touch (function names, package names, bug categories such as `concurrency`, `resource-leak`, `multi-item`, `determinism`). A prior incident in the same area is a strong signal you're about to repeat it — read that entry's root cause and preventative rule _before_ writing a line of code, not after. See §5.3 for how entries are structured and why this matters.
+1. **Confirm `Lessons.md` is covered by the startup read above.** If the task involves code changes, re-check the relevant Lessons.md entries right before implementing, not just at session start — the file may have grown.
 
 ### Keeping memories up-to-date
 

@@ -1,10 +1,22 @@
 // Package config loads, parses, saves, and resolves Pokkum configuration
 // from .pokkum.yaml, environment variables, and defaults, implementing the
 // required precedence: explicit CLI flag > environment variable > profile override > project config > default.
+//
+// There is no generic dotted-key -> POKKUM_* environment binding here: each
+// field that has an environment override reads it explicitly via os.Getenv
+// at its own call site (see cmd/pokkum/build.go). Only a fixed, documented
+// subset of fields has an override at all (docker.repo, security.fail_on_cve,
+// cache.verify_mode, cache.pubkey, cache.keyless_identity,
+// cache.keyless_issuer, plus the per-profile sourcemap setting) — see
+// Vocabulary.md for the authoritative list. Everything else is config-file
+// or flag only.
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -12,24 +24,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
-const (
-	// EnvPrefix is the environment variable prefix for Pokkum configuration.
-	EnvPrefix = "POKKUM"
-
-	// ConfigFilename is the name of the configuration file.
-	ConfigFilename = ports.ConfigFilename
-)
+// ConfigFilename is the name of the configuration file.
+const ConfigFilename = ports.ConfigFilename
 
 // Manager implements ports.ConfigManager and loads/saves Pokkum configuration.
 type Manager struct {
-	v          *viper.Viper
 	logger     *slog.Logger
 	projectDir string
 	cfgPath    string
@@ -41,28 +46,15 @@ type Loader = Manager
 // New creates a new configuration manager.
 // It searches for .pokkum.yaml in projectDir first, then in the current working directory.
 func New(projectDir string, logger *slog.Logger) (*Manager, error) {
-	v := viper.New()
-
-	// Set environment variable prefix and binding
-	v.SetEnvPrefix(EnvPrefix)
-	v.AutomaticEnv()
-
-	// Replace dots with underscores for env var names
-	// Config key "docker.repo" maps to env var "POKKUM_DOCKER_REPO"
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-
 	searchPaths := []string{projectDir, "."}
-	configFound := false
 	foundPath := ""
 
 	for _, path := range searchPaths {
 		if path == "" {
 			continue
 		}
-		v.AddConfigPath(path)
 		fullPath := filepath.Join(path, ConfigFilename)
 		if _, err := os.Stat(fullPath); err == nil {
-			configFound = true
 			foundPath = fullPath
 			if logger != nil {
 				logger.Debug("config file found", "path", fullPath)
@@ -71,21 +63,11 @@ func New(projectDir string, logger *slog.Logger) (*Manager, error) {
 		}
 	}
 
-	v.SetConfigName(ConfigFilename[:len(ConfigFilename)-len(filepath.Ext(ConfigFilename))]) // ".pokkum"
-	v.SetConfigType("yaml")
-
-	if configFound {
-		if err := v.ReadInConfig(); err != nil {
-			if logger != nil {
-				logger.Warn("failed to read config file into viper", "error", err)
-			}
-		}
-	} else if logger != nil {
+	if foundPath == "" && logger != nil {
 		logger.Debug("config file not found", "search_paths", searchPaths)
 	}
 
 	return &Manager{
-		v:          v,
 		logger:     logger,
 		projectDir: projectDir,
 		cfgPath:    foundPath,
@@ -94,6 +76,10 @@ func New(projectDir string, logger *slog.Logger) (*Manager, error) {
 
 // Load reads and parses .pokkum.yaml from projectDir (or current directory).
 // Returns os.ErrNotExist if no configuration file is found.
+//
+// Parsing rejects unknown top-level or nested keys (e.g. a typo'd
+// "strategey:" instead of "strategy:") rather than silently dropping them,
+// matching this repo's fail-fast-before-any-network-call convention.
 func (m *Manager) Load(projectDir string) (*ports.ProjectConfig, error) {
 	targetPath := m.cfgPath
 	if targetPath == "" {
@@ -110,7 +96,9 @@ func (m *Manager) Load(projectDir string) (*ports.ProjectConfig, error) {
 	}
 
 	var cfg ports.ProjectConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("config: parse %s: %w", targetPath, err)
 	}
 
@@ -180,6 +168,9 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 	}
 	if len(profile.Platforms) > 0 {
 		merged.Platforms = append([]string{}, profile.Platforms...)
+	}
+	if profile.Docker.Repo != "" {
+		merged.Docker.Repo = profile.Docker.Repo
 	}
 
 	// Image overrides
@@ -407,54 +398,6 @@ func deepCopyProjectConfig(src *ports.ProjectConfig) *ports.ProjectConfig {
 	}
 
 	return &dst
-}
-
-// GetString retrieves a string configuration value with precedence:
-// explicit value (if non-empty) > environment variable > config file > default.
-func (m *Manager) GetString(key, defaultValue string) string {
-	if m.v != nil {
-		if val := m.v.GetString(key); val != "" {
-			if m.logger != nil {
-				m.logger.Debug("config value from environment or file", "key", key)
-			}
-			return val
-		}
-	}
-	if m.logger != nil {
-		m.logger.Debug("config value from default", "key", key)
-	}
-	return defaultValue
-}
-
-// GetStringSlice retrieves a string slice configuration value with precedence.
-func (m *Manager) GetStringSlice(key string, defaultValue []string) []string {
-	if m.v != nil {
-		if val := m.v.GetStringSlice(key); len(val) > 0 {
-			if m.logger != nil {
-				m.logger.Debug("config value from environment or file", "key", key)
-			}
-			return val
-		}
-	}
-	if m.logger != nil {
-		m.logger.Debug("config value from default", "key", key)
-	}
-	return defaultValue
-}
-
-// GetBool retrieves a boolean configuration value with precedence.
-func (m *Manager) GetBool(key string, defaultValue bool) bool {
-	if m.v != nil && m.v.IsSet(key) {
-		val := m.v.GetBool(key)
-		if m.logger != nil {
-			m.logger.Debug("config value from environment or file", "key", key, "value", val)
-		}
-		return val
-	}
-	if m.logger != nil {
-		m.logger.Debug("config value from default", "key", key)
-	}
-	return defaultValue
 }
 
 // ResolveBuildTimestamp resolves the SOURCE_DATE_EPOCH for reproducible builds.

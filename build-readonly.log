@@ -1,0 +1,64 @@
+Usage:
+  pokkum build [dir] [flags]
+
+Flags:
+      --allow-incomplete                Allow build to succeed even if base image vulnerability database lookups fail (default: fail closed when --fail-on-cve is active)
+      --allow-secret-pattern strings    Regex pattern to ignore during build-time secret scanning, repeatable
+      --base string                     Base image preset (distroless [default], chainguard, or custom reference)
+      --base-keyless-identity string    Expected Fulcio certificate Subject Alternative Name for keyless base image verification (overrides the preset default)
+      --base-keyless-issuer string      Expected OIDC issuer for keyless base image verification (overrides the preset default)
+      --base-verify-mode string         Base image signature verification mode: auto (preset decides), keyless (Fulcio/Rekor, the default for distroless/chainguard), or static-key (Cosign key-based verification)
+      --bun-binary string               Local path to a bun executable escape hatch (skips download/resolution)
+      --bun-variant string              Bun CPU variant (standard [AVX2 required on x86-64] or baseline) (default "standard")
+      --cache-keyless-identity string   Expected Fulcio certificate Subject Alternative Name for keyless cache verification
+      --cache-keyless-issuer string     Expected OIDC issuer for keyless cache verification
+      --cache-verify-key string         Path or PEM string for static Cosign public key to verify remote cache hits
+      --cache-verify-mode string        Cache image signature verification mode: auto (default), static-key, or keyless
+      --cache-verify-strict             Strict cache verification: fail build if candidate cache tag has invalid signature
+      --compression string              Layer compression algorithm: gzip (default) or zstd (default "gzip")
+      --dry-run                         Resolve everything and report what would be built and pushed, but perform no writes
+      --fail-on-cve string              Fail build if base image vulnerabilities exceed threshold (low, medium, high, critical; default warn-only)
+      --hardened                        Select the Chainguard base preset (shorthand for --base chainguard)
+  -h, --help                            help for build
+      --hermetic                        Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required)
+      --image-label strings             Custom image labels (key=value), repeatable
+      --inject                          Enable zero-config auto-injection for svelte.config.js (default true) (default true)
+      --keep-vendor strings             Custom glob pattern(s) of vendor files to preserve during pruning, repeatable (e.g. --keep-vendor='*.md')
+      --local                           Load the image into the local Docker daemon instead of pushing to a registry
+      --log-format string               Log format (text or json) (default "text")
+      --log-level string                Log level (DEBUG, INFO, WARN, ERROR) (default "INFO")
+      --metrics-only                    Disable trace span generation while keeping OTEL metrics active
+      --no-cache                        Disable remote OCI composite input caching and force full rebuild
+      --no-cache-verify                 Disable cryptographic signature verification on remote cache-hit images
+      --no-inject                       Explicitly disable auto-injection
+      --no-precompress                  Disable build-time static asset pre-compression (.gz, .br, .zst)
+      --no-prune                        Disable build-time stripping of non-runtime files (*.d.ts, *.map, tests, docs) from the vendor layer
+      --no-sign                         Explicitly disable signing
+      --no-strip                        Disable build-time stripping of unneeded debug symbols from native .node ELF addons
+      --no-telemetry                    Explicitly disable OpenTelemetry auto-instrumentation and metrics export
+      --no-verify-base                  Suppress Cosign signature verification on upstream base images
+      --offline                         Strictly enforce using pokkum.lock and local cache without remote registry calls
+      --otel-export string              Override OTLP exporter endpoint URL (e.g. http://collector:4318)
+  -p, --platform strings                Target platform(s); repeatable, e.g. --platform linux/amd64 --platform linux/arm64. Use 'all' for all supported platforms (default [linux/amd64,linux/arm64])
+      --print-manifest                  Emit the computed OCI manifest/config without pushing
+  -P, --profile string                  Activate a named build profile defined in .pokkum.yaml (e.g. --profile local or --profile production)
+      --push-concurrency int            Number of concurrent layer uploads during registry push (0 = registry adapter's default)
+      --registry-config string          Path to custom OCI registry auth config file (config.json)
+      --require-env strings             Declare required runtime environment variables (comma-separated or repeatable)
+      --sbom string                     SBOM format (spdx-json [default], cyclonedx-json, or none) (default "spdx-json")
+      --sbom-attach string              SBOM attachment mode (referrer [default, OCI 1.1] or tag) (default "referrer")
+      --sign                            Enable SLSA, Cosign, and DSSE signing (default true) (default true)
+      --sigstore-trusted-root string    Path to a Sigstore trusted-root JSON file overriding the embedded public-good default
+      --sourcemap                       Generate and preserve source maps in compiled bundles and vendor layers
+      --static                          Shorthand for --strategy=static: compile a purely static site onto a minimal libc-free base image, served by an embedded Go file server (ETag/Range/Content-Encoding). Cannot be combined with --strategy.
+      --strategy string                 Packaging strategy: layered (5-layer arch-independent layout [default]), exe (single executable, deprecated), or static (purely static site served by an embedded Go file server, no Bun runtime) (default "layered")
+      --tarball string                  Export the image as an OCI archive to the specified path (e.g., image.tar)
+      --telemetry                       Enable OpenTelemetry auto-instrumentation and metrics export
+      --telemetry-env string            Target environment for telemetry (dev, preview, production)
+      --trace-sample-rate float         Sampling ratio for trace spans (0.0 to 1.0) (default 1)
+      --update-base                     Force re-resolving base image tags against remote registry and update pokkum.lock
+      --with-otel-sidecar               Inject OTEL Collector sidecar spec into Kubernetes manifests
+
+Global Flags:
+      --output string   Output serialization format (text or json) (default "text")
+time=2026-08-16T17:09:53.090+02:00 level=ERROR msg="command failed" error="unknown flag: --tag"
