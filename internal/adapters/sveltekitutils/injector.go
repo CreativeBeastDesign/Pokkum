@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -417,6 +418,49 @@ func rewriteRelativeImportSpecifiers(source string) string {
 	return relativeImportSpecifierRegex.ReplaceAllString(source, "${1}${2}../${3}")
 }
 
+// importMetaURLRegex matches the literal token import.meta.url wherever it
+// appears — always used as a read expression, never assigned to, so a
+// textual substitution is safe without parsing how the surrounding
+// expression (e.g. fileURLToPath(import.meta.url)) consumes it.
+var importMetaURLRegex = regexp.MustCompile(`import\.meta\.url`)
+
+// shimDirnameAndImportMetaURL compensates for the virtual config executing
+// from <projectDir>/.pokkum/ instead of realConfigPath's real directory (see
+// rewriteRelativeImportSpecifiers' doc comment for why the virtual config
+// lives one level deeper). Bun injects __dirname/__filename as ambient
+// globals even under ESM, so the near-universal
+// path.resolve(__dirname, './src/lib') pattern — commonly used to build
+// resolve.alias entries — silently resolves one directory too deep once
+// relocated, landing on <project>/.pokkum/src/lib instead of
+// <project>/src/lib.
+//
+// Two shims, for two different reasons:
+//
+//   - __dirname/__filename are shadowed with module-scoped `const`
+//     declarations pointing at realConfigPath's real directory/path. A
+//     top-level `const` in the same module takes precedence over Bun's
+//     ambient global for every reference within that module (JS scoping),
+//     so this corrects every direct __dirname/__filename usage without
+//     needing to know how it's used.
+//   - import.meta.url cannot be shadowed the same way — it is a read-only,
+//     module-URL-tied meta property, not a reassignable binding — so every
+//     literal occurrence of the token is textually replaced with a
+//     precomputed string constant holding realConfigPath's real file://
+//     URL, matching rewriteRelativeImportSpecifiers' existing textual
+//     substitution approach rather than introducing a JS/TS parser.
+//
+// realConfigPath must be the original vite.config.ts's real, absolute path
+// on disk — not the virtual .pokkum/ copy's path.
+func shimDirnameAndImportMetaURL(source, realConfigPath string) string {
+	realDir := filepath.Dir(realConfigPath)
+	fileURL := "file://" + filepath.ToSlash(realConfigPath)
+
+	source = importMetaURLRegex.ReplaceAllLiteralString(source, strconv.Quote(fileURL))
+
+	preamble := fmt.Sprintf("const __dirname = %s;\nconst __filename = %s;\n", strconv.Quote(realDir), strconv.Quote(realConfigPath))
+	return preamble + source
+}
+
 // PrepareVirtualViteConfig inspects the project's Vite config, transforms it to configure targetAdapter,
 // and writes the virtual config file to <projectDir>/.pokkum/<viteConfigName>.
 func PrepareVirtualViteConfig(projectDir, viteConfigName, viteConfigSource string, opts InjectorOptions) (*VirtualConfigResult, error) {
@@ -434,6 +478,7 @@ func PrepareVirtualViteConfig(projectDir, viteConfigName, viteConfigSource strin
 		return nil, fmt.Errorf("transform %s: %w", viteConfigName, err)
 	}
 	transformed = rewriteRelativeImportSpecifiers(transformed)
+	transformed = shimDirnameAndImportMetaURL(transformed, filepath.Join(projectDir, viteConfigName))
 
 	pokkumDir := filepath.Join(projectDir, ".pokkum")
 	if err := os.MkdirAll(pokkumDir, 0o700); err != nil {

@@ -309,6 +309,86 @@ export default defineConfig({
 	}
 }
 
+// TestShimDirnameAndImportMetaURL guards the fix for PB-5 (see Roadmap.md/
+// Lessons.md): the virtual config written to <projectDir>/.pokkum/ executes
+// one directory level deeper than the real vite.config.ts it was copied
+// from, so a real Bun runtime's ambient __dirname (and any
+// fileURLToPath(import.meta.url) computation) would otherwise silently
+// resolve into .pokkum/ instead of the real project directory — breaking
+// the near-universal path.resolve(__dirname, './src/lib') pattern used to
+// build resolve.alias entries.
+func TestShimDirnameAndImportMetaURL(t *testing.T) {
+	realConfigPath := "/home/user/myapp/vite.config.ts"
+	out := shimDirnameAndImportMetaURL("const x = 1;\n", realConfigPath)
+
+	if !strings.Contains(out, `const __dirname = "/home/user/myapp";`) {
+		t.Errorf("expected __dirname shadowed to the real project dir, got:\n%s", out)
+	}
+	if !strings.Contains(out, `const __filename = "/home/user/myapp/vite.config.ts";`) {
+		t.Errorf("expected __filename shadowed to the real config path, got:\n%s", out)
+	}
+	if !strings.HasSuffix(strings.TrimRight(out, "\n"), "const x = 1;") {
+		t.Errorf("expected original source preserved after the preamble, got:\n%s", out)
+	}
+}
+
+func TestShimDirnameAndImportMetaURL_ReplacesImportMetaURL(t *testing.T) {
+	realConfigPath := "/home/user/myapp/vite.config.ts"
+	input := "const dir = path.dirname(fileURLToPath(import.meta.url));\n"
+	out := shimDirnameAndImportMetaURL(input, realConfigPath)
+
+	if strings.Contains(out, "import.meta.url") {
+		t.Errorf("expected import.meta.url token replaced, still present in:\n%s", out)
+	}
+	if !strings.Contains(out, `fileURLToPath("file:///home/user/myapp/vite.config.ts")`) {
+		t.Errorf("expected import.meta.url replaced with the real file:// URL, got:\n%s", out)
+	}
+}
+
+// TestPrepareVirtualViteConfig_DirnameResolvesToRealProjectDir is an
+// end-to-end regression test through the public entrypoint: a vite.config.ts
+// using both the __dirname pattern and the import.meta.url pattern to build
+// resolve.alias entries must, once staged into .pokkum/, still compute paths
+// rooted at the REAL project directory — not <project>/.pokkum.
+func TestPrepareVirtualViteConfig_DirnameResolvesToRealProjectDir(t *testing.T) {
+	tempDir := t.TempDir()
+
+	configContent := `import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
+
+const metaDir = path.dirname(fileURLToPath(import.meta.url));
+
+export default defineConfig({
+	plugins: [sveltekit()],
+	resolve: {
+		alias: {
+			'$lib-dirname': path.resolve(__dirname, './src/lib'),
+			'$lib-meta': path.resolve(metaDir, './src/lib'),
+		},
+	},
+});`
+
+	opts := InjectorOptions{TargetAdapter: "@sveltejs/adapter-node"}
+	res, err := PrepareVirtualViteConfig(tempDir, "vite.config.ts", configContent, opts)
+	if err != nil {
+		t.Fatalf("PrepareVirtualViteConfig failed: %v", err)
+	}
+
+	realDirLiteral := `"` + tempDir + `"`
+	if !strings.Contains(res.TransformedSource, "const __dirname = "+realDirLiteral+";") {
+		t.Errorf("expected __dirname shadowed to %s, got:\n%s", tempDir, res.TransformedSource)
+	}
+	wantFileURL := `"file://` + tempDir + `/vite.config.ts"`
+	if !strings.Contains(res.TransformedSource, wantFileURL) {
+		t.Errorf("expected import.meta.url replaced with %s, got:\n%s", wantFileURL, res.TransformedSource)
+	}
+	if strings.Contains(res.TransformedSource, "import.meta.url") {
+		t.Errorf("import.meta.url token should have been substituted away, got:\n%s", res.TransformedSource)
+	}
+}
+
 func TestTransformViteConfig_AdversarialComplexCases(t *testing.T) {
 	t.Run("commonjs_require_transformed", func(t *testing.T) {
 		input := `const adapter = require('@sveltejs/adapter-auto');
