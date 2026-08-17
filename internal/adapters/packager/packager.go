@@ -240,7 +240,11 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		if err != nil {
 			return nil, err
 		}
-		serverLayer, _, serverRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppServerDir, ports.AppServerDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true})
+		// AppServerDir is the whole build output (see pipeline.go), so
+		// client/vendor/native/prerendered are explicitly excluded here —
+		// each is packaged into its own layer below/elsewhere, and without
+		// this they'd be duplicated into /app/server too.
+		serverLayer, _, serverRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppServerDir, ports.AppServerDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true, ExcludeDirs: []string{"client", "vendor", "native", "prerendered"}})
 		if err != nil {
 			return nil, fmt.Errorf("packager: build %s: server layer: %w", req.Platform, err)
 		}

@@ -6,6 +6,36 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
 )
 
+func TestIsExcludedDir(t *testing.T) {
+	opts := pruneutils.PruneOptions{ExcludeDirs: []string{"client", "prerendered"}}
+
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"client", true},
+		{"prerendered", true},
+		{"/client", true}, // leading slash tolerated
+		{"server", false},
+		{"client.js", false},     // must be an exact name match, not a prefix
+		{"server/client", false}, // only a top-level match, not nested
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := pruneutils.IsExcludedDir(c.path, opts); got != c.want {
+			t.Errorf("IsExcludedDir(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+
+	// Unlike IsJunk, ExcludeDirs applies even when NoPrune is set — it's not
+	// about disposable junk, it's about a subtree packaged into a different
+	// layer entirely.
+	noPruneOpts := pruneutils.PruneOptions{NoPrune: true, ExcludeDirs: []string{"client"}}
+	if !pruneutils.IsExcludedDir("client", noPruneOpts) {
+		t.Error("IsExcludedDir should still exclude a matching dir even when NoPrune is true")
+	}
+}
+
 func TestIsJunk_Defaults(t *testing.T) {
 	opts := pruneutils.PruneOptions{}
 

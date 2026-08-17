@@ -132,6 +132,14 @@ type PruneOptions struct {
 	NoPrune       bool     // Disable pruning entirely
 	KeepSourcemap bool     // Preserve *.map files even when pruning is enabled
 	KeepPatterns  []string // Additional glob patterns to keep/whitelist
+
+	// ExcludeDirs names top-level subdirectories (relative to the tree being
+	// walked, e.g. "client") to skip entirely — unlike NoPrune/KeepPatterns,
+	// which decide file-by-file whether something is disposable junk, this
+	// unconditionally omits a whole subtree regardless of NoPrune, because
+	// its contents are packaged into a different layer entirely and including
+	// them here would duplicate them, not just fail to prune them.
+	ExcludeDirs []string
 }
 
 // PruneResult records what was pruned from a vendor directory tree: how many
@@ -146,6 +154,21 @@ type PruneResult struct {
 	FilesPruned int
 	BytesSaved  int64
 	PrunedPaths []string
+}
+
+// IsExcludedDir reports whether relPath (slash-separated, relative to the
+// tree being walked) is one of opts.ExcludeDirs — an exact top-level
+// subdirectory name, not a glob. Unlike IsJunk, this applies even when
+// opts.NoPrune is set, since ExcludeDirs isn't about disposable junk, it's
+// about a subtree that belongs to a different layer entirely.
+func IsExcludedDir(relPath string, opts PruneOptions) bool {
+	normPath := strings.TrimPrefix(filepath.ToSlash(relPath), "/")
+	for _, ex := range opts.ExcludeDirs {
+		if normPath == strings.Trim(ex, "/") {
+			return true
+		}
+	}
+	return false
 }
 
 // IsJunk returns true if relPath (slash-separated relative path) matches junk blocklists

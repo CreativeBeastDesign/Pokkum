@@ -62,12 +62,29 @@ func (m *mockCompiler) Prepare(_ context.Context, req ports.PrepareRequest) (por
 	// buildPrerenderedAddenda.
 	if req.Strategy != ports.StrategyExe {
 		if req.Strategy == ports.StrategyLayered {
+			// Mirrors a real @sveltejs/adapter-node build's actual shape: the
+			// entrypoint (index.js) sits at outputDir's top level, a SIBLING
+			// of server/ — not inside it. AppServerDir (internal/core/pipeline.go)
+			// packages the whole outputDir now, precisely because a real build's
+			// entrypoint lives here and chunk files inside server/ reach back
+			// out via relative paths that only resolve correctly when this
+			// nesting is preserved exactly. This fixture used to place index.js
+			// inside server/ instead, which never modeled the real shape and is
+			// part of why the missing-entrypoint bug this mirrors went
+			// undetected — see Lessons.md.
 			serverDir := filepath.Join(outputDir, "server")
 			if err := os.MkdirAll(serverDir, 0o755); err != nil {
 				return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: mkdir server dir: %w", err)
 			}
-			if err := os.WriteFile(filepath.Join(serverDir, "index.js"), []byte("export default { fetch() {} };\n"), 0o644); err != nil {
-				return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: write server fixture: %w", err)
+			if err := os.WriteFile(filepath.Join(outputDir, "index.js"), []byte("import './server/chunks/fixture.js';\nexport default { fetch() {} };\n"), 0o644); err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: write entrypoint fixture: %w", err)
+			}
+			chunksDir := filepath.Join(serverDir, "chunks")
+			if err := os.MkdirAll(chunksDir, 0o755); err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: mkdir chunks dir: %w", err)
+			}
+			if err := os.WriteFile(filepath.Join(chunksDir, "fixture.js"), []byte("export default {};\n"), 0o644); err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("mockCompiler: prepare: write chunk fixture: %w", err)
 			}
 
 			vendorDir := filepath.Join(outputDir, "vendor")

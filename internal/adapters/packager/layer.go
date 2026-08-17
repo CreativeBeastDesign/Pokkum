@@ -721,14 +721,18 @@ func BuildDirectoryTreeLayerWithPruning(ctx context.Context, platform ports.Plat
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
 		rel, err := filepath.Rel(hostDir, p)
 		if err != nil {
 			return err
 		}
 		relSlash := filepath.ToSlash(rel)
+
+		if d.IsDir() {
+			if pruneutils.IsExcludedDir(relSlash, pruneOpts) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 
 		if pruneutils.IsJunk(rel, false, pruneOpts) {
 			pruned.FilesPruned++

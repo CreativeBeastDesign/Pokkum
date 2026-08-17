@@ -1098,7 +1098,22 @@ func fanOut(
 
 			switch req.Compile.Strategy {
 			case StrategyLayered:
-				pkgReq.AppServerDir = filepath.Join(prep.OutputDir, "server")
+				// AppServerDir is the WHOLE build output, not just its
+				// server/ subdirectory: a real @sveltejs/adapter-node build
+				// emits its actual entrypoint (index.js) and index.js's own
+				// non-server dependencies (env.js, shims.js) as siblings of
+				// server/, not inside it, and chunk files inside server/
+				// reach back out to them via relative paths like
+				// "../../shims.js" that assume the original nesting is
+				// preserved. Flattening server/ alone into /app/server (the
+				// prior behavior) silently dropped index.js from every
+				// layered-strategy image and broke those relative escapes —
+				// packaging the whole tree, with client/prerendered/
+				// excluded below since they're packaged into their own
+				// layers, keeps every original relative path correct by
+				// construction instead of requiring bundler-output-specific
+				// rewrites. See Lessons.md's corresponding entry.
+				pkgReq.AppServerDir = prep.OutputDir
 				pkgReq.AppClientDir = filepath.Join(prep.OutputDir, "client")
 				pkgReq.AppVendorDir = filepath.Join(prep.OutputDir, "vendor")
 				pkgReq.AppNativeDir = filepath.Join(prep.OutputDir, "native")

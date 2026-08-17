@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -195,6 +196,73 @@ func TestBuildDirectoryTreeLayerWithPruning(t *testing.T) {
 	wantBytes := int64(len("declare const a: number") + len("{}") + len("# Readme"))
 	if pruned.BytesSaved != wantBytes {
 		t.Errorf("expected BytesSaved %d, got %d", wantBytes, pruned.BytesSaved)
+	}
+}
+
+// TestBuildDirectoryTreeLayerWithPruning_ExcludeDirs guards the fix for a
+// real bug (see Lessons.md's "missing /app/server/index.js" entry): AppServerDir
+// packages a whole build output tree that also contains client/ and
+// prerendered/ subdirectories already packaged into their own layers
+// elsewhere. ExcludeDirs must skip those subtrees entirely — even under
+// NoPrune: true, since this isn't about disposable junk — while leaving a
+// same-named FILE (as opposed to directory) alone, and leaving nested
+// directory structure that isn't excluded intact.
+func TestBuildDirectoryTreeLayerWithPruning_ExcludeDirs(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	_ = os.WriteFile(filepath.Join(tmpDir, "index.js"), []byte("entrypoint"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "server", "chunks"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "server", "chunks", "handler.js"), []byte("handler"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "client"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "client", "app.js"), []byte("client bundle"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "prerendered"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "prerendered", "index.html"), []byte("<html></html>"), 0644)
+
+	modTime := time.Unix(1700000000, 0)
+	pruneOpts := pruneutils.PruneOptions{
+		NoPrune:     true,
+		ExcludeDirs: []string{"client", "prerendered"},
+	}
+
+	layer, _, _, err := BuildDirectoryTreeLayerWithPruning(ctx, ports.LinuxAMD64, tmpDir, "/app/server", modTime, ports.CompressionGzip, pruneOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rc, err := layer.Uncompressed()
+	if err != nil {
+		t.Fatalf("failed to open uncompressed layer stream: %v", err)
+	}
+	defer rc.Close()
+
+	tr := tar.NewReader(rc)
+	entries := make(map[string]bool)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar read error: %v", err)
+		}
+		entries[hdr.Name] = true
+	}
+
+	// The real entrypoint and its nested server/ subtree must survive intact
+	// and with their original relative nesting preserved — this is the exact
+	// shape a real @sveltejs/adapter-node build's chunk files depend on to
+	// resolve their own relative imports correctly.
+	for _, want := range []string{"app/server/index.js", "app/server/server/chunks/handler.js"} {
+		if !entries[want] {
+			t.Errorf("expected %s in layer tar, got %v", want, entries)
+		}
+	}
+	// client/ and prerendered/ must be excluded entirely, despite NoPrune: true.
+	for name := range entries {
+		if strings.HasPrefix(name, "app/server/client/") || strings.HasPrefix(name, "app/server/prerendered/") {
+			t.Errorf("expected client/prerendered to be excluded, found %s", name)
+		}
 	}
 }
 
