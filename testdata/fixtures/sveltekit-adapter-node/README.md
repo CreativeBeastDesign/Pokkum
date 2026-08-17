@@ -19,7 +19,7 @@ file is exactly what `sv create` emitted; no `svelte.config.js` exists
 because current `sv create` scaffolds don't generate one (the adapter is
 configured entirely in `vite.config.ts`, matching this project's real
 default — see `Roadmap.md`'s "Layered-Strategy Real-Build Correctness" and
-`concepts/zero-config-injection-concept.md`).
+`concepts/archive/zero-config-injection-concept.md`).
 
 This is the fixture `tests/integration/layered_prerendered_e2e_test.go`
 drives `--strategy=layered` against, end to end, through the real

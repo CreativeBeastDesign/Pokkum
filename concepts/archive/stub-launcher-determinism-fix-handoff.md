@@ -2,7 +2,7 @@
 
 **Status:** Confirmed real bug, not yet fixed. Flagged as code-review finding #10 (2026-08-17) against the Option A (compiled stub launcher) implementation, then verified empirically during the fix pass — see below. Deliberately left unfixed there because a proper fix is real engineering, not a minimal edit.
 
-**Read first:** `concepts/layered-strategy-runtime-hardening-concept.md` §1 (the design doc Option A was built from) and `CLAUDE.md`'s "Bit-for-Bit OCI Reproducibility" invariant — this bug is a direct violation of that invariant, which the rest of the codebase treats as load-bearing (every other embedded binary/layer in Pokkum is either downloaded-and-checksum-pinned or built deterministically from `SOURCE_DATE_EPOCH`-pinned inputs).
+**Read first:** `concepts/archive/layered-strategy-runtime-hardening-concept.md` §1 (the design doc Option A was built from) and `CLAUDE.md`'s "Bit-for-Bit OCI Reproducibility" invariant — this bug is a direct violation of that invariant, which the rest of the codebase treats as load-bearing (every other embedded binary/layer in Pokkum is either downloaded-and-checksum-pinned or built deterministically from `SOURCE_DATE_EPOCH`-pinned inputs).
 
 ---
 
@@ -59,7 +59,7 @@ Result: **two different SHA256 hashes.** `file bun-stub-x64` shows `BuildID[sha1
 | `internal/adapters/bunruntime/resolver_test.go` | Where the new determinism regression test belongs (step 3). |
 | `internal/adapters/striputils/striputils.go` | Reference for this codebase's existing ELF-handling conventions (`debug/elf` usage, `IsELFBinary`) and the exact portability trap to avoid repeating (host-strip-tool dependency). Do not assume this package's `StripELFFile` is directly reusable — verify per step 2's notes above. |
 | `internal/adapters/attestutils/` | A second reference point: this package already computes deterministic content hashes over build output for the (already-shipped) Option C startup-attestation feature — same problem class ("make build output verifiably identical across runs"), worth a skim for any directly reusable patterns even though its inputs (a directory tree) differ from this task's (a single ELF binary). |
-| `concepts/layered-strategy-runtime-hardening-concept.md` | Original Option A design doc; §1.3's "build-time assertion, not a one-time fact to trust forever" framing directly motivates step 3. |
+| `concepts/archive/layered-strategy-runtime-hardening-concept.md` | Original Option A design doc; §1.3's "build-time assertion, not a one-time fact to trust forever" framing directly motivates step 3. |
 
 ## 5. Acceptance criteria
 

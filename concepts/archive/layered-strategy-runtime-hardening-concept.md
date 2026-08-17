@@ -5,7 +5,7 @@
 Both are the same shape of unfinished business: each was analyzed, partially spiked, and explicitly **deferred** rather than built, because building it under time pressure risked getting the mechanism wrong in a way that's hard to detect later. Both are now the top of their respective backlogs:
 
 - **Option A** (compiled stub launcher) is `Roadmap.md`'s "2. Layered-Strategy Runtime Hardening" — the one item left in that section after Option C (startup attestation) shipped 2026-08-17.
-- **Option B** (generated `vite.config.ts` wrapper) is `concepts/zero-config-injection-concept.md`'s deferred follow-up to Option C (fail-fast detection), which shipped the same day (see `Roadmap.md`'s "0. Layered-Strategy Real-Build Correctness").
+- **Option B** (generated `vite.config.ts` wrapper) is `concepts/archive/zero-config-injection-concept.md`'s deferred follow-up to Option C (fail-fast detection), which shipped the same day (see `Roadmap.md`'s "0. Layered-Strategy Real-Build Correctness").
 
 Neither is scoped as a "just build it" ticket. Both need a real design decision recorded before implementation starts, because both have at least one plausible-looking mechanism that turns out to be broken or fragile — and this document exists to record that now, empirically, rather than have someone rediscover it mid-implementation.
 

@@ -5,7 +5,7 @@
 | Feature                                     | DX (1-10) | Security (1-10) | Cost (1-10) | Expected cost (explicit)                                                         | External Dependencies             | Priority |
 | ------------------------------------------- | --------- | --------------- | ----------- | -------------------------------------------------------------------------------- | --------------------------------- | -------- |
 | Live Cluster Annotation Inspection          | 8         | 2               | 4           | `kubectl get` pre-flight query in `pokkum apply` to seed deployment history      | `kubectl`                         | Done     |
-| Monorepo Affected-Detection                 | 7         | 1               | 4           | Git-diff input tracking per `pokkum://` app                                      | None                              | Medium   |
+| Monorepo Affected-Detection                 | 7         | 1               | 4           | Git-diff input tracking per `pokkum://` app                                      | None                              | Done     |
 | Static/Prerendered Page Optimization        | 8         | 1               | 4           | Shipped v1.0: prerendered slim layer (layered) + `--static` served by embedded Go `pokkum-static` (no nginx) | Embedded Go `pokkum-static`        | Done     |
 | Multi-Environment Management                | 7         | 3               | 5           | Config templating; secret-manager integrations                                   | Vault / AWS Secrets               | Medium   |
 | Hooks System                                | 6         | 2               | 5           | Small CLI size; cross-platform shell exec; defuses Plugin System demand          | Shell / Bun                       | Medium   |
@@ -41,7 +41,7 @@
 | Built-in Metrics Endpoint (supervisor)      | 7         | 2               | 3           | Supervisor-level `/metrics` only; app metrics already shipped via OTel           | None                              | Done     |
 | Image Provenance Timeline                   | 6         | 5               | 5           | Registry API reliance; partially subsumed by `verify` + OCI annotations          | Registry (SLSA lookup)            | Done     |
 | Verify Base on Cache Hit                    | 3         | 7               | 2           | One Cosign/keyless verify per cache hit; opt-in strict; decoupled from `--cache-verify` | None (sigstore already vendored) | Backlog  |
-| Layered-Strategy Runtime Hardening (new 2026-08-16) | 5 | 8               | 5           | Compiled stub launcher (needs a spike: verify runtime-import of external files) + ~100 LOC supervisor startup attestation | None | Medium-High |
+| Layered-Strategy Runtime Hardening          | 5         | 8               | 4           | Option A compiled stub launcher (`--stub-launcher`) + Option C supervisor startup attestation (`POKKUM_ATTESTATION_DIGEST`) | None | Done     |
 | Dedicated `chainguard-static` Preset (new 2026-08-16) | 4 | 5             | 2           | Small enum-driven change; one self-healing orphaned `pokkum.lock` entry per existing `--static` user | None | Low-Medium |
 
 ### Shipped (removed from matrix)
@@ -307,12 +307,13 @@ property "every emitted/promoted image traces to a verified base, hit or miss":
   surface. Opt-in so the sub-100ms fast path is preserved by default. (new flag: `--verify-base-on-cache-hit`
   on `build`)
 
-### Layered-Strategy Runtime Hardening
+### Layered-Strategy Runtime Hardening (Shipped)
 
 - `--strategy=layered` (default since v0.3) ships stock `bun`, which exposes its full CLI via `BUN_BE_BUN=1` — an attacker with an existing exec primitive can run arbitrary scripts, unlike v0.1's sealed compiled-exe strategy
-- Two composable mitigations, both from the original v0.3 hardening analysis but never built: a compiled stub launcher (Option A — closes the `BUN_BE_BUN`/`bunx` surface entirely) and supervisor startup attestation (Option C — a SHA-256 manifest check before `pokkum-init` execs the app, restoring tamper-evidence without depending on cluster-level readonly-fs policy)
-- Unlike most items in this document, this closes a gap in the **default** build path, not an opt-in feature — see `Roadmap.md`'s "Recommended Next Steps" and `concepts/archive/pokkum-layer-caching-concept.md` §5.2
-- Tracking: Recommended Next Steps (Medium-High Priority) on `Roadmap.md`
+- Two composable mitigations shipped 2026-08-17:
+  - **Option A (Compiled Stub Launcher)**: compiles a minimal non-foldable entrypoint launcher (`const p = "/app/server/" + "index.js"; await import(p);`) via `--stub-launcher` (`POKKUM_STUB_LAUNCHER`), cached per `(version, variant, platform)`.
+  - **Option C (Supervisor Startup Attestation)**: packager computes a SHA-256 root digest over the authoritative `/app` tree (`POKKUM_ATTESTATION_DIGEST`) and `pokkum-init` re-derives and verifies it at startup, exit 126 on mismatch.
+- Tracking: Completed on `Roadmap.md` (see `concepts/archive/layered-strategy-runtime-hardening-concept.md` and `concepts/archive/pokkum-layer-caching-concept.md` §5.2)
 
 ### Dedicated `chainguard-static` Base Image Preset
 

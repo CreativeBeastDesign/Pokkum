@@ -8,10 +8,17 @@ This document provides a comprehensive inventory of all implemented features, ca
 
 ### Core Compilation & Container Packaging
 - **Zero-Dependency OCI Image Compilation**: Compiles SvelteKit applications directly into multi-arch OCI container images (`linux/amd64`, `linux/arm64`) without Docker daemon or buildkit dependencies.
-- **Dual Packaging Strategies**:
-  - `--strategy=layered` (Default): 5-layer OCI layout (Supervisor, Bun Runtime, App dependencies `node_modules`, Prerendered client assets, SvelteKit SSR runtime).
-  - `--strategy=exe`: Compiles self-contained single-file executable using Bun compiler (`bun build --compile`).
-- **Zero-Config Virtual Auto-Injection**: Injects custom SvelteKit adapter (`@jesterkit/exe-sveltekit`), pins `kit.version.name` to `SOURCE_DATE_EPOCH`, and injects telemetry hooks into `.pokkum/` virtual sandbox space without mutating user source trees on disk.
+- **Three Packaging Strategies**:
+  - `--strategy=layered` (Default): 8-layer OCI layout (Base image, Bun runtime or compiled stub launcher, Supervisor, App server, Client assets, Vendor dependencies, Native addons, Prerendered pages).
+  - `--strategy=static` (`--static` shorthand): Pure zero-JS static site compilation onto `chainguard/static` with embedded `pokkum-static` Go web server (PID 1), SPA fallback support, Range requests, strong ETags, and precompressed `.gz/.br/.zst` sidecars.
+  - `--strategy=exe` (Legacy): Compiles self-contained single-file executable using Bun compiler (`bun build --compile`).
+- **Zero-Config Virtual Auto-Injection**: Surgically transforms `vite.config.ts/js` to inject/override the target adapter inside `sveltekit({ adapter: adapter() })` while preserving runes, compiler options, and other plugins. `bunexec.Compiler.Prepare` generates `.pokkum/<viteConfigName>` and invokes `bun x vite build --config .pokkum/<viteConfigName>` without mutating user-authored files, with fallback to Option C (`checkEffectiveAdapter` fail-fast validation).
+- **Layered Runtime Hardening & Startup Attestation**:
+  - Option A Compiled Stub Launcher (`--stub-launcher`): Replaces stock Bun CLI with a minimal non-foldable entrypoint launcher (`const p = "/app/server/" + "index.js"; await import(p);`) eliminating the `BUN_BE_BUN` / `bunx` attack surface.
+  - Option C Supervisor Startup Attestation (`POKKUM_ATTESTATION_DIGEST`): Computes a deterministic SHA-256 root digest over authoritative post-processing `/app` artifacts, verified by `/pokkum/init` prior to execution (exit 126 on mismatch).
+- **Composite Remote OCI Input Caching & Anti-Poisoning**: Computes deterministic composite input hashes (`sha256(source + lockfile + baseDigest + bunVersion + platforms + flags)`) to skip builds in sub-100ms on registry cache hits, with mandatory pre-promotion Cosign/Sigstore signature verification (`--cache-verify`).
+- **Static Asset Pre-Compression**: Build-time `.gz`, `.br`, and `.zst` sidecar compression for `/app/client` web assets.
+- **Vendor Layer Pruning & ELF Stripping**: Automatic build-time removal of non-runtime files (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests) from `/app/vendor` and stripping of debug symbols from native `.node` addons.
 - **Configurable Layer Compression**: Supports `--compression=gzip` (default) and `--compression=zstd` for high-throughput registry pushes.
 - **Embedded PID-1 Process Supervisor (`/pokkum/init`)**:
   - Sub-process management: Reaps orphaned zombie child processes and forwards OS signals (`SIGTERM`, `SIGINT`, `SIGHUP`).
@@ -58,6 +65,7 @@ This document provides a comprehensive inventory of all implemented features, ca
 ### Kubernetes Integration & Day-2 Operations
 - **Declarative URI Resolution (`pokkum resolve`)**: Resolves `pokkum://` image URIs in Kubernetes YAML manifests to immutable image digests (`repo@sha256:...`).
 - **Direct Cluster Deployment (`pokkum apply`)**: Resolves manifests and applies them directly to Kubernetes clusters (`kubectl apply -f -`).
+- **Monorepo Affected-Detection (`--since=<git-ref>`)**: Diffs each project tree against a base ref and skips builds for unaffected projects that already have a known prior digest (`ports.Reference.Skipped`).
 - **Cluster Hardening Defaults**: Injects secure `securityContext` (`runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`), resource requests/limits, and automatic `NetworkPolicy` and `PodDisruptionBudget` manifests.
 - **Multi-Generation Rollback (`pokkum rollback`)**: Rolls back image references in Kubernetes manifests using `pokkum.dev/image-history` annotations with depth selection (`-g`, `--generation=<n>`, `--list`, `--to`).
 - **Multi-Registry Authentication (`--registry-config`)**: Shells out to dynamic `docker-credential-*` binaries (ECR, GCR, OSXKeychain) with in-memory caching and fallback to static `auths` blocks.
