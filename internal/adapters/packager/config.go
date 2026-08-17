@@ -222,6 +222,12 @@ func mergeLabels(base, caller map[string]string, baseDigest v1.Hash, ts time.Tim
 		baked = slices.Compact(baked)
 		out[ports.LabelEnvBaked] = strings.Join(baked, ",")
 	}
+	if len(rc.VEXExemptions) > 0 {
+		exempted := slices.Clone(rc.VEXExemptions)
+		slices.Sort(exempted)
+		exempted = slices.Compact(exempted)
+		out[ports.LabelVEXExemptions] = strings.Join(exempted, ",")
+	}
 
 	maps.Copy(out, caller)
 	return out
@@ -250,6 +256,9 @@ func imageAnnotations(labels map[string]string, baseRef string, caller map[strin
 	}
 	if v, ok := labels[ports.LabelEnvBaked]; ok && v != "" {
 		out[ports.AnnotationEnvBaked] = v
+	}
+	if v, ok := labels[ports.LabelVEXExemptions]; ok && v != "" {
+		out[ports.AnnotationVEXExemptions] = v
 	}
 	if _, ok := out[ports.LabelBaseName]; !ok && baseRef != "" {
 		out[ports.LabelBaseName] = baseRef

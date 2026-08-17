@@ -482,6 +482,14 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				Target:          base.PinnedRef,
 				FailOn:          effectiveFailOn,
 				AllowIncomplete: req.AllowIncompleteScan,
+				VEXExemptions:   req.VEXExemptions,
+				// Real wall-clock time, not SOURCE_DATE_EPOCH — see
+				// ports.VEXExemption.Expired's doc comment for why an
+				// exemption's expiry is evaluated against actual current
+				// time. This does not affect any image byte: it only
+				// changes whether the build proceeds, exactly like the
+				// live OSV.dev query this whole branch already depends on.
+				Now: time.Now(),
 			})
 
 			// Record scan result in pokkum.lock if lockfile tracking is available
@@ -505,6 +513,20 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				}
 			} else if len(scanRes.Vulnerabilities) > 0 {
 				log.Info("base image vulnerability scan passed", "pinned", base.PinnedRef, "vulns", len(scanRes.Vulnerabilities), "maxSeverity", scanRes.MaxSeverityFound)
+			}
+
+			if len(scanRes.ExemptedVulnerabilities) > 0 {
+				seen := make(map[string]bool, len(scanRes.ExemptedVulnerabilities))
+				var ids []string
+				for _, v := range scanRes.ExemptedVulnerabilities {
+					if !seen[v.ID] {
+						seen[v.ID] = true
+						ids = append(ids, v.ID)
+					}
+				}
+				slices.Sort(ids)
+				req.Runtime.VEXExemptions = ids
+				log.Warn("VEX exemption(s) applied — these CVEs were excluded from the --fail-on-cve threshold", "cves", strings.Join(ids, ","))
 			}
 		}
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,6 +30,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/slsa"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/staticserver"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/vexutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 )
 
@@ -111,6 +113,7 @@ type buildFlags struct {
 
 	failOnCVE       string
 	allowIncomplete bool
+	vexOutput       string
 	noPrune         bool
 	keepVendor      []string
 	noPrecompress   bool
@@ -162,8 +165,8 @@ The project directory defaults to the current working directory.`,
 		"Select the Chainguard base preset (shorthand for --base chainguard)")
 	cmd.Flags().StringVar(&flags.sbom, "sbom", "spdx-json",
 		"SBOM format (spdx-json [default], cyclonedx-json, or none)")
-	cmd.Flags().StringVar(&flags.sbomAttach, "sbom-attach", "referrer",
-		"SBOM attachment mode (referrer [default, OCI 1.1] or tag)")
+	cmd.Flags().StringVar(&flags.sbomAttach, "sbom-attach", "auto",
+		"SBOM attachment mode: auto [default] probes OCI 1.1 referrers support and falls back to tag mode if unsupported (ECR, older Harbor/Artifactory), referrer forces OCI 1.1 with no fallback, tag always uses the legacy .sbom tag convention")
 	cmd.Flags().BoolVar(&flags.local, "local", false,
 		"Load the image into the local Docker daemon instead of pushing to a registry")
 	cmd.Flags().StringVar(&flags.tarball, "tarball", "",
@@ -265,6 +268,8 @@ The project directory defaults to the current working directory.`,
 		"Fail build if base image vulnerabilities exceed threshold (low, medium, high, critical; default warn-only)")
 	cmd.Flags().BoolVar(&flags.allowIncomplete, "allow-incomplete", false,
 		"Allow build to succeed even if base image vulnerability database lookups fail (default: fail closed when --fail-on-cve is active)")
+	cmd.Flags().StringVar(&flags.vexOutput, "vex-output", "",
+		"Write a real OpenVEX document (https://openvex.dev) covering this build's active security.vex_exemptions (.pokkum.yaml) to the given path. No-op if there are no active exemptions.")
 	cmd.Flags().BoolVar(&flags.noPrune, "no-prune", false,
 		"Disable build-time stripping of non-runtime files (*.d.ts, *.map, tests, docs) from the vendor layer")
 	cmd.Flags().StringSliceVar(&flags.keepVendor, "keep-vendor", nil,
@@ -335,12 +340,41 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		return err
 	}
 
+	if flags.vexOutput != "" {
+		if err := writeVEXDocument(flags.vexOutput, req.VEXExemptions, res.Image.Ref); err != nil {
+			return fmt.Errorf("write vex document: %w", err)
+		}
+	}
+
 	logger.Info("build finished",
 		"ref", res.Image.Ref,
 		"digest", res.Image.Digest.String(),
 		"platforms", core.PlatformList(res.Image.Platforms),
 		"base", res.BaseImage.PinnedRef,
 		"duration", res.Duration.String())
+	return nil
+}
+
+// writeVEXDocument writes a real OpenVEX document covering exemptions to
+// path, or does nothing (not even creating an empty file) if there are no
+// active exemptions — a --vex-output flag on a build with no
+// security.vex_exemptions configured is a no-op, not an empty/misleading
+// document.
+func writeVEXDocument(path string, exemptions []core.VEXExemption, imageRef string) error {
+	if len(exemptions) == 0 {
+		return nil
+	}
+	now := time.Now()
+	id := "https://pokkum.dev/vex/" + strings.ReplaceAll(imageRef, "/", "-")
+	doc := vexutils.BuildDocument(exemptions, now, id, imageRef)
+
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal openvex document: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
 	return nil
 }
 
@@ -817,6 +851,14 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 		req.AllowIncompleteScan = true
 	} else {
 		req.AllowIncompleteScan = flags.allowIncomplete
+	}
+
+	if projCfg != nil && len(projCfg.Security.VEXExemptions) > 0 {
+		exemptions, err := core.ParseVEXExemptions(projCfg.Security.VEXExemptions, time.Now())
+		if err != nil {
+			return nil, fmt.Errorf(".pokkum.yaml security.vex_exemptions: %w", err)
+		}
+		req.VEXExemptions = exemptions
 	}
 
 	// Cache verification configuration

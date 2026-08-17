@@ -210,6 +210,7 @@ const (
 	LabelBunVersion    = "dev.pokkum.bun.version"
 	LabelRequiredEnv   = "dev.pokkum.required-env"
 	LabelEnvBaked      = "dev.pokkum.env-baked"
+	LabelVEXExemptions = "dev.pokkum.vex-exemptions"
 
 	// AnnotationRequiredEnv is the manifest annotation key for required env contract.
 	AnnotationRequiredEnv = "pokkum.dev/required-env"
@@ -224,6 +225,15 @@ const (
 	// these — unlike $env/dynamic/*, which is deliberately excluded from
 	// detection because it IS read at runtime.
 	AnnotationEnvBaked = "pokkum.dev/env-baked"
+
+	// AnnotationVEXExemptions is the manifest annotation key naming which
+	// CVE IDs were excluded from --fail-on-cve's threshold decision for
+	// this specific image, via a "not_affected" OpenVEX-shaped exemption
+	// (see VEXExemption in vex.go). A durable, auditable record that this
+	// image's clean CVE gate result relied on a deliberate, owned,
+	// time-bounded exemption — not that the base image is actually free of
+	// those CVEs.
+	AnnotationVEXExemptions = "pokkum.dev/vex-exemptions"
 )
 
 // DefaultLayeredEntrypoint returns the image entrypoint for StrategyLayered:
@@ -297,6 +307,15 @@ type RuntimeConfig struct {
 	// informational: it drives AnnotationEnvBaked, not any runtime env var —
 	// unlike RequireEnv, nothing reads this at container startup.
 	EnvBaked []string
+
+	// VEXExemptions lists the CVE IDs that were actually excluded from
+	// --fail-on-cve's threshold decision for this build (a build's
+	// configured exemptions minus whichever didn't match any vulnerability
+	// actually found) — auto-populated by the pipeline from the scanner's
+	// ScanResult.ExemptedVulnerabilities, never set directly by a flag.
+	// Purely informational: it drives AnnotationVEXExemptions, not any
+	// runtime env var.
+	VEXExemptions []string
 
 	// ExposedPorts lists additional TCP ports to declare in the image config.
 	// Port and ProbePort are always exposed and need not be repeated. Nil means

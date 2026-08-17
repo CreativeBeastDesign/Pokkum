@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
@@ -155,12 +156,13 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 
 	// Base (top-level) config fields.
 	validationErrors = append(validationErrors, validateConfigFields(configFieldsToValidate{
-		strategy:   cfg.Strategy,
-		base:       cfg.Base,
-		platforms:  cfg.Platforms,
-		dockerRepo: cfg.Docker.Repo,
-		failOnCVE:  cfg.Security.FailOnCVE,
-		sbomFormat: cfg.SBOM.Format,
+		strategy:      cfg.Strategy,
+		base:          cfg.Base,
+		platforms:     cfg.Platforms,
+		dockerRepo:    cfg.Docker.Repo,
+		failOnCVE:     cfg.Security.FailOnCVE,
+		sbomFormat:    cfg.SBOM.Format,
+		vexExemptions: cfg.Security.VEXExemptions,
 	})...)
 
 	// Every named profile, using the exact same field validation logic as the
@@ -176,13 +178,14 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 	for _, name := range profileNames {
 		profile := cfg.Profiles[name]
 		validationErrors = append(validationErrors, validateConfigFields(configFieldsToValidate{
-			profileName: name,
-			strategy:    profile.Strategy,
-			base:        profile.Base,
-			platforms:   profile.Platforms,
-			dockerRepo:  profile.Docker.Repo,
-			failOnCVE:   profile.Security.FailOnCVE,
-			sbomFormat:  profile.SBOM.Format,
+			profileName:   name,
+			strategy:      profile.Strategy,
+			base:          profile.Base,
+			platforms:     profile.Platforms,
+			dockerRepo:    profile.Docker.Repo,
+			failOnCVE:     profile.Security.FailOnCVE,
+			sbomFormat:    profile.SBOM.Format,
+			vexExemptions: profile.Security.VEXExemptions,
 		})...)
 	}
 
@@ -219,13 +222,14 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 // otherwise, so a single validation implementation serves both call sites in
 // runConfigValidate without duplicating the checks.
 type configFieldsToValidate struct {
-	profileName string
-	strategy    string
-	base        string
-	platforms   []string
-	dockerRepo  string
-	failOnCVE   string
-	sbomFormat  string
+	profileName   string
+	strategy      string
+	base          string
+	platforms     []string
+	dockerRepo    string
+	failOnCVE     string
+	sbomFormat    string
+	vexExemptions []ports.VEXExemptionConfig
 }
 
 // validateConfigFields runs the schema/value checks shared by the base
@@ -271,6 +275,12 @@ func validateConfigFields(f configFieldsToValidate) []string {
 	if f.sbomFormat != "" {
 		if _, err := core.ParseSBOMFormat(f.sbomFormat); err != nil {
 			errs = append(errs, fmt.Sprintf("%sinvalid sbom format %q: %v", prefix, f.sbomFormat, err))
+		}
+	}
+
+	if len(f.vexExemptions) > 0 {
+		if _, err := core.ParseVEXExemptions(f.vexExemptions, time.Now()); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid vex_exemptions: %v", prefix, err))
 		}
 	}
 

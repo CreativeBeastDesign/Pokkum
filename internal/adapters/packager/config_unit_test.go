@@ -382,6 +382,26 @@ func TestMergeLabelsAndAnnotationsWithEnvBaked(t *testing.T) {
 	}
 }
 
+// TestMergeLabelsAndAnnotationsWithVEXExemptions is PR-6's regression guard:
+// an image built with an active --fail-on-cve VEX exemption must carry a
+// durable record of which CVEs were exempted, mirrored from label to
+// manifest annotation exactly like AnnotationRequiredEnv/AnnotationEnvBaked.
+func TestMergeLabelsAndAnnotationsWithVEXExemptions(t *testing.T) {
+	rc := ports.RuntimeConfig{
+		VEXExemptions: []string{"CVE-2024-99999", "CVE-2024-12345"},
+	}
+	hash := v1.Hash{Algorithm: "sha256", Hex: "1234567890abcdef"}
+	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc)
+	if labels[ports.LabelVEXExemptions] != "CVE-2024-12345,CVE-2024-99999" {
+		t.Errorf("got LabelVEXExemptions = %q, want CVE-2024-12345,CVE-2024-99999 (sorted)", labels[ports.LabelVEXExemptions])
+	}
+
+	annotations := imageAnnotations(labels, "", nil)
+	if annotations[ports.AnnotationVEXExemptions] != "CVE-2024-12345,CVE-2024-99999" {
+		t.Errorf("got AnnotationVEXExemptions = %q, want CVE-2024-12345,CVE-2024-99999", annotations[ports.AnnotationVEXExemptions])
+	}
+}
+
 // TestMergeLabelsOmitsEnvBakedWhenUnset confirms an ordinary build with no
 // $env/static/* imports never gets a fabricated/empty annotation — absence
 // of the key, not an empty-string value, is how "not detected" is spelled.

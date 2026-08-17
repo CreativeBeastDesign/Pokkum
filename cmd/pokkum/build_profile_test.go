@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -274,4 +277,143 @@ profiles:
 	if err == nil {
 		t.Fatal("expected error on invalid output mode in profile, got nil")
 	}
+}
+
+// TestBuild_VEXExemptionsFromConfig is PR-6's CLI-wiring regression guard:
+// self-review (checklist row 13, mem:self_review_checklist) found that
+// core.ParseVEXExemptions and the scanner adapter were both unit-tested in
+// isolation, but nothing proved a real .pokkum.yaml security.vex_exemptions
+// block actually reaches BuildRequest.VEXExemptions through this file's real
+// parsing call chain (build.go's buildRequestFromConfigAndFlags), following
+// the same pattern already established above for --profile/--base wiring.
+func TestBuild_VEXExemptionsFromConfig(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("valid vex_exemptions block reaches BuildRequest.VEXExemptions", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfgContent := `version: 1
+docker:
+  repo: ghcr.io/example/app
+base: distroless
+strategy: layered
+security:
+  vex_exemptions:
+    - cve: CVE-2026-1234
+      package: libssl3
+      justification: component_not_present
+      status_notes: not compiled into this image
+      expires: "2099-01-01"
+      owner: security-team
+`
+		_ = os.WriteFile(filepath.Join(tmpDir, ports.ConfigFilename), []byte(cfgContent), 0644)
+
+		flags := &buildFlags{
+			dryRun:      true,
+			platforms:   []string{"linux/amd64"},
+			strategy:    "layered",
+			sbom:        "spdx-json",
+			sbomAttach:  "referrer",
+			compression: "gzip",
+			bunVariant:  "standard",
+			inject:      true,
+		}
+
+		req, err := buildRequestFromConfigAndFlags(context.Background(), logger, flags, tmpDir)
+		if err != nil {
+			t.Fatalf("buildRequestFromConfigAndFlags with vex_exemptions failed: %v", err)
+		}
+		if len(req.VEXExemptions) != 1 {
+			t.Fatalf("expected 1 parsed VEXExemption, got %d: %+v", len(req.VEXExemptions), req.VEXExemptions)
+		}
+		ex := req.VEXExemptions[0]
+		if ex.CVE != "CVE-2026-1234" || ex.Package != "libssl3" || ex.Owner != "security-team" {
+			t.Errorf("unexpected parsed exemption: %+v", ex)
+		}
+		if string(ex.Justification) != "component_not_present" {
+			t.Errorf("expected justification component_not_present, got %q", ex.Justification)
+		}
+	})
+
+	t.Run("invalid vex_exemptions block fails the build request with a clear error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfgContent := `version: 1
+docker:
+  repo: ghcr.io/example/app
+base: distroless
+strategy: layered
+security:
+  vex_exemptions:
+    - cve: CVE-2026-9999
+      justification: not_a_real_justification_code
+      expires: "2099-01-01"
+      owner: security-team
+`
+		_ = os.WriteFile(filepath.Join(tmpDir, ports.ConfigFilename), []byte(cfgContent), 0644)
+
+		flags := &buildFlags{
+			dryRun:      true,
+			platforms:   []string{"linux/amd64"},
+			strategy:    "layered",
+			sbom:        "spdx-json",
+			sbomAttach:  "referrer",
+			compression: "gzip",
+			bunVariant:  "standard",
+			inject:      true,
+		}
+
+		_, err := buildRequestFromConfigAndFlags(context.Background(), logger, flags, tmpDir)
+		if err == nil {
+			t.Fatal("expected an error for an invalid vex_exemptions justification, got nil")
+		}
+		if !strings.Contains(err.Error(), "vex_exemptions") {
+			t.Errorf("expected error to mention vex_exemptions, got: %v", err)
+		}
+	})
+}
+
+// TestWriteVEXDocument covers PR-6's --vex-output flag: the OpenVEX document
+// writer that runs after a successful build (cmd/pokkum/build.go's
+// writeVEXDocument), which self-review found had no direct test — only
+// vexutils.BuildDocument (the pure document-construction half) was tested.
+func TestWriteVEXDocument(t *testing.T) {
+	t.Run("writes a real OpenVEX JSON document when exemptions are present", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		outPath := filepath.Join(tmpDir, "vex.json")
+
+		exemptions := []core.VEXExemption{{
+			CVE:           "CVE-2026-1234",
+			Justification: core.VEXJustification(ports.VEXComponentNotPresent),
+			Expires:       time.Now().AddDate(1, 0, 0),
+			Owner:         "security-team",
+		}}
+
+		if err := writeVEXDocument(outPath, exemptions, "ghcr.io/example/app@sha256:abc123"); err != nil {
+			t.Fatalf("writeVEXDocument failed: %v", err)
+		}
+
+		data, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatalf("expected %s to be written, got: %v", outPath, err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(data, &doc); err != nil {
+			t.Fatalf("written file is not valid JSON: %v", err)
+		}
+		statements, ok := doc["statements"].([]any)
+		if !ok || len(statements) != 1 {
+			t.Fatalf("expected 1 statement in the written document, got: %+v", doc["statements"])
+		}
+	})
+
+	t.Run("writes nothing when there are no exemptions", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		outPath := filepath.Join(tmpDir, "vex.json")
+
+		if err := writeVEXDocument(outPath, nil, "ghcr.io/example/app"); err != nil {
+			t.Fatalf("writeVEXDocument failed: %v", err)
+		}
+		if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+			t.Errorf("expected no file to be written when there are no exemptions, got err=%v", err)
+		}
+	})
 }

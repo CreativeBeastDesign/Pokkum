@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
@@ -1778,6 +1779,91 @@ func TestBuild_EnvBakeWarning(t *testing.T) {
 		req := newReq()
 		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
 			t.Fatalf("expected a detector error to be swallowed (best-effort scan), got: %v", err)
+		}
+	})
+}
+
+// TestBuild_VEXExemptionWarning is PR-6's pipeline-level regression guard:
+// self-review (checklist row 13, mem:self_review_checklist) found that
+// TestScanner_VEXExemptionExcludesFromThreshold and TestActiveVEXExemption
+// only exercised the scanner adapter directly — nothing proved
+// BuildRequest.VEXExemptions actually reaches ports.ScanRequest.VEXExemptions
+// through core.Build's real wiring (internal/core/pipeline.go), nor that a
+// scan's real ScanResult.ExemptedVulnerabilities gets surfaced as a build
+// warning. This closes that gap; the parallel half (that the warning's CVE
+// list also lands on the image's label/annotation) is covered by
+// packager/config_unit_test.go's TestMergeLabelsAndAnnotationsWithVEXExemptions,
+// matching the same split already used by TestBuild_EnvBakeWarning above.
+func TestBuild_VEXExemptionWarning(t *testing.T) {
+	const warningSubstring = "VEX exemption(s) applied"
+
+	newReq := func(exemptions []core.VEXExemption) core.BuildRequest {
+		return core.BuildRequest{
+			ProjectDir:    "/abs/project",
+			Repo:          "ghcr.io/example/app",
+			Platforms:     []core.Platform{core.LinuxAMD64},
+			Tags:          []string{"v1.0.0"},
+			VEXExemptions: exemptions,
+		}
+	}
+
+	t.Run("warns and passes through the exempted CVE when the scanner reports one", func(t *testing.T) {
+		var buf bytes.Buffer
+		deps := newFullDeps(io.Discard)
+		deps.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+		var gotExemptions []ports.VEXExemption
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, req ports.ScanRequest) (ports.ScanResult, error) {
+				gotExemptions = req.VEXExemptions
+				return ports.ScanResult{
+					Passed:           true,
+					MaxSeverityFound: ports.SeverityCritical,
+					ExemptedVulnerabilities: []ports.Vulnerability{
+						{ID: "CVE-2026-1234", Severity: ports.SeverityCritical, Package: "libssl3"},
+					},
+				}, nil
+			},
+		}
+
+		exemption := core.VEXExemption{
+			CVE:           "CVE-2026-1234",
+			Justification: core.VEXJustification(ports.VEXComponentNotPresent),
+			Expires:       time.Now().AddDate(1, 0, 0),
+			Owner:         "test-owner",
+		}
+		req := newReq([]core.VEXExemption{exemption})
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+
+		if len(gotExemptions) != 1 || gotExemptions[0].CVE != "CVE-2026-1234" {
+			t.Fatalf("expected BuildRequest.VEXExemptions to reach ports.ScanRequest.VEXExemptions, got: %+v", gotExemptions)
+		}
+		if got := buf.String(); !strings.Contains(got, warningSubstring) {
+			t.Errorf("expected VEX exemption warning, got:\n%s", got)
+		}
+		if got := buf.String(); !strings.Contains(got, "CVE-2026-1234") {
+			t.Errorf("expected warning to name the exempted CVE, got:\n%s", got)
+		}
+	})
+
+	t.Run("does not warn when the scanner reports no exemptions applied", func(t *testing.T) {
+		var buf bytes.Buffer
+		deps := newFullDeps(io.Discard)
+		deps.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				return ports.ScanResult{Passed: true, MaxSeverityFound: ports.SeverityLow}, nil
+			},
+		}
+
+		req := newReq(nil)
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+		if got := buf.String(); strings.Contains(got, warningSubstring) {
+			t.Errorf("unexpected VEX exemption warning with nothing exempted, got:\n%s", got)
 		}
 	})
 }

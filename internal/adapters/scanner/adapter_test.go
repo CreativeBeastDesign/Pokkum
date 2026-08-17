@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scannerutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -42,6 +43,99 @@ func TestScanner_FailsWhenThresholdExceeded(t *testing.T) {
 	}
 	if !errors.Is(err, core.ErrVulnerabilityThresholdExceeded) {
 		t.Errorf("expected ErrVulnerabilityThresholdExceeded, got %v", err)
+	}
+}
+
+func TestActiveVEXExemption(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	future := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	adv := ports.Vulnerability{ID: "CVE-2024-12345", Package: "openssl"}
+
+	t.Run("no exemptions", func(t *testing.T) {
+		if activeVEXExemption(adv, nil, now) {
+			t.Error("expected no exemption to apply with an empty list")
+		}
+	})
+
+	t.Run("matching, non-expired exemption applies", func(t *testing.T) {
+		exemptions := []ports.VEXExemption{{CVE: "CVE-2024-12345", Expires: future}}
+		if !activeVEXExemption(adv, exemptions, now) {
+			t.Error("expected a matching, non-expired exemption to apply")
+		}
+	})
+
+	t.Run("matching but expired exemption does not apply", func(t *testing.T) {
+		exemptions := []ports.VEXExemption{{CVE: "CVE-2024-12345", Expires: past}}
+		if activeVEXExemption(adv, exemptions, now) {
+			t.Error("expected an expired exemption not to apply")
+		}
+	})
+
+	t.Run("non-matching exemption does not apply", func(t *testing.T) {
+		exemptions := []ports.VEXExemption{{CVE: "CVE-2024-99999", Expires: future}}
+		if activeVEXExemption(adv, exemptions, now) {
+			t.Error("expected a non-matching exemption not to apply")
+		}
+	})
+}
+
+// TestScanner_VEXExemptionExcludesFromThreshold is PR-6's core regression
+// guard, using the same offline embedded-advisories path
+// TestScanner_FailsWhenThresholdExceeded already relies on for a real,
+// deterministic (no network) failure to exempt — rather than hardcoding a
+// specific CVE ID from the embedded advisory table (which could change),
+// this discovers which CVE actually caused the failure first, then proves
+// exempting exactly that CVE flips the same scan to Passed and reports it
+// under ExemptedVulnerabilities instead of silently vanishing.
+func TestScanner_VEXExemptionExcludesFromThreshold(t *testing.T) {
+	adapter := NewAdapter(nil)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	baseline, err := adapter.Scan(context.Background(), ports.ScanRequest{
+		FailOn:  ports.SeverityLow,
+		Offline: true,
+		Now:     now,
+	})
+	if err == nil || !errors.Is(err, core.ErrVulnerabilityThresholdExceeded) {
+		t.Fatalf("expected the unexempted baseline scan to fail the threshold, got: %v", err)
+	}
+	if len(baseline.Vulnerabilities)+len(baseline.ToolchainAdvisories) == 0 {
+		t.Fatal("test setup: expected at least one embedded advisory to exempt")
+	}
+	var target ports.Vulnerability
+	if len(baseline.ToolchainAdvisories) > 0 {
+		target = baseline.ToolchainAdvisories[0]
+	} else {
+		target = baseline.Vulnerabilities[0]
+	}
+
+	exempted, err := adapter.Scan(context.Background(), ports.ScanRequest{
+		FailOn:  ports.SeverityLow,
+		Offline: true,
+		Now:     now,
+		VEXExemptions: []ports.VEXExemption{{
+			CVE:           target.ID,
+			Justification: ports.VEXComponentNotPresent,
+			Expires:       now.AddDate(1, 0, 0),
+			Owner:         "test-owner",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("expected the scan to pass once the failing CVE (%s) is exempted, got: %v", target.ID, err)
+	}
+	if !exempted.Passed {
+		t.Errorf("expected Passed=true once the failing CVE is exempted")
+	}
+
+	found := false
+	for _, v := range exempted.ExemptedVulnerabilities {
+		if v.ID == target.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %s to appear in ExemptedVulnerabilities, got %+v", target.ID, exempted.ExemptedVulnerabilities)
 	}
 }
 

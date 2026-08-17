@@ -251,6 +251,9 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 	if len(profile.Security.AllowSecretPatterns) > 0 {
 		merged.Security.AllowSecretPatterns = append([]string{}, profile.Security.AllowSecretPatterns...)
 	}
+	if len(profile.Security.VEXExemptions) > 0 {
+		merged.Security.VEXExemptions = append([]ports.VEXExemptionConfig{}, profile.Security.VEXExemptions...)
+	}
 
 	// SBOM overrides
 	if profile.SBOM.Format != "" {
@@ -397,6 +400,9 @@ func deepCopyProjectConfig(src *ports.ProjectConfig) *ports.ProjectConfig {
 	}
 	if len(src.Security.AllowSecretPatterns) > 0 {
 		dst.Security.AllowSecretPatterns = append([]string{}, src.Security.AllowSecretPatterns...)
+	}
+	if len(src.Security.VEXExemptions) > 0 {
+		dst.Security.VEXExemptions = append([]ports.VEXExemptionConfig{}, src.Security.VEXExemptions...)
 	}
 
 	if src.Cache.Enabled != nil {

@@ -155,8 +155,15 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 
 	maxSev := ports.SeverityLow
 	failed := false
+	var exempted []ports.Vulnerability
+	var countedTowardThreshold int
 
 	for _, adv := range allFound {
+		if activeVEXExemption(adv, req.VEXExemptions, req.Now) {
+			exempted = append(exempted, adv)
+			continue
+		}
+		countedTowardThreshold++
 		if adv.Severity.Rank() > maxSev.Rank() {
 			maxSev = adv.Severity
 		}
@@ -166,17 +173,18 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 	}
 
 	res := ports.ScanResult{
-		Target:              target,
-		Vulnerabilities:     vulnerabilities,
-		ToolchainAdvisories: toolchainAdvisories,
-		Passed:              !failed,
-		MaxSeverityFound:    maxSev,
-		Incomplete:          incomplete,
-		Warnings:            warnings,
+		Target:                  target,
+		Vulnerabilities:         vulnerabilities,
+		ToolchainAdvisories:     toolchainAdvisories,
+		Passed:                  !failed,
+		MaxSeverityFound:        maxSev,
+		Incomplete:              incomplete,
+		Warnings:                warnings,
+		ExemptedVulnerabilities: exempted,
 	}
 
 	if failed {
-		return res, fmt.Errorf("scanner: %d vulnerability(ies) exceed threshold %s: %w", len(allFound), req.FailOn, core.ErrVulnerabilityThresholdExceeded)
+		return res, fmt.Errorf("scanner: %d vulnerability(ies) exceed threshold %s: %w", countedTowardThreshold, req.FailOn, core.ErrVulnerabilityThresholdExceeded)
 	}
 
 	// A scan that silently degraded to "0 vulnerabilities" because a
@@ -191,6 +199,19 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 	}
 
 	return res, nil
+}
+
+// activeVEXExemption reports whether adv is covered by a non-expired entry
+// in exemptions as of now. An exemption that matches but has expired does
+// NOT exempt — the CVE counts toward the threshold again, which is the
+// entire point of a mandatory expiry (see ports.VEXExemption's doc comment).
+func activeVEXExemption(adv ports.Vulnerability, exemptions []ports.VEXExemption, now time.Time) bool {
+	for _, ex := range exemptions {
+		if ex.Matches(adv) && !ex.Expired(now) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Adapter) scanProjectToolchain(ctx context.Context, projectDir string, offline bool) ([]ports.Vulnerability, bool, error) {

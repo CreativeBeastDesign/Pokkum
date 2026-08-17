@@ -400,6 +400,9 @@ func TestApplyProfile_AdversarialDeepCopyIsolation(t *testing.T) {
 		},
 		Security: ports.SecurityConfig{
 			AllowSecretPatterns: []string{"pat1"},
+			VEXExemptions: []ports.VEXExemptionConfig{
+				{CVE: "CVE-BASE", Justification: "component_not_present", Expires: "2030-01-01", Owner: "base-owner"},
+			},
 		},
 		Profiles: map[string]ports.BuildProfile{
 			"dev": {
@@ -412,6 +415,9 @@ func TestApplyProfile_AdversarialDeepCopyIsolation(t *testing.T) {
 				},
 				Security: ports.SecurityConfig{
 					AllowSecretPatterns: []string{"pat2"},
+					VEXExemptions: []ports.VEXExemptionConfig{
+						{CVE: "CVE-PROFILE", Justification: "component_not_present", Expires: "2030-01-01", Owner: "profile-owner"},
+					},
 				},
 				Cache: ports.CacheConfig{
 					Enabled: &bTrue,
@@ -437,6 +443,11 @@ func TestApplyProfile_AdversarialDeepCopyIsolation(t *testing.T) {
 	merged.Image.RequireEnv[0] = "MUTATED"
 	merged.Security.AllowSecretPatterns[0] = "MUTATED"
 
+	if len(merged.Security.VEXExemptions) != 1 || merged.Security.VEXExemptions[0].CVE != "CVE-PROFILE" {
+		t.Fatalf("expected profile's VEXExemptions to win, got %+v", merged.Security.VEXExemptions)
+	}
+	merged.Security.VEXExemptions[0].CVE = "MUTATED"
+
 	if baseCfg.Image.Labels["mutated"] != "" {
 		t.Errorf("baseCfg.Image.Labels was mutated through merged config")
 	}
@@ -454,6 +465,9 @@ func TestApplyProfile_AdversarialDeepCopyIsolation(t *testing.T) {
 	}
 	if baseCfg.Security.AllowSecretPatterns[0] != "pat1" {
 		t.Errorf("baseCfg.Security.AllowSecretPatterns was mutated through merged config")
+	}
+	if baseCfg.Security.VEXExemptions[0].CVE != "CVE-BASE" {
+		t.Errorf("baseCfg.Security.VEXExemptions was mutated through merged config")
 	}
 }
 

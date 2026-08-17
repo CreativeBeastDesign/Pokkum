@@ -42,7 +42,7 @@ This document provides a comprehensive inventory of all implemented features, ca
 - **Cosign & DSSE Cryptographic Signing**: Automatically generates Cosign signatures (`<repo>:sha256-<hex>.sig`) and DSSE envelopes using local private keys (`POKKUM_SIGNING_KEY`) or Sigstore keyless infrastructure.
 - **Software Bill of Materials (SBOM)**:
   - Generates comprehensive SBOMs (SPDX JSON or CycloneDX JSON) cataloging npm dependencies and the embedded Bun runtime (`pkg:generic/bun@<version>`, with its SHA-256 when resolved — the same value recorded in SLSA provenance) for `--strategy=layered`/`--strategy=exe` builds. Does not catalog OS packages.
-  - Attaches SBOMs via OCI 1.1 Referrers API (`--sbom-attach=referrer`, default) or legacy tags (`--sbom-attach=tag`).
+  - Attaches SBOMs via OCI 1.1 Referrers API (`--sbom-attach=referrer`), legacy tags (`--sbom-attach=tag`), or `--sbom-attach=auto` (default): tries the Referrers API first and falls back to the tag convention on registries that don't support it (ECR, older Harbor, older Artifactory), so a real, discoverable SBOM attachment doesn't require the caller to know their registry's capability in advance.
 - **Base Image Signature Verification**:
   - Keyless Sigstore verification (Fulcio OIDC + Rekor transparency logs) against embedded trust roots for stock presets (`distroless`, `chainguard`).
   - Static-key Cosign verification for custom base images (`--base-verify-mode=static-key`, `--base-verify-key=<path>`).
@@ -62,6 +62,7 @@ This document provides a comprehensive inventory of all implemented features, ca
   - `pokkum build` actively queries OSV.dev for vulnerabilities against the locked base digest.
   - Supports `--fail-on-cve=critical|high|medium|low` (or `POKKUM_FAIL_ON_CVE`) to break builds on vulnerable base digests.
   - Enforces fail-closed handling on incomplete vulnerability database scans (`--allow-incomplete` to opt out).
+  - **OpenVEX Exemptions**: `.pokkum.yaml`'s `security.vex_exemptions` lets a specific CVE be excluded from the `--fail-on-cve` threshold, each entry requiring a real OpenVEX justification code, a mandatory expiry, and a mandatory owner (an unjustified or already-expired entry is rejected outright, not silently honored). Exempted CVEs are named in the build warning, stamped onto the image (`dev.pokkum.vex-exemptions` label / `pokkum.dev/vex-exemptions` annotation), and can be exported as a real OpenVEX v0.2.0 JSON document via `--vex-output=<path>` for consumption by Trivy/Grype/Kyverno.
 
 ### Security Vulnerability Auditing (`pokkum scan`)
 - **Real OS & Dependency Scanning**: Analyzes container images, local projects, and tarballs by extracting packages via Syft and querying OSV.dev batch API (`/v1/querybatch`).

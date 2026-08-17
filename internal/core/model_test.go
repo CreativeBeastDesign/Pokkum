@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,6 +212,7 @@ func TestParseSBOMAttachMode(t *testing.T) {
 		{"oci1.1", core.SBOMAttachReferrer, false},
 		{"tag", core.SBOMAttachTag, false},
 		{"tags", core.SBOMAttachTag, false},
+		{"auto", core.SBOMAttachAuto, false},
 		{"invalid", "", true},
 	}
 
@@ -228,6 +230,100 @@ func TestParseSBOMAttachMode(t *testing.T) {
 			t.Errorf("ParseSBOMAttachMode(%q) = %v, want %v", tt.input, got, tt.want)
 		}
 	}
+}
+
+func TestParseVEXExemptions(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("empty input returns nil, no error", func(t *testing.T) {
+		got, err := core.ParseVEXExemptions(nil, now)
+		if err != nil || got != nil {
+			t.Errorf("got (%v, %v), want (nil, nil)", got, err)
+		}
+	})
+
+	t.Run("valid entry, plain date", func(t *testing.T) {
+		got, err := core.ParseVEXExemptions([]ports.VEXExemptionConfig{{
+			CVE:           "CVE-2024-12345",
+			Justification: "component_not_present",
+			Expires:       "2030-06-15",
+			Owner:         "security-team",
+		}}, now)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("expected 1 exemption, got %d", len(got))
+		}
+		want := time.Date(2030, 6, 15, 0, 0, 0, 0, time.UTC)
+		if !got[0].Expires.Equal(want) {
+			t.Errorf("Expires = %v, want %v", got[0].Expires, want)
+		}
+	})
+
+	t.Run("valid entry, RFC3339", func(t *testing.T) {
+		got, err := core.ParseVEXExemptions([]ports.VEXExemptionConfig{{
+			CVE:           "CVE-2024-12345",
+			Justification: "component_not_present",
+			Expires:       "2030-06-15T12:00:00Z",
+			Owner:         "security-team",
+		}}, now)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("expected 1 exemption, got %d", len(got))
+		}
+	})
+
+	t.Run("unparseable expires", func(t *testing.T) {
+		_, err := core.ParseVEXExemptions([]ports.VEXExemptionConfig{{
+			CVE: "CVE-2024-12345", Justification: "component_not_present", Expires: "not-a-date", Owner: "x",
+		}}, now)
+		if !errors.Is(err, core.ErrInvalidRequest) {
+			t.Errorf("expected ErrInvalidRequest for an unparseable expires date, got %v", err)
+		}
+	})
+
+	t.Run("missing owner rejected", func(t *testing.T) {
+		_, err := core.ParseVEXExemptions([]ports.VEXExemptionConfig{{
+			CVE: "CVE-2024-12345", Justification: "component_not_present", Expires: "2030-06-15", Owner: "",
+		}}, now)
+		if !errors.Is(err, core.ErrInvalidRequest) {
+			t.Errorf("expected ErrInvalidRequest for a missing owner, got %v", err)
+		}
+	})
+
+	t.Run("invalid justification code rejected", func(t *testing.T) {
+		_, err := core.ParseVEXExemptions([]ports.VEXExemptionConfig{{
+			CVE: "CVE-2024-12345", Justification: "made_up_reason", Expires: "2030-06-15", Owner: "x",
+		}}, now)
+		if !errors.Is(err, core.ErrInvalidRequest) {
+			t.Errorf("expected ErrInvalidRequest for an invalid justification code, got %v", err)
+		}
+	})
+
+	t.Run("already-expired exemption rejected outright", func(t *testing.T) {
+		_, err := core.ParseVEXExemptions([]ports.VEXExemptionConfig{{
+			CVE: "CVE-2024-12345", Justification: "component_not_present", Expires: "2020-01-01", Owner: "x",
+		}}, now)
+		if !errors.Is(err, core.ErrInvalidRequest) {
+			t.Errorf("expected ErrInvalidRequest for an already-expired exemption, got %v", err)
+		}
+	})
+
+	t.Run("multi-item: error identifies the offending entry by index and CVE", func(t *testing.T) {
+		_, err := core.ParseVEXExemptions([]ports.VEXExemptionConfig{
+			{CVE: "CVE-2024-11111", Justification: "component_not_present", Expires: "2030-06-15", Owner: "x"},
+			{CVE: "CVE-2024-22222", Justification: "component_not_present", Expires: "2030-06-15", Owner: ""},
+		}, now)
+		if err == nil {
+			t.Fatal("expected an error for the second, invalid entry")
+		}
+		if !strings.Contains(err.Error(), "CVE-2024-22222") {
+			t.Errorf("expected error to name the offending CVE, got: %v", err)
+		}
+	})
 }
 
 func TestParseBaseImagePreset(t *testing.T) {

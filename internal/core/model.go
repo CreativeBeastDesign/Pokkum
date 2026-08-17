@@ -108,6 +108,12 @@ type (
 	// Scanner scans container images, tarballs, or toolchain versions for CVEs and advisories.
 	Scanner = ports.Scanner
 
+	// VEXJustification is one of OpenVEX's five defined justification codes.
+	VEXJustification = ports.VEXJustification
+
+	// VEXExemption records why a specific CVE is allowed to pass --fail-on-cve's threshold gate.
+	VEXExemption = ports.VEXExemption
+
 	// SecretMatch describes a detected secret or sensitive token leak in a file.
 	SecretMatch = ports.SecretMatch
 
@@ -154,6 +160,7 @@ const (
 
 	SBOMAttachReferrer    = ports.SBOMAttachReferrer
 	SBOMAttachTag         = ports.SBOMAttachTag
+	SBOMAttachAuto        = ports.SBOMAttachAuto
 	DefaultSBOMAttachMode = ports.DefaultSBOMAttachMode
 
 	BaseImageDistroless    = ports.BaseImageDistroless
@@ -331,9 +338,63 @@ func ParseSBOMAttachMode(s string) (SBOMAttachMode, error) {
 		return SBOMAttachReferrer, nil
 	case "tag", "tags":
 		return SBOMAttachTag, nil
+	case "auto":
+		return SBOMAttachAuto, nil
 	default:
 		return "", fmt.Errorf("sbom attach mode %q: %w", s, ErrInvalidSBOMAttachMode)
 	}
+}
+
+// vexExpiresLayouts are the date formats an .pokkum.yaml exemption's
+// "expires" field may use — a plain calendar date (the common case for a
+// human hand-authoring an exemption) or full RFC3339 (for a tool generating
+// one), tried in that order.
+var vexExpiresLayouts = []string{"2006-01-02", time.RFC3339}
+
+// ParseVEXExemptions converts .pokkum.yaml's VEXExemptionConfig entries into
+// validated VEXExemption values. Every entry must be fully valid — cve,
+// justification (one of OpenVEX's five defined codes), expires (a parseable
+// date, and not already in the past — an exemption authored already-expired
+// is very likely a typo, not a deliberate no-op, so it is rejected outright
+// rather than silently accepted as inert), and owner are all mandatory (see
+// VEXExemption's doc comment for why). now is the reference point for the
+// already-expired check — the real current time at the one real call site,
+// an explicit parameter here for the same testability reason as
+// VEXExemption.Expired.
+func ParseVEXExemptions(cfgs []ports.VEXExemptionConfig, now time.Time) ([]VEXExemption, error) {
+	if len(cfgs) == 0 {
+		return nil, nil
+	}
+	out := make([]VEXExemption, 0, len(cfgs))
+	for i, c := range cfgs {
+		var expires time.Time
+		var err error
+		for _, layout := range vexExpiresLayouts {
+			if expires, err = time.Parse(layout, strings.TrimSpace(c.Expires)); err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("vex_exemptions[%d] (%s): expires %q: not a valid date (want YYYY-MM-DD or RFC3339): %w", i, c.CVE, c.Expires, ErrInvalidRequest)
+		}
+
+		ex := VEXExemption{
+			CVE:           c.CVE,
+			Package:       c.Package,
+			Justification: VEXJustification(c.Justification),
+			StatusNotes:   c.StatusNotes,
+			Expires:       expires,
+			Owner:         c.Owner,
+		}
+		if reason := ex.Valid(); reason != "" {
+			return nil, fmt.Errorf("vex_exemptions[%d] (%s): %s: %w", i, c.CVE, reason, ErrInvalidRequest)
+		}
+		if ex.Expired(now) {
+			return nil, fmt.Errorf("vex_exemptions[%d] (%s): expires %s is already in the past: %w", i, c.CVE, c.Expires, ErrInvalidRequest)
+		}
+		out = append(out, ex)
+	}
+	return out, nil
 }
 
 // ParseBaseImagePreset converts user input to a BaseImagePreset, accepting any
@@ -656,6 +717,14 @@ type BuildRequest struct {
 
 	// AllowIncompleteScan permits the build to succeed even if vulnerability database lookups fail.
 	AllowIncompleteScan bool
+
+	// VEXExemptions lists CVEs that must not count toward FailOnCVE's
+	// threshold decision, each a "not_affected" OpenVEX statement with a
+	// mandatory expiry and owner — see VEXExemption's doc comment. Only
+	// applies to a live vulnerability scan; an offline/hermetic build
+	// falling back to pokkum.lock's cached severity summary has no
+	// per-CVE detail to filter against.
+	VEXExemptions []VEXExemption
 
 	// CacheVerify configures cryptographic signature verification on candidate remote cache-hit images.
 	CacheVerify RemoteCacheVerifyOptions

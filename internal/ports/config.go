@@ -40,10 +40,25 @@ type ImageConfig struct {
 
 // SecurityConfig holds security scanning and validation policies.
 type SecurityConfig struct {
-	FailOnCVE            string   `yaml:"fail_on_cve,omitempty" json:"fail_on_cve,omitempty"`
-	VerifyBase           *bool    `yaml:"verify_base,omitempty" json:"verify_base,omitempty"`
-	AllowIncompleteScans *bool    `yaml:"allow_incomplete_scans,omitempty" json:"allow_incomplete_scans,omitempty"`
-	AllowSecretPatterns  []string `yaml:"allow_secret_patterns,omitempty" json:"allow_secret_patterns,omitempty"`
+	FailOnCVE            string               `yaml:"fail_on_cve,omitempty" json:"fail_on_cve,omitempty"`
+	VerifyBase           *bool                `yaml:"verify_base,omitempty" json:"verify_base,omitempty"`
+	AllowIncompleteScans *bool                `yaml:"allow_incomplete_scans,omitempty" json:"allow_incomplete_scans,omitempty"`
+	AllowSecretPatterns  []string             `yaml:"allow_secret_patterns,omitempty" json:"allow_secret_patterns,omitempty"`
+	VEXExemptions        []VEXExemptionConfig `yaml:"vex_exemptions,omitempty" json:"vex_exemptions,omitempty"`
+}
+
+// VEXExemptionConfig is the .pokkum.yaml shape of a VEXExemption — see that
+// type's doc comment (internal/ports/vex.go) for what each field means and
+// why Expires/Owner are mandatory. Expires is a string here (RFC3339 or a
+// plain "2006-01-02" date) because YAML has no native date type; it is
+// parsed and validated by internal/adapters/config.
+type VEXExemptionConfig struct {
+	CVE           string `yaml:"cve" json:"cve"`
+	Package       string `yaml:"package,omitempty" json:"package,omitempty"`
+	Justification string `yaml:"justification" json:"justification"`
+	StatusNotes   string `yaml:"status_notes,omitempty" json:"status_notes,omitempty"`
+	Expires       string `yaml:"expires" json:"expires"`
+	Owner         string `yaml:"owner" json:"owner"`
 }
 
 // SBOMConfig holds software bill-of-materials settings.

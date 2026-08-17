@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Severity indicates the security risk level of a vulnerability.
@@ -86,6 +87,19 @@ type ScanRequest struct {
 	// clean bill of health, worse than no scan at all. Not needed with
 	// Offline, which is an intentional, expected reduction in coverage.
 	AllowIncomplete bool `json:"allow_incomplete"`
+
+	// VEXExemptions lists CVEs that must not count toward FailOn's
+	// threshold decision — see VEXExemption's doc comment. A vulnerability
+	// matched by an exemption is moved to ScanResult.ExemptedVulnerabilities
+	// rather than silently dropped, so exemptions stay auditable in output.
+	VEXExemptions []VEXExemption `json:"vex_exemptions,omitempty"`
+
+	// Now is the real current time, used only to evaluate whether a
+	// VEXExemption has expired — see VEXExemption.Expired's doc comment for
+	// why this is real wall-clock time, not SOURCE_DATE_EPOCH. The caller
+	// supplies it explicitly rather than Scan calling time.Now() itself, so
+	// this stays unit-testable.
+	Now time.Time `json:"-"`
 }
 
 // ScanResult contains the discovered security vulnerabilities.
@@ -106,6 +120,13 @@ type ScanResult struct {
 	// Warnings lists non-fatal problems encountered during the scan (e.g.
 	// which specific OSV.dev query failed and why).
 	Warnings []string `json:"warnings,omitempty"`
+
+	// ExemptedVulnerabilities lists vulnerabilities that matched an active
+	// (non-expired) ScanRequest.VEXExemptions entry and were therefore
+	// excluded from the FailOn threshold decision. Never silently dropped —
+	// still reported here, and MaxSeverityFound/Passed only reflect the
+	// non-exempted set.
+	ExemptedVulnerabilities []Vulnerability `json:"exempted_vulnerabilities,omitempty"`
 }
 
 // Scanner scans container images, tarballs, or toolchain versions for CVEs and advisories.
