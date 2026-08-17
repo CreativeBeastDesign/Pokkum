@@ -137,6 +137,22 @@ type SBOMRequest struct {
 	// scanning. Nil means the generator's defaults, which should already skip
 	// .svelte-kit, build output and .git.
 	ExcludePaths []string
+
+	// BunVersion is the resolved version of the Bun runtime embedded in the
+	// image (StrategyLayered) or that compiled it (StrategyExe). Empty means
+	// no Bun component is added to the document — e.g. for a static build,
+	// which ships no Bun runtime at all.
+	//
+	// This is deliberately a different source than the project's own
+	// dependency graph: Bun is a Pokkum-embedded runtime artifact, not
+	// something declared in package.json/bun.lock, so it can't be discovered
+	// by scanning ProjectDir the way npm packages are.
+	BunVersion string
+
+	// BunSHA256 is the lowercase hex SHA256 of the resolved Bun artifact
+	// (ports.BunResolverResult.SHA256). Empty omits the hash from the
+	// document's Bun component while still recording its version.
+	BunSHA256 string
 }
 
 // SBOMDocument is a generated bill of materials, held in memory. SBOMs are

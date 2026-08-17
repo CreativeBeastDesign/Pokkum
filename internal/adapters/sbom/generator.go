@@ -108,15 +108,15 @@ func (g *Generator) Generate(ctx context.Context, req ports.SBOMRequest) (*ports
 		return nil, err
 	}
 
-	id := contentIdentityUUID(name, version, packages)
+	id := contentIdentityUUID(name, version, packages, req.BunVersion, req.BunSHA256)
 	created := req.CreatedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
 
 	var docBytes []byte
 	switch req.Format {
 	case ports.SBOMFormatSPDXJSON:
-		docBytes, err = renderSPDXJSON(name, version, id, created, packages)
+		docBytes, err = renderSPDXJSON(name, version, id, created, packages, req.BunVersion, req.BunSHA256)
 	case ports.SBOMFormatCycloneDXJSON:
-		docBytes, err = renderCycloneDXJSON(name, version, id, created, packages)
+		docBytes, err = renderCycloneDXJSON(name, version, id, created, packages, req.BunVersion, req.BunSHA256)
 	default:
 		return nil, fmt.Errorf("sbom: unsupported format %q: %w", req.Format, core.ErrInvalidSBOMFormat)
 	}
@@ -129,13 +129,18 @@ func (g *Generator) Generate(ctx context.Context, req ports.SBOMRequest) (*ports
 		return nil, fmt.Errorf("sbom: format %q has no media type: %w", req.Format, core.ErrInvalidSBOMFormat)
 	}
 
+	packageCount := len(packages)
+	if req.BunVersion != "" {
+		packageCount++
+	}
+
 	sum := sha256.Sum256(docBytes)
 	doc := &ports.SBOMDocument{
 		Format:       req.Format,
 		MediaType:    mediaType,
 		Content:      docBytes,
 		SHA256:       hex.EncodeToString(sum[:]),
-		PackageCount: len(packages),
+		PackageCount: packageCount,
 	}
 	g.log.InfoContext(ctx, "sbom: generated", "format", req.Format, "packages", doc.PackageCount, "bytes", len(docBytes))
 	return doc, nil
@@ -281,9 +286,9 @@ func (g *Generator) buildMatcher(req ports.SBOMRequest) (*ignoreutils.Matcher, e
 	return ignoreutils.New(patterns)
 }
 
-func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage) ([]byte, error) {
-	spdxPackages := make([]map[string]any, 0, len(packages)+1)
-	relationships := make([]map[string]any, 0, len(packages)+1)
+func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string) ([]byte, error) {
+	spdxPackages := make([]map[string]any, 0, len(packages)+2)
+	relationships := make([]map[string]any, 0, len(packages)+2)
 
 	// The root package describes the project/application itself (its own name and
 	// version), distinct from its dependencies below. SPDX documents are expected to
@@ -306,6 +311,43 @@ func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages
 		"relatedSpdxElement": rootSPDXID,
 		"relationshipType":   "DESCRIBES",
 	})
+
+	// Bun is a Pokkum-embedded runtime artifact, not a project dependency
+	// discovered by scanning ProjectDir — it gets its own package entry,
+	// distinct from the npm packages loop below, placed right after the
+	// root package so document order is deterministic regardless of
+	// whether npm packages were found.
+	if bunVersion != "" {
+		bunSPDXID := fmt.Sprintf("SPDXRef-Package-bun-%s", sanitizeSPDXID(bunVersion))
+		bunPkg := map[string]any{
+			"SPDXID":           bunSPDXID,
+			"name":             "bun",
+			"versionInfo":      bunVersion,
+			"downloadLocation": "NOASSERTION",
+			"filesAnalyzed":    false,
+			"licenseConcluded": "NOASSERTION",
+			"licenseDeclared":  "NOASSERTION",
+			"copyrightText":    "NOASSERTION",
+			"externalRefs": []map[string]any{
+				{
+					"referenceCategory": "PACKAGE-MANAGER",
+					"referenceLocator":  "pkg:generic/bun@" + bunVersion,
+					"referenceType":     "purl",
+				},
+			},
+		}
+		if bunSHA256 != "" {
+			bunPkg["checksums"] = []map[string]any{
+				{"algorithm": "SHA256", "checksumValue": bunSHA256},
+			}
+		}
+		spdxPackages = append(spdxPackages, bunPkg)
+		relationships = append(relationships, map[string]any{
+			"spdxElementId":      rootSPDXID,
+			"relatedSpdxElement": bunSPDXID,
+			"relationshipType":   "DEPENDS_ON",
+		})
+	}
 
 	for _, p := range packages {
 		pkgSPDXID := fmt.Sprintf("SPDXRef-Package-%s-%s", sanitizeSPDXID(p.Name), sanitizeSPDXID(p.Version))
@@ -355,8 +397,28 @@ func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages
 	return marshalDeterministic(doc)
 }
 
-func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage) ([]byte, error) {
-	components := make([]map[string]any, 0, len(packages))
+func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string) ([]byte, error) {
+	components := make([]map[string]any, 0, len(packages)+1)
+
+	// Bun is a Pokkum-embedded runtime artifact, not a project dependency
+	// discovered by scanning ProjectDir — placed first, before the npm
+	// packages loop, so document order is deterministic regardless of
+	// whether npm packages were found.
+	if bunVersion != "" {
+		bunComponent := map[string]any{
+			"type":    "application",
+			"name":    "bun",
+			"version": bunVersion,
+			"purl":    "pkg:generic/bun@" + bunVersion,
+		}
+		if bunSHA256 != "" {
+			bunComponent["hashes"] = []map[string]any{
+				{"alg": "SHA-256", "content": bunSHA256},
+			}
+		}
+		components = append(components, bunComponent)
+	}
+
 	for _, p := range packages {
 		purl := fmt.Sprintf("pkg:npm/%s@%s", p.Name, p.Version)
 		components = append(components, map[string]any{
@@ -392,7 +454,7 @@ func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, pac
 	return marshalDeterministic(doc)
 }
 
-func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPackage) uuid.UUID {
+func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string) uuid.UUID {
 	ids := make([]string, 0, len(packages))
 	for _, p := range packages {
 		ids = append(ids, fmt.Sprintf("%s@%s@%s", p.Name, p.Version, p.Type))
@@ -404,6 +466,13 @@ func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPa
 	for _, id := range ids {
 		b.WriteString(id)
 		b.WriteByte('\n')
+	}
+	if bunVersion != "" {
+		// Appended after the sorted npm ids at a fixed position, so a change
+		// in the resolved Bun version/hash changes the document identity
+		// (matching how an npm package version bump does) without needing
+		// to fold "bun" into the same sort as npm package names.
+		fmt.Fprintf(&b, "bun@%s@%s\n", bunVersion, bunSHA256)
 	}
 	return uuid.NewSHA1(pokkumSBOMNamespace, []byte(b.String()))
 }

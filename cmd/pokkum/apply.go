@@ -26,6 +26,8 @@ type applyFlags struct {
 	noNetworkPolicy    bool
 	resourceDefaults   bool
 	noResourceDefaults bool
+	probeDefaults      bool
+	noProbeDefaults    bool
 	clusterInspect     bool
 	noClusterInspect   bool
 	registryConfig     string
@@ -67,6 +69,10 @@ PATH and is equivalent to:
 		"Inject default CPU/memory requests and limits and append a PodDisruptionBudget")
 	cmd.Flags().BoolVar(&flags.noResourceDefaults, "no-resource-defaults", false,
 		"Disable resource default injection and PodDisruptionBudget generation")
+	cmd.Flags().BoolVar(&flags.probeDefaults, "probe-defaults", true,
+		"Inject readinessProbe/livenessProbe/startupProbe defaults against the supervisor's /readyz and /healthz for pokkum-built containers that don't already define their own")
+	cmd.Flags().BoolVar(&flags.noProbeDefaults, "no-probe-defaults", false,
+		"Disable probe default injection")
 	cmd.Flags().BoolVar(&flags.clusterInspect, "cluster-inspect", true,
 		"Inspect live cluster workload annotations before resolving to seed multi-generation history")
 	cmd.Flags().BoolVar(&flags.noClusterInspect, "no-cluster-inspect", false,
@@ -89,6 +95,7 @@ func runApply(ctx context.Context, logger *slog.Logger, flags *applyFlags) error
 	secCtx := securityContextEnabled(flags.securityContext, flags.noSecurityContext)
 	netPol := flags.networkPolicy && !flags.noNetworkPolicy
 	resDefs := flags.resourceDefaults && !flags.noResourceDefaults
+	probeDefs := flags.probeDefaults && !flags.noProbeDefaults
 	inspectCluster := flags.clusterInspect && !flags.noClusterInspect
 
 	logger.Debug("apply command started",
@@ -97,6 +104,7 @@ func runApply(ctx context.Context, logger *slog.Logger, flags *applyFlags) error
 		"securityContext", secCtx,
 		"networkPolicy", netPol,
 		"resourceDefaults", resDefs,
+		"probeDefaults", probeDefs,
 		"clusterInspect", inspectCluster,
 		"since", flags.since)
 
@@ -119,6 +127,7 @@ func runApply(ctx context.Context, logger *slog.Logger, flags *applyFlags) error
 		SecurityContext:    secCtx,
 		NetworkPolicy:      netPol,
 		ResourceDefaults:   resDefs,
+		ProbeDefaults:      probeDefs,
 		RegistryConfigPath: flags.registryConfig,
 		Since:              flags.since,
 		ClusterInspector:   inspector,

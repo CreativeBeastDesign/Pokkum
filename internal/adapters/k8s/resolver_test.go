@@ -1322,3 +1322,116 @@ spec:
 		t.Errorf("expected local explicit annotation %s to take precedence over cluster %s, got:\n%s", localCurrentImage, clusterImage, out)
 	}
 }
+
+// TestResolver_ProbeDefaults is PR-4's regression guard: readinessProbe,
+// livenessProbe and startupProbe were previously injected nowhere at all —
+// not just startupProbe, which is all the roadmap item originally named.
+func TestResolver_ProbeDefaults(t *testing.T) {
+	t.Parallel()
+
+	r := k8s.NewResolver()
+	ctx := context.Background()
+
+	buildFn := func(_ context.Context, _ string) (string, error) {
+		return "ghcr.io/acme/app@sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
+	}
+
+	t.Run("injects all three probes when none present", func(t *testing.T) {
+		doc := ports.Document{
+			Name: "deploy.yaml",
+			Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+      - name: main
+        image: pokkum://./src/app
+`),
+		}
+		res, err := r.Resolve(ctx, ports.ResolveRequest{
+			Documents:     []ports.Document{doc},
+			ProbeDefaults: true,
+			Build:         buildFn,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		out := string(res.Documents[0].Content)
+		for _, want := range []string{"readinessProbe:", "livenessProbe:", "startupProbe:", "/readyz", "/healthz", "8081"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected %q in resolved manifest:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("does not inject when ProbeDefaults is false", func(t *testing.T) {
+		doc := ports.Document{
+			Name: "deploy.yaml",
+			Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+      - name: main
+        image: pokkum://./src/app
+`),
+		}
+		res, err := r.Resolve(ctx, ports.ResolveRequest{
+			Documents: []ports.Document{doc},
+			Build:     buildFn,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		out := string(res.Documents[0].Content)
+		for _, unwanted := range []string{"readinessProbe:", "livenessProbe:", "startupProbe:"} {
+			if strings.Contains(out, unwanted) {
+				t.Errorf("unexpected %q injected with ProbeDefaults unset:\n%s", unwanted, out)
+			}
+		}
+	})
+
+	t.Run("skips per probe type when the container already defines its own", func(t *testing.T) {
+		doc := ports.Document{
+			Name: "deploy.yaml",
+			Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+      - name: main
+        image: pokkum://./src/app
+        livenessProbe:
+          exec:
+            command: ["custom-healthcheck"]
+`),
+		}
+		res, err := r.Resolve(ctx, ports.ResolveRequest{
+			Documents:     []ports.Document{doc},
+			ProbeDefaults: true,
+			Build:         buildFn,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		out := string(res.Documents[0].Content)
+		if !strings.Contains(out, "custom-healthcheck") {
+			t.Errorf("expected the container's own explicit livenessProbe to survive untouched:\n%s", out)
+		}
+		if strings.Count(out, "livenessProbe:") != 1 {
+			t.Errorf("expected exactly one livenessProbe (the user's own, not a second injected one):\n%s", out)
+		}
+		if !strings.Contains(out, "readinessProbe:") || !strings.Contains(out, "startupProbe:") {
+			t.Errorf("expected readinessProbe/startupProbe to still be injected alongside the user's own livenessProbe:\n%s", out)
+		}
+	})
+}

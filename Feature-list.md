@@ -16,6 +16,7 @@ This document provides a comprehensive inventory of all implemented features, ca
 - **Layered Runtime Hardening & Startup Attestation**:
   - Option A Compiled Stub Launcher (`--stub-launcher`): Replaces stock Bun CLI with a minimal non-foldable entrypoint launcher (`const p = "/app/server/" + "index.js"; await import(p);`) eliminating the `BUN_BE_BUN` / `bunx` attack surface.
   - Option C Supervisor Startup Attestation (`POKKUM_ATTESTATION_DIGEST`): Computes a deterministic SHA-256 root digest over authoritative post-processing `/app` artifacts, verified by `/pokkum/init` prior to execution (exit 125 on mismatch, reserving exit 126 for binary exec failures).
+- **Bun Release Integrity Verification**: Every downloaded Bun release archive is checksum-verified before extraction — a small set of common versions against statically pinned SHA256 digests (no network round trip), and any other `--bun-version` against Bun's own GPG-signed `SHASUMS256.txt.asc` release manifest, verified against an embedded release-signing public key. Fails closed: a download whose trusted checksum can't be established (network failure, invalid signature, no matching manifest entry) or doesn't match is rejected, never silently installed.
 - **Composite Remote OCI Input Caching & Anti-Poisoning**: Computes deterministic composite input hashes (`sha256(source + lockfile + baseDigest + bunVersion + platforms + flags)`) to skip builds in sub-100ms on registry cache hits, with mandatory pre-promotion Cosign/Sigstore signature verification (`--cache-verify`).
 - **Registry Push Throughput & Zero-Egress Optimizations**:
   - Parallel layer uploads over HTTP/2 with configurable concurrency (`--push-concurrency`, defaulting to 4 workers).
@@ -40,13 +41,14 @@ This document provides a comprehensive inventory of all implemented features, ca
 - **SLSA v1.0 Provenance Attestation**: Generates and attaches SLSA v1.0 provenance attestations (`<repo>:sha256-<hex>.att`) capturing builder metadata, invocation parameters, and cryptographic dependency digests.
 - **Cosign & DSSE Cryptographic Signing**: Automatically generates Cosign signatures (`<repo>:sha256-<hex>.sig`) and DSSE envelopes using local private keys (`POKKUM_SIGNING_KEY`) or Sigstore keyless infrastructure.
 - **Software Bill of Materials (SBOM)**:
-  - Generates comprehensive SBOMs (SPDX JSON or CycloneDX JSON) cataloging OS and npm dependencies.
+  - Generates comprehensive SBOMs (SPDX JSON or CycloneDX JSON) cataloging npm dependencies and the embedded Bun runtime (`pkg:generic/bun@<version>`, with its SHA-256 when resolved — the same value recorded in SLSA provenance) for `--strategy=layered`/`--strategy=exe` builds. Does not catalog OS packages.
   - Attaches SBOMs via OCI 1.1 Referrers API (`--sbom-attach=referrer`, default) or legacy tags (`--sbom-attach=tag`).
 - **Base Image Signature Verification**:
   - Keyless Sigstore verification (Fulcio OIDC + Rekor transparency logs) against embedded trust roots for stock presets (`distroless`, `chainguard`).
   - Static-key Cosign verification for custom base images (`--base-verify-mode=static-key`, `--base-verify-key=<path>`).
 - **Secret-Inlining Guard (`secretguard`)**: Build-time Shannon entropy and regex scanner that prevents bundler secret leaks into OCI layer tarballs (`--allow-secret-pattern` bypass).
 - **Runtime Environment Contract**: `--require-env=KEY1,KEY2` stamps runtime variable requirements into OCI annotations (`pokkum.dev/required-env`) and container environment, verified by PID-1 supervisor on boot to fail-fast if absent.
+- **adapter-node Reverse-Proxy Contract**: First-class support for `ORIGIN`, `PROTOCOL_HEADER`, `HOST_HEADER`, `ADDRESS_HEADER`, `XFF_DEPTH`, and `BODY_SIZE_LIMIT` via `--origin`/`--protocol-header`/`--host-header`/`--address-header`/`--xff-depth`/`--body-size-limit` (or matching `.pokkum.yaml` `image.*` keys). Closes the most common first-deploy failure for an app behind a reverse proxy/ingress (`403 Cross-site POST form submissions are forbidden`) — `pokkum build` proactively warns when `ORIGIN` is unset for a layered/exe build.
 - **Image Provenance Timeline (`pokkum history <image>`)**: Inspects published OCI manifests and extracts standard `org.opencontainers.image.*` provenance annotations (git commit, repository, build timestamp, version) with `--expect-source` validation.
 
 ### Base Image Security & Escrow Management
@@ -78,7 +80,7 @@ This document provides a comprehensive inventory of all implemented features, ca
 - **Declarative URI Resolution (`pokkum resolve`)**: Resolves `pokkum://` image URIs in Kubernetes YAML manifests to immutable image digests (`repo@sha256:...`).
 - **Direct Cluster Deployment (`pokkum apply`)**: Resolves manifests and applies them directly to Kubernetes clusters (`kubectl apply -f -`).
 - **Monorepo Affected-Detection (`--since=<git-ref>`)**: Diffs each project tree against a base ref and skips builds for unaffected projects that already have a known prior digest (`ports.Reference.Skipped`).
-- **Cluster Hardening Defaults**: Injects secure `securityContext` (`runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`), resource requests/limits, and automatic `NetworkPolicy` and `PodDisruptionBudget` manifests.
+- **Cluster Hardening Defaults**: Injects secure `securityContext` (`runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`), resource requests/limits, automatic `NetworkPolicy` and `PodDisruptionBudget` manifests, and `readinessProbe`/`livenessProbe`/`startupProbe` defaults against the supervisor's `/readyz`/`/healthz` (checked independently per probe type, so an existing custom probe of one type doesn't block the other two).
 - **Multi-Generation Rollback (`pokkum rollback`)**: Rolls back image references in Kubernetes manifests using `pokkum.dev/image-history` annotations with depth selection (`-g`, `--generation=<n>`, `--list`, `--to`).
 - **Multi-Registry Authentication (`--registry-config`)**: Shells out to dynamic `docker-credential-*` binaries (ECR, GCR, OSXKeychain) with in-memory caching and fallback to static `auths` blocks.
 

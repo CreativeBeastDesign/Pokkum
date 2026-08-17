@@ -162,6 +162,12 @@ type ResolveRequest struct {
 	// and appends a PodDisruptionBudget.
 	ResourceDefaults bool
 
+	// ProbeDefaults, when true, injects readinessProbe/livenessProbe/startupProbe
+	// defaults (httpGet against the supervisor's /readyz and /healthz on
+	// POKKUM_PROBE_PORT's default) into pokkum-built containers that don't
+	// already define their own — checked independently per probe type.
+	ProbeDefaults bool
+
 	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
 	RegistryConfigPath string
 

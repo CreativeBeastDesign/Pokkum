@@ -148,6 +148,47 @@ const (
 	EnvAttestationDigest = "POKKUM_ATTESTATION_DIGEST"
 )
 
+// adapter-node's documented reverse-proxy contract (see
+// https://svelte.dev/docs/kit/adapter-node#Environment-variables). None of
+// these are Pokkum-invented names — they are read directly by the bundled
+// @sveltejs/adapter-node server (handler.js), which Pokkum embeds unmodified.
+// Every one of these is optional and, left unset, falls back to
+// adapter-node's own default (deriving origin from the raw socket, which is
+// wrong behind a TLS-terminating ingress — the "403 Cross-site POST form
+// submissions are forbidden" failure this contract exists to prevent).
+const (
+	// EnvOrigin is the app's own canonical origin (e.g. "https://example.com"),
+	// used to validate the Origin header on form-action POSTs and to build
+	// absolute URLs. Without it, adapter-node derives origin/protocol from the
+	// raw socket, which reports the wrong scheme/host behind a
+	// TLS-terminating reverse proxy or ingress.
+	EnvOrigin = "ORIGIN"
+
+	// EnvProtocolHeader names the proxy header adapter-node trusts for the
+	// original request protocol (typically "x-forwarded-proto"), used instead
+	// of ORIGIN when the protocol is derived per-request rather than pinned.
+	EnvProtocolHeader = "PROTOCOL_HEADER"
+
+	// EnvHostHeader names the proxy header adapter-node trusts for the
+	// original request host (typically "x-forwarded-host").
+	EnvHostHeader = "HOST_HEADER"
+
+	// EnvAddressHeader names the proxy header adapter-node trusts for the
+	// real client IP (typically "x-forwarded-for"). Without it, event.getClientAddress()
+	// reports the proxy's own address for every request.
+	EnvAddressHeader = "ADDRESS_HEADER"
+
+	// EnvXFFDepth is the number of trusted proxy hops adapter-node counts
+	// back from when parsing ADDRESS_HEADER (X-Forwarded-For-style headers
+	// can list multiple hops). adapter-node defaults to 1 when unset.
+	EnvXFFDepth = "XFF_DEPTH"
+
+	// EnvBodySizeLimit caps request body size, in adapter-node's own
+	// size-string format (e.g. "512K", "10M", or "Infinity" to disable).
+	// adapter-node defaults to "512K" when unset.
+	EnvBodySizeLimit = "BODY_SIZE_LIMIT"
+)
+
 // Probe endpoints served by pokkum-init on the probe port.
 const (
 	ProbePathLive  = "/healthz"
@@ -241,6 +282,30 @@ type RuntimeConfig struct {
 	// Port and ProbePort are always exposed and need not be repeated. Nil means
 	// none.
 	ExposedPorts []int
+
+	// Origin is written to ORIGIN, adapter-node's canonical-origin contract
+	// variable (see EnvOrigin's doc comment). Empty means unset — adapter-node
+	// falls back to its own raw-socket-derived origin, which is wrong behind a
+	// TLS-terminating proxy.
+	Origin string
+
+	// ProtocolHeader is written to PROTOCOL_HEADER. Empty means unset.
+	ProtocolHeader string
+
+	// HostHeader is written to HOST_HEADER. Empty means unset.
+	HostHeader string
+
+	// AddressHeader is written to ADDRESS_HEADER. Empty means unset.
+	AddressHeader string
+
+	// XFFDepth is written to XFF_DEPTH. Zero means unset — adapter-node's own
+	// default (1) applies. Negative is invalid.
+	XFFDepth int
+
+	// BodySizeLimit is written to BODY_SIZE_LIMIT verbatim (adapter-node's own
+	// size-string format, e.g. "512K", "10M", "Infinity"). Empty means unset —
+	// adapter-node's own default ("512K") applies.
+	BodySizeLimit string
 }
 
 // WithDefaults returns a copy of c with every zero field replaced by its

@@ -82,9 +82,13 @@ type envVar struct {
 
 // pokkumEnv returns the environment Pokkum contributes, in a fixed order.
 //
-// The three contract variables come first, in the order they are declared in
-// ports, followed by RuntimeConfig.Env sorted by key. That sort is one of the
-// two map-iteration hazards W1 called out: Env is a map so that callers need
+// The always-present contract variables (PORT, POKKUM_PROBE_PORT,
+// POKKUM_SHUTDOWN_TIMEOUT) come first, in the order they are declared in
+// ports, followed by the optional adapter-node reverse-proxy contract
+// variables (ORIGIN and friends — only emitted when set, since each has its
+// own sensible adapter-node-side default when absent), followed by
+// RuntimeConfig.Env sorted by key. That sort is one of the two
+// map-iteration hazards W1 called out: Env is a map so that callers need
 // not care about order, but the image config's Env is an ordered JSON array, so
 // draining the map directly would produce a different config digest on almost
 // every run.
@@ -96,6 +100,24 @@ func pokkumEnv(rc ports.RuntimeConfig) []envVar {
 		{ports.EnvPort, strconv.Itoa(rc.Port)},
 		{ports.EnvProbePort, strconv.Itoa(rc.ProbePort)},
 		{ports.EnvShutdownTimeout, rc.ShutdownTimeout.String()},
+	}
+	if rc.Origin != "" {
+		out = append(out, envVar{ports.EnvOrigin, rc.Origin})
+	}
+	if rc.ProtocolHeader != "" {
+		out = append(out, envVar{ports.EnvProtocolHeader, rc.ProtocolHeader})
+	}
+	if rc.HostHeader != "" {
+		out = append(out, envVar{ports.EnvHostHeader, rc.HostHeader})
+	}
+	if rc.AddressHeader != "" {
+		out = append(out, envVar{ports.EnvAddressHeader, rc.AddressHeader})
+	}
+	if rc.XFFDepth != 0 {
+		out = append(out, envVar{ports.EnvXFFDepth, strconv.Itoa(rc.XFFDepth)})
+	}
+	if rc.BodySizeLimit != "" {
+		out = append(out, envVar{ports.EnvBodySizeLimit, rc.BodySizeLimit})
 	}
 	if len(rc.RequireEnv) > 0 {
 		reqEnvs := slices.Clone(rc.RequireEnv)

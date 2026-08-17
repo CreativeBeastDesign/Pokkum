@@ -19,8 +19,8 @@
     },
     {
       "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "size": 183,
-      "digest": "sha256:d492cc934beb80d7ff12ac2e0bd11777906cd3f39bf9410feef08721a732dfb3"
+      "size": 169,
+      "digest": "sha256:cb3cdf2e6d412d64e6f8aa5f836b0e3ad94a339577e54efda3b7d08019823fcd"
     }
   ],
   "annotations": {

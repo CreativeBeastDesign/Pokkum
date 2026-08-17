@@ -193,6 +193,24 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 	if profile.Image.ShutdownTimeout != "" {
 		merged.Image.ShutdownTimeout = profile.Image.ShutdownTimeout
 	}
+	if profile.Image.Origin != "" {
+		merged.Image.Origin = profile.Image.Origin
+	}
+	if profile.Image.ProtocolHeader != "" {
+		merged.Image.ProtocolHeader = profile.Image.ProtocolHeader
+	}
+	if profile.Image.HostHeader != "" {
+		merged.Image.HostHeader = profile.Image.HostHeader
+	}
+	if profile.Image.AddressHeader != "" {
+		merged.Image.AddressHeader = profile.Image.AddressHeader
+	}
+	if profile.Image.XFFDepth != 0 {
+		merged.Image.XFFDepth = profile.Image.XFFDepth
+	}
+	if profile.Image.BodySizeLimit != "" {
+		merged.Image.BodySizeLimit = profile.Image.BodySizeLimit
+	}
 	if len(profile.Image.Ports) > 0 {
 		merged.Image.Ports = append([]int{}, profile.Image.Ports...)
 	}

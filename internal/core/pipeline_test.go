@@ -242,6 +242,17 @@ func (m *mockSBOMGenerator) Generate(ctx context.Context, req ports.SBOMRequest)
 	}, nil
 }
 
+// Mock implementation of ports.StaticServerProvider
+type mockStaticServerProvider struct{}
+
+func (m *mockStaticServerProvider) Binary(ctx context.Context, p core.Platform) ([]byte, error) {
+	return []byte("fake-pokkum-static-binary"), nil
+}
+
+func (m *mockStaticServerProvider) Version(ctx context.Context) (string, error) {
+	return "v-test", nil
+}
+
 // Mock implementation of ports.NativeInspector
 type mockNativeInspector struct {
 	inspectFn func(ctx context.Context, projectDir string, platform core.Platform) (ports.NativeInspectionResult, error)
@@ -255,9 +266,14 @@ func (m *mockNativeInspector) Inspect(ctx context.Context, projectDir string, pl
 }
 
 // Mock implementation of signing ports
-type mockSLSAGenerator struct{}
+type mockSLSAGenerator struct {
+	generateFn func(ctx context.Context, req ports.SLSAGeneratorRequest) (ports.SLSAStatement, error)
+}
 
 func (m *mockSLSAGenerator) Generate(ctx context.Context, req ports.SLSAGeneratorRequest) (ports.SLSAStatement, error) {
+	if m.generateFn != nil {
+		return m.generateFn(ctx, req)
+	}
 	return ports.SLSAStatement{}, nil
 }
 
@@ -540,6 +556,106 @@ func TestBuildPushSuccess(t *testing.T) {
 	outStr := buf.String()
 	if !strings.Contains(outStr, expectedRef) {
 		t.Errorf("expected stdout to contain ref line %q, got %q", expectedRef, outStr)
+	}
+}
+
+// TestBuildPushSuccess_SLSAAndSBOMCarryResolvedBunRuntime is PR-7's
+// regression guard, covering both halves the roadmap flagged as
+// inconsistent: SLSA claimed to correctly record Bun's SHA-256 but never
+// actually populated BunBinaryHash in a real build, and the SBOM never
+// carried Bun at all. It also pins a real (if subtle) correctness fix: the
+// SLSA "bun" dependency descriptor must name the resolved EMBEDDED runtime
+// artifact (ports.BunResolverResult, "1.2.2"/"mockbunsha256" per
+// mockBunRuntimeResolver's default), not the HOST's compiler bun
+// (ports.PreflightResult.BunVersion, "1.2.18" per mockCompiler's default) —
+// the two fixtures are deliberately different values here specifically so a
+// regression back to the wrong source is provable, not just plausible.
+func TestBuildPushSuccess_SLSAAndSBOMCarryResolvedBunRuntime(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+
+	var sbomReq ports.SBOMRequest
+	deps.SBOM = &mockSBOMGenerator{
+		generateFn: func(ctx context.Context, req ports.SBOMRequest) (*ports.SBOMDocument, error) {
+			sbomReq = req
+			return &ports.SBOMDocument{
+				Format:       req.Format,
+				Content:      []byte(`{"spdxVersion":"SPDX-2.3"}`),
+				SHA256:       "3333444455556666333344445555666633334444555566663333444455556666",
+				PackageCount: 1,
+			}, nil
+		},
+	}
+
+	var slsaReq ports.SLSAGeneratorRequest
+	deps.SLSAGenerator = &mockSLSAGenerator{
+		generateFn: func(ctx context.Context, req ports.SLSAGeneratorRequest) (ports.SLSAStatement, error) {
+			slsaReq = req
+			return ports.SLSAStatement{}, nil
+		},
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+		Sign:       true,
+	}
+
+	if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	if slsaReq.Toolchain.BunVersion != "1.2.2" {
+		t.Errorf("SLSA Toolchain.BunVersion = %q, want %q (the resolved embedded runtime, not the host compiler bun %q)",
+			slsaReq.Toolchain.BunVersion, "1.2.2", "1.2.18")
+	}
+	if slsaReq.Toolchain.BunBinaryHash != "mockbunsha256" {
+		t.Errorf("SLSA Toolchain.BunBinaryHash = %q, want %q — this field was never populated in a real build before this fix", slsaReq.Toolchain.BunBinaryHash, "mockbunsha256")
+	}
+
+	if sbomReq.BunVersion != "1.2.2" {
+		t.Errorf("SBOM request BunVersion = %q, want %q", sbomReq.BunVersion, "1.2.2")
+	}
+	if sbomReq.BunSHA256 != "mockbunsha256" {
+		t.Errorf("SBOM request BunSHA256 = %q, want %q", sbomReq.BunSHA256, "mockbunsha256")
+	}
+}
+
+// TestBuildLocalSuccess_ExeStrategyKeepsHostBunVersionForSLSA guards the
+// fallback half of the same fix: for a strategy with no resolved embedded
+// runtime (exe: Bun compiled the binary but there is no separate downloaded
+// runtime artifact), the SLSA "bun" descriptor must keep using the host
+// compiler's bun version rather than silently going empty.
+func TestBuildLocalSuccess_ExeStrategyKeepsHostBunVersionForSLSA(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+
+	var slsaReq ports.SLSAGeneratorRequest
+	deps.SLSAGenerator = &mockSLSAGenerator{
+		generateFn: func(ctx context.Context, req ports.SLSAGeneratorRequest) (ports.SLSAStatement, error) {
+			slsaReq = req
+			return ports.SLSAStatement{}, nil
+		},
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+		Sign:       true,
+	}
+	req.Compile.Strategy = core.StrategyExe
+
+	if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	if slsaReq.Toolchain.BunVersion != "1.2.18" {
+		t.Errorf("SLSA Toolchain.BunVersion = %q, want %q (host compiler bun, since exe has no resolved embedded runtime artifact)", slsaReq.Toolchain.BunVersion, "1.2.18")
+	}
+	if slsaReq.Toolchain.BunBinaryHash != "" {
+		t.Errorf("SLSA Toolchain.BunBinaryHash = %q, want empty (no embedded runtime resolve happens for exe strategy)", slsaReq.Toolchain.BunBinaryHash)
 	}
 }
 
@@ -1501,6 +1617,80 @@ func TestBuild_CacheHit_SkipsVerifyBaseImageAndNativeInspection(t *testing.T) {
 	if inspectCalled {
 		t.Errorf("NativeInspector.Inspect must not be called on a confirmed remote-cache hit")
 	}
+}
+
+// TestBuild_OriginWarning is PB-4's regression guard: adapter-node's
+// ORIGIN contract previously had no proactive signal at all, so a user
+// deploying behind a reverse proxy/ingress would only discover the gap when
+// a real user's form submission 403'd in production. Warn, don't fail —
+// plenty of real deployments never hit this — but the warning must actually
+// fire for the strategies where it matters (layered/exe, which embed
+// adapter-node) and stay silent everywhere it doesn't apply.
+func TestBuild_OriginWarning(t *testing.T) {
+	const warningSubstring = "ORIGIN not set"
+
+	runBuild := func(t *testing.T, mutate func(*core.BuildRequest)) string {
+		t.Helper()
+		var buf bytes.Buffer
+		deps := newFullDeps(io.Discard)
+		deps.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+		req := core.BuildRequest{
+			ProjectDir: "/abs/project",
+			Repo:       "ghcr.io/example/app",
+			Platforms:  []core.Platform{core.LinuxAMD64},
+			Tags:       []string{"v1.0.0"},
+		}
+		if mutate != nil {
+			mutate(&req)
+		}
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+		return buf.String()
+	}
+
+	t.Run("warns for layered strategy with no origin", func(t *testing.T) {
+		got := runBuild(t, nil)
+		if !strings.Contains(got, warningSubstring) {
+			t.Errorf("expected ORIGIN warning for a layered build with no origin, got:\n%s", got)
+		}
+	})
+
+	t.Run("does not warn when origin is set", func(t *testing.T) {
+		got := runBuild(t, func(req *core.BuildRequest) {
+			req.Runtime.Origin = "https://example.com"
+		})
+		if strings.Contains(got, warningSubstring) {
+			t.Errorf("unexpected ORIGIN warning with Runtime.Origin set, got:\n%s", got)
+		}
+	})
+
+	t.Run("does not warn for static strategy (no adapter-node runtime)", func(t *testing.T) {
+		var buf bytes.Buffer
+		deps := newFullDeps(io.Discard)
+		deps.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+		deps.StaticServer = &mockStaticServerProvider{}
+
+		req := core.BuildRequest{
+			ProjectDir: "/abs/project",
+			Repo:       "ghcr.io/example/app",
+			Platforms:  []core.Platform{core.LinuxAMD64},
+			Tags:       []string{"v1.0.0"},
+		}
+		req.Compile.Strategy = core.StrategyStatic
+
+		// A full static-strategy build needs more mock wiring than this test
+		// cares about (the packager/compiler mocks here are shaped for
+		// layered/exe output) — the ORIGIN warning is emitted before any of
+		// that runs, so what matters is that it doesn't fire, regardless of
+		// whether the build goes on to fail for an unrelated reason.
+		_, _ = core.Build(context.Background(), deps, req, core.BuildOptions{})
+
+		if got := buf.String(); strings.Contains(got, warningSubstring) {
+			t.Errorf("unexpected ORIGIN warning for a static build (no Bun/adapter-node runtime at all), got:\n%s", got)
+		}
+	})
 }
 
 // TestBuild_CacheHit_DisclosesBaseImageVerificationSkip proves the auditable

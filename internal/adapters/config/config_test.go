@@ -311,6 +311,76 @@ func TestParseSourceDateEpoch(t *testing.T) {
 	}
 }
 
+// TestApplyProfile_OriginContractFields is a self-review-caught regression
+// guard (mem:self_review_checklist row 10: base-vs-profile config validation
+// parity): PB-4 added Origin/ProtocolHeader/HostHeader/AddressHeader/
+// XFFDepth/BodySizeLimit to ports.ImageConfig, but ApplyProfile's per-field
+// Image-override merge is a fixed, explicit list of field names — a new
+// ImageConfig field is invisible to it unless added there too. Without this
+// fix, `profiles.<name>.image.origin` in .pokkum.yaml would parse
+// successfully and then be silently discarded on `--profile <name>`.
+func TestApplyProfile_OriginContractFields(t *testing.T) {
+	mgr, err := New(".", nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	baseCfg := &ports.ProjectConfig{
+		Version: 1,
+		Docker:  ports.DockerConfig{Repo: "ghcr.io/test/app"},
+		Image: ports.ImageConfig{
+			Origin: "https://base.example.com",
+		},
+		Profiles: map[string]ports.BuildProfile{
+			"production": {
+				Image: ports.ImageConfig{
+					Origin:         "https://prod.example.com",
+					ProtocolHeader: "x-forwarded-proto",
+					HostHeader:     "x-forwarded-host",
+					AddressHeader:  "x-forwarded-for",
+					XFFDepth:       2,
+					BodySizeLimit:  "10M",
+				},
+			},
+		},
+	}
+
+	merged, err := mgr.ApplyProfile(baseCfg, "production")
+	if err != nil {
+		t.Fatalf("ApplyProfile 'production' failed: %v", err)
+	}
+
+	if merged.Image.Origin != "https://prod.example.com" {
+		t.Errorf("Image.Origin = %q, want profile override https://prod.example.com", merged.Image.Origin)
+	}
+	if merged.Image.ProtocolHeader != "x-forwarded-proto" {
+		t.Errorf("Image.ProtocolHeader = %q, want x-forwarded-proto", merged.Image.ProtocolHeader)
+	}
+	if merged.Image.HostHeader != "x-forwarded-host" {
+		t.Errorf("Image.HostHeader = %q, want x-forwarded-host", merged.Image.HostHeader)
+	}
+	if merged.Image.AddressHeader != "x-forwarded-for" {
+		t.Errorf("Image.AddressHeader = %q, want x-forwarded-for", merged.Image.AddressHeader)
+	}
+	if merged.Image.XFFDepth != 2 {
+		t.Errorf("Image.XFFDepth = %d, want 2", merged.Image.XFFDepth)
+	}
+	if merged.Image.BodySizeLimit != "10M" {
+		t.Errorf("Image.BodySizeLimit = %q, want 10M", merged.Image.BodySizeLimit)
+	}
+
+	// A profile with no origin-contract overrides at all must fall through
+	// to the base value, matching every other Image field's precedence.
+	baseCfg.Profiles["empty"] = ports.BuildProfile{}
+	merged, err = mgr.ApplyProfile(baseCfg, "empty")
+	if err != nil {
+		t.Fatalf("ApplyProfile 'empty' failed: %v", err)
+	}
+	if merged.Image.Origin != "https://base.example.com" {
+		t.Errorf("Image.Origin = %q, want base value https://base.example.com to survive an empty profile", merged.Image.Origin)
+	}
+}
+
 func TestApplyProfile_AdversarialDeepCopyIsolation(t *testing.T) {
 	mgr, err := New(".", nil)
 	if err != nil {

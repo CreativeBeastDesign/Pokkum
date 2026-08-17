@@ -288,6 +288,64 @@ func TestPokkumEnvWithRequireEnv(t *testing.T) {
 	}
 }
 
+// TestPokkumEnvWithOriginContract is PB-4's regression guard: adapter-node's
+// reverse-proxy contract (ORIGIN and friends) previously appeared nowhere in
+// the codebase at all. Every one of these must be emitted when set, and
+// absent when not — each has its own adapter-node-side default that must be
+// allowed to apply rather than Pokkum writing an empty override.
+func TestPokkumEnvWithOriginContract(t *testing.T) {
+	rc := ports.RuntimeConfig{
+		Port:            3000,
+		ProbePort:       8081,
+		ShutdownTimeout: 30 * time.Second,
+		Origin:          "https://example.com",
+		ProtocolHeader:  "x-forwarded-proto",
+		HostHeader:      "x-forwarded-host",
+		AddressHeader:   "x-forwarded-for",
+		XFFDepth:        2,
+		BodySizeLimit:   "10M",
+	}
+	got := pokkumEnv(rc)
+
+	want := map[string]string{
+		ports.EnvOrigin:         "https://example.com",
+		ports.EnvProtocolHeader: "x-forwarded-proto",
+		ports.EnvHostHeader:     "x-forwarded-host",
+		ports.EnvAddressHeader:  "x-forwarded-for",
+		ports.EnvXFFDepth:       "2",
+		ports.EnvBodySizeLimit:  "10M",
+	}
+	gotMap := make(map[string]string, len(got))
+	for _, e := range got {
+		gotMap[e.key] = e.value
+	}
+	for k, v := range want {
+		if gotMap[k] != v {
+			t.Errorf("pokkumEnv()[%s] = %q, want %q (full output: %v)", k, gotMap[k], v, got)
+		}
+	}
+}
+
+// TestPokkumEnvOmitsOriginContractWhenUnset guards the other half: a build
+// with none of these set (the common case today, since PB-4 just added the
+// fields) must not write empty ORIGIN/PROTOCOL_HEADER/etc into the image —
+// that would override adapter-node's own sensible per-variable defaults with
+// an empty string, which is worse than not setting them at all.
+func TestPokkumEnvOmitsOriginContractWhenUnset(t *testing.T) {
+	rc := ports.RuntimeConfig{
+		Port:            3000,
+		ProbePort:       8081,
+		ShutdownTimeout: 30 * time.Second,
+	}
+	got := pokkumEnv(rc)
+	for _, e := range got {
+		switch e.key {
+		case ports.EnvOrigin, ports.EnvProtocolHeader, ports.EnvHostHeader, ports.EnvAddressHeader, ports.EnvXFFDepth, ports.EnvBodySizeLimit:
+			t.Errorf("pokkumEnv() unexpectedly emitted %s=%q with RuntimeConfig fields unset", e.key, e.value)
+		}
+	}
+}
+
 func TestMergeLabelsAndAnnotationsWithRequireEnv(t *testing.T) {
 	rc := ports.RuntimeConfig{
 		RequireEnv: []string{"DATABASE_URL", "JWT_SECRET"},

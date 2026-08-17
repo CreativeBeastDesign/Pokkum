@@ -156,13 +156,13 @@ func (d Deps) stdout() io.Writer {
 	return d.Stdout
 }
 
-// validate reports the first port that this particular build needs and does
-// not have. It runs before any subprocess or network call, so a miswired
-// composition root fails in microseconds rather than after a two-minute
-// compile.
+// validate reports the first dependency that this particular build needs and
+// does not have. It runs before any subprocess or network call, so a
+// miswired composition root fails in microseconds rather than after a
+// two-minute compile.
 func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 	missing := func(name string) error {
-		return fmt.Errorf("core: %s port is required: %w", name, ErrInvalidRequest)
+		return fmt.Errorf("core: %s is required: %w", name, ErrInvalidRequest)
 	}
 	if d.Compiler == nil {
 		return missing("compiler")
@@ -292,6 +292,18 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		"output", req.Output.Mode,
 		"dryRun", opts.DryRun,
 		"printManifest", opts.PrintManifest)
+
+	// Static builds have no Bun runtime and no adapter-node server, so the
+	// ORIGIN contract doesn't apply. For layered/exe, an unset ORIGIN is the
+	// single highest-volume first-deploy failure this tool can proactively
+	// warn about: adapter-node falls back to deriving its origin from the
+	// raw socket, which is wrong behind a TLS-terminating ingress and
+	// produces "403 Cross-site POST form submissions are forbidden" on the
+	// app's first form action. Warn, don't fail — plenty of real deployments
+	// (bare HTTP, no forms, dev/staging) never hit this.
+	if req.Runtime.Origin == "" && req.Compile.Strategy != StrategyStatic {
+		log.Warn("ORIGIN not set — if this app is served behind a reverse proxy or ingress, form actions will likely fail with \"403 Cross-site POST form submissions are forbidden\"; set --origin to the public URL this app is served at (e.g. --origin=https://example.com)")
+	}
 
 	// Stage 2: host toolchain and project layout.
 	pf, err := deps.Compiler.Preflight(ctx, ports.PreflightRequest{
@@ -713,8 +725,38 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		return BuildResult{}, err
 	}
 
+	// Resolve the embedded Bun runtime once, ahead of the per-platform fan-out
+	// below, so its version/hash are available to attach to the SBOM and SLSA
+	// provenance — both single documents describing the whole build, not
+	// per-platform. Deliberately distinct from toolchain.BunVersion (the
+	// HOST's compiler bun, from Preflight): this is the actual runtime
+	// artifact that gets embedded in the image, which is what a dependency
+	// descriptor in an SBOM/SLSA statement needs to name correctly, and the
+	// two commonly differ (a developer's local bun and the pinned runtime
+	// version are unrelated unless they happen to match).
+	//
+	// Resolving req.Platforms[0] here and then again inside fanOut's own
+	// per-platform loop is intentional, not wasted work: the second call is a
+	// cache hit (Resolver's own on-disk cache), and this keeps fanOut's
+	// concurrent per-platform logic completely untouched rather than special
+	// -casing one platform's goroutine to reuse a pre-fetched result.
+	var bunToolchain ports.BunResolverResult
+	if req.Compile.Strategy == StrategyLayered && deps.BunRuntime != nil && len(req.Platforms) > 0 {
+		bunToolchain, err = deps.BunRuntime.Resolve(ctx, ports.BunResolverRequest{
+			Platform:         req.Platforms[0],
+			Version:          req.BunRuntime.Version,
+			Variant:          req.BunRuntime.Variant,
+			CustomBinaryPath: req.BunRuntime.CustomBinaryPath,
+			StubLauncher:     req.BunRuntime.StubLauncher,
+			SourceDateEpoch:  req.SourceDateEpoch,
+		})
+		if err != nil {
+			return BuildResult{}, fmt.Errorf("core: resolve bun runtime for sbom/provenance: %w", err)
+		}
+	}
+
 	// Stage 6: the parallel section.
-	built, doc, err := fanOut(ctx, deps, req, base, prep, workDir, imageLabels(req, baseInfo, toolchain))
+	built, doc, err := fanOut(ctx, deps, req, base, prep, workDir, imageLabels(req, baseInfo, toolchain), bunToolchain)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -840,10 +882,21 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			},
 			OutputDigest: pub.Digest,
 			Toolchain: ports.SLSAToolchain{
-				PokkumVersion:       deps.Version,
-				GoVersion:           runtime.Version(),
-				BuilderOSArch:       runtime.GOOS + "/" + runtime.GOARCH,
-				BunVersion:          toolchain.BunVersion,
+				PokkumVersion: deps.Version,
+				GoVersion:     runtime.Version(),
+				BuilderOSArch: runtime.GOOS + "/" + runtime.GOARCH,
+				// bunToolchain is the resolved embedded-runtime artifact
+				// (StrategyLayered only) — the correct thing for a
+				// dependency descriptor to name, and previously the only
+				// half ever populated (BunVersion, via toolchain.BunVersion
+				// below); BunBinaryHash was always empty in production
+				// despite slsa/generator.go having supported it since
+				// inception. For strategies with no resolved runtime (exe,
+				// static), fall back to toolchain.BunVersion — the host
+				// compiler's bun — preserving prior behavior rather than
+				// leaving the field empty.
+				BunVersion:          firstNonEmpty(bunToolchain.Version, toolchain.BunVersion),
+				BunBinaryHash:       bunToolchain.SHA256,
 				SupervisorVersion:   toolchain.SupervisorVersion,
 				StaticServerVersion: toolchain.StaticServerVersion,
 			},
@@ -875,6 +928,14 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	return result, nil
 }
 
+// firstNonEmpty returns a, or b if a is empty.
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
 // platformBuild is one platform's slice of the fan-out.
 type platformBuild struct {
 	artifact Artifact
@@ -897,6 +958,15 @@ type platformBuild struct {
 //   - errgroup.WithContext gives the cancel-the-others behaviour: the first
 //     error cancels gctx, every other in-flight port call sees a done context
 //     and returns, and Wait reports the first error.
+//
+// bunToolchain is pre-resolved by the caller (Build), not by this function:
+// the SBOM scan needs it immediately, with no dependency on any platform's
+// own per-platform resolve completing, and threading a live resolve through
+// this goroutine's own concurrency would couple two things (SBOM generation
+// and Bun resolution) that this function's own doc comment above says are
+// deliberately independent. Zero value (StrategyExe/static, or
+// deps.BunRuntime == nil) is fine — Generate treats an empty BunVersion as
+// "no Bun component" rather than an error.
 func fanOut(
 	ctx context.Context,
 	deps Deps,
@@ -905,6 +975,7 @@ func fanOut(
 	prep ports.PrepareResult,
 	workDir string,
 	labels map[string]string,
+	bunToolchain ports.BunResolverResult,
 ) ([]platformBuild, *ports.SBOMDocument, error) {
 	log := deps.logger()
 	built := make([]platformBuild, len(req.Platforms))
@@ -1070,6 +1141,8 @@ func fanOut(
 				Format:     req.SBOM.Format,
 				Name:       req.Repo,
 				CreatedAt:  req.SourceDateEpoch,
+				BunVersion: bunToolchain.Version,
+				BunSHA256:  bunToolchain.SHA256,
 			})
 			if err != nil {
 				return err

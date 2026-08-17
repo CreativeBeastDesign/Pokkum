@@ -54,6 +54,12 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--no-verify-base` | — | — | `false` | Suppress base image signature verification entirely (both static-key and keyless). |
 | `--allow-secret-pattern` | — | — | (none) | Regex pattern to ignore during build-time secret scanning, repeatable. |
 | `--require-env` | — | — | (none) | Declare required runtime environment variables (comma-separated or repeatable). Stamped into image annotations (`pokkum.dev/required-env`) and validated by the supervisor on container boot. |
+| `--origin` | — | — | (none) | Canonical origin (e.g. `https://example.com`) written to `ORIGIN` — see §18b. Recommended for any deployment behind a reverse proxy/ingress. |
+| `--protocol-header` | — | — | (none) | Proxy header adapter-node trusts for the request protocol, written to `PROTOCOL_HEADER` — see §18b. |
+| `--host-header` | — | — | (none) | Proxy header adapter-node trusts for the request host, written to `HOST_HEADER` — see §18b. |
+| `--address-header` | — | — | (none) | Proxy header adapter-node trusts for the client IP, written to `ADDRESS_HEADER` — see §18b. |
+| `--xff-depth` | — | — | `0` (adapter-node's own default of `1` applies) | Trusted proxy hop count for `--address-header`, written to `XFF_DEPTH` — see §18b. |
+| `--body-size-limit` | — | — | (none, adapter-node's own default of `512K` applies) | Request body size cap in adapter-node's size-string format, written to `BODY_SIZE_LIMIT` — see §18b. |
 | `--fail-on-cve` | — | `POKKUM_FAIL_ON_CVE` | (none) | Fail build if base image vulnerabilities exceed threshold (`low`, `medium`, `high`, `critical`; default warn-only). |
 | `--allow-incomplete` | — | — | `false` | Allow build to succeed even if base image vulnerability database lookups fail (default: fail closed when `--fail-on-cve` is active). |
 | `--hermetic` | — | — | `false` | Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required). |
@@ -79,6 +85,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--offline` | — | — | `false` | Strictly enforce using `pokkum.lock` and local cache without remote registry calls. |
 | `--bun-binary` | — | — | (none) | Local filesystem path escape hatch to a `bun` executable (skips resolution/download/stub-compilation). |
 | `--bun-variant` | — | — | `standard` | Bun CPU variant (`standard` [AVX2 required on x86-64] or `baseline`). |
+| `--bun-version` | — | — | (none, resolves to the pinned default) | Bun release version to embed. A small set of common versions is checksum-verified against statically pinned SHA256 digests; any other version is verified against Bun's own GPG-signed `SHASUMS256.txt.asc` release manifest before use — never installed unverified. Also available on `pokkum dev`. |
 | `--stub-launcher` | — | `POKKUM_STUB_LAUNCHER` | `false` | Compile a minimal entrypoint launcher stub instead of embedding stock Bun runtime (layered strategy runtime hardening). |
 | `--strategy` | — | — | `layered` | Packaging strategy (`layered` [8-layer layout], `static` [zero-JS static site], or `exe` [single executable, deprecated]). |
 | `--static` | — | — | `false` | Shorthand for `--strategy=static`: compile a purely static site onto a minimal libc-free `chainguard/static` image served by the embedded `pokkum-static` PID-1 file server (no Bun runtime, no compiled executable). Conflicts with `--strategy=exe`; defaults the base to the static image when no `--base`/`--hardened` is given. |
@@ -114,6 +121,8 @@ Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode), `SOU
 | `--no-network-policy` | — | `false` | Disable NetworkPolicy generation. |
 | `--resource-defaults` | — | `true` | Inject default CPU/memory requests and limits and append a PodDisruptionBudget, selector-scoped to the workload (skipped entirely if no labels are found — never emitted namespace-wide). |
 | `--no-resource-defaults` | — | `false` | Disable resource default injection and PodDisruptionBudget generation. |
+| `--probe-defaults` | — | `true` | Inject `readinessProbe`/`livenessProbe`/`startupProbe` defaults (`httpGet` against the supervisor's `/readyz`/`/healthz` on port `8081`) for pokkum-built containers, checked independently per probe type — a container with its own `livenessProbe` still gets `readinessProbe`/`startupProbe` filled in. See §19b. |
+| `--no-probe-defaults` | — | `false` | Disable probe default injection. |
 | `--cluster-inspect` | — | `true` | (`apply` only) Query live cluster workload annotations before resolution to seed multi-generation deployment history. |
 | `--no-cluster-inspect` | — | `false` | (`apply` only) Disable live cluster annotation inspection; wins over `--cluster-inspect` if both are set. |
 | `--since` | — | (none) | Git ref (commit, branch, tag) to diff against for monorepo affected-detection: a `pokkum://` project whose source tree has not changed since this ref, and for which a prior digest is known (from the manifest's `pokkum.dev/current-image` annotation or live cluster state when inspecting), skips compilation/packaging and reuses that digest. If no prior digest is known, or the project is affected, it is built normally. Fail-closed: an unknown ref or git failure errors out. |
@@ -297,6 +306,19 @@ These configure the image's *runtime* behavior inside the container (read by `/p
 | `POKKUM_STATIC_ROOTS` | `/app/client:/app/prerendered` | Colon-separated list of static roots that `pokkum-static` serves (via Content-Encoding/Range/ETag) for `--strategy=static` images. Set by the packager at build time. |
 | `POKKUM_STATIC_FALLBACK` | (none) | **Opt-in SPA fallback** for `--strategy=static`: an in-image file path (e.g. `/app/client/200.html`) that `pokkum-static` serves with `200` for any unmatched `GET`/`HEAD` route (same ETag/Range/Content-Encoding negotiation as any served file). Set by the packager only when the source project configures an `@sveltejs/adapter-static` `fallback` page that was actually emitted into the client staging. Absent/empty (the default) means unmatched routes keep returning a plain `404`; the server logs a one-per-process `Warn` on the first such `404` pointing at this doc. Mirrors the `-fallback` flag on the `pokkum-static` binary. |
 
+## 18b. Environment Variables (Runtime, Read by the Application)
+
+Unlike the table above, these are read directly by the bundled `@sveltejs/adapter-node` server itself (`handler.js`), not by `pokkum-init` — they only apply to `--strategy=layered`/`--strategy=exe`, which embed adapter-node. All are optional; adapter-node falls back to its own default for any that are unset. Set via `--origin`/`--protocol-header`/`--host-header`/`--address-header`/`--xff-depth`/`--body-size-limit` on `pokkum build`, or the matching `image.*` keys in `.pokkum.yaml`.
+
+| Variable | Default (adapter-node's own) | Description |
+|---|---|---|
+| `ORIGIN` | (none — derived from the raw socket) | The app's own canonical origin (e.g. `https://example.com`), used to validate the `Origin` header on form-action POSTs and to build absolute URLs. **Strongly recommended for any deployment behind a reverse proxy or ingress** — without it, adapter-node derives origin/protocol from the raw socket, which reports the wrong scheme/host behind TLS termination and produces `403 Cross-site POST form submissions are forbidden` on the app's first form action. `pokkum build` logs a `Warn` at build time when this is unset for a layered/exe build. |
+| `PROTOCOL_HEADER` | (none) | Proxy header adapter-node trusts for the original request protocol (e.g. `x-forwarded-proto`). |
+| `HOST_HEADER` | (none) | Proxy header adapter-node trusts for the original request host (e.g. `x-forwarded-host`). |
+| `ADDRESS_HEADER` | (none) | Proxy header adapter-node trusts for the real client IP (e.g. `x-forwarded-for`). Without it, `event.getClientAddress()` reports the proxy's own address for every request. |
+| `XFF_DEPTH` | `1` | Number of trusted proxy hops adapter-node counts back from when parsing `ADDRESS_HEADER`. |
+| `BODY_SIZE_LIMIT` | `512K` | Request body size cap, in adapter-node's own size-string format (e.g. `512K`, `10M`, `Infinity` to disable). |
+
 ---
 
 ## 19. Supervisor Exit Codes (`pokkum-init`)
@@ -313,6 +335,18 @@ These configure the image's *runtime* behavior inside the container (read by `/p
 | `126` | Child binary exists but could not be exec'd (`EACCES`/`EPERM`/`ENOEXEC` — e.g. missing execute bit, wrong architecture). **Not** used for attestation failures (see `125` above); the two were split apart specifically so this code keeps its single, pre-existing meaning. | `startExitCode` in `supervisor.go` |
 | `127` | Child binary not found (`ENOENT` / not on `PATH`). | `startExitCode` in `supervisor.go` |
 | `128+N` | Child was killed by signal `N` (e.g. `137` = `128+SIGKILL`, `143` = `128+SIGTERM`), including the shutdown-timeout escalation to `SIGKILL` when the child ignores the forwarded termination signal past `POKKUM_SHUTDOWN_TIMEOUT`. | `exitCode` in `supervisor.go` |
+
+---
+
+## 19b. Kubernetes Probe Defaults (`pokkum resolve`/`apply --probe-defaults`)
+
+`--probe-defaults` (default `true`) injects three probes against pokkum-init's probe server (`POKKUM_PROBE_PORT`, default `8081`) into any pokkum-built container that doesn't already define its own — checked independently per probe type, so an existing custom `livenessProbe` doesn't block `readinessProbe`/`startupProbe` from being filled in:
+
+| Probe | Path | `periodSeconds` | `failureThreshold` | Purpose |
+|---|---|---|---|---|
+| `readinessProbe` | `/readyz` (`ports.ProbePathReady`) | `10` | `3` | Traffic gating — a TCP-connect check to the app's own port; adapter-node's server (`handler.js`) resolves its module-level `await server.init(...)` — which is what runs `hooks.server.js`'s `init` hook — before `index.js` ever calls `server.listen()`, so a successful connect here already implies `init()` has completed. |
+| `livenessProbe` | `/healthz` (`ports.ProbePathLive`) | `10` | `3` | Process-alive check — restarts the container if the supervisor reports the child process as not running. |
+| `startupProbe` | `/readyz` | `2` | `30` (60s total grace) | Protects a legitimately slow `init()` (a slow DB connection, a large cache warm) from being killed by `livenessProbe`'s normal cadence before the app has even finished starting — while a `startupProbe` hasn't yet succeeded once, `readinessProbe`/`livenessProbe` don't count against the container at all. |
 
 ---
 

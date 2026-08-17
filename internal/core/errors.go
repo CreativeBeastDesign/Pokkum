@@ -171,6 +171,13 @@ var (
 	// ErrBunDownloadFailed reports a network or IO failure downloading a Bun release archive.
 	ErrBunDownloadFailed = errors.New("bun binary download failed")
 
+	// ErrBunSignatureVerificationFailed reports that a Bun release's signed
+	// SHASUMS256.txt could not be fetched, or failed GPG signature
+	// verification against the embedded oven-sh release key. Distinct from
+	// ErrBunChecksumMismatch: this fires when the trusted checksum itself
+	// couldn't be established, not when a checksum comparison failed.
+	ErrBunSignatureVerificationFailed = errors.New("bun release signature verification failed")
+
 	// ErrInvalidStrategy reports an unrecognized packaging strategy (must be layered or exe).
 	ErrInvalidStrategy = errors.New("invalid build strategy")
 

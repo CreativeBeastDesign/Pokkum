@@ -25,6 +25,17 @@ type ImageConfig struct {
 	Port            int               `yaml:"port,omitempty" json:"port,omitempty"`
 	ProbePort       int               `yaml:"probe_port,omitempty" json:"probe_port,omitempty"`
 	ShutdownTimeout string            `yaml:"shutdown_timeout,omitempty" json:"shutdown_timeout,omitempty"`
+
+	// Origin and the headers/limits below mirror adapter-node's reverse-proxy
+	// contract (RuntimeConfig.Origin's doc comment in packager.go has the
+	// full rationale). All optional; each falls back to adapter-node's own
+	// default when unset.
+	Origin         string `yaml:"origin,omitempty" json:"origin,omitempty"`
+	ProtocolHeader string `yaml:"protocol_header,omitempty" json:"protocol_header,omitempty"`
+	HostHeader     string `yaml:"host_header,omitempty" json:"host_header,omitempty"`
+	AddressHeader  string `yaml:"address_header,omitempty" json:"address_header,omitempty"`
+	XFFDepth       int    `yaml:"xff_depth,omitempty" json:"xff_depth,omitempty"`
+	BodySizeLimit  string `yaml:"body_size_limit,omitempty" json:"body_size_limit,omitempty"`
 }
 
 // SecurityConfig holds security scanning and validation policies.

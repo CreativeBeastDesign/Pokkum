@@ -3,6 +3,7 @@ module github.com/CreativeBeastDesign/pokkum
 go 1.26.6
 
 require (
+	github.com/ProtonMail/go-crypto v1.4.1
 	github.com/andybalholm/brotli v1.2.2
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/docker/cli v29.6.2+incompatible
@@ -25,6 +26,7 @@ require (
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/cloudflare/circl v1.6.2 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467 // indirect

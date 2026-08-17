@@ -14,9 +14,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
+	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/clearsign"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -24,11 +27,48 @@ import (
 
 // Known pinned SHA256 digests for official Bun zip release archives.
 // Key format: "<version>/<target-name>" (e.g. "1.2.2/bun-linux-x64").
+//
+// These entries are a fast, network-free path for the one version Pokkum
+// defaults to (ports.DefaultBunVersion) — not the only source of integrity
+// verification. Any version not listed here still gets verified, via
+// fetchVerifiedChecksum below, against Bun's own GPG-signed release
+// manifest. This map existing or not existing for a given version has no
+// bearing on whether that version's download is checked; it only decides
+// whether checking it costs a network round trip.
 var pinnedReleaseChecksums = map[string]string{
 	"1.2.2/bun-linux-x64":          "3f4efb8afd1f84ac2a98c04661c898561d1d35527d030cb4571e99b7c85f5079",
 	"1.2.2/bun-linux-x64-baseline": "cad7756a6ee16f3432a328f8023fc5cd431106822eacfa6d6d3afbad6fdc24db",
 	"1.2.2/bun-linux-aarch64":      "d1dbaa3e9af24549fad92bdbe4fb21fa53302cd048a8f004e85a240984c93d4d",
 }
+
+// embeddedBunReleaseKeyArmored is Bun's official release-signing OpenPGP
+// public key, identity "Robobun <robobun@oven.sh>", fingerprint
+// F3DC C08A 8572 C074 9B3E 1888 8EAB 4D40 A7B2 2B59. Fetched from
+// keys.openpgp.org (a verifying keyserver requiring email-address proof for
+// UID publication) on 2026-08-17, and confirmed to genuinely verify a real
+// SHASUMS256.txt.asc from github.com/oven-sh/bun's bun-v1.2.2 release
+// before being pinned here — see resolver_test.go's
+// TestResolver_ReleaseKey_VerifiesRealBunSignature, which is skipped rather
+// than run offline but documents the exact verification that was performed
+// to source this key. Pinning it here (rather than fetching it from a
+// keyserver at resolve time) means an unpinned --bun-version's integrity
+// check does not itself depend on a keyserver being reachable or honest.
+const embeddedBunReleaseKeyArmored = `-----BEGIN PGP PUBLIC KEY BLOCK-----
+Comment: F3DC C08A 8572 C074 9B3E  1888 8EAB 4D40 A7B2 2B59
+Comment: Robobun <robobun@oven.sh>
+
+xjMEY9GQFhYJKwYBBAHaRw8BAQdAkppAqaXl0RkROz6NfdvlwYd2UuUVfHLk2NNY
+IzEdnT/NGVJvYm9idW4gPHJvYm9idW5Ab3Zlbi5zaD7CkwQTFgoAOxYhBPPcwIqF
+csB0mz4YiI6rTUCnsitZBQJj0ZAWAhsDBQsJCAcCAiICBhUKCQgLAgQWAgMBAh4H
+AheAAAoJEI6rTUCnsitZ96UBAMvwCLD6Ud1RZkpvvnGUU+idHt2hcNmYU2d0XxDI
+HQ0rAQCA9VFOtjZefQkfhDzgIgnEEdSFXaMiyY+D+LP8awNMCs44BGPRkBYSCisG
+AQQBl1UBBQEBB0BpfePYSOEx8PihYkNXjlK5YT89CGHjEK5etleaB9i6OwMBCAfC
+eAQYFgoAIBYhBPPcwIqFcsB0mz4YiI6rTUCnsitZBQJj0ZAWAhsMAAoJEI6rTUCn
+sitZvhAA/j4SQxOCLheRG86A2181WAP4qLS1qxSw+fCf28DgiPfbAQCL0kcel+M9
+qbRIlMnwn6TwlQgN9w1qqlSnA9CbKXT9Aw==
+=zRMz
+-----END PGP PUBLIC KEY BLOCK-----
+`
 
 var _ ports.BunRuntimeResolver = (*Resolver)(nil)
 
@@ -39,6 +79,14 @@ type Resolver struct {
 
 	// HTTPClient is the HTTP client used for downloading release archives.
 	HTTPClient *http.Client
+
+	// ReleaseKeyArmored is the armored OpenPGP public key trusted to verify
+	// Bun's signed SHASUMS256.txt release manifests, for any version not
+	// covered by pinnedReleaseChecksums. Empty (the production default) uses
+	// embeddedBunReleaseKeyArmored; tests override this with a throwaway
+	// keypair so they can exercise real signature verification — including
+	// the tamper-rejection path — without access to Bun's actual private key.
+	ReleaseKeyArmored string
 
 	mu sync.Mutex
 }
@@ -96,12 +144,15 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 	if version == "" {
 		version = ports.DefaultBunVersion
 	}
+	if err := validateBunVersion(version); err != nil {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: %w: %w", err, core.ErrBunResolutionFailed)
+	}
 	variant := req.Variant
 	if variant == "" {
 		variant = ports.BunVariantStandard
 	}
 
-	// 3. Resolve target archive name
+	// 3. Resolve target archive name (also validates variant)
 	targetName, err := resolveBunTargetName(req.Platform, variant)
 	if err != nil {
 		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: resolve target name: %w: %w", err, core.ErrBunResolutionFailed)
@@ -127,20 +178,23 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 		binaryPath = filepath.Join(targetDir, "bun")
 	}
 
-	// Check if already cached & verified
-	if info, err := os.Stat(binaryPath); err == nil && !info.IsDir() {
-		sha, size, err := computeFileSHA256(binaryPath)
-		if err == nil {
-			r.mu.Unlock()
-			return ports.BunResolverResult{
-				BinaryPath: binaryPath,
-				Version:    version,
-				Variant:    variant,
-				Platform:   req.Platform,
-				SHA256:     sha,
-				Size:       size,
-			}, nil
-		}
+	// Check if already cached & verified. A file existing at binaryPath is
+	// NOT sufficient on its own — see verifiedCacheHit's doc comment: only a
+	// binary whose contents still match the digest sidecar this resolver
+	// itself wrote after cryptographically verifying it is treated as a hit.
+	// Anything else (no sidecar, mismatched sidecar) is a cache miss, forcing
+	// a fresh download-and-verify rather than trusting arbitrary bytes some
+	// other process placed at that path.
+	if sha, size, ok := verifiedCacheHit(binaryPath); ok {
+		r.mu.Unlock()
+		return ports.BunResolverResult{
+			BinaryPath: binaryPath,
+			Version:    version,
+			Variant:    variant,
+			Platform:   req.Platform,
+			SHA256:     sha,
+			Size:       size,
+		}, nil
 	}
 	r.mu.Unlock()
 
@@ -149,8 +203,13 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 		return r.compileStub(ctx, version, variant, req.Platform, targetDir, binaryPath)
 	}
 
-	// 5. Download and extract
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
+	// 5. Download and extract. 0o700: this cache directory holds a binary
+	// that becomes trusted purely because it lives at this path (see
+	// verifiedCacheHit) — 0755 would let any other local user on a
+	// shared/misconfigured cache root (e.g. the os.TempDir() fallback in
+	// NewResolver, when $HOME/$XDG_CACHE_HOME aren't set) read or, in a
+	// world-writable parent, plant files here.
+	if err := os.MkdirAll(targetDir, 0o700); err != nil {
 		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: create cache dir %s: %w: %w", targetDir, err, core.ErrBunResolutionFailed)
 	}
 
@@ -170,19 +229,41 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: download %s status %d: %w", archiveURL, resp.StatusCode, core.ErrBunDownloadFailed)
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	// Capped well above any real Bun release archive (~100MB uncompressed;
+	// the zip itself is smaller) so a compromised/misbehaving endpoint can't
+	// force unbounded memory use on the build host — this read happens
+	// before any integrity check, so nothing about these bytes is trusted
+	// yet. LimitReader+1 so a body that exactly fills the cap doesn't read
+	// as an ambiguous "maybe truncated, maybe exactly the limit".
+	const maxArchiveBytes = 512 << 20
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxArchiveBytes+1))
 	if err != nil {
 		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: read download body %s: %w: %w", archiveURL, err, core.ErrBunDownloadFailed)
 	}
+	if len(bodyBytes) > maxArchiveBytes {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: download body %s exceeds %d byte limit: %w", archiveURL, maxArchiveBytes, core.ErrBunDownloadFailed)
+	}
 
-	// Check release zip checksum if pinned
+	// Establish a trusted checksum for this exact (version, target) and
+	// verify the download against it — unconditionally, not only when the
+	// version happens to be statically pinned. A version outside
+	// pinnedReleaseChecksums still gets checked, via fetchVerifiedChecksum,
+	// against Bun's own GPG-signed SHASUMS256.txt.asc for that release. This
+	// is a fail-closed check: if a trusted checksum can't be established at
+	// all (network failure, missing/invalid signature, no matching entry),
+	// the download is rejected rather than silently accepted.
 	key := fmt.Sprintf("%s/%s", version, targetName)
-	if expectedSHA, ok := pinnedReleaseChecksums[key]; ok {
-		actualSHABytes := sha256.Sum256(bodyBytes)
-		actualSHA := hex.EncodeToString(actualSHABytes[:])
-		if actualSHA != expectedSHA {
-			return ports.BunResolverResult{}, fmt.Errorf("bunruntime: release archive checksum mismatch for %s (expected %s, got %s): %w", key, expectedSHA, actualSHA, core.ErrBunChecksumMismatch)
+	expectedSHA, ok := pinnedReleaseChecksums[key]
+	if !ok {
+		expectedSHA, err = r.fetchVerifiedChecksum(ctx, version, targetName)
+		if err != nil {
+			return ports.BunResolverResult{}, fmt.Errorf("bunruntime: could not establish a trusted checksum for %s: %w", key, err)
 		}
+	}
+	actualSHABytes := sha256.Sum256(bodyBytes)
+	actualSHA := hex.EncodeToString(actualSHABytes[:])
+	if actualSHA != expectedSHA {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: release archive checksum mismatch for %s (expected %s, got %s): %w", key, expectedSHA, actualSHA, core.ErrBunChecksumMismatch)
 	}
 
 	// Extract binary from zip
@@ -209,17 +290,41 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 	}
 	defer rc.Close()
 
-	tmpPath := binaryPath + ".tmp"
-	outFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	// A unique temp file per call (os.CreateTemp), not a deterministic
+	// binaryPath+".tmp", so two concurrent pokkum processes resolving the
+	// same (version, variant, platform) — e.g. two separate `pokkum build`
+	// invocations on a shared CI cache — can't interleave writes into the
+	// same file and produce a torn binary that would then be trusted
+	// forever via the cache-hit path.
+	tmpFile, err := os.CreateTemp(targetDir, "bun-*.tmp")
 	if err != nil {
-		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: create temp file %s: %w: %w", tmpPath, err, core.ErrBunDownloadFailed)
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: create temp file in %s: %w: %w", targetDir, err, core.ErrBunDownloadFailed)
+	}
+	tmpPath := tmpFile.Name()
+	if err := tmpFile.Chmod(0o700); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: chmod temp file %s: %w: %w", tmpPath, err, core.ErrBunDownloadFailed)
 	}
 
-	_, err = io.Copy(outFile, io.LimitReader(rc, 200<<20))
-	outFile.Close()
+	written, err := io.Copy(tmpFile, io.LimitReader(rc, 200<<20))
+	tmpFile.Close()
 	if err != nil {
 		os.Remove(tmpPath)
 		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: write binary %s: %w: %w", tmpPath, err, core.ErrBunDownloadFailed)
+	}
+	// io.Copy's LimitReader silently returns nil once the cap is hit rather
+	// than an error, which would otherwise let a >200MB "bun" entry be
+	// truncated and cached as if it were complete. UncompressedSize64 is
+	// from the zip's own central directory, read before any bytes of this
+	// entry were copied, so this check catches truncation the LimitReader
+	// cap would otherwise hide. Compared as uint64 (converting the
+	// known-non-negative, LimitReader-bounded `written` up, not the
+	// attacker-influenced central-directory field down) to avoid a lossy
+	// int64 conversion of an untrusted uint64.
+	if want := binaryEntry.UncompressedSize64; written < 0 || uint64(written) != want {
+		os.Remove(tmpPath)
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: extracted %d bytes for %s, want %d (truncated or oversized): %w", written, key, want, core.ErrBunDownloadFailed)
 	}
 
 	if err := os.Rename(tmpPath, binaryPath); err != nil {
@@ -230,6 +335,12 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 	sha, size, err := computeFileSHA256(binaryPath)
 	if err != nil {
 		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: checksum calculation for %s: %w: %w", binaryPath, err, core.ErrBunResolutionFailed)
+	}
+	// Record what we just cryptographically verified (the zip) and
+	// extracted, so a later Resolve call's cache-hit check (verifiedCacheHit)
+	// can detect if anything replaces these bytes in between.
+	if err := writeCacheDigestSidecar(binaryPath, sha); err != nil {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: write cache digest sidecar for %s: %w: %w", binaryPath, err, core.ErrBunResolutionFailed)
 	}
 
 	return ports.BunResolverResult{
@@ -242,9 +353,152 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 	}, nil
 }
 
+// fetchVerifiedChecksum fetches Bun's GPG-signed SHASUMS256.txt.asc for
+// version from the official GitHub release, verifies its signature against
+// the release-signing key (embeddedBunReleaseKeyArmored, or
+// r.ReleaseKeyArmored if set), and returns the trusted SHA256 hex digest for
+// targetName+".zip" from the signed content.
+//
+// Fails closed: any error along this path (fetch failure, malformed
+// clearsigned message, signature verification failure, no matching entry in
+// the verified content) returns an error rather than a usable checksum —
+// there is no fallback to an unverified value.
+//
+// Known limitation (not fixed here — flagged during adversarial security
+// review so it isn't mistaken for an oversight): SHASUMS256.txt's entries
+// are keyed only by filename ("bun-linux-x64.zip"), identical across every
+// Bun release, and the signed content contains nothing binding it to the
+// release it was published under. A party in a position to substitute what
+// this fetch receives (compromised CDN/distribution channel, malicious
+// registry proxy, a trusted-root MITM) could serve the genuine,
+// genuinely-Bun-signed SHASUMS256.txt.asc and matching zip from an OLDER
+// release while this function believes it's verifying `version`. Every
+// check here would pass — signature valid, checksum matches — while
+// silently downgrading to a known-vulnerable but authentically-signed
+// build, and the SBOM/SLSA provenance would then incorrectly claim the
+// newer version. Mitigation would require either TOFU-pinning the verified
+// checksum per (version, target) across runs, or cross-checking against
+// release-tag-scoped metadata; tracked as a roadmap follow-up rather than
+// fixed as part of this change.
+func (r *Resolver) fetchVerifiedChecksum(ctx context.Context, version, targetName string) (string, error) {
+	ascURL := fmt.Sprintf("https://github.com/oven-sh/bun/releases/download/bun-v%s/SHASUMS256.txt.asc", version)
+
+	ascBody, err := r.fetchSmall(ctx, ascURL)
+	if err != nil {
+		return "", fmt.Errorf("bunruntime: fetch %s: %w: %w", ascURL, err, core.ErrBunSignatureVerificationFailed)
+	}
+
+	keyring, err := r.releaseKeyring()
+	if err != nil {
+		return "", fmt.Errorf("bunruntime: parse release signing key: %w: %w", err, core.ErrBunSignatureVerificationFailed)
+	}
+
+	block, _ := clearsign.Decode(ascBody)
+	if block == nil {
+		return "", fmt.Errorf("bunruntime: %s is not a valid clearsigned message: %w", ascURL, core.ErrBunSignatureVerificationFailed)
+	}
+	// nil config: the openpgp v1 API used here doesn't reject weak signature
+	// hash algorithms (SHA-1/MD5) by default the way openpgp/v2 does — not
+	// currently exploitable (forging a signature over attacker-chosen
+	// content still needs a hash collision against an existing genuine Bun
+	// signature, and Bun signs with SHA-512), but noted so a future
+	// migration to openpgp/v2 — or passing an explicit
+	// packet.Config{RejectMessageHashAlgorithms: ...} here — isn't lost.
+	if _, err := block.VerifySignature(keyring, nil); err != nil {
+		return "", fmt.Errorf("bunruntime: signature verification failed for %s: %w: %w", ascURL, err, core.ErrBunSignatureVerificationFailed)
+	}
+
+	// block.Plaintext is only trustworthy past this point — it is the exact
+	// content VerifySignature just checked the signature over (block.Bytes),
+	// with the clearsign dash-escaping undone.
+	sha, err := parseSHASUMSEntry(block.Plaintext, targetName+".zip")
+	if err != nil {
+		return "", fmt.Errorf("bunruntime: %s: %w: %w", ascURL, err, core.ErrBunSignatureVerificationFailed)
+	}
+	return sha, nil
+}
+
+// releaseKeyring returns the keyring trusted to verify Bun release
+// signatures: r.ReleaseKeyArmored if set (used by tests to inject a
+// throwaway keypair so they can exercise real verification, including the
+// tamper-rejection path, without Bun's actual private key), otherwise the
+// embedded production key.
+func (r *Resolver) releaseKeyring() (openpgp.EntityList, error) {
+	armored := r.ReleaseKeyArmored
+	if armored == "" {
+		armored = embeddedBunReleaseKeyArmored
+	}
+	return openpgp.ReadArmoredKeyRing(strings.NewReader(armored))
+}
+
+// fetchSmall performs a simple GET and returns the response body, capped at
+// 1MB and failing on any non-200 status. Distinct from the release-archive
+// download in Resolve: this is only ever used for the few-KB
+// SHASUMS256.txt.asc manifest, never the ~90MB binary archive.
+func (r *Resolver) fetchSmall(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	resp, err := r.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	return body, nil
+}
+
+// parseSHASUMSEntry finds the SHA256 hex digest for filename in
+// SHASUMS256.txt-format plaintext (one "<hex>  <filename>" line per file,
+// GNU coreutils sha256sum output format — two spaces, but strings.Fields
+// splits on any run of whitespace so this tolerates either).
+func parseSHASUMSEntry(plaintext []byte, filename string) (string, error) {
+	for _, line := range strings.Split(string(plaintext), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[1] != filename {
+			continue
+		}
+		sha := strings.ToLower(fields[0])
+		if len(sha) != 64 {
+			return "", fmt.Errorf("malformed checksum length %d for %s", len(sha), filename)
+		}
+		return sha, nil
+	}
+	return "", fmt.Errorf("no checksum entry for %s in signed manifest", filename)
+}
+
+// bunVersionPattern restricts accepted Bun version strings to a safe
+// charset before they're interpolated into a cache filesystem path and a
+// release download URL. Without this, a version string containing "../"
+// could make the cache path escape CacheDir entirely.
+var bunVersionPattern = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.\-]*$`)
+
+func validateBunVersion(version string) error {
+	if !bunVersionPattern.MatchString(version) {
+		return fmt.Errorf("bun version %q contains characters outside the allowed set (alphanumeric, '.', '-', not starting with '.' or '-')", version)
+	}
+	return nil
+}
+
 func resolveBunTargetName(p ports.Platform, variant ports.BunVariant) (string, error) {
 	if p.OS != "linux" {
 		return "", fmt.Errorf("unsupported operating system %s", p.OS)
+	}
+	// An unrecognized variant must be a hard error, not a silent fall-through
+	// to "standard": every branch below treats "not baseline" as standard,
+	// so a typo'd --bun-variant would previously produce a silently wrong
+	// artifact under a differently-named cache directory.
+	switch variant {
+	case ports.BunVariantStandard, ports.BunVariantBaseline:
+	default:
+		return "", fmt.Errorf("unknown bun variant %q (must be %q or %q)", variant, ports.BunVariantStandard, ports.BunVariantBaseline)
 	}
 	switch p.Arch {
 	case "amd64":
@@ -280,6 +534,51 @@ func compileTargetName(p ports.Platform, variant ports.BunVariant) (string, erro
 	return name, nil
 }
 
+// cacheDigestSidecarPath returns the path of the sidecar file recording the
+// trusted SHA256 of the binary at binaryPath, at the time it was verified
+// and written by this resolver.
+func cacheDigestSidecarPath(binaryPath string) string {
+	return binaryPath + ".sha256"
+}
+
+// verifiedCacheHit reports whether binaryPath is a cache hit whose contents
+// are still exactly what this resolver verified and wrote there — not
+// merely a file that happens to exist at that path. A binary with no
+// sidecar, an unreadable sidecar, or a sidecar that disagrees with the
+// binary's current hash is NOT a hit: it is treated identically to a cold
+// cache, forcing a fresh download-and-verify. Without this, a cache-hit
+// check that only asks "does a file exist here" trusts arbitrary bytes any
+// other local process (or another local user on a shared/misconfigured
+// cache directory) could have placed at that exact path — a cache hit was
+// the one code path that received zero integrity checking even before this
+// file's checksum-verification-for-unpinned-versions fix, since it never
+// compares against pinnedReleaseChecksums or a signed manifest at all.
+func verifiedCacheHit(binaryPath string) (sha string, size int64, ok bool) {
+	info, err := os.Stat(binaryPath)
+	if err != nil || info.IsDir() {
+		return "", 0, false
+	}
+	wantSHA, err := os.ReadFile(cacheDigestSidecarPath(binaryPath))
+	if err != nil {
+		return "", 0, false
+	}
+	gotSHA, gotSize, err := computeFileSHA256(binaryPath)
+	if err != nil || gotSHA != strings.TrimSpace(string(wantSHA)) {
+		return "", 0, false
+	}
+	return gotSHA, gotSize, true
+}
+
+// writeCacheDigestSidecar records sha as the trusted digest for the
+// just-verified-and-written binary at binaryPath, so a later Resolve call
+// for the same path can prove nothing tampered with it since. Only ever
+// called immediately after a binary this resolver itself produced (via a
+// cryptographically verified download, or a locally compiled stub) has had
+// its digest freshly computed — never with an externally-supplied value.
+func writeCacheDigestSidecar(binaryPath, sha string) error {
+	return os.WriteFile(cacheDigestSidecarPath(binaryPath), []byte(sha), 0o600)
+}
+
 func computeFileSHA256(path string) (string, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -293,14 +592,14 @@ func computeFileSHA256(path string) (string, int64, error) {
 		return "", 0, err
 	}
 
-	// Avoid unused runtime import error if any by using string check or runtime
-	_ = runtime.GOOS
-
 	return hex.EncodeToString(h.Sum(nil)), size, nil
 }
 
 func (r *Resolver) compileStub(ctx context.Context, version string, variant ports.BunVariant, platform ports.Platform, targetDir, binaryPath string) (ports.BunResolverResult, error) {
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
+	// 0o700: matches the download path's cache directory hardening — see
+	// verifiedCacheHit's doc comment for why this cache root shouldn't be
+	// readable/writable by other local users.
+	if err := os.MkdirAll(targetDir, 0o700); err != nil {
 		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: create stub cache dir %s: %w: %w", targetDir, err, core.ErrBunResolutionFailed)
 	}
 
@@ -355,7 +654,7 @@ func (r *Resolver) compileStub(ctx context.Context, version string, variant port
 			return ports.BunResolverResult{}, fmt.Errorf("bunruntime: open compiled stub %s: %w: %w", tmpBinary, openErr, core.ErrBunResolutionFailed)
 		}
 		defer in.Close()
-		out, createErr := os.OpenFile(binaryPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+		out, createErr := os.OpenFile(binaryPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o700)
 		if createErr != nil {
 			return ports.BunResolverResult{}, fmt.Errorf("bunruntime: create stub destination %s: %w: %w", binaryPath, createErr, core.ErrBunResolutionFailed)
 		}
@@ -364,11 +663,18 @@ func (r *Resolver) compileStub(ctx context.Context, version string, variant port
 		if copyErr != nil {
 			return ports.BunResolverResult{}, fmt.Errorf("bunruntime: write stub destination %s: %w: %w", binaryPath, copyErr, core.ErrBunResolutionFailed)
 		}
+	} else if err := os.Chmod(binaryPath, 0o700); err != nil {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: chmod stub destination %s: %w: %w", binaryPath, err, core.ErrBunResolutionFailed)
 	}
 
 	sha, size, err := computeFileSHA256(binaryPath)
 	if err != nil {
 		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: checksum calculation for %s: %w: %w", binaryPath, err, core.ErrBunResolutionFailed)
+	}
+	// Same rationale as the download path: record what we just compiled and
+	// hashed, so a later cache-hit (verifiedCacheHit) can detect tampering.
+	if err := writeCacheDigestSidecar(binaryPath, sha); err != nil {
+		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: write cache digest sidecar for %s: %w: %w", binaryPath, err, core.ErrBunResolutionFailed)
 	}
 
 	return ports.BunResolverResult{

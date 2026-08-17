@@ -9,7 +9,7 @@ preventative rule each one produced. Newest entries first.
 
 **Category:** overclaiming / fake-implementation (new category — distinct from this file's recurring `test-fixture-fidelity` theme: no test was wrong here, because for the worst offender *no test asserted real behavior at all*)
 
-**Root cause:** a documentation-first verification loop. Each of these features was described in `Feature-list.md` / `Roadmap.md` / `AdditionalFeatures.md`, and every subsequent review — human and agent — read those descriptions and treated them as evidence that the code existed. `pokkum explain`/`why`/`diff` shipped as three cobra commands returning hardcoded literals (`Digest: "sha256:base..."`, `"layer_index": 3`, `"modified": ["Layer #3 (App JS)"]`) and were marked `[x]` in the v0.4 milestone. The 143-line `cmd/pokkum/explain.go` never imports `remote`, never opens a tarball, never touches an image. `explain_test.go` exists and passes — it asserts the command's *output shape*, which the hardcoded data satisfies perfectly. Three further items were marked Done while only one of their two halves was built: supervisor `/metrics` (never built; only `/livez`+`/readyz` exist), app-side trace-context logging (no `trace_id` anywhere in `internal/` or `supervisor/`), and Helm/Kustomize GitOps export (raw-YAML `pokkum://` resolution only).
+**Root cause:** a documentation-first verification loop. Each of these features was described in `Feature-list.md` / `Roadmap.md` / `AdditionalFeatures.md`, and every subsequent review — human and agent — read those descriptions and treated them as evidence that the code existed. `pokkum explain`/`why`/`diff` shipped as three cobra commands returning hardcoded literals (`Digest: "sha256:base..."`, `"layer_index": 3`, `"modified": ["Layer #3 (App JS)"]`) and were marked `[x]` in the v0.4 milestone. The 143-line `cmd/pokkum/explain.go` never imports `remote`, never opens a tarball, never touches an image. `explain_test.go` exists and passes — it asserts the command's *output shape*, which the hardcoded data satisfies perfectly. Three further items were marked Done while only one of their two halves was built: supervisor `/metrics` (never built; only `/healthz`+`/readyz` exist — corrected 2026-08-17, this entry itself previously said "/livez", the wrong name; see the PR-4 entry below), app-side trace-context logging (no `trace_id` anywhere in `internal/` or `supervisor/`), and Helm/Kustomize GitOps export (raw-YAML `pokkum://` resolution only).
 
 The trigger that finally exposed it was external: two outside reviews of `Feature-list.md` arrived, and verifying *their* claims against the code — rather than against the feature list — surfaced the stubs incidentally. One reviewer even asked for a layer-churn *sub-mode* of `pokkum diff`, assuming the command worked. Notably, this is the second audit to find this drift class in this project (`fixes-to-v1.md` was the first), which makes it a process property rather than an accident.
 
@@ -552,4 +552,109 @@ per-platform field-populating call (no `Compile`, no `BunRuntime.Resolve`,
 etc.) should use `>1` platform specifically to catch this class of bug —
 single-platform coverage of a new strategy is not sufficient confidence that
 its multi-platform path works.
+
+## 2026-08-17 — A roadmap item's own wording assumed a CLI flag existed that was never actually wired
+
+**Category:** documentation-drift / feature reality check (Row 16 family)
+
+**Root cause:** `Roadmap.md`'s PB-2 entry read "Any other `--bun-version`
+downloads and installs a ~90MB binary with no integrity check at all,"
+written as if `--bun-version` were an existing, reachable CLI flag. It
+wasn't: `ports.BunResolverRequest.Version` / `core.BunRuntimeOptions.Version`
+existed as Go struct fields, and `internal/adapters/bunruntime/resolver.go`
+correctly consumed them, but `cmd/pokkum/build.go` and `cmd/pokkum/dev.go`
+only ever registered `--bun-binary` and `--bun-variant` — never
+`--bun-version`. The original external-review audit that produced this
+roadmap entry inferred a CLI surface from the existence of a Go field
+without checking whether any flag actually set it, and the entry's own
+wording was never checked against `cmd/pokkum/build.go`'s flag list before
+being written down as fact.
+
+**Where:** `cmd/pokkum/build.go`, `cmd/pokkum/dev.go` (missing flag
+registration); `Roadmap.md`'s PB-2 row (the unverified claim).
+
+**Fix:** Added `--bun-version` to both `pokkum build` and `pokkum dev`,
+wired to `core.BunRuntimeOptions.Version`, matching the existing
+`--bun-binary`/`--bun-variant` pattern exactly. This was found while
+building the GPG-signature-verification fix for PB-2 itself (a separate,
+correctly-scoped change) — the verification logic was fully correct and
+tested, but had zero real CLI attack surface until this flag existed, so the
+fix would have silently shipped as library-only/dead-from-the-CLI code
+without this second look.
+
+**Preventative rule:** Row 16 of `mem:self_review_checklist` says to grep
+the implementing file for the I/O primitive a feature's description
+requires before marking something Done. This is the mirror case for
+*consuming* a roadmap claim rather than *writing* one: before implementing a
+fix for an item that references a `--flag`, grep the actual `cmd/pokkum/*.go`
+flag registrations for that exact flag name first — a struct field or port
+request parameter existing is not evidence a CLI flag reaches it. A roadmap
+entry describing "how a bug is triggered" is itself a claim to verify, same
+as a "Done" claim.
+
+## 2026-08-17 — `make verify`'s 5-step suite doesn't cover `tests/integration/`'s own golden fixtures
+
+**Category:** verification-scope / determinism
+
+**Root cause:** Earlier the same day, `internal/adapters/packager/layer.go` and
+`internal/adapters/precompressutils/precompressutils.go` were switched from
+stdlib `compress/gzip` to `github.com/klauspost/compress/gzip` (closing
+PR-1's cross-toolchain gzip framing skew). `internal/adapters/packager/golden_test.go`'s
+hardcoded digest constants were correctly re-recorded and `go test ./internal/...`
+passed clean. But `tests/integration/golden_test.go` independently pins full
+OCI manifest/config/index JSON (`testdata/golden/manifest_linux_amd64.json`,
+`config_linux_amd64.json`, `index_multi_arch.json`) against the exact same
+underlying compressed-layer-digest-sensitive build path — and `tests/integration/`
+is outside `make verify`'s 5-step scope (`./internal/...` + `./cmd/pokkum`
+only). The gzip-implementation swap was declared complete, verified, and
+committed with these two golden files silently stale; only a later, broader
+`go test ./...` sweep (run for an unrelated reason, while working on PB-2/PR-7)
+caught it.
+
+**Where:** `tests/integration/golden_test.go` (`TestGoldenOCIManifestAndConfig`,
+`TestGoldenOCIIndex`); `testdata/golden/*.json`.
+
+**Fix:** Regenerated both stale golden files with `go test ./tests/integration/...
+-run <TestName> -update`, then diffed the result to confirm only compressed-bytes
+digests moved (matching the same DiffID-unchanged invariant already verified
+in `internal/adapters/packager/golden_test.go`) before committing.
+
+**Preventative rule:** `mem:task_completion` now says explicitly: any change
+touching layer compression, tar construction, or OCI manifest/config assembly
+must also run `go test ./tests/integration/...` (or a full `go test ./...`),
+not just the standard 5-step suite — `make verify`'s `./internal/...` scope is
+a deliberate boundary (keeps the fast inner loop fast), not a claim that
+nothing outside it can break. The general form of this lesson: a passing
+`make verify` proves the tests inside its scope pass, never that no golden
+fixture *anywhere in the repo* depends on what changed — when a change is
+known to affect a widely-depended-on primitive (compression output, hashing,
+serialization format), search the whole tree for other consumers of that
+primitive's output before declaring done, not just the package that was
+directly edited.
+
+## 2026-08-17 — PR-4's own problem statement ("readiness races the `init` hook") was checked empirically against real adapter-node source and turned out to be false — but the fix was still worth building, for a different reason
+
+**Category:** verify-before-fixing (Row 15/16 family) / no bug found, root cause is a documentation-drift risk avoided
+
+**Root cause:** `Roadmap.md`'s PR-4 entry claimed "`/readyz` proves only a TCP listener... a pod passes readiness before `init` resolves and takes traffic it cannot serve." Before designing a fix around that claim, it was checked against the real, currently-vendored `@sveltejs/adapter-node@5.5.7` + `@sveltejs/kit@2.70.2` source in `testdata/fixtures/sveltekit-adapter-node/node_modules/`, not assumed. Finding: `index.js` does `import { handler } from './handler.js'` at its top; `handler.js`'s own top-level code does `await server.init({...})` (an ES module top-level `await`); ES module semantics guarantee an importer's own top-level code cannot proceed until every static import's top-level code — including its top-level awaits — has fully resolved. `server.listen()` in `index.js` runs *after* that import line. `@sveltejs/kit`'s `Server.init()` (`src/runtime/server/index.js:108-143`) is exactly where `hooks.server.js`'s exported `init()` hook gets awaited. Chained together: the TCP port literally cannot open before the user's `init()` hook (DB pool setup, cache warming) has resolved — there is no race window for the specific failure PR-4 described. A raw TCP-connect readiness check, which is what `supervisor/cmd/pokkum-init/probe.go`'s `/readyz` already does, was therefore already correct for that specific concern.
+
+Separately, and found while looking at the wider claim: `readinessProbe`/`livenessProbe`/`startupProbe` injection was entirely absent from `internal/adapters/k8s/resolver.go` — not just `startupProbe`, which is all the roadmap item named. The `req.ResourceDefaults`/`req.SecurityDefaults` per-container injection pattern existed for CPU/memory and security context, but nothing generated any probe at all; a user gets probes only if they hand-write `readinessProbe`/`livenessProbe` pointing at the right port in their own Deployment YAML.
+
+**Where:** `testdata/fixtures/sveltekit-adapter-node/node_modules/@sveltejs/adapter-node/files/{index.js,handler.js}`, `.../@sveltejs/kit/src/runtime/server/index.js:56-143` (the empirical check); `internal/adapters/k8s/resolver.go` (the actual, different gap).
+
+**Fix:** did not build a readiness-vs-init race fix, because there is no race to fix. Built `injectContainerProbeDefaults` instead, for the *correct*, still-real reason a `startupProbe` matters here: with only a normal-cadence `livenessProbe`, a legitimately slow `init()` (a slow DB connection, a large cache warm) can get the container killed by kubelet for "failing" liveness before it ever finishes starting and opens its port — `startupProbe`'s `failureThreshold * periodSeconds` grace period (60s by default here) exists specifically to protect a slow-but-healthy startup from that premature kill, and `readinessProbe`/`livenessProbe` don't count against the container until `startupProbe` has succeeded once. Also injected `readinessProbe`/`livenessProbe` themselves, since neither existed either, gated per-probe-type so a container with its own custom `livenessProbe` still gets the other two filled in. `Roadmap.md`'s PR-4 entry is corrected to state the actual verified mechanism, not the originally-assumed one.
+
+**Preventative rule:** matches Row 16's mirror-case extension from the same day's earlier `--bun-version` entry, applied to a technical (not just CLI-surface) claim: a roadmap item's problem statement about a third-party dependency's runtime behavior is an empirical claim, not a given. When real vendored source for that dependency is available in the repo (`testdata/fixtures/...node_modules/...`), read it before designing a fix around the claim — a wrong root cause can still lead to *a* correct-feeling fix (a `startupProbe` genuinely helps here) while completely misdiagnosing *why*, which would have left the doc/comments asserting something false indefinitely. Also folds in Row 15's existing guidance: this is the same "verify the mechanism, don't ship a fix around a plausible-but-unverified hypothesis" discipline, just applied to a framework's documented lifecycle behavior instead of a build-determinism bug.
+
+## 2026-08-17 — Six new `ports.ImageConfig` fields (PB-4) were added to the struct and to base-config parsing but not to `ApplyProfile`'s per-field profile merge
+
+**Category:** multi-item / config-parity (Row 10 family — caught by running the self-review checklist, not by a failing test)
+
+**Root cause:** PB-4 added `Origin`/`ProtocolHeader`/`HostHeader`/`AddressHeader`/`XFFDepth`/`BodySizeLimit` to `ports.ImageConfig` and wired them into base `.pokkum.yaml` parsing (`cmd/pokkum/build.go`'s `projCfg.Image.Origin` read). `internal/adapters/config/config.go`'s `ApplyProfile`, which merges a named profile's `Image` overrides onto the base config, is not generic reflection over the struct — it's an explicit, hand-written list of `if profile.Image.X != zero { merged.Image.X = profile.Image.X }` lines, one per existing field (`Port`, `ProbePort`, `User`, `WorkingDir`, `ShutdownTimeout`, ...). A new `ImageConfig` field is invisible to this merge unless a matching line is added for it — nothing about adding the field to the struct forces that. Undetected because there is no existing test that adds a new `ImageConfig` field and checks it flows through `ApplyProfile`; the omission would have shipped as `profiles.<name>.image.origin: ...` parsing successfully, validating successfully, and then being silently discarded the moment `--profile <name>` was used — the base config's `Origin` (or empty, if unset) would apply instead, with no error or warning anywhere.
+
+**Where:** `internal/adapters/config/config.go`'s `ApplyProfile`, Image-override block (~line 180-219).
+
+**Fix:** added the six missing `if profile.Image.X != zero { merged.Image.X = profile.Image.X }` lines, matching the existing fields' exact style. Confirmed `deepCopyProjectConfig` needed no corresponding change — it starts from a full struct value copy (`dst := *src`) and only needs explicit re-cloning for reference-typed fields (maps/slices/pointers) to avoid aliasing; the six new fields are all plain `string`/`int`, already copied correctly by value. Added `TestApplyProfile_OriginContractFields`, which sets each of the six fields only in a profile (not the base) and asserts they appear in the merged result, plus a same-test check that an empty profile leaves the base value untouched.
+
+**Preventative rule:** this is exactly `mem:self_review_checklist` row 10, re-confirmed rather than revised — the row already existed from a near-identical incident (validation, not merge, that time) and caught this one on the first checklist pass over the PB-4 diff, before any test run surfaced it. Restating the general form since it keeps recurring in this exact area: whenever a field is added to `ports.ImageConfig` (or any struct with a hand-written per-field override/merge/validate function elsewhere, as opposed to generic reflection), grep for every existing hand-written function operating on that struct — `ApplyProfile`, `validateConfigFields`, `deepCopyProjectConfig` — and add the new field to each one that has a reason to touch it, don't assume adding the field to the struct alone is sufficient.
 

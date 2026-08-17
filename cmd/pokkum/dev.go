@@ -24,6 +24,7 @@ type devFlags struct {
 	platform   string
 	bunBinary  string
 	bunVariant string
+	bunVersion string
 }
 
 func newDevCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -57,6 +58,8 @@ When --debug is enabled, the command drops into an interactive shell inside the 
 		"Local path to a bun executable escape hatch")
 	cmd.Flags().StringVar(&flags.bunVariant, "bun-variant", "standard",
 		"Bun CPU variant (standard or baseline)")
+	cmd.Flags().StringVar(&flags.bunVersion, "bun-version", "",
+		"Bun release version to embed (default: the pinned "+core.DefaultBunVersion+")")
 
 	return cmd
 }
@@ -118,6 +121,7 @@ func buildAndLoadDevContainer(ctx context.Context, logger *slog.Logger, flags *d
 		},
 		Sign: false,
 		BunRuntime: core.BunRuntimeOptions{
+			Version:          flags.bunVersion,
 			CustomBinaryPath: flags.bunBinary,
 			Variant:          core.BunVariant(flags.bunVariant),
 		},

@@ -24,6 +24,83 @@ func TestBuildCommandRequireEnvFlag(t *testing.T) {
 	}
 }
 
+// TestBuildCommandBunVersionFlag guards PB-2's CLI-reachability half: the
+// bunruntime.Resolver's GPG-verified-checksum path for unpinned versions was
+// previously unreachable from the CLI at all — no --bun-version flag
+// existed, so req.BunRuntime.Version could only ever come from a Go-API
+// caller, never a real `pokkum build` invocation.
+func TestBuildCommandBunVersionFlag(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cmd := newBuildCommand(context.Background(), logger)
+
+	flag := cmd.Flags().Lookup("bun-version")
+	if flag == nil {
+		t.Fatal("expected --bun-version flag to be registered")
+	}
+	if flag.DefValue != "" {
+		t.Errorf("--bun-version default = %q, want empty (empty means core.DefaultBunVersion)", flag.DefValue)
+	}
+
+	if err := cmd.Flags().Parse([]string{"--bun-version=1.2.5"}); err != nil {
+		t.Fatalf("parse --bun-version: %v", err)
+	}
+	got, err := cmd.Flags().GetString("bun-version")
+	if err != nil {
+		t.Fatalf("GetString(bun-version): %v", err)
+	}
+	if got != "1.2.5" {
+		t.Errorf("--bun-version parsed value = %q, want %q", got, "1.2.5")
+	}
+}
+
+// TestBuildCommandOriginContractFlags guards PB-4's CLI-reachability half:
+// adapter-node's ORIGIN/PROTOCOL_HEADER/HOST_HEADER/ADDRESS_HEADER/XFF_DEPTH/
+// BODY_SIZE_LIMIT contract previously had no CLI flag at all — the only way
+// to set any of it was hand-editing the image config after the fact.
+func TestBuildCommandOriginContractFlags(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cmd := newBuildCommand(context.Background(), logger)
+
+	for _, name := range []string{"origin", "protocol-header", "host-header", "address-header", "xff-depth", "body-size-limit"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("expected --%s flag to be registered", name)
+		}
+	}
+
+	if err := cmd.Flags().Parse([]string{
+		"--origin=https://example.com",
+		"--protocol-header=x-forwarded-proto",
+		"--host-header=x-forwarded-host",
+		"--address-header=x-forwarded-for",
+		"--xff-depth=2",
+		"--body-size-limit=10M",
+	}); err != nil {
+		t.Fatalf("parse origin-contract flags: %v", err)
+	}
+
+	for name, want := range map[string]string{
+		"origin":          "https://example.com",
+		"protocol-header": "x-forwarded-proto",
+		"host-header":     "x-forwarded-host",
+		"address-header":  "x-forwarded-for",
+		"xff-depth":       "2",
+		"body-size-limit": "10M",
+	} {
+		got, err := cmd.Flags().GetString(name)
+		if name == "xff-depth" {
+			var i int
+			i, err = cmd.Flags().GetInt(name)
+			got = fmt.Sprint(i)
+		}
+		if err != nil {
+			t.Fatalf("get --%s: %v", name, err)
+		}
+		if got != want {
+			t.Errorf("--%s parsed value = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestBuildCommandStaticStrategyLayeredConflictRejected(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cmd := newBuildCommand(context.Background(), logger)

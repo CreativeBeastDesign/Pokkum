@@ -37,6 +37,7 @@ type resolveManifestsOptions struct {
 	SecurityContext    bool
 	NetworkPolicy      bool
 	ResourceDefaults   bool
+	ProbeDefaults      bool
 	RegistryConfigPath string
 	Since              string
 	AffectedDetector   ports.AffectedDetector
@@ -87,6 +88,7 @@ func resolveManifests(ctx context.Context, logger *slog.Logger, opts resolveMani
 		SecurityDefaults:   opts.SecurityContext,
 		NetworkPolicy:      opts.NetworkPolicy,
 		ResourceDefaults:   opts.ResourceDefaults,
+		ProbeDefaults:      opts.ProbeDefaults,
 		RegistryConfigPath: opts.RegistryConfigPath,
 		ClusterInspector:   opts.ClusterInspector,
 	})

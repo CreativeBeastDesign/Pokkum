@@ -723,6 +723,10 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 				injectContainerResourceDefaults(t.containerNode)
 			}
 
+			if req.ProbeDefaults {
+				injectContainerProbeDefaults(t.containerNode)
+			}
+
 			if req.WithOTELSidecar && t.podSpecNode != nil {
 				injectOTELCollectorSidecar(t.podSpecNode)
 			}
@@ -809,6 +813,78 @@ limits:
 	if err := yaml.Unmarshal([]byte(strings.TrimSpace(resYAML)), &node); err == nil && len(node.Content) > 0 {
 		mapAppend(container, "resources", node.Content[0])
 	}
+}
+
+// defaultProbePort matches bunruntime's own default (ports.DefaultProbePort,
+// "POKKUM_PROBE_PORT") and extractWorkloadContainerPorts' own fallback
+// below — the resolver operates on a manifest that's a separate artifact
+// from the `pokkum build` invocation that produced the image, so it has no
+// direct way to know a non-default --probe-port was used; a container that
+// already declares its own probes (any of the three) is left untouched, so
+// this only matters for the common case of the unchanged default.
+const defaultProbePort = 8081
+
+// injectContainerProbeDefaults fills in readinessProbe, livenessProbe and
+// startupProbe against the supervisor's probe endpoints
+// (ports.ProbePathReady "/readyz", ports.ProbePathLive "/healthz") when a
+// container doesn't already define its own — checked independently per
+// probe type, so a container with a custom livenessProbe still gets
+// readinessProbe/startupProbe filled in.
+//
+// startupProbe deserves explaining, since a shorter TCP-connect readiness
+// check would seem to cover "has the app started": adapter-node's bundled
+// server (handler.js) resolves its own module-level `await server.init(...)`
+// — which is what actually runs hooks.server.js's `init` hook (DB pool
+// setup, cache warming) — before index.js ever calls `server.listen()`, so
+// the TCP port genuinely cannot open before `init()` resolves (verified
+// empirically against real @sveltejs/adapter-node@5.5.7 + kit@2.70.2
+// source, not assumed). That means readinessProbe alone isn't racing a
+// still-initializing app. But a startupProbe is still valuable for a
+// different, real reason: with only a normal-cadence livenessProbe, a
+// legitimately slow `init()` (a slow DB connection, a large cache warm)
+// can get the container killed by kubelet for "failing" liveness before it
+// ever finishes starting and opens its port at all — startupProbe's
+// generous failureThreshold*periodSeconds grace period exists specifically
+// to protect a slow-but-healthy startup from that premature kill, and
+// liveness/readiness probing don't begin counting against the container
+// until startupProbe has succeeded once.
+func injectContainerProbeDefaults(container *yaml.Node) {
+	if container == nil || container.Kind != yaml.MappingNode {
+		return
+	}
+	if _, ok := mapGet(container, "readinessProbe"); !ok {
+		mapAppend(container, "readinessProbe", probeNode(ports.ProbePathReady, 10, 3, 5))
+	}
+	if _, ok := mapGet(container, "livenessProbe"); !ok {
+		mapAppend(container, "livenessProbe", probeNode(ports.ProbePathLive, 10, 3, 10))
+	}
+	if _, ok := mapGet(container, "startupProbe"); !ok {
+		// 30 * 2s = 60s of grace before a still-starting container is
+		// considered to have failed to start at all.
+		mapAppend(container, "startupProbe", probeNode(ports.ProbePathReady, 2, 30, 0))
+	}
+}
+
+// probeNode builds an httpGet Probe YAML node against defaultProbePort.
+// initialDelaySeconds is omitted (left at the Kubernetes default of 0) when
+// zero, since startupProbe's own failureThreshold*periodSeconds grace
+// period is the mechanism that matters there, not an upfront delay.
+func probeNode(path string, periodSeconds, failureThreshold, initialDelaySeconds int) *yaml.Node {
+	probeYAML := fmt.Sprintf(`
+httpGet:
+  path: %s
+  port: %d
+periodSeconds: %d
+failureThreshold: %d
+`, path, defaultProbePort, periodSeconds, failureThreshold)
+	if initialDelaySeconds > 0 {
+		probeYAML += fmt.Sprintf("initialDelaySeconds: %d\n", initialDelaySeconds)
+	}
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(strings.TrimSpace(probeYAML)), &node); err != nil || len(node.Content) == 0 {
+		return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	}
+	return node.Content[0]
 }
 
 func extractWorkloadContainerPorts(containerNodes []*yaml.Node) []int {

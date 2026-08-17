@@ -21,6 +21,8 @@ type resolveFlags struct {
 	noNetworkPolicy    bool
 	resourceDefaults   bool
 	noResourceDefaults bool
+	probeDefaults      bool
+	noProbeDefaults    bool
 	registryConfig     string
 	since              string
 }
@@ -63,6 +65,10 @@ All logging goes to stderr.`,
 		"Inject default CPU/memory requests and limits and append a PodDisruptionBudget")
 	cmd.Flags().BoolVar(&flags.noResourceDefaults, "no-resource-defaults", false,
 		"Disable resource default injection and PodDisruptionBudget generation")
+	cmd.Flags().BoolVar(&flags.probeDefaults, "probe-defaults", true,
+		"Inject readinessProbe/livenessProbe/startupProbe defaults against the supervisor's /readyz and /healthz for pokkum-built containers that don't already define their own")
+	cmd.Flags().BoolVar(&flags.noProbeDefaults, "no-probe-defaults", false,
+		"Disable probe default injection")
 	cmd.Flags().StringVar(&flags.registryConfig, "registry-config", "",
 		"Path to custom OCI registry auth config file (config.json)")
 	cmd.Flags().StringVar(&flags.since, "since", "",
@@ -81,6 +87,7 @@ func runResolve(ctx context.Context, logger *slog.Logger, flags *resolveFlags) e
 	secCtx := securityContextEnabled(flags.securityContext, flags.noSecurityContext)
 	netPol := flags.networkPolicy && !flags.noNetworkPolicy
 	resDefs := flags.resourceDefaults && !flags.noResourceDefaults
+	probeDefs := flags.probeDefaults && !flags.noProbeDefaults
 
 	logger.Debug("resolve command started",
 		"file", flags.file,
@@ -88,6 +95,7 @@ func runResolve(ctx context.Context, logger *slog.Logger, flags *resolveFlags) e
 		"securityContext", secCtx,
 		"networkPolicy", netPol,
 		"resourceDefaults", resDefs,
+		"probeDefaults", probeDefs,
 		"since", flags.since)
 
 	out, err := resolveManifests(ctx, logger, resolveManifestsOptions{
@@ -96,6 +104,7 @@ func runResolve(ctx context.Context, logger *slog.Logger, flags *resolveFlags) e
 		SecurityContext:    secCtx,
 		NetworkPolicy:      netPol,
 		ResourceDefaults:   resDefs,
+		ProbeDefaults:      probeDefs,
 		RegistryConfigPath: flags.registryConfig,
 		Since:              flags.since,
 	})

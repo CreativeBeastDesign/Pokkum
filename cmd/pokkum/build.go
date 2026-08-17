@@ -67,6 +67,7 @@ type buildFlags struct {
 	// Bun runtime & strategy flags
 	bunBinary  string
 	bunVariant string
+	bunVersion string
 	strategy   string
 	// strategyExplicit records whether --strategy was actually passed on the
 	// command line, as opposed to sitting at its "layered" default — needed
@@ -97,14 +98,24 @@ type buildFlags struct {
 	registryConfig      string
 	pushConcurrency     int
 	requireEnv          []string
-	failOnCVE           string
-	allowIncomplete     bool
-	noPrune             bool
-	keepVendor          []string
-	noPrecompress       bool
-	noStrip             bool
-	noCache             bool
-	stubLauncher        bool
+
+	// adapter-node reverse-proxy contract flags (see ports.EnvOrigin's doc
+	// comment for the full rationale)
+	origin         string
+	protocolHeader string
+	hostHeader     string
+	addressHeader  string
+	xffDepth       int
+	bodySizeLimit  string
+
+	failOnCVE       string
+	allowIncomplete bool
+	noPrune         bool
+	keepVendor      []string
+	noPrecompress   bool
+	noStrip         bool
+	noCache         bool
+	stubLauncher    bool
 
 	// Cache verification flags
 	noCacheVerify        bool
@@ -203,6 +214,8 @@ The project directory defaults to the current working directory.`,
 		"Local path to a bun executable escape hatch (skips download/resolution)")
 	cmd.Flags().StringVar(&flags.bunVariant, "bun-variant", "standard",
 		"Bun CPU variant (standard [AVX2 required on x86-64] or baseline)")
+	cmd.Flags().StringVar(&flags.bunVersion, "bun-version", "",
+		"Bun release version to embed (default: the pinned "+core.DefaultBunVersion+"). Any version is checksum-verified against Bun's GPG-signed release manifest before use")
 	cmd.Flags().BoolVar(&flags.stubLauncher, "stub-launcher", false,
 		"Compile a minimal entrypoint launcher stub instead of embedding stock Bun runtime (layered strategy hardening)")
 	cmd.Flags().StringVar(&flags.strategy, "strategy", "layered",
@@ -235,6 +248,18 @@ The project directory defaults to the current working directory.`,
 		"Number of concurrent layer uploads during registry push (0 = registry adapter's default)")
 	cmd.Flags().StringSliceVar(&flags.requireEnv, "require-env", nil,
 		"Declare required runtime environment variables (comma-separated or repeatable)")
+	cmd.Flags().StringVar(&flags.origin, "origin", "",
+		"Canonical origin (e.g. https://example.com) written to ORIGIN, adapter-node's reverse-proxy contract. Strongly recommended for any deployment behind an ingress/reverse proxy — without it, form-action POSTs fail with \"403 Cross-site POST form submissions are forbidden\"")
+	cmd.Flags().StringVar(&flags.protocolHeader, "protocol-header", "",
+		"Proxy header adapter-node trusts for the original request protocol (e.g. x-forwarded-proto), written to PROTOCOL_HEADER")
+	cmd.Flags().StringVar(&flags.hostHeader, "host-header", "",
+		"Proxy header adapter-node trusts for the original request host (e.g. x-forwarded-host), written to HOST_HEADER")
+	cmd.Flags().StringVar(&flags.addressHeader, "address-header", "",
+		"Proxy header adapter-node trusts for the real client IP (e.g. x-forwarded-for), written to ADDRESS_HEADER")
+	cmd.Flags().IntVar(&flags.xffDepth, "xff-depth", 0,
+		"Number of trusted proxy hops when parsing --address-header (0 = adapter-node's own default of 1), written to XFF_DEPTH")
+	cmd.Flags().StringVar(&flags.bodySizeLimit, "body-size-limit", "",
+		"Request body size cap in adapter-node's size-string format (e.g. 512K, 10M, Infinity; empty = adapter-node's own default of 512K), written to BODY_SIZE_LIMIT")
 	cmd.Flags().StringVar(&flags.failOnCVE, "fail-on-cve", "",
 		"Fail build if base image vulnerabilities exceed threshold (low, medium, high, critical; default warn-only)")
 	cmd.Flags().BoolVar(&flags.allowIncomplete, "allow-incomplete", false,
@@ -619,6 +644,7 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	}
 
 	req.BunRuntime = core.BunRuntimeOptions{
+		Version:          flags.bunVersion,
 		CustomBinaryPath: flags.bunBinary,
 		Variant:          core.BunVariant(flags.bunVariant),
 		StubLauncher:     stubLauncherSetting,
@@ -681,6 +707,45 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 			}
 			req.Runtime.ShutdownTimeout = d
 		}
+		if projCfg.Image.Origin != "" {
+			req.Runtime.Origin = projCfg.Image.Origin
+		}
+		if projCfg.Image.ProtocolHeader != "" {
+			req.Runtime.ProtocolHeader = projCfg.Image.ProtocolHeader
+		}
+		if projCfg.Image.HostHeader != "" {
+			req.Runtime.HostHeader = projCfg.Image.HostHeader
+		}
+		if projCfg.Image.AddressHeader != "" {
+			req.Runtime.AddressHeader = projCfg.Image.AddressHeader
+		}
+		if projCfg.Image.XFFDepth != 0 {
+			req.Runtime.XFFDepth = projCfg.Image.XFFDepth
+		}
+		if projCfg.Image.BodySizeLimit != "" {
+			req.Runtime.BodySizeLimit = projCfg.Image.BodySizeLimit
+		}
+	}
+
+	// CLI flags win over .pokkum.yaml, matching --image-label below and the
+	// general flag-beats-config precedence used throughout this command.
+	if flags.origin != "" {
+		req.Runtime.Origin = flags.origin
+	}
+	if flags.protocolHeader != "" {
+		req.Runtime.ProtocolHeader = flags.protocolHeader
+	}
+	if flags.hostHeader != "" {
+		req.Runtime.HostHeader = flags.hostHeader
+	}
+	if flags.addressHeader != "" {
+		req.Runtime.AddressHeader = flags.addressHeader
+	}
+	if flags.xffDepth != 0 {
+		req.Runtime.XFFDepth = flags.xffDepth
+	}
+	if flags.bodySizeLimit != "" {
+		req.Runtime.BodySizeLimit = flags.bodySizeLimit
 	}
 
 	if len(flags.imageLabels) > 0 {
