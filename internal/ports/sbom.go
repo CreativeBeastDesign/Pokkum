@@ -32,21 +32,30 @@ const DefaultSBOMFormat = SBOMFormatSPDXJSON
 type SBOMAttachMode string
 
 const (
-	// SBOMAttachReferrer attaches the SBOM as an OCI 1.1 referrer artifact (default).
+	// SBOMAttachReferrer attaches the SBOM as an OCI 1.1 referrer artifact,
+	// explicitly — no fallback if the registry doesn't support it, the push
+	// fails outright, since the caller asked for this mode by name.
 	SBOMAttachReferrer SBOMAttachMode = "referrer"
 
 	// SBOMAttachTag attaches the SBOM using the legacy .sbom tag convention.
 	SBOMAttachTag SBOMAttachMode = "tag"
+
+	// SBOMAttachAuto attempts the OCI 1.1 Referrers API first and falls back
+	// to the legacy .sbom tag convention if the registry doesn't support it
+	// (ECR, older Harbor, and older Artifactory still lack it) — the
+	// default, so a caller doesn't need to know their registry's capability
+	// in advance to get a real SBOM attachment.
+	SBOMAttachAuto SBOMAttachMode = "auto"
 )
 
 // DefaultSBOMAttachMode is used when a BuildRequest leaves the SBOM attach mode at its
 // zero value.
-const DefaultSBOMAttachMode = SBOMAttachReferrer
+const DefaultSBOMAttachMode = SBOMAttachAuto
 
 // Valid reports whether m is a known attach mode.
 func (m SBOMAttachMode) Valid() bool {
 	switch m {
-	case SBOMAttachReferrer, SBOMAttachTag:
+	case SBOMAttachReferrer, SBOMAttachTag, SBOMAttachAuto:
 		return true
 	default:
 		return false

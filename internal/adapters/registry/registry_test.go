@@ -106,9 +106,25 @@ func countMethod(reqs []recordedRequest, method, substr string) int {
 
 // newTestRegistry starts an in-memory OCI registry (pkg/registry) behind
 // httptest, so every test in this file runs with no real network access.
+// OCI 1.1 referrers support is OFF by default here — matching the majority
+// of tests, which don't care about it — so a registry that genuinely lacks
+// referrers support (ECR, older Harbor/Artifactory) is the realistic default
+// to test against; see newTestRegistryWithReferrers for the opposite case.
 func newTestRegistry(t *testing.T) (*httptest.Server, *countingRegistry) {
 	t.Helper()
 	cr := &countingRegistry{inner: registry.New()}
+	s := httptest.NewServer(cr)
+	t.Cleanup(s.Close)
+	return s, cr
+}
+
+// newTestRegistryWithReferrers is newTestRegistry with the OCI 1.1 Referrers
+// API endpoint enabled (registry.WithReferrersSupport), for tests that need
+// to exercise the real referrer-mode success path rather than the
+// unsupported-registry fallback path.
+func newTestRegistryWithReferrers(t *testing.T) (*httptest.Server, *countingRegistry) {
+	t.Helper()
+	cr := &countingRegistry{inner: registry.New(registry.WithReferrersSupport(true))}
 	s := httptest.NewServer(cr)
 	t.Cleanup(s.Close)
 	return s, cr
