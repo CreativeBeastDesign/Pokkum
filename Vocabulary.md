@@ -107,6 +107,8 @@ Positional: `[dir]` — project directory, defaults to `.`.
 
 Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode), `SOURCE_DATE_EPOCH` (reproducible build timestamp), `POKKUM_CACHE_DIR` (custom base cache directory for layers and runtime binaries; defaults to `~/.cache/pokkum`), `POKKUM_SOURCEMAP` (enable source map preservation), `POKKUM_STUB_LAUNCHER` (compile minimal entrypoint launcher stub), `POKKUM_CACHE_PUBKEY` (static public key for remote cache verification), `POKKUM_CACHE_VERIFY_MODE`, `POKKUM_CACHE_KEYLESS_IDENTITY`, and `POKKUM_CACHE_KEYLESS_ISSUER`.
 
+**Automatic `$env/static/*` detection (no flag):** every build scans the project's `src/` tree for `$env/static/public`/`$env/static/private` imports — SvelteKit inlines these as literal values at build time, so an image importing from them is pinned to whatever environment built it. A `Warn` names the exact bindings found, and they're stamped as a `pokkum.dev/env-baked` manifest annotation (comma-separated binding names, mirroring the existing `pokkum.dev/required-env` convention). This is a source scan, not a data-flow analysis — it does not follow a re-export or a dynamically-computed import specifier. `$env/dynamic/*` is correctly excluded (read at container startup, never baked).
+
 ---
 
 ## 4. `pokkum resolve` / `pokkum apply`

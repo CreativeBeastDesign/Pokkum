@@ -17,6 +17,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/dsse"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/envbake"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
@@ -401,6 +402,7 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		DSSESigner:      dsse.NewSigner(logger),
 		Scanner:         scanner.NewAdapter(logger),
 		SecretGuard:     secretguard.NewAdapter(),
+		EnvBakeDetector: envbake.NewAdapter(),
 		RemoteCache: remotecacheutils.New(
 			remotecacheutils.WithLogger(logger),
 			remotecacheutils.WithCosignSigner(cosign.NewSigner(logger)),

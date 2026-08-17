@@ -216,6 +216,12 @@ func mergeLabels(base, caller map[string]string, baseDigest v1.Hash, ts time.Tim
 		reqEnvs = slices.Compact(reqEnvs)
 		out[ports.LabelRequiredEnv] = strings.Join(reqEnvs, ",")
 	}
+	if len(rc.EnvBaked) > 0 {
+		baked := slices.Clone(rc.EnvBaked)
+		slices.Sort(baked)
+		baked = slices.Compact(baked)
+		out[ports.LabelEnvBaked] = strings.Join(baked, ",")
+	}
 
 	maps.Copy(out, caller)
 	return out
@@ -241,6 +247,9 @@ func imageAnnotations(labels map[string]string, baseRef string, caller map[strin
 	}
 	if v, ok := labels[ports.LabelRequiredEnv]; ok && v != "" {
 		out[ports.AnnotationRequiredEnv] = v
+	}
+	if v, ok := labels[ports.LabelEnvBaked]; ok && v != "" {
+		out[ports.AnnotationEnvBaked] = v
 	}
 	if _, ok := out[ports.LabelBaseName]; !ok && baseRef != "" {
 		out[ports.LabelBaseName] = baseRef

@@ -361,3 +361,40 @@ func TestMergeLabelsAndAnnotationsWithRequireEnv(t *testing.T) {
 		t.Errorf("got AnnotationRequiredEnv = %q, want DATABASE_URL,JWT_SECRET", annotations[ports.AnnotationRequiredEnv])
 	}
 }
+
+// TestMergeLabelsAndAnnotationsWithEnvBaked is PB-3's regression guard: an
+// image built from a project that imports $env/static/* must carry a
+// durable record of which bindings got baked in, mirrored from label to
+// manifest annotation exactly like AnnotationRequiredEnv.
+func TestMergeLabelsAndAnnotationsWithEnvBaked(t *testing.T) {
+	rc := ports.RuntimeConfig{
+		EnvBaked: []string{"PUBLIC_API_URL", "DB_PASSWORD"},
+	}
+	hash := v1.Hash{Algorithm: "sha256", Hex: "1234567890abcdef"}
+	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc)
+	if labels[ports.LabelEnvBaked] != "DB_PASSWORD,PUBLIC_API_URL" {
+		t.Errorf("got LabelEnvBaked = %q, want DB_PASSWORD,PUBLIC_API_URL (sorted)", labels[ports.LabelEnvBaked])
+	}
+
+	annotations := imageAnnotations(labels, "", nil)
+	if annotations[ports.AnnotationEnvBaked] != "DB_PASSWORD,PUBLIC_API_URL" {
+		t.Errorf("got AnnotationEnvBaked = %q, want DB_PASSWORD,PUBLIC_API_URL", annotations[ports.AnnotationEnvBaked])
+	}
+}
+
+// TestMergeLabelsOmitsEnvBakedWhenUnset confirms an ordinary build with no
+// $env/static/* imports never gets a fabricated/empty annotation — absence
+// of the key, not an empty-string value, is how "not detected" is spelled.
+func TestMergeLabelsOmitsEnvBakedWhenUnset(t *testing.T) {
+	rc := ports.RuntimeConfig{}
+	hash := v1.Hash{Algorithm: "sha256", Hex: "1234567890abcdef"}
+	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc)
+	if _, ok := labels[ports.LabelEnvBaked]; ok {
+		t.Errorf("expected no LabelEnvBaked when EnvBaked is unset, got %q", labels[ports.LabelEnvBaked])
+	}
+
+	annotations := imageAnnotations(labels, "", nil)
+	if _, ok := annotations[ports.AnnotationEnvBaked]; ok {
+		t.Errorf("expected no AnnotationEnvBaked when EnvBaked is unset, got %q", annotations[ports.AnnotationEnvBaked])
+	}
+}

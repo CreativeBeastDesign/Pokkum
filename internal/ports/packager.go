@@ -209,9 +209,21 @@ const (
 	LabelSupervisor    = "dev.pokkum.supervisor.version"
 	LabelBunVersion    = "dev.pokkum.bun.version"
 	LabelRequiredEnv   = "dev.pokkum.required-env"
+	LabelEnvBaked      = "dev.pokkum.env-baked"
 
 	// AnnotationRequiredEnv is the manifest annotation key for required env contract.
 	AnnotationRequiredEnv = "pokkum.dev/required-env"
+
+	// AnnotationEnvBaked is the manifest annotation key naming which
+	// $env/static/* values (SvelteKit inlines these into the build output
+	// at compile time — see BuildRequest's env-baking detection) this
+	// specific image was built with. A non-empty value is a durable record
+	// that this image is pinned to one environment's values: promoting it
+	// to another environment carries the OLD values along, silently, since
+	// nothing about the running container re-reads the environment for
+	// these — unlike $env/dynamic/*, which is deliberately excluded from
+	// detection because it IS read at runtime.
+	AnnotationEnvBaked = "pokkum.dev/env-baked"
 )
 
 // DefaultLayeredEntrypoint returns the image entrypoint for StrategyLayered:
@@ -277,6 +289,14 @@ type RuntimeConfig struct {
 	// RequireEnv lists environment variables that must be non-empty at runtime.
 	// pokkum-init verifies presence at startup and fails fast if any are missing.
 	RequireEnv []string
+
+	// EnvBaked lists the $env/static/* binding names (e.g. "PUBLIC_API_URL")
+	// detected in the project's source tree, auto-populated by
+	// sveltekitutils.DetectStaticEnvBindings ahead of packaging — never set
+	// directly by a flag. Nil/empty means none were detected. Purely
+	// informational: it drives AnnotationEnvBaked, not any runtime env var —
+	// unlike RequireEnv, nothing reads this at container startup.
+	EnvBaked []string
 
 	// ExposedPorts lists additional TCP ports to declare in the image config.
 	// Port and ProbePort are always exposed and need not be repeated. Nil means

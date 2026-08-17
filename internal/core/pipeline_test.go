@@ -1693,6 +1693,95 @@ func TestBuild_OriginWarning(t *testing.T) {
 	})
 }
 
+// mockEnvBakeDetector is a test double for ports.EnvBakeDetector — real
+// detection is exercised by sveltekitutils.DetectStaticEnvBindings's own
+// tests; here only the pipeline wiring (warn + RuntimeConfig.EnvBaked
+// population) is under test.
+type mockEnvBakeDetector struct {
+	bindings []string
+	err      error
+}
+
+func (m *mockEnvBakeDetector) DetectStaticEnv(_ context.Context, _ ports.EnvBakeRequest) (ports.EnvBakeResult, error) {
+	if m.err != nil {
+		return ports.EnvBakeResult{}, m.err
+	}
+	return ports.EnvBakeResult{Bindings: m.bindings}, nil
+}
+
+// TestBuild_EnvBakeWarning is PB-3's regression guard: a project importing
+// $env/static/* must warn and stamp the detected bindings into
+// req.Runtime.EnvBaked (which flows into the image's annotation — see
+// packager's config_unit_test.go for that half), while an ordinary project
+// with no such import gets neither.
+func TestBuild_EnvBakeWarning(t *testing.T) {
+	const warningSubstring = "imports from $env/static/*"
+
+	newReq := func() core.BuildRequest {
+		return core.BuildRequest{
+			ProjectDir: "/abs/project",
+			Repo:       "ghcr.io/example/app",
+			Platforms:  []core.Platform{core.LinuxAMD64},
+			Tags:       []string{"v1.0.0"},
+		}
+	}
+
+	t.Run("warns and records bindings when detected", func(t *testing.T) {
+		var buf bytes.Buffer
+		deps := newFullDeps(io.Discard)
+		deps.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+		deps.EnvBakeDetector = &mockEnvBakeDetector{bindings: []string{"PUBLIC_API_URL"}}
+
+		req := newReq()
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+		if got := buf.String(); !strings.Contains(got, warningSubstring) {
+			t.Errorf("expected env-baked warning, got:\n%s", got)
+		}
+	})
+
+	t.Run("does not warn when nothing detected", func(t *testing.T) {
+		var buf bytes.Buffer
+		deps := newFullDeps(io.Discard)
+		deps.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+		deps.EnvBakeDetector = &mockEnvBakeDetector{bindings: nil}
+
+		req := newReq()
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+		if got := buf.String(); strings.Contains(got, warningSubstring) {
+			t.Errorf("unexpected env-baked warning with nothing detected, got:\n%s", got)
+		}
+	})
+
+	t.Run("does not warn or fail when no detector is wired", func(t *testing.T) {
+		var buf bytes.Buffer
+		deps := newFullDeps(io.Discard)
+		deps.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+		deps.EnvBakeDetector = nil
+
+		req := newReq()
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+		if got := buf.String(); strings.Contains(got, warningSubstring) {
+			t.Errorf("unexpected env-baked warning with no detector wired, got:\n%s", got)
+		}
+	})
+
+	t.Run("a detection error is tolerated, not fatal", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		deps.EnvBakeDetector = &mockEnvBakeDetector{err: fmt.Errorf("boom")}
+
+		req := newReq()
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("expected a detector error to be swallowed (best-effort scan), got: %v", err)
+		}
+	})
+}
+
 // TestBuild_CacheHit_DisclosesBaseImageVerificationSkip proves the auditable
 // disclosure of the accepted security tradeoff: on a confirmed remote-cache
 // hit, base-image signature verification is deliberately skipped, and the

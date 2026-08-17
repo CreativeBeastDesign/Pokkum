@@ -103,6 +103,7 @@ Pokkum is structured using **Hexagonal Architecture (Ports and Adapters)** to de
    - `sveltekit`: Checks `@jesterkit/exe-sveltekit` adapter installation in target projects.
    - `cosign`: Signs OCI images, attaches Cosign signatures to OCI registries, and implements `ports.ReleaseVerifier` for release signature and SHA-256 checksum verification.
    - `secretguard`: Build-time entropy and pattern scanner for detecting hardcoded secrets in source files before image packaging (`ports.SecretGuard`).
+   - `envbake`: Implements `ports.EnvBakeDetector`, wrapping `sveltekitutils.DetectStaticEnvBindings`'s source scan behind the port boundary so `internal/core` can trigger `$env/static/*` detection without importing an adapter/utility package directly. Optional, like `SecretGuard` — nil means no detection/warning/annotation.
    - `slsa`: Generates SLSA v1.0 provenance predicate statements.
    - `dsse`: Wraps attestations in Dead Simple Signing Envelopes (DSSE).
    - `config`: Implements `ports.ConfigManager` for reading, writing, and validating `.pokkum.yaml` project configurations, evaluating build profiles (e.g. `local`, `production`), and enforcing precedence: explicit CLI flags > environment variables > profile overrides > top-level config defaults.
@@ -270,9 +271,9 @@ Pokkum embeds supply chain security directly into the image publishing lifecycle
 
 Pokkum unifies trace spans and metrics into a native, zero-config OpenTelemetry pipeline built on SvelteKit 2.31+ native observability (`kit.experimental.tracing.server` and `kit.experimental.instrumentation.server`):
 
-* **SvelteKit Version Inspection (`internal/adapters/sveltekit/project.go`)**: Inspects `@sveltejs/kit` in `package.json`. If < 2.31.0, telemetry injection is gracefully skipped.
-* **Single-Pass Virtual Config Transformer (`internal/adapters/sveltekit/injector.go`)**: Patches `svelte.config.js` in a single virtual pass to enable adapter swapping, version pinning, and experimental tracing/instrumentation flags without mutating source files on disk.
-* **Strict Precedence & Virtual Instrumentation (`internal/adapters/sveltekit/telemetry.go`)**: Checks for existing `src/instrumentation.server.ts|js|mjs`. If present, user setup is preserved. If missing, Pokkum generates a virtual instrumentation file configured with OTLP trace & metric exporters, probability sampling (`--trace-sample-rate`), lazy SDK initialization, and metrics-only mode (`--metrics-only`).
+* **SvelteKit Version Inspection (`internal/adapters/sveltekitutils/project.go`)**: Inspects `@sveltejs/kit` in `package.json`. If < 2.31.0, telemetry injection is gracefully skipped.
+* **Single-Pass Virtual Config Transformer (`internal/adapters/sveltekitutils/injector.go`)**: Patches `svelte.config.js` in a single virtual pass to enable adapter swapping, version pinning, and experimental tracing/instrumentation flags without mutating source files on disk. Also owns the zero-config Vite adapter injection's `.pokkum/` virtual config generation (§2), including its `__dirname`/`import.meta.url` correction.
+* **Strict Precedence & Virtual Instrumentation (`internal/adapters/sveltekitutils/telemetry.go`)**: Checks for existing `src/instrumentation.server.ts|js|mjs`. If present, user setup is preserved. If missing, Pokkum generates a virtual instrumentation file configured with OTLP trace & metric exporters, probability sampling (`--trace-sample-rate`), lazy SDK initialization, and metrics-only mode (`--metrics-only`).
 * **OTEL Collector Sidecar Injection (`internal/adapters/k8s`)**: When `--with-otel-sidecar` is set, `pokkum resolve` and `pokkum apply` automatically attach an OpenTelemetry Collector sidecar container specification exposing OTLP ports (`4317` gRPC, `4318` HTTP) and Prometheus scraping endpoints (`8889`/`9090`) to the generated Pod specs.
 
 ---

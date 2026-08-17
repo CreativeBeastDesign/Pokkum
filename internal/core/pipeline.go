@@ -90,6 +90,10 @@ type Deps struct {
 	// SecretGuard performs build-time secret scanning on source files. Optional.
 	SecretGuard ports.SecretGuard
 
+	// EnvBakeDetector scans project source for $env/static/* imports ahead of
+	// packaging. Optional — nil means no detection/warning/annotation.
+	EnvBakeDetector ports.EnvBakeDetector
+
 	// RemoteCache queries and reconciles remote OCI input caches. Optional.
 	RemoteCache ports.RemoteCacher
 
@@ -303,6 +307,27 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	// (bare HTTP, no forms, dev/staging) never hit this.
 	if req.Runtime.Origin == "" && req.Compile.Strategy != StrategyStatic {
 		log.Warn("ORIGIN not set — if this app is served behind a reverse proxy or ingress, form actions will likely fail with \"403 Cross-site POST form submissions are forbidden\"; set --origin to the public URL this app is served at (e.g. --origin=https://example.com)")
+	}
+
+	// SvelteKit inlines $env/static/* as literal values at build time,
+	// regardless of strategy — unlike $env/dynamic/*, which is read at
+	// container startup, an image that imports from $env/static/* is
+	// pinned to whatever environment built it. Promoting that exact image
+	// to a different environment silently carries the old values along,
+	// with nothing in the running container re-reading the environment to
+	// notice — invalidating digest pinning/resolve/rollback/provenance as
+	// *environment-independent* guarantees for that image. Detection is a
+	// best-effort source scan (see sveltekitutils.DetectStaticEnvBindings's
+	// own doc comment for its real gaps: re-exports and dynamic specifiers
+	// aren't followed) — warn, don't fail, and record what was found as a
+	// durable annotation rather than silently saying nothing. Optional,
+	// like SecretGuard, so tests/callers that don't care can leave it nil.
+	if deps.EnvBakeDetector != nil {
+		envRes, err := deps.EnvBakeDetector.DetectStaticEnv(ctx, ports.EnvBakeRequest{ProjectDir: req.ProjectDir})
+		if err == nil && len(envRes.Bindings) > 0 {
+			log.Warn("this build imports from $env/static/* — this image will be pinned to the environment it was built in; promoting it to a different environment will NOT pick up new values for these", "bindings", strings.Join(envRes.Bindings, ","))
+			req.Runtime.EnvBaked = envRes.Bindings
+		}
 	}
 
 	// Stage 2: host toolchain and project layout.
