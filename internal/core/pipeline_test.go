@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -620,6 +621,65 @@ func TestBuildPushSuccess_SLSAAndSBOMCarryResolvedBunRuntime(t *testing.T) {
 	}
 	if sbomReq.BunSHA256 != "mockbunsha256" {
 		t.Errorf("SBOM request BunSHA256 = %q, want %q", sbomReq.BunSHA256, "mockbunsha256")
+	}
+}
+
+// TestBuild_HermeticThreadsIntoBunResolverAndSLSAProvenance is PR-2's
+// pipeline-wiring regression guard (security review findings F5/F6): a
+// --hermetic build must (a) tell the Bun runtime resolver not to reach the
+// network on a cache miss (BunResolverRequest.Offline), and (b) record an
+// honest, platform-accurate enforcement mode in SLSA provenance
+// (SLSAGeneratorRequest.HermeticEnforcement), not just echo the Hermetic
+// bool back unexamined. Both are asserted from one real core.Build call so
+// this proves the actual wiring, not just that the two structs' fields
+// exist.
+func TestBuild_HermeticThreadsIntoBunResolverAndSLSAProvenance(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+
+	var bunReq ports.BunResolverRequest
+	deps.BunRuntime = &mockBunRuntimeResolver{
+		resolveFn: func(_ context.Context, req ports.BunResolverRequest) (ports.BunResolverResult, error) {
+			bunReq = req
+			return ports.BunResolverResult{
+				BinaryPath: "/mock/bun", Version: "1.2.2", Variant: ports.BunVariantStandard,
+				Platform: req.Platform, SHA256: "mockbunsha256", Size: 1000,
+			}, nil
+		},
+	}
+
+	var slsaReq ports.SLSAGeneratorRequest
+	deps.SLSAGenerator = &mockSLSAGenerator{
+		generateFn: func(_ context.Context, req ports.SLSAGeneratorRequest) (ports.SLSAStatement, error) {
+			slsaReq = req
+			return ports.SLSAStatement{}, nil
+		},
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+		Sign:       true,
+		Hermetic:   true,
+	}
+
+	if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	if !bunReq.Offline {
+		t.Errorf("expected BunResolverRequest.Offline = true for a --hermetic build, got false")
+	}
+	if !slsaReq.Hermetic {
+		t.Errorf("expected SLSAGeneratorRequest.Hermetic = true, got false")
+	}
+	wantEnforcement := "advisory-env-only"
+	if runtime.GOOS == "linux" {
+		wantEnforcement = "kernel-enforced-netns"
+	}
+	if slsaReq.HermeticEnforcement != wantEnforcement {
+		t.Errorf("SLSAGeneratorRequest.HermeticEnforcement = %q, want %q (GOOS=%s)", slsaReq.HermeticEnforcement, wantEnforcement, runtime.GOOS)
 	}
 }
 

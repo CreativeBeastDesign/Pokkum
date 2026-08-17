@@ -125,8 +125,21 @@ type SLSAGeneratorRequest struct {
 	// LockfileHashes maps lockfile names to SHA256 hashes (optional).
 	LockfileHashes map[string]string
 
-	// Hermetic reports whether the compile step ran with network isolation.
+	// Hermetic reports whether --hermetic was requested for this build.
 	Hermetic bool
+
+	// HermeticEnforcement names *how* Hermetic was actually enforced, so
+	// provenance doesn't claim a uniform guarantee "--hermetic" doesn't
+	// uniformly provide: "kernel-enforced-netns" (Linux, a real unshared
+	// network namespace — see internal/adapters/bunexec/hermetic_linux.go)
+	// or "advisory-env-only" (every other platform — BUN_OFFLINE=1 and
+	// friends, which a malicious build script can simply ignore). Empty when
+	// Hermetic is false. A consumer of this attestation checking for a real
+	// hermetic guarantee must check this field, not just Hermetic — a
+	// signed statement asserting "hermetic: true" without it would be
+	// indistinguishable from a real kernel-enforced build even when nothing
+	// was actually enforced.
+	HermeticEnforcement string
 }
 
 // SLSAGenerator produces SLSA v1.0 in-toto provenance statements.

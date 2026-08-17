@@ -74,6 +74,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -340,6 +341,19 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	cmd.Env = baseEnv
 	setNewProcessGroup(cmd)
 
+	hermeticSandboxApplied := false
+	if req.Hermetic {
+		if hermeticSandboxSupported {
+			applyHermeticSandbox(cmd)
+			hermeticSandboxApplied = true
+		} else {
+			log.Warn(
+				"bunexec: --hermetic requested, but kernel-enforced network isolation is only implemented on Linux; this platform falls back to advisory-only isolation (BUN_OFFLINE=1/NODE_ENV=production/NO_UPDATE_NOTIFIER=1), which a compromised or malicious build-time dependency can simply ignore",
+				"projectDir", req.ProjectDir, "goos", runtime.GOOS,
+			)
+		}
+	}
+
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 	// Bun and vite progress chatter is diagnostic output, not data, so it goes
@@ -350,7 +364,35 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	cmd.Stdout = os.Stderr
 
 	log.Debug("bunexec: exec", "argv", cmd.Args, "dir", cmd.Dir)
-	runErr := cmd.Run()
+
+	if hermeticSandboxApplied {
+		if err := verifyHermeticSandboxApplied(cmd); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w: %w", req.ProjectDir, err, core.ErrPrepareFailed)
+		}
+	}
+
+	// Start and Wait are split (rather than cmd.Run()) so a namespace-setup
+	// failure (Start) can be distinguished precisely from a real build
+	// failure (Wait returning a non-zero exit) instead of guessing from
+	// whether any stderr was captured — and so the "sandbox active" log line
+	// only fires once the sandboxed process has actually started, not
+	// pre-emptively (see mem:self_review_checklist row 16/17 family: an
+	// enforcement claim must be logged only once it's verified true, not
+	// asserted ahead of the fact).
+	if startErr := cmd.Start(); startErr != nil {
+		if hermeticSandboxApplied {
+			return ports.PrepareResult{}, fmt.Errorf(
+				"bunexec: prepare %s: bun run build failed to start inside the hermetic network sandbox: %w (this usually means either the kernel does not allow unprivileged user namespaces here — check /proc/sys/kernel/unprivileged_userns_clone — or pokkum itself is running inside a container whose own seccomp/capability policy blocks creating one, which some Docker-based CI executors restrict by default even though a plain VM runner would not; run without --hermetic to fall back to advisory-only isolation): %w",
+				req.ProjectDir, startErr, core.ErrPrepareFailed,
+			)
+		}
+		return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: bun run build failed to start: %w: %w", req.ProjectDir, startErr, core.ErrPrepareFailed)
+	}
+	if hermeticSandboxApplied {
+		log.Info("bunexec: hermetic build sandbox active — kernel-enforced zero network egress via an unshared Linux network namespace, not merely advisory env vars", "projectDir", req.ProjectDir)
+	}
+
+	runErr := cmd.Wait()
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, ctxErr)
@@ -571,6 +613,26 @@ func (c *Compiler) Compile(ctx context.Context, req ports.CompileRequest) (ports
 	cmd.Env = buildEnvWithEpoch(req.Env, req.SourceDateEpoch)
 	setNewProcessGroup(cmd)
 
+	// `bun build --compile` bundles req.EntrypointPath — a file the
+	// third-party SvelteKit adapter generated during Prepare — and Bun's
+	// bundler runs bunfig.toml preload plugins and `with { type: "macro" }`
+	// imports at bundle time, so this stage must be sandboxed identically to
+	// Prepare's `bun run build`/`bun x vite build`: a Compiler that only
+	// sandboxes Prepare is not actually hermetic, since a malicious
+	// build-time dependency can simply wait for this stage to run.
+	hermeticSandboxApplied := false
+	if req.Hermetic {
+		if hermeticSandboxSupported {
+			applyHermeticSandbox(cmd)
+			hermeticSandboxApplied = true
+		} else {
+			log.Debug(
+				"bunexec: --hermetic requested, but kernel-enforced network isolation is only implemented on Linux; this platform's compile stage also falls back to advisory-only isolation (see Prepare's Warn log for the full explanation, logged once per build rather than once per platform here)",
+				"platform", req.Platform, "goos", runtime.GOOS,
+			)
+		}
+	}
+
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 	// Bun and vite progress chatter is diagnostic output, not data, so it goes
@@ -582,7 +644,30 @@ func (c *Compiler) Compile(ctx context.Context, req ports.CompileRequest) (ports
 
 	log.Debug("bunexec: exec", "argv", cmd.Args, "dir", cmd.Dir)
 	log.Info("bunexec: compiling", "platform", req.Platform, "target", target, "output", req.OutputPath)
-	runErr := cmd.Run()
+
+	if hermeticSandboxApplied {
+		if err := verifyHermeticSandboxApplied(cmd); err != nil {
+			return ports.Artifact{}, fmt.Errorf("bunexec: compile %s: %w: %w", req.Platform, err, core.ErrCompileFailed)
+		}
+	}
+
+	// Start/Wait split for the same reason as Prepare: precisely distinguish
+	// a namespace-setup failure from a real compile failure, and only log
+	// sandbox-active once the sandboxed process has actually started.
+	if startErr := cmd.Start(); startErr != nil {
+		if hermeticSandboxApplied {
+			return ports.Artifact{}, fmt.Errorf(
+				"bunexec: compile %s: bun build --compile failed to start inside the hermetic network sandbox: %w (this usually means either the kernel does not allow unprivileged user namespaces here — check /proc/sys/kernel/unprivileged_userns_clone — or pokkum itself is running inside a container whose own seccomp/capability policy blocks creating one; run without --hermetic to fall back to advisory-only isolation): %w",
+				req.Platform, startErr, core.ErrCompileFailed,
+			)
+		}
+		return ports.Artifact{}, fmt.Errorf("bunexec: compile %s: bun build --compile failed to start: %w: %w", req.Platform, startErr, core.ErrCompileFailed)
+	}
+	if hermeticSandboxApplied {
+		log.Info("bunexec: hermetic build sandbox active for compile — kernel-enforced zero network egress", "platform", req.Platform)
+	}
+
+	runErr := cmd.Wait()
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ports.Artifact{}, fmt.Errorf("bunexec: compile %s: %w", req.Platform, ctxErr)

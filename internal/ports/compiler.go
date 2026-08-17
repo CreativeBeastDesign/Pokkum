@@ -447,6 +447,18 @@ type CompileRequest struct {
 	// Sourcemap embeds a source map in the executable. Increases binary size
 	// substantially; false by default.
 	Sourcemap bool
+
+	// Hermetic enforces zero network egress during compile, the same way
+	// PrepareRequest.Hermetic does for Prepare. This exists because `bun
+	// build --compile` bundles req.EntrypointPath and its transitive
+	// imports — files a third-party SvelteKit adapter generated during
+	// Prepare — and Bun's bundler executes `bunfig.toml` preload plugins and
+	// `with { type: "macro" }` imports at bundle time, so this stage can run
+	// attacker-influenced code exactly like Prepare's `bun run build` can. A
+	// Compiler that sandboxes Prepare but not Compile is not actually
+	// hermetic: a malicious build script only has to wait for this stage to
+	// run before making its network call.
+	Hermetic bool
 }
 
 // Compiler turns a SvelteKit project into one self-contained executable per

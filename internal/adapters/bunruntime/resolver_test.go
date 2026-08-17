@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -216,6 +217,101 @@ func TestResolver_DownloadAndCache(t *testing.T) {
 	}
 	if res2.BinaryPath != res.BinaryPath {
 		t.Errorf("expected same cached binary path %s, got %s", res.BinaryPath, res2.BinaryPath)
+	}
+}
+
+// TestResolver_Offline_FailsClosedOnCacheMiss is PR-2's regression guard
+// (security review finding F6): a --hermetic build threads Offline: true
+// into every BunResolverRequest, and on a cold cache Resolve must fail
+// closed with core.ErrHermeticViolation rather than silently reaching the
+// network — matching Preflight's pre-populated node_modules requirement for
+// the same reason. Asserts zero HTTP requests were made, not just that the
+// call returned an error, since a fail-closed check placed after the
+// download attempt would also return an error while still having leaked a
+// request.
+func TestResolver_Offline_FailsClosedOnCacheMiss(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	cacheDir := t.TempDir()
+	resolver := NewResolver(cacheDir, pathRoutedClient(server))
+
+	_, err := resolver.Resolve(context.Background(), ports.BunResolverRequest{
+		Platform:        ports.LinuxAMD64,
+		Version:         "9.9.9",
+		Variant:         ports.BunVariantStandard,
+		SourceDateEpoch: time.Unix(1700000000, 0),
+		Offline:         true,
+	})
+	if !errors.Is(err, core.ErrHermeticViolation) {
+		t.Fatalf("expected core.ErrHermeticViolation on a cold-cache offline resolve, got: %v", err)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("expected zero HTTP requests for an offline resolve, got %d", n)
+	}
+}
+
+// TestResolver_Offline_SucceedsOnCacheHit proves Offline doesn't break the
+// legitimate case: a bun runtime already verified and cached by a prior
+// (non-hermetic) resolve must still resolve successfully offline, with no
+// network access needed or attempted.
+func TestResolver_Offline_SucceedsOnCacheHit(t *testing.T) {
+	bunBinaryContent := []byte("#!/bin/sh\necho 'fake bun'")
+	zipBytes := buildBunZip(t, bunBinaryContent)
+
+	zipSHA := sha256.Sum256(zipBytes)
+	entity, pubKey := newTestReleaseKeypair(t)
+	shasums := hex.EncodeToString(zipSHA[:]) + "  bun-linux-x64.zip\n"
+	ascBytes := signSHASUMS(t, entity, shasums)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "SHASUMS256.txt.asc"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(ascBytes)
+		case strings.HasSuffix(r.URL.Path, ".zip"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(zipBytes)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cacheDir := t.TempDir()
+	resolver := NewResolver(cacheDir, pathRoutedClient(server))
+	resolver.ReleaseKeyArmored = pubKey
+
+	req := ports.BunResolverRequest{
+		Platform:        ports.LinuxAMD64,
+		Version:         "9.9.9",
+		Variant:         ports.BunVariantStandard,
+		SourceDateEpoch: time.Unix(1700000000, 0),
+	}
+	if _, err := resolver.Resolve(context.Background(), req); err != nil {
+		t.Fatalf("failed to warm the cache: %v", err)
+	}
+	warmupRequests := requests.Load()
+	if warmupRequests == 0 {
+		t.Fatal("test premise broken: warm-up resolve made no HTTP requests")
+	}
+
+	req.Offline = true
+	res, err := resolver.Resolve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected an offline resolve to succeed on a warm cache, got: %v", err)
+	}
+	if res.Version != "9.9.9" {
+		t.Errorf("expected version 9.9.9, got %s", res.Version)
+	}
+	if got := requests.Load(); got != warmupRequests {
+		t.Errorf("expected no additional HTTP requests for the offline cache-hit resolve, got %d more", got-warmupRequests)
 	}
 }
 

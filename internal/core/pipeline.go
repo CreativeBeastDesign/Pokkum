@@ -796,6 +796,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			CustomBinaryPath: req.BunRuntime.CustomBinaryPath,
 			StubLauncher:     req.BunRuntime.StubLauncher,
 			SourceDateEpoch:  req.SourceDateEpoch,
+			Offline:          req.Hermetic,
 		})
 		if err != nil {
 			return BuildResult{}, fmt.Errorf("core: resolve bun runtime for sbom/provenance: %w", err)
@@ -947,7 +948,9 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				SupervisorVersion:   toolchain.SupervisorVersion,
 				StaticServerVersion: toolchain.StaticServerVersion,
 			},
-			SourceDateEpoch: req.SourceDateEpoch,
+			SourceDateEpoch:     req.SourceDateEpoch,
+			Hermetic:            req.Hermetic,
+			HermeticEnforcement: hermeticEnforcementMode(req.Hermetic),
 		})
 		switch {
 		case serr != nil:
@@ -981,6 +984,29 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// hermeticEnforcementMode reports how a hermetic build was actually enforced
+// for the platform Build is running on, for honest SLSA provenance (see
+// ports.SLSAGeneratorRequest.HermeticEnforcement's doc comment for why this
+// must not just echo the hermetic bool back). This process spawns the bun
+// subprocess directly — Pokkum does not do remote/distributed builds — so
+// runtime.GOOS here is genuinely the OS the subprocess ran under, not a
+// guess about some other machine. It is safe to derive this purely from
+// GOOS and the hermetic flag, with no separate signal needed from the
+// bunexec adapter: bunexec's own Prepare/Compile fail the whole build
+// closed if kernel-level enforcement was expected but could not actually be
+// applied (see hermetic_linux.go's verifyHermeticSandboxApplied and the
+// Start-failure error paths) — so if Build reaches this point successfully
+// with req.Hermetic true on Linux, enforcement genuinely happened.
+func hermeticEnforcementMode(hermetic bool) string {
+	if !hermetic {
+		return ""
+	}
+	if runtime.GOOS == "linux" {
+		return "kernel-enforced-netns"
+	}
+	return "advisory-env-only"
 }
 
 // platformBuild is one platform's slice of the fan-out.
@@ -1063,6 +1089,7 @@ func fanOut(
 					Variant:          req.BunRuntime.Variant,
 					CustomBinaryPath: req.BunRuntime.CustomBinaryPath,
 					StubLauncher:     req.BunRuntime.StubLauncher,
+					Offline:          req.Hermetic,
 					SourceDateEpoch:  req.SourceDateEpoch,
 				})
 				if err != nil {
@@ -1085,6 +1112,7 @@ func fanOut(
 					Env:             req.Compile.Env,
 					Minify:          !req.Compile.NoMinify,
 					Sourcemap:       req.Compile.Sourcemap,
+					Hermetic:        req.Hermetic,
 				})
 				if err != nil {
 					return err

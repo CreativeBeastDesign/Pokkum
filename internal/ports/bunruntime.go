@@ -40,6 +40,16 @@ type BunResolverRequest struct {
 
 	// SourceDateEpoch is the deterministic timestamp for file headers/mtime derivation. Required.
 	SourceDateEpoch time.Time
+
+	// Offline forbids downloading the Bun release archive on a cache miss —
+	// set for a --hermetic build, matching Preflight's pre-populated
+	// node_modules requirement for the same reason (see
+	// bunexec.Compiler.Preflight): a hermetic build must fail closed on
+	// anything it cannot satisfy from a local cache, not silently reach the
+	// network. Does not affect StubLauncher (compileStub shells out to the
+	// host's own bun via PATH to compile a Pokkum-authored literal stub — no
+	// network access either way) or CustomBinaryPath (already local-only).
+	Offline bool
 }
 
 // BunResolverResult reports the verified Bun runtime binary artifact details.

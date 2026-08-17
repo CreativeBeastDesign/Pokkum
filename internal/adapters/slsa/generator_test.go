@@ -39,16 +39,17 @@ func TestSLSAGenerator_Generate(t *testing.T) {
 
 	now := time.Unix(1700000000, 0).UTC()
 	req := ports.SLSAGeneratorRequest{
-		ProjectDir:      tmpDir,
-		Repo:            "ghcr.io/acme/app",
-		Tags:            []string{"v1.0.0", "latest"},
-		Platforms:       []ports.Platform{ports.LinuxAMD64, ports.LinuxARM64},
-		OutputMode:      "push",
-		OutputDigest:    outHash,
-		SourceDateEpoch: now,
-		GitRepo:         "https://github.com/acme/app",
-		GitCommit:       "abc123456789def",
-		Hermetic:        true,
+		ProjectDir:          tmpDir,
+		Repo:                "ghcr.io/acme/app",
+		Tags:                []string{"v1.0.0", "latest"},
+		Platforms:           []ports.Platform{ports.LinuxAMD64, ports.LinuxARM64},
+		OutputMode:          "push",
+		OutputDigest:        outHash,
+		SourceDateEpoch:     now,
+		GitRepo:             "https://github.com/acme/app",
+		GitCommit:           "abc123456789def",
+		Hermetic:            true,
+		HermeticEnforcement: "kernel-enforced-netns",
 		BaseImage: ports.SLSABaseImage{
 			Preset:    ports.BaseImageDistroless,
 			Ref:       "gcr.io/distroless/static-debian12:nonroot",
@@ -100,6 +101,9 @@ func TestSLSAGenerator_Generate(t *testing.T) {
 	if bd.InternalParameters["hermetic"] != true {
 		t.Errorf("InternalParameters[hermetic] = %v, want true", bd.InternalParameters["hermetic"])
 	}
+	if bd.InternalParameters["hermeticEnforcement"] != "kernel-enforced-netns" {
+		t.Errorf("InternalParameters[hermeticEnforcement] = %v, want kernel-enforced-netns", bd.InternalParameters["hermeticEnforcement"])
+	}
 	if bd.InternalParameters["sourceDateEpoch"] != int64(1700000000) {
 		t.Errorf("InternalParameters[sourceDateEpoch] = %v, want 1700000000", bd.InternalParameters["sourceDateEpoch"])
 	}
@@ -146,6 +150,34 @@ func TestSLSAGenerator_Generate(t *testing.T) {
 	}
 	if !foundGo {
 		t.Error("Go toolchain dependency not found in ResolvedDependencies")
+	}
+}
+
+// TestSLSAGenerator_HermeticEnforcementOmittedWhenEmpty is PR-2's provenance
+// honesty regression guard (security review finding F5): a non-hermetic
+// build (or a platform where hermetic mode is advisory-only) must not carry
+// a hermeticEnforcement claim at all — the field's absence is itself the
+// honest signal, distinct from an empty string being present.
+func TestSLSAGenerator_HermeticEnforcementOmittedWhenEmpty(t *testing.T) {
+	gen := NewGenerator(nil)
+	outHash, err := v1.NewHash("sha256:1111111111111111111111111111111111111111111111111111111111111111")
+	if err != nil {
+		t.Fatalf("parse output hash: %v", err)
+	}
+
+	stmt, err := gen.Generate(context.Background(), ports.SLSAGeneratorRequest{
+		Repo:         "acme/app",
+		OutputDigest: outHash,
+		Hermetic:     false,
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if _, ok := stmt.Predicate.BuildDefinition.InternalParameters["hermeticEnforcement"]; ok {
+		t.Errorf("expected hermeticEnforcement to be omitted for a non-hermetic build, got %v", stmt.Predicate.BuildDefinition.InternalParameters["hermeticEnforcement"])
+	}
+	if stmt.Predicate.BuildDefinition.InternalParameters["hermetic"] != false {
+		t.Errorf("InternalParameters[hermetic] = %v, want false", stmt.Predicate.BuildDefinition.InternalParameters["hermetic"])
 	}
 }
 

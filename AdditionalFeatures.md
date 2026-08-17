@@ -72,7 +72,7 @@ Priority column uses the `Roadmap.md` flag vocabulary: **🚩 Blocker** = do not
 | `.secretguardignore` / inline allow comment | 6         | 4               | 2           | Scoped annotation parsing; complements the existing blunt `--allow-secret-pattern` | None                              | Low-Medium |
 | Helm Post-Renderer + Kustomize KRM          | 8         | 2               | 5           | Two thin entrypoints over existing `resolve`; unlocks the two dominant toolchains | Helm / kustomize                  | Low-Medium |
 | Build-Time Test Gate (`--test`)             | 6         | 3               | 3           | Subprocess + exit-code gate; conflicts with `--hermetic` semantics                | None                              | Low |
-| Enforced Hermetic (netns/Landlock/seccomp)  | 2         | 8               | 9           | Platform-specific sandboxing; the real fix behind the PR-2 wording change         | Linux kernel features             | Low (backlog) |
+| ~~Enforced Hermetic (netns/Landlock/seccomp)~~ | — | — | — | ✅ **Shipped (2026-08-17)** — real Linux network-namespace enforcement, see `Roadmap.md`'s PR-2 entry | Linux kernel features | Done |
 | Edge / WASM Runtimes                        | 6         | 2               | 9           | Not an OCI image; a different product                                             | CF Workers / Deno / Vercel        | **Out of scope — state it** |
 
 ### Shipped (removed from matrix)
@@ -479,7 +479,7 @@ Every item below was confirmed absent or defective in the code, and is tracked o
 | Stdlib `compress/gzip` used for layers; `klauspost` already vendored | `layer.go:18` vs. `go.mod:12` | ⚠️ PR-1 |
 | No route-template span naming; no trace-correlated logging | `telemetry.go:38-100` | ⚠️ PR-5 |
 | No referrers capability probe / auto-fallback | `registry/sbom.go:63` | ⚠️ PR-8 |
-| `--hermetic` is advisory (env vars only) | `compiler.go:324` — no netns/Landlock/seccomp anywhere | ⚠️ PR-2 |
+| ~~`--hermetic` is advisory (env vars only)~~ | ✅ **Fixed (2026-08-17)** — real Linux network-namespace enforcement, `hermetic_linux.go` | PR-2 |
 | No KMS signing, no TUF refresh, no CI OIDC | zero hits for `awskms`/`gcpkms`/`hashivault`/`pkcs11`/`tuf` | item 9a–9c |
 | Multi-arch attestation subject undocumented/untested | no index-vs-manifest assertion found | item 9d |
 | No ECR `--create-repository`; no resumable chunked upload | zero hits | item 10a–10b |

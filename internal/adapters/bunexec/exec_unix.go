@@ -30,7 +30,16 @@ const processKillGrace = 5 * time.Second
 // WaitDelay is a last-resort backstop that forcibly closes the pipes after
 // processKillGrace even if some descendant somehow escaped the group.
 func setNewProcessGroup(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Additive, not a replacing assignment: on Linux, applyHermeticSandbox
+	// (hermetic_linux.go) may be called on the same *exec.Cmd afterward and
+	// needs to add Cloneflags/UidMappings/GidMappings onto this same struct
+	// — a security-relevant field, so this must never silently overwrite
+	// fields another call already set (see mem:self_review_checklist row 4's
+	// origin incident for exactly this class of bug).
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil

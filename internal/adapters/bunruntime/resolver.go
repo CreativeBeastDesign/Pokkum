@@ -203,6 +203,13 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 		return r.compileStub(ctx, version, variant, req.Platform, targetDir, binaryPath)
 	}
 
+	if req.Offline {
+		return ports.BunResolverResult{}, fmt.Errorf(
+			"bunruntime: resolve bun %s (%s, %s): hermetic build requires a pre-cached bun runtime binary, but none was verified at %s — pre-populate the cache (a prior non-hermetic build, or `pokkum base update`-style warm-up) before running with --hermetic: %w",
+			version, variant, req.Platform, binaryPath, core.ErrHermeticViolation,
+		)
+	}
+
 	// 5. Download and extract. 0o700: this cache directory holds a binary
 	// that becomes trusted purely because it lives at this path (see
 	// verifiedCacheHit) — 0755 would let any other local user on a

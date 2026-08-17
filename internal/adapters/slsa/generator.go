@@ -133,6 +133,9 @@ func (g *Generator) Generate(ctx context.Context, req ports.SLSAGeneratorRequest
 	intParams := map[string]any{
 		"hermetic": req.Hermetic,
 	}
+	if req.HermeticEnforcement != "" {
+		intParams["hermeticEnforcement"] = req.HermeticEnforcement
+	}
 	if !req.SourceDateEpoch.IsZero() {
 		intParams["sourceDateEpoch"] = req.SourceDateEpoch.Unix()
 	}
@@ -174,6 +177,7 @@ func (g *Generator) Generate(ctx context.Context, req ports.SLSAGeneratorRequest
 		"subject", req.OutputDigest.String(),
 		"dependencies", len(deps),
 		"hermetic", req.Hermetic,
+		"hermeticEnforcement", req.HermeticEnforcement,
 	)
 
 	return stmt, nil
