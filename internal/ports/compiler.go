@@ -278,7 +278,9 @@ type PreflightResult struct {
 type BuildStrategy string
 
 const (
-	// StrategyLayered builds a 5-layer arch-independent image layout with Bun runtime.
+	// StrategyLayered builds a multi-layer arch-independent image layout with
+	// Bun runtime; the exact layer set and count vary by build (see "pokkum
+	// explain").
 	StrategyLayered BuildStrategy = "layered"
 
 	// StrategyExe builds a single compiled executable per architecture (legacy).

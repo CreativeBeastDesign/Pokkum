@@ -219,7 +219,7 @@ The project directory defaults to the current working directory.`,
 	cmd.Flags().BoolVar(&flags.stubLauncher, "stub-launcher", false,
 		"Compile a minimal entrypoint launcher stub instead of embedding stock Bun runtime (layered strategy hardening)")
 	cmd.Flags().StringVar(&flags.strategy, "strategy", "layered",
-		"Packaging strategy: layered (5-layer arch-independent layout [default]), exe (single executable, deprecated), or static (purely static site served by an embedded Go file server, no Bun runtime)")
+		"Packaging strategy: layered (multi-layer arch-independent layout [default] — see 'pokkum explain' for a given build's real breakdown), exe (single executable, deprecated), or static (purely static site served by an embedded Go file server, no Bun runtime)")
 	cmd.Flags().BoolVar(&flags.static, "static", false,
 		"Shorthand for --strategy=static: compile a purely static site onto a minimal libc-free base image, served by an embedded Go file server (ETag/Range/Content-Encoding). Cannot be combined with --strategy.")
 	cmd.Flags().StringVar(&flags.compression, "compression", "gzip",

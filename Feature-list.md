@@ -9,7 +9,7 @@ This document provides a comprehensive inventory of all implemented features, ca
 ### Core Compilation & Container Packaging
 - **Zero-Dependency OCI Image Compilation**: Compiles SvelteKit applications directly into multi-arch OCI container images (`linux/amd64`, `linux/arm64`) without Docker daemon or buildkit dependencies.
 - **Three Packaging Strategies**:
-  - `--strategy=layered` (Default): 8-layer OCI layout (Base image, Bun runtime or compiled stub launcher, Supervisor, App server, Client assets, Vendor dependencies, Native addons, Prerendered pages).
+  - `--strategy=layered` (Default): multi-layer OCI layout — up to Base image, Bun runtime or compiled stub launcher, Supervisor, App server, Client assets, Vendor dependencies, Native addons, and Prerendered pages, though the exact set and count depend on what a given build actually produces (client/vendor/native/prerendered layers are only added when present). Run `pokkum explain` on a built image for its real per-layer breakdown.
   - `--strategy=static` (`--static` shorthand): Pure zero-JS static site compilation onto `chainguard/static` with embedded `pokkum-static` Go web server (PID 1), SPA fallback support, Range requests, strong ETags, and precompressed `.gz/.br/.zst` sidecars.
   - `--strategy=exe` (Legacy): Compiles self-contained single-file executable using Bun compiler (`bun build --compile`).
 - **Zero-Config Virtual Auto-Injection**: Surgically transforms `vite.config.ts/js` to inject/override the target adapter inside `sveltekit({ adapter: adapter() })` while preserving runes, compiler options, and other plugins. `bunexec.Compiler.Prepare` generates `.pokkum/<viteConfigName>` and invokes `bun x vite build --config .pokkum/<viteConfigName>` without mutating user-authored files, with fallback to Option C (`checkEffectiveAdapter` fail-fast validation).
@@ -91,7 +91,7 @@ This document provides a comprehensive inventory of all implemented features, ca
   - Inspection & Validation: `pokkum config view` displays resolved configurations and `pokkum config validate` strictly checks schema structure, known fields, and profile consistency.
 - **Hot-Reload Development (`pokkum dev`)**: Builds, loads into Docker/Podman daemon, and watches source directories for rapid live reload with `--debug` shell inspection.
 - **Preflight Checks & Mechanical Repairs (`pokkum doctor`)**: Audits local Bun runtime, SvelteKit version compatibility, `.pokkumignore`, and registry credentials, offering automatic fixes (`--fix`).
-- **Layer & Origin Tracing (`pokkum explain`, `pokkum why`, `pokkum diff`)**: Breaks down layer compositions, tracks dependency origins, and visualizes diffs between images.
+- **Layer & Origin Tracing (`pokkum explain`, `pokkum explain why`, `pokkum explain diff`)**: Reads a real OCI image (registry ref or local tarball) and reports its actual per-layer digests, sizes, file counts, and purposes; traces which real layer a specific file came from, was deleted in, or is absent from entirely; and diffs real layer/file-level changes between two images.
 - **Project Adoption Codemod (`pokkum adopt`)**: Automatically migrates SvelteKit projects from `@sveltejs/adapter-node`, `adapter-vercel`, `adapter-auto`, or legacy Dockerfiles to Pokkum compilation defaults.
 - **Signed Self-Updates (`pokkum upgrade`)**: Checks releases and verifies release binary checksum signatures via Cosign.
 - **Standardized Machine-Readable Output**: Global `--output=json` across all commands emitting versioned `ports.JSONEnvelope` payloads.

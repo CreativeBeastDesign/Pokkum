@@ -48,7 +48,7 @@ type LayerExplain struct {
 	FileCount  int    `json:"file_count,omitempty"`
 }
 
-// ExplainOutput represents the structured data payload for `pokkum explain` / `pokkum why`.
+// ExplainOutput represents the structured data payload for `pokkum explain`.
 type ExplainOutput struct {
 	Target    string         `json:"target"`
 	TotalSize int64          `json:"total_size_bytes"`

@@ -173,7 +173,8 @@ const (
 	// BunVariantBaseline targets pre-AVX2 x86-64 CPUs.
 	BunVariantBaseline = ports.BunVariantBaseline
 
-	// StrategyLayered emits the 5-layer arch-independent layout (default).
+	// StrategyLayered emits a multi-layer arch-independent layout (default);
+	// the exact layer set and count vary by build (see "pokkum explain").
 	StrategyLayered = ports.StrategyLayered
 	// StrategyExe emits the single executable layout (legacy).
 	StrategyExe = ports.StrategyExe

@@ -6,7 +6,7 @@
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**Pokkum** is a zero-dependency OCI container image compiler for SvelteKit applications. In a single command, Pokkum compiles your SvelteKit app into a zero-daemon, 5-layer cached OCI container image complete with SBOMs, OpenTelemetry auto-instrumentation, signed SLSA provenance, and hardened Kubernetes deployment manifests.
+**Pokkum** is a zero-dependency OCI container image compiler for SvelteKit applications. In a single command, Pokkum compiles your SvelteKit app into a zero-daemon, multi-layer cached OCI container image (the exact layer set and count depend on the strategy and what a given build actually produces — run `pokkum explain` for the real breakdown) complete with SBOMs, OpenTelemetry auto-instrumentation, signed SLSA provenance, and hardened Kubernetes deployment manifests.
 
 Think of it as `ko` for SvelteKit: zero Dockerfile, zero Docker daemon required, and bit-for-bit reproducible builds out of the box.
 
@@ -25,7 +25,7 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum build ./my-app
 - **What this does**:
   - Automatically detects your SvelteKit project directory.
   - Compiles your app into an architecture-independent layout using the Bun runtime.
-  - Assembles a 5-layer OCI container image on a Distroless glibc base.
+  - Assembles a multi-layer OCI container image on a Distroless glibc base (run `pokkum explain` for the real per-build layer breakdown).
   - Generates SPDX-JSON Software Bill of Materials (SBOMs).
   - Pushes the multi-architecture image (`linux/amd64`, `linux/arm64`) to `ghcr.io/example/my-app`.
 
@@ -159,7 +159,7 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 
 | Command                    | Usage                                       | Description                                                                        |
 | -------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `pokkum build [dir]`       | `pokkum build ./my-app`                     | Compiles SvelteKit app into a 5-layer OCI container image.                         |
+| `pokkum build [dir]`       | `pokkum build ./my-app`                     | Compiles SvelteKit app into a multi-layer OCI container image.                     |
 | `pokkum resolve -f <file>` | `pokkum resolve -f deploy.yaml`             | Resolves `pokkum://` URIs in K8s manifests to immutable image digests.             |
 | `pokkum apply -f <file>`   | `pokkum apply -f deploy.yaml`               | Resolves manifests and pipes directly to `kubectl apply`.                          |
 | `pokkum dev [dir]`         | `pokkum dev ./my-app`                       | Local development mode with hot-reloading file watcher and Docker daemon loading.  |
@@ -174,7 +174,7 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 
 ## Documentation & Deep Dive
 
-- **[ARCHITECTURE.md](ARCHITECTURE.md)**: Architectural invariants, Hexagonal layer boundaries, and 5-layer layout.
+- **[ARCHITECTURE.md](ARCHITECTURE.md)**: Architectural invariants, Hexagonal layer boundaries, and image layer layout.
 - **[Vocabulary.md](Vocabulary.md)**: Complete CLI flag reference and configuration options.
 - **[Roadmap.md](Roadmap.md)**: Implementation progress and future feature backlog.
 - **[fixes-to-v1.md](fixes-to-v1.md)**: Post-v1.0 audit findings and the fixes applied for each.

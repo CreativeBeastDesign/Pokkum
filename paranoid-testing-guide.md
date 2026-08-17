@@ -117,9 +117,10 @@ docker inspect "$POKKUM_DOCKER_REPO@$DIGEST" | jq '.[0].Config'
   claims `runAsNonRoot`/UID 65532 — confirm it here, not from a Pokkum log
   line).
 - `docker history "$POKKUM_DOCKER_REPO@$DIGEST"` — count the layers
-  yourself, cross-check against the 5-layer architecture Pokkum's docs
-  describe (base, Bun runtime, supervisor, app server/client, vendor,
-  native — depending on `--strategy`).
+  yourself, cross-check against `pokkum explain "$POKKUM_DOCKER_REPO@$DIGEST"`'s
+  real per-layer breakdown for that same image (the layer count and set vary
+  by `--strategy` and by which optional layers — client assets, vendor deps,
+  native addons, prerendered pages — a given build actually produced).
 - If `crane` is installed: `crane manifest "$POKKUM_DOCKER_REPO@$DIGEST" | jq .`
   gives you the raw OCI manifest without Docker's daemon interpreting
   anything for you.

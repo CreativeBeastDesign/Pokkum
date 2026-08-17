@@ -87,7 +87,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--bun-variant` | — | — | `standard` | Bun CPU variant (`standard` [AVX2 required on x86-64] or `baseline`). |
 | `--bun-version` | — | — | (none, resolves to the pinned default) | Bun release version to embed. A small set of common versions is checksum-verified against statically pinned SHA256 digests; any other version is verified against Bun's own GPG-signed `SHASUMS256.txt.asc` release manifest before use — never installed unverified. Also available on `pokkum dev`. |
 | `--stub-launcher` | — | `POKKUM_STUB_LAUNCHER` | `false` | Compile a minimal entrypoint launcher stub instead of embedding stock Bun runtime (layered strategy runtime hardening). |
-| `--strategy` | — | — | `layered` | Packaging strategy (`layered` [8-layer layout], `static` [zero-JS static site], or `exe` [single executable, deprecated]). |
+| `--strategy` | — | — | `layered` | Packaging strategy (`layered` [multi-layer layout — see `pokkum explain` for a given build's real breakdown], `static` [zero-JS static site], or `exe` [single executable, deprecated]). |
 | `--static` | — | — | `false` | Shorthand for `--strategy=static`: compile a purely static site onto a minimal libc-free `chainguard/static` image served by the embedded `pokkum-static` PID-1 file server (no Bun runtime, no compiled executable). Conflicts with `--strategy=exe`; defaults the base to the static image when no `--base`/`--hardened` is given. |
 | `--compression` | — | — | `gzip` | Layer compression algorithm (`gzip` or `zstd`). |
 | `--sourcemap` | — | `POKKUM_SOURCEMAP` | `false` | Generate and preserve source maps in compiled bundles and vendor layers. |
@@ -177,13 +177,17 @@ Subcommand group to inspect and validate project configuration files (`.pokkum.y
 
 ---
 
-## 9. `pokkum explain` / `pokkum why` / `pokkum diff`
+## 9. `pokkum explain` / `pokkum explain why` / `pokkum explain diff`
+
+`why` and `diff` are subcommands of `explain`, not top-level commands — the invocation is `pokkum explain why ...` / `pokkum explain diff ...`.
 
 | Command / Flag | Default | Description |
 |---|---|---|
-| `pokkum explain [image]` | — | Inspects layer hierarchy, sizes, and functions for an image or local build. |
-| `pokkum why <file-path>` | — | Traces which layer and input source embedded a specific file. |
-| `pokkum diff <img1> <img2>` | — | Compares layer size and structure differences between two images. |
+| `pokkum explain <image>` | — | Reads a real image (registry ref, or a local `.tar` from `pokkum build --output=tarball`) and reports its actual per-layer digest, compressed size, real file count, and purpose (derived from the image's own history metadata for layers Pokkum built). The layer count printed is whatever the image actually has. |
+| `pokkum explain why <image> <file-path>` | — | Traces which real layer a file came from, was deleted in (via a whiteout), or reports it was never present in any layer. |
+| `pokkum explain diff <image1> <image2>` | — | Compares two real images' manifests and, for any layer whose digest differs, reports real added/removed/modified files. |
+| `--platform` (`-p`) | host platform | On all three: which child image to inspect when the target is a multi-arch index, e.g. `linux/amd64`. |
+| `--registry-config` | — | On all three: path to a `docker config.json`-style auth file for private registries. |
 
 ---
 
