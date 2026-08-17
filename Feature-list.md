@@ -32,8 +32,8 @@ This document provides a comprehensive inventory of all implemented features, ca
 - **Hermetic Build Mode**: `--hermetic` enforces zero network egress (`BUN_OFFLINE=1`), cached base image resolution, and pre-populated `node_modules/` verification.
 
 ### OpenTelemetry & Observability
-- **Zero-Config Virtual Instrumentation**: Automatically injects OpenTelemetry tracing and metrics instrumentation via `.pokkum/src/instrumentation.server.ts` or preserves user-authored `src/instrumentation.server.ts` intact.
-- **Unified Metrics & Tracing Controls**: Build-time configuration via `--telemetry`, `--no-telemetry`, `--otel-export`, `--telemetry-env` (`dev`, `preview`, `production`), `--trace-sample-rate` (`0.0`–`1.0`), and `--metrics-only`.
+- **Zero-Config Virtual Instrumentation** ⚠️ **Currently non-functional — see `Roadmap.md`'s PR-5 (rescoped 2026-08-17) and `Lessons.md`**: the generator for `.pokkum/src/instrumentation.server.ts` and the `kit.experimental.tracing`/`instrumentation` svelte.config.js flag injection both exist and are individually unit-tested, but neither is actually invoked by a real build today — `--telemetry`/`.pokkum.yaml` OTel settings parse and validate but have no observable effect on a built image. Fixing this requires a build-dispatch architecture change, not a small patch; not yet implemented.
+- **Unified Metrics & Tracing Controls**: Build-time configuration via `--telemetry`, `--no-telemetry`, `--otel-export`, `--telemetry-env` (`dev`, `preview`, `production`), `--trace-sample-rate` (`0.0`–`1.0`), and `--metrics-only` — flags parse and validate correctly, but see the Zero-Config Virtual Instrumentation caveat directly above: none of them currently reach a running build.
 - **Application Metrics Endpoint (`pokkum metrics`)**: Exposes dedicated metrics scraping server via `pokkum metrics` (`--metrics-port`, default 8889).
 - **Kubernetes Collector Sidecar Injection**: `--with-otel-sidecar` injects OpenTelemetry Collector sidecar specs (`4317` gRPC, `4318` HTTP, `8889` metrics) directly into generated Kubernetes workload manifests.
 

@@ -270,6 +270,9 @@ Pokkum embeds supply chain security directly into the image publishing lifecycle
 
 ## 7. Unified Observability & OpenTelemetry Architecture
 
+> [!WARNING]
+> **Currently non-functional (found 2026-08-17, see `Roadmap.md`'s PR-5 and `Lessons.md`).** The pieces described below exist and are individually unit-tested, but nothing in the real build pipeline calls them: `internal/core/pipeline.go`'s `ports.PrepareRequest{}` construction never sets `Telemetry:`, so `internal/adapters/bunexec/compiler.go`'s `Compiler.Prepare` never sees `req.Telemetry` and never calls `sveltekitutils.PrepareVirtualInstrumentation`; the `kit.experimental.tracing`/`instrumentation` svelte.config.js flag injection is separately dead for a reason already documented in `compiler.go`'s own comments (its `.pokkum/svelte.config.js` output is never read by either build path). `--telemetry`/`.pokkum.yaml`'s `otel.*` settings parse and validate but have no effect on a built image today. The design below describes the intended architecture, not current behavior.
+
 Pokkum unifies trace spans and metrics into a native, zero-config OpenTelemetry pipeline built on SvelteKit 2.31+ native observability (`kit.experimental.tracing.server` and `kit.experimental.instrumentation.server`):
 
 * **SvelteKit Version Inspection (`internal/adapters/sveltekitutils/project.go`)**: Inspects `@sveltejs/kit` in `package.json`. If < 2.31.0, telemetry injection is gracefully skipped.
