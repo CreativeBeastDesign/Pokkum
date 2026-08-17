@@ -86,7 +86,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--sourcemap` | — | `POKKUM_SOURCEMAP` | `false` | Generate and preserve source maps in compiled bundles and vendor layers. |
 | `--no-prune` | — | — | `false` | Disable build-time stripping of non-runtime files (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests) from `/app/vendor`. |
 | `--keep-vendor` | — | — | (none) | Custom glob pattern(s) of vendor files to preserve during pruning, repeatable (e.g. `--keep-vendor='*.md'`). |
-| `--no-precompress` | — | — | `false` | Disable build-time static asset pre-compression (`.gz`, `.br`, `.zst`) for `/app/client`. |
+| `--no-precompress` | — | — | `false` | Disable build-time static asset pre-compression (`.gz`/`.br`; also `.zst` under `--strategy=static`) for `/app/client`. |
 | `--no-strip` | — | — | `false` | Disable build-time stripping of unneeded debug symbols from native `.node` ELF addons. |
 | `--no-cache` | — | — | `false` | Disable checking and publishing to the remote composite OCI input cache. |
 | `--no-cache-verify` | — | — | `false` | Disable cryptographic signature verification on remote cache-hit images. |

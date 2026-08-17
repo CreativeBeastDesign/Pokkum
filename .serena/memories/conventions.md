@@ -30,7 +30,7 @@
   - Sets pinned `SOURCE_DATE_EPOCH` timestamps on stripped files.
   - Escape hatch: `--no-strip` disables native addon debug symbol stripping.
 - **Build-Time Static Asset Pre-Compression (`internal/adapters/precompressutils`)**:
-  - Automatically generates `.gz` (Gzip level 9), `.br` (Brotli quality 11), and `.zst` (Zstandard best compression) sidecars for compressible assets (`.js`, `.css`, `.html`, `.json`, `.svg`, `.wasm`, etc.) in `/app/client`.
+  - Generates `.gz` (Gzip, via `github.com/klauspost/compress/gzip`, not stdlib), `.br` (Brotli quality 11), and/or `.zst` (Zstandard best compression) sidecars for compressible assets (`.js`, `.css`, `.html`, `.json`, `.svg`, `.wasm`, etc.) in `/app/client`/`/app/prerendered`, per `PrecompressOptions{Gzip, Brotli, Zstd bool}` — the layered strategy requests gzip+brotli only (its sirv server never negotiates zstd); `--strategy=static` requests all three.
   - Pre-compression executes strictly inside the `.pokkum/` build sandbox (`OutputDir/client`), ensuring zero mutation of user source files.
   - Sidecars inherit pinned `SOURCE_DATE_EPOCH` timestamps.
   - Escape hatch: `--no-precompress` disables static pre-compression.

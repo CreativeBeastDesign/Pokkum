@@ -37,10 +37,10 @@ const (
 	goldenSupervisorLayerDiffID = "sha256:dfbcaa2cb264f3acee10b7b6aeced293c3283460e07c0f63bca2d05177a60d4e"
 	goldenSupervisorLayerDigest = "sha256:39064dcb430d05629cfc39ac324657459f412d0424f9d0ad9d5a8da5d712cfba"
 	goldenAppLayerDiffID        = "sha256:444f537f1513ae1971fb23beaec92dd1fb046f8c533d411518d421ad94707602"
-	goldenAppLayerDigest        = "sha256:363520a76df60ab6a9ce193a54076c20d19a5c18d96678d84c1bc4d433b19701"
+	goldenAppLayerDigest        = "sha256:f145163ebb449b41bb6c46cf894839aabb2c80e937a8185c124ce234610fe62a"
 	goldenConfigDigest          = "sha256:50c44d23216338fcb78bf3b0f111f9c351d726642ee17e75b7c42d4ee27e549b"
-	goldenManifestDigest        = "sha256:3ea634df883efc60ea2cae0c70acf3b96ee17341c1028850332283264cc7d29a"
-	goldenIndexDigest           = "sha256:a1afd0511491d24a163abdbc1ebf43247a9a7e120708922d1cfab44eb6ea8266"
+	goldenManifestDigest        = "sha256:270927be57664f7227452f2ab7dce976c128b6ae71f38883370d585f8ac0c5e7"
+	goldenIndexDigest           = "sha256:d92b441587e0da7577d540e1be691dcc3fd94ad76baa3b4f79a915aa3233cf86"
 )
 
 func TestGoldenImageDigests(t *testing.T) {

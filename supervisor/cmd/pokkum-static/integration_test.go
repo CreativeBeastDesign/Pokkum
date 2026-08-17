@@ -109,11 +109,14 @@ func buildStaticIntegrationFixture(t *testing.T) staticIntegrationFixture {
 	writeFile(indexPath, indexHTML)
 
 	// Real compression via the same production code path the build pipeline
-	// uses (internal/adapters/precompressutils), not hand-faked bytes.
-	if err := precompressutils.PrecompressDirectory(clientRoot, fixtureModTime); err != nil {
+	// uses (internal/adapters/precompressutils), not hand-faked bytes. This
+	// fixture exercises pokkum-static, which (unlike the layered strategy's
+	// sirv server) genuinely negotiates all three sidecar formats.
+	allFormats := precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: true}
+	if err := precompressutils.PrecompressDirectory(clientRoot, fixtureModTime, allFormats); err != nil {
 		t.Fatalf("PrecompressDirectory(client): %v", err)
 	}
-	if err := precompressutils.PrecompressDirectory(prerenderedRoot, fixtureModTime); err != nil {
+	if err := precompressutils.PrecompressDirectory(prerenderedRoot, fixtureModTime, allFormats); err != nil {
 		t.Fatalf("PrecompressDirectory(prerendered): %v", err)
 	}
 

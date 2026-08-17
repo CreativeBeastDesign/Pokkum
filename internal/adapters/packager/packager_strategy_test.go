@@ -354,3 +354,93 @@ func TestBuild_StrategyStatic_FallbackEnv(t *testing.T) {
 		}
 	})
 }
+
+// precompressibleAsset is large and repetitive enough to clear
+// precompressutils.PrecompressFile's two skip gates: the 64-byte minimum-size
+// floor and the "only keep a sidecar that's actually smaller than the
+// source" check. A short fixture like "client asset" (used elsewhere in this
+// file for layer-presence tests, where sidecar generation is irrelevant)
+// would silently produce zero sidecars of any format, making a `.zst`
+// absence assertion trivially true rather than a real regression guard.
+var precompressibleAsset = strings.Repeat("console.log('pokkum precompression fixture');\n", 50)
+
+// allTarMemberNames flattens every layer of img into one list of tar entry
+// names, so a sidecar-format assertion doesn't need to know which layer
+// index the client/prerendered content landed at for a given strategy.
+func allTarMemberNames(t *testing.T, img v1.Image) []string {
+	t.Helper()
+	layers, err := img.Layers()
+	if err != nil {
+		t.Fatalf("layers: %v", err)
+	}
+	var names []string
+	for _, l := range layers {
+		for _, m := range readLayer(t, l) {
+			names = append(names, m.Name)
+		}
+	}
+	return names
+}
+
+// hasSuffixAmong reports whether any name in names ends with suffix.
+func hasSuffixAmong(names []string, suffix string) bool {
+	for _, n := range names {
+		if strings.HasSuffix(n, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBuild_PrecompressionFormatsPerStrategy is PR-3's regression guard:
+// the layered strategy's runtime (adapter-node's bundled sirv server) only
+// ever negotiates gzip/brotli, never zstd, so generating `.zst` sidecars for
+// it is wasted build time and wasted layer bytes; only pokkum-static
+// (--strategy=static) actually serves them. Nothing prior to this test
+// asserted either half of that contract.
+func TestBuild_PrecompressionFormatsPerStrategy(t *testing.T) {
+	t.Run("layered: gzip/brotli present, zstd absent", func(t *testing.T) {
+		req := newRequest(t, ports.LinuxAMD64)
+		req.Strategy = ports.StrategyLayered
+		req.BunRuntime = ports.BunResolverResult{BinaryPath: writeBinary(t, "bun", []byte("bun"))}
+		req.AppServerDir = writeStrategyDir(t, map[string]string{"index.js": "server entry"})
+		req.AppClientDir = writeStrategyDir(t, map[string]string{"app.js": precompressibleAsset})
+		req.AppPrerenderedDir = writeStrategyDir(t, map[string]string{"index.html": precompressibleAsset})
+
+		img, err := NewPackager(testLogger()).Build(context.Background(), req)
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+
+		names := allTarMemberNames(t, img)
+		if !hasSuffixAmong(names, ".gz") {
+			t.Error("no .gz sidecar found in a layered-strategy build; want gzip still generated")
+		}
+		if !hasSuffixAmong(names, ".br") {
+			t.Error("no .br sidecar found in a layered-strategy build; want brotli still generated")
+		}
+		if hasSuffixAmong(names, ".zst") {
+			t.Error("found a .zst sidecar in a layered-strategy build; adapter-node's sirv server never negotiates zstd, so it should not be generated")
+		}
+	})
+
+	t.Run("static: gzip/brotli/zstd all present", func(t *testing.T) {
+		req := newRequest(t, ports.LinuxAMD64)
+		req.Strategy = ports.StrategyStatic
+		req.StaticServer = []byte("fake-pokkum-static-binary")
+		req.AppClientDir = writeStrategyDir(t, map[string]string{"app.js": precompressibleAsset})
+		req.AppPrerenderedDir = writeStrategyDir(t, map[string]string{"index.html": precompressibleAsset})
+
+		img, err := NewPackager(testLogger()).Build(context.Background(), req)
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+
+		names := allTarMemberNames(t, img)
+		for _, suffix := range []string{".gz", ".br", ".zst"} {
+			if !hasSuffixAmong(names, suffix) {
+				t.Errorf("no %s sidecar found in a static-strategy build; pokkum-static negotiates all three formats", suffix)
+			}
+		}
+	})
+}

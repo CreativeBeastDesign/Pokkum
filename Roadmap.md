@@ -8,6 +8,16 @@ several `[x]` items below overstated what they actually did, and the fixes
 applied for each; [for-users.md](for-users.md) for what changed as a
 result.
 
+## Status flag legend
+
+| Flag | Meaning |
+| ---- | ------- |
+| 🚩 **PUBLISH-BLOCKER** | **Do not go public until this is fixed.** Either the code does not do what a shipped document claims it does, or it fails on the first thing a new user will try. Publishing with any of these open invites the exact criticism the item describes. |
+| ⚠️ **PUBLISH-RISK** | Fix it, or explicitly downgrade the corresponding claim in `Feature-list.md`/`README.md` before publishing. Shipping the feature *and* the overclaim together is what does the damage — either half alone is fine. |
+| (no flag) | Ordinary backlog. Publishing does not depend on it. |
+
+**The single gate for going public: zero open 🚩 items, and every ⚠️ item either fixed or reworded in the docs.** Everything else on this roadmap can ship afterwards. See the [Pre-Publication Gate](#-pre-publication-gate-external-review-2026-08-17) section below for the current list.
+
 ## v0.1 (Completed)
 
 - [x] Reproducible layer timestamps: set every layer/config timestamp to `SOURCE_DATE_EPOCH` derived from the last git commit (`git log -1 --pretty=%ct`), not build time
@@ -44,7 +54,7 @@ _Refactoring to replace the `exe` adapter with a hand-rolled adapter for layer c
 - [x] `pokkum doctor`: Environment preflight checks (Bun version, registry auth, `svelte.config.js` sanity). (new flag: `--fix` for mechanical repairs)
 - [x] Interactive Failure Diagnostics: Automatic log dump and exit code analysis on local container failure. (new flag: `--no-diagnostics` opt-out for CI)
 - [x] `--output=json`: Machine-readable build results schema for robust CI parsing.
-- [x] Diff & Explain: `pokkum diff`, `pokkum explain`, and `pokkum why` to trace layer changes and dependencies. (reuses `--output=json` for machine-readable output; no new flag)
+- [ ] Diff & Explain: `pokkum diff`, `pokkum explain`, and `pokkum why` to trace layer changes and dependencies. (reuses `--output=json` for machine-readable output; no new flag) — **correction (2026-08-17), un-checked: all three are stubs returning hardcoded fabricated data.** `cmd/pokkum/explain.go:47` returns a literal slice with `Digest: "sha256:base..."` and invented byte counts; `:100` hardcodes `"layer_index": 3` for any path passed to `why`; `:130` hardcodes `"modified": ["Layer #3 (App JS)"]` for `diff`. The 143-line file contains no `remote.`, no `Fetch`, and no image access of any kind. A **Zero Fake Implementations** violation (`CLAUDE.md` §3) found during external-review verification; tracked as **PB-1** in the Pre-Publication Gate.
 
 ## v0.5: Reproducibility & Diagnosis
 
@@ -146,6 +156,53 @@ The post-v1.0 milestones addressed critical supply chain verification, CVE gatin
 
 ---
 
+## 🚩 Pre-Publication Gate (External Review, 2026-08-17)
+
+_Source: two independent external reviews of [Feature-list.md](Feature-list.md), each claim then verified against the actual code rather than taken at face value. The reviews' own accuracy is audited in [AdditionalFeatures.md](AdditionalFeatures.md#external-review-audit-2026-08-17) — including three claims that are **wrong** and must not be "fixed"._
+
+The reviews converged on one structural finding worth stating plainly:
+
+**The supply-chain and OCI plumbing is expert-level and real. The SvelteKit runtime semantics are thin — and that is where the users actually live.** Almost everything currently shipped would apply equally to a Next.js or Remix packager. The three places where SvelteKit is genuinely weird in production (`$env/static/*` build-time inlining, `ORIGIN`/CSRF reconstruction behind an ingress, asset version skew during rolling deploys) are unaddressed, and the three SvelteKit-facing introspection commands are stubs.
+
+### Blockers
+
+| ID | Item | Why it blocks publication | Files | Effort |
+| --- | ---- | ------------------------- | ----- | ------ |
+| **PB-1** | 🚩 `explain` / `why` / `diff` return hardcoded fabricated data | `Feature-list.md` line 92 claims working layer introspection. The commands print invented digests (`sha256:base...`) and invented byte counts. This is the one line in that document that is not true, and it is a **Zero Fake Implementations** violation (`CLAUDE.md` §3) | `cmd/pokkum/explain.go` | Medium |
+| **PB-2** | 🚩 Bun release checksums pinned for exactly one version | `pinnedReleaseChecksums` holds 3 entries, all `1.2.2`, behind an `if …, ok` guard. **Any other `--bun-version` downloads and installs a ~90MB binary with no integrity check at all.** Unacceptable in a tool whose pitch is supply-chain integrity | `internal/adapters/bunruntime/resolver.go:27` | Low |
+| **PB-3** | 🚩 No `$env/static/*` detection | SvelteKit inlines `$env/static/*` at **build** time. A user who imports from it gets an image pinned to one environment, and can promote staging's `PUBLIC_API_URL` to prod with nothing in any annotation showing it. This silently invalidates digest pinning, `resolve`, rollback, and provenance as *environment-independent* guarantees | new — `sveltekitutils` + annotation plumbing | Medium |
+| **PB-4** | 🚩 No `ORIGIN` / proxy-header / body-limit contract | adapter-node's documented contract (`ORIGIN`, `PROTOCOL_HEADER`, `HOST_HEADER`, `ADDRESS_HEADER`, `XFF_DEPTH`, `BODY_SIZE_LIMIT`) appears **nowhere** in the codebase. Every app with a form action behind an ingress gets `403 Cross-site POST form submissions are forbidden` on first deploy. This will be the highest-volume bug report by a wide margin | `cmd/pokkum/build.go`, `internal/adapters/packager`, `supervisor/` | Low–Medium |
+| **PB-5** | 🚩 `.pokkum/` config relocation breaks `__dirname`-relative paths | `rewriteRelativeImportSpecifiers` rewrites relative *import specifiers* only. It does not pin Vite's `root`, does not rewrite `resolve.alias`, and does nothing about `__dirname` / `import.meta.url`. The near-universal `path.resolve(__dirname, './src/lib')` resolves to `<project>/.pokkum/src/lib` and breaks. Zero-config injection is the headline DX feature; it must not break on the common config shape | `internal/adapters/sveltekitutils/injector.go:416` | Medium |
+
+### Risks — fix, or reword the claim before publishing
+
+| ID | Item | The overclaim to fix if the code isn't | Files | Effort |
+| --- | ---- | -------------------------------------- | ----- | ------ |
+| ~~**PR-1**~~ | ✅ **FIXED (2026-08-17)** — Layer gzip uses stdlib `compress/gzip` | Both `internal/adapters/packager/layer.go` (OCI layer compression) and `internal/adapters/precompressutils/precompressutils.go` (client/prerendered `.gz` sidecars, which are tarred into the layer and would otherwise still move the uncompressed DiffID across toolchains) are now pinned to `github.com/klauspost/compress/gzip`, already a version-locked `go.mod` dependency. `Feature-list.md` Limitation #3 (gzip framing skew) is deleted; golden digests re-recorded in `golden_test.go` — only the compressed-bytes-dependent constants moved, DiffIDs/config digest unchanged, confirming no accidental content drift | `internal/adapters/packager/layer.go:18`, `internal/adapters/precompressutils/precompressutils.go:4` | **Low** |
+| **PR-2** | ⚠️ `--hermetic` is env-var advisory, not enforced | `Feature-list.md` line 31 says it "enforces zero network egress". It sets `BUN_OFFLINE=1`/`NODE_ENV`/`NO_UPDATE_NOTIFIER`, preflights a populated `node_modules`, and resolves the base offline. A malicious `postinstall` can ignore all of it. Either enforce (netns/Landlock/seccomp `connect`) or downgrade the wording to "best-effort" | `internal/adapters/bunexec/compiler.go:324`, `Feature-list.md:31` | Low (reword) / High (enforce) |
+| ~~**PR-3**~~ | ✅ **FIXED (2026-08-17)** — `.zst` sidecars are dead weight in the default strategy | `precompressutils.PrecompressOptions{Gzip, Brotli, Zstd bool}` now lets each call site select formats; the layered strategy's client/prerendered precompression requests gzip+brotli only (adapter-node's sirv server never negotiates zstd), while `--strategy=static` keeps requesting all three (`pokkum-static` genuinely serves `.zst`). Regression-guarded by `TestBuild_PrecompressionFormatsPerStrategy` in `internal/adapters/packager/packager_strategy_test.go` | `internal/adapters/packager/packager.go:257`, `internal/adapters/precompressutils/precompressutils.go` | **Trivial** |
+| **PR-4** | ⚠️ `/readyz` proves only a TCP listener | SvelteKit 2.x's server `init` hook is where real apps open DB pools and warm caches. A pod passes readiness before `init` resolves and takes traffic it cannot serve — the exact failure the graceful-drain logic prevents at the other end. No `startupProbe` is generated either | `supervisor/cmd/pokkum-init/probe.go:62`, `internal/adapters/k8s` | Medium |
+| **PR-5** | ⚠️ OTel spans will have unbounded cardinality | Generated instrumentation is a bare `NodeSDK` + `getNodeAutoInstrumentations()`. Nothing reads `event.route.id` from the `handle` hook, so spans are named `/blog/hello-world`, not `/blog/[slug]`. Also missing: `fetch` context propagation inside `load`, `handleError` → span status, and trace-correlated JSON logging (the thing people actually use) | `internal/adapters/sveltekitutils/telemetry.go:38` | Medium |
+| **PR-6** | ⚠️ `--fail-on-cve` has no exemption mechanism | All-or-nothing. One unexploitable OpenSSL advisory in a Chainguard base blocks every deploy, and the real-world response is `--fail-on-cve=critical`, then `--allow-incomplete`, then nothing. Needs OpenVEX with **mandatory** expiry + justification + owner | new — see item 8 below | Medium |
+| **PR-7** | ⚠️ Bun is absent from the SBOM | Its SHA-256 **is** correctly recorded in SLSA provenance (`slsa/generator.go:96`), but `sbom/generator.go` only parses `bun.lock` for npm packages. The largest single component in the image is not catalogued | `internal/adapters/sbom/generator.go` | Low |
+| **PR-8** | ⚠️ `--sbom-attach=referrer` has no capability probe | ECR, older Harbor, and older Artifactory still lack OCI 1.1 referrers. The mode is a flag the user must know to flip, not an `auto` that probes and falls back to the tag scheme | `internal/adapters/registry/sbom.go:63` | Low |
+| **PR-9** | ⚠️ Layer-count / 8-vs-5 documentation inconsistency | `Feature-list.md:12` says 8 layers; `explain.go`'s stub and its `Long` string say 5. Whichever is right, one is wrong in a user-facing string. Folds into PB-1 | `cmd/pokkum/explain.go:24`, `Feature-list.md:12` | Trivial |
+
+### Suggested order
+
+Batch by file and by risk, not by ID:
+
+| Wave | Contents | Rationale |
+| ---- | -------- | --------- |
+| 1 | ~~**PR-1 + PR-3**~~ ✅ **Done (2026-08-17)** | Both touch `packager/`, both are small, both are strictly-better-than-status-quo with no design debate. Together they let you *delete* Limitation #3 from `Feature-list.md` |
+| 2 | **PB-2 + PR-7** | Same subject (the Bun binary), both low effort, closes the largest unattested artifact in the image |
+| 3 | **PB-4 + PR-4** | Both are the runtime/ingress contract; shipping `ORIGIN` without real readiness leaves half the "works locally, 403s in the cluster" story open |
+| 4 | **PB-1 + PR-9** | Decide first: build real layer introspection, or cut the three commands and the feature-list line. Both are acceptable; shipping the stubs is not |
+| 5 | **PB-5**, then **PB-3** | PB-5 protects the feature already shipped; PB-3 is new surface |
+| 6 | **PR-2, PR-5, PR-6, PR-8** | Independent; PR-2's reword is a 5-minute unblock if enforcement is deferred |
+
+---
+
 ## Recommended Next Steps (Prioritized)
 
 Prioritized backlog for ongoing development:
@@ -195,6 +252,80 @@ Prioritized backlog for ongoing development:
 - **Solution**: Integrate Open Policy Agent (OPA) / Rego policy evaluation to assert organizational supply-chain and container security policies against image metadata, SBOMs, and scan results prior to publishing.
 - **Flags/Interface**: `pokkum policy check --policy=<path>` subcommand and `--policy=<path>` build gate.
 
+### 5. Rolling-Deploy Asset Overlay (High Priority — Differentiator)
+- **Problem**: SvelteKit's client polls `/_app/version.json`. During a rolling update across N replicas, a browser holding v1's HTML requests `/_app/immutable/chunks/<hash>.js` and gets routed to a v2 pod → **404 → white screen**. `updated.check()` improves the UX but does not close the 404 window, and it is worse with prerendered pages and long-lived tabs. No competitor solves this.
+- **Why Pokkum specifically can**: it already controls layer composition *and* already records `pokkum.dev/image-history` (used by `pokkum rollback`). Pull the previous N images' `/app/client/_app/immutable` content by digest, merge non-conflicting hashed files into a separate overlay layer. Because the merged bytes are identical to what the node already pulled, the layer dedupes at the registry **and** on the node. Cost is near zero; benefit is rolling deploys that actually work.
+- **Flags/Interface**: `--asset-overlay=<n>` on `pokkum build` (default `0` = off, preserving current behavior). Interacts with the composite input hash — the overlay's source digests must be part of the cache key or a cache hit will serve a stale overlay.
+- **Open question**: conflict policy when the same hashed path exists with different bytes across generations (should be impossible given content hashing, so it likely warrants a hard build failure rather than a silent pick).
+
+### 6. Sub-Second Cluster Dev Loop (High Priority — Differentiator)
+- **Problem**: `pokkum dev` goes through full image construction and a Docker/Podman daemon. That is table stakes, and it is not what makes anyone switch tools. Both external reviews independently flagged the dev loop.
+- **Solution**, in ascending order of value:
+  - **6a (cheap, do first)**: a no-container mode that skips image creation entirely and runs a hot-reloading Bun process locally, with an opt-in container-parity mode. This is what most SvelteKit developers actually want day to day.
+  - **6b (differentiated)**: `pokkum dev --cluster` — watch → rebuild → sync `/app/server` + `/app/client` into a running pod via the Kubernetes API → restart the Bun process. No registry round-trip. This is the SvelteKit analog of hot-swapping a Go binary and would beat Skaffold and Tilt on their own turf.
+  - **6c (adjacent, cheap)**: `--to-oci-layout` / tarball output plus direct `kind`/`k3d`/`minikube` load, for users with no daemon at all.
+- **Flags/Interface**: `--no-container` (or `--local-process`) on `dev`; `--cluster` + `--namespace`/`--selector` on `dev`; `--to-oci-layout=<path>` on `build`.
+
+### 7. `--runtime=node` (High Priority — Adoption Ceiling)
+- **Problem**: Bun-only is the single largest cap on addressable users. Many teams cannot run Bun in production for policy reasons, Node-compat risk (`AsyncLocalStorage`, `worker_threads`, N-API gaps), or plain conservatism. Today a user who hits a Bun compat bug has **no escape hatch** — they abandon the tool.
+- **Solution**: `--runtime=node` targeting a distroless Node base. Architecturally cheap relative to its reach: the layered strategy already separates runtime / server / vendor / client, and adapter-node is already the layered target adapter. Roughly doubles the addressable audience and converts a dead end into a fallback.
+- **Flags/Interface**: `--runtime=bun|node` (default `bun`). Must join the composite input hash, `pokkum.lock` keying, and the toolchain CVE lookup.
+- **Note**: this is a *strategy* decision as much as a feature — see item 10.
+
+### 8. OpenVEX Exemptions with Mandatory Expiry (Medium-High Priority)
+- **Problem**: `--fail-on-cve` is all-or-nothing (**PR-6** above). Both external reviews raised this independently.
+- **Solution**: OpenVEX — a standard, not a bespoke YAML block, so the same document is consumable by Trivy, Grype, and Kyverno rather than Pokkum-only. Require `justification`, `expires`, and `owner` on every entry; **refuse to honor an expired or unjustified exemption** rather than warning, or the mechanism becomes a permanent mute button. Record the honored set in the attestation so an exemption is itself auditable.
+- **Flags/Interface**: `.pokkum-vex.yaml` (or `--vex=<path>`), read by `pokkum build`'s CVE gate and `pokkum scan`.
+- **Rejected alternative**: a `pokkum.base.exemptions` config section (as suggested by the second reviewer) — reinvents OpenVEX with none of the interoperability.
+
+### 9. Supply-Chain Completions (Medium Priority)
+- **Problem**: several narrow but real gaps, individually small, collectively the difference between a defensible SLSA story and an asserted one.
+- **Solution**:
+  - **9a — KMS-backed signing**: `POKKUM_SIGNING_KEY` holding a raw private key in an env var is a smell. Support `awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, and PKCS#11 URIs.
+  - **9b — CI OIDC identity**: provenance generated by a CLI on a developer laptop is SLSA L1/L2 in substance regardless of what the attestation says. Add first-class GitHub Actions / GitLab / Buildkite OIDC so the certificate identity is issuer-attested rather than self-asserted, and state the build environment explicitly in the attestation.
+  - **9c — Sigstore TUF refresh**: embedded trust roots go stale as the Sigstore root rotates via TUF. Ship a TUF client or a documented refresh path, or keyless verification silently breaks for anyone on an older binary.
+  - **9d — Multi-arch attestation subject**: document, test, and pin whether `.sig`/`.att` attach to the **index** digest, the **per-platform manifest** digests, or both. Verifiers differ, and getting it wrong means policy passes under `cosign verify` and fails under Kyverno (or the reverse). Attaching to both, and documenting which one `pokkum verify` checks, is the safe answer.
+  - **9e — Native addon provenance**: `sharp`, `better-sqlite3`, etc. ship prebuilt `.node` binaries fetched **outside** the npm tarball integrity model, and Syft will not meaningfully catalog them. Pokkum already strips their symbols — it should also hash them, record them in provenance, and flag any addon whose bytes are not covered by a lockfile tarball.
+  - **9f — Lifecycle-script provenance**: Bun blocks `postinstall` for untrusted dependencies and requires `trustedDependencies`. Emitting which packages actually executed lifecycle scripts during the build is a cheap provenance field nobody else publishes.
+  - **9g — Build-environment capture**: record the Go version Pokkum itself was built with, plus the resolved SvelteKit version, alongside the already-recorded Bun version.
+
+### 10. Registry & Runtime Ergonomics (Medium Priority — Support-Hour Sink)
+- **Problem**: unglamorous, and per the external review roughly a third of real-world failures live here.
+- **Solution**:
+  - **10a**: ECR requires the repository to exist before push → `--create-repository`.
+  - **10b**: resumable chunked upload with backoff on 429/5xx during a ~90MB layer push.
+  - **10c**: GAR/Harbor project-path semantics; Docker Hub anonymous base-pull rate limits surfaced as a readable error rather than a generic push/pull failure.
+  - **10d**: cgroup awareness in the supervisor — JSC does not read cgroup limits, so a Bun app in a 512Mi container OOMKills in ways that look random. Read `/sys/fs/cgroup/memory.max`, export it, and warn when the limit is below a sane floor.
+  - **10e**: source maps as an OCI referrer — strip from the image, attach as an artifact keyed to the digest, so `handleError` + Sentry release tagging works without shipping maps to production.
+  - **10f**: assert and test that the Bun layer diffID is **globally stable** for a given (version × variant × platform), so an entire fleet pulls ~90MB exactly once. It is the single biggest size lever and it is invisible unless enforced by a test.
+  - **10g**: state the Cache-Control contract as a tested invariant — `/_app/immutable/*` → `public, max-age=31536000, immutable`; `/_app/version.json` → `no-cache` (it is polled); `service-worker.js` → `no-cache` at root scope; prerendered HTML → `no-cache` or short TTL. Getting one wrong either breaks `updated.check()` or serves stale HTML forever.
+
+### 11. Scope Discipline & Polish (Medium Priority — Strategic)
+- **Problem**: raised by the first external review and worth taking seriously. `ko`'s power is that it is three seconds and one concept. Pokkum now has `scan`, `rollback`, `base update --mirror-registry`, NetworkPolicy/PDB generation, `upgrade`, `history`, `why`, `diff`, `explain`, `doctor`, `repro doctor`, `adopt`, `init`, `config`, and `metrics`. Each is individually defensible; collectively they are a large maintenance surface and a lot of `--help`.
+- **Suggested split** — this is a decision to make deliberately, not a task to complete:
+  - **Core (only Pokkum can build these)**: `build`, `resolve`, `verify`, `dev`, `explain` — plus reproducible SvelteKit images, asset overlay (item 5), the cluster dev loop (item 6), and env-baking detection (**PB-3**). This is the moat.
+  - **Adjacent (strong dedicated tools already exist)**: registry mirroring, NetworkPolicy generation, vulnerability scanning — maintenance spent competing with Trivy, Grype, Kyverno, and Renovate without differentiating.
+- **Polish items**, each small and each currently missing:
+  - JSON Schema for `.pokkum.yaml` with editor completion.
+  - `pokkum config view` showing value **provenance** (flag vs. profile vs. env vs. default), not just the resolved value.
+  - A documented exit-code table — 125/126 are already used meaningfully and are undocumented.
+  - An explicit "this tool sends no telemetry" statement.
+  - A stable Go library API, if Skaffold/Tilt integration is ever wanted.
+- **Reconsider**: `pokkum metrics` as a subcommand reads like a client-side scraper rather than a server the image exposes. Folding it into build flags and documenting the port contract would be clearer.
+
+### 12. Monorepo & Config Drift (Low-Medium Priority)
+- **Problem**: `--since` avoids builds *between* projects but does nothing *within* a build when many packages share dependencies. Separately, nothing validates that a `.pokkum.yaml`'s configured adapter, base image, and telemetry settings are still coherent after a SvelteKit or Bun upgrade.
+- **Solution**:
+  - **12a**: extend `layercacheutils` into a content-addressable vendor-layer cache keyed by `package.json` + lockfile subtree, shared across projects in one invocation (analogous to how `ko` leans on Go's build cache). **Verify first whether the existing layer cache already covers this** — the external review asserted the gap from the feature list, not the code.
+  - **12b**: a `pokkum doctor` check for config/toolchain drift — adapter still installed and still the effective one, base preset still resolvable, telemetry flags still valid for the detected SvelteKit version.
+  - **12c**: `.secretguardignore` / inline `// pokkum:allow-secret` comments. `--allow-secret-pattern` exists, but a global regex is a blunt instrument for a JWT signing key in a test file; a scoped annotation is the right granularity.
+  - **12d**: build-time test gating (`--test`) so image creation can be conditioned on the project's own test suite passing.
+
+### 13. Explicit Scope Decision: Edge / WASM Runtimes (Decision, Not Work)
+- **Problem**: SvelteKit has growing interest in edge runtimes (Cloudflare Workers, Deno Deploy, Vercel Edge). Pokkum has no path there, which is defensible — it is an **OCI image compiler**, and edge targets are not OCI images.
+- **Required action**: state this as explicitly **out of scope** in `README.md` before publishing, rather than leaving it as an apparent omission. An unstated non-goal reads as a gap; a stated one reads as focus.
+- **Also decide and state**: is Pokkum optimizing for *maximum security and reproducibility* or *fastest path to production for a typical team*? The current design leans hard toward the former, and items 5, 6, and 7 all lean toward the latter. Publishing without an answer means the README cannot be written coherently.
+
 ---
 
 ## Beyond v1.0 / Long-term Backlog
@@ -208,5 +339,8 @@ _Features planned for future architectural iterations:_
 - [ ] Asset Optimization Pipeline: Automatic WebP/AVIF variants, cache-busting, CDN-origin separation. (new flag: `--optimize-assets` on `build`)
 - [ ] Plugin System: Extensible via external packages (high complexity/supply-chain risk). (new subcommands: `pokkum plugin add|list|remove <name>`)
 - [ ] `--verify-base-on-cache-hit` (opt-in, strict): On a confirmed remote-cache hit, still run `BaseImageResolver.VerifyBaseImage` before accepting the hit. Today a cache hit deliberately skips base-image signature verification (nothing is built from the base on a hit, and the cache key already binds the base image digest via `pokkum.lock`); the skip is disclosed with an explicit audit log line. This flag exists for strict supply-chain-audit environments that want the uniform guarantee "every emitted/promoted image traces to a verified base, hit or miss" — notably catching the narrow case of a base whose pinned digest still matches but whose signature was later revoked/rekeyed. Must stay **structurally independent** of `--cache-verify` (which authenticates the cache-hit *output* image; this flag authenticates the *base*). Opt-in so the sub-100ms fast path is preserved by default. (new flag: `--verify-base-on-cache-hit` on `build`; see `AdditionalFeatures.md`)
+- [ ] Helm post-renderer mode + KRM function for kustomize/kpt (added 2026-08-17 from external review): `pokkum resolve` handles `pokkum://` in **raw** YAML, which covers Knative-style repos and little else — most teams template with Helm or Kustomize and will never reach `pokkum apply`. A `--post-renderer` mode (`helm install --post-renderer pokkum`) and a KRM function entrypoint would make `resolve` usable in the two toolchains that actually dominate. Note the existing `AdditionalFeatures.md` matrix row "Kubernetes (extended manifests/GitOps)" is marked **Done** while claiming "YAML/Helm/Kustomize templating" — that row is overstated and is corrected in that file.
+- [ ] Enforced hermetic builds via OS sandboxing (added 2026-08-17): the real fix behind **PR-2** — a Linux network namespace, Landlock, or a seccomp filter on `connect` — so `--hermetic` becomes a guarantee rather than a request a `postinstall` script can decline. Deferred because it is platform-specific and materially complex; the near-term action is the wording change, tracked as PR-2 in the Pre-Publication Gate.
+- [ ] Evaluate (and probably reject) `--strategy=optimized` layer collapsing (added 2026-08-17): the second external review suggested collapsing layers because "more layers = slower cold starts on some snapshotters." Layers pull in parallel and dedupe, and item 5's asset overlay *adds* a layer for a much larger win — so this is recorded for completeness but is most likely the wrong trade. **Do not build without a measurement** on CRI-O/containerd showing a real cold-start regression attributable to layer count in Pokkum's actual 8-layer shape.
 - [ ] Strategy-Dispatch Consolidation (see `concepts/strategy-dispatch-refactor-concept.md`): `ports.BuildStrategy` dispatch (`layered`/`exe`/`static`) is scattered across ~20 sites in 4 files with no compiler-enforced completeness — a future 4th strategy risks a missed branch. The concept doc proposes 3 package-local dispatch tables (not one cross-cutting interface — that would violate the hexagonal boundary between `internal/core` and the adapters). **Explicitly deferred by the concept doc's own recommendation**: do not build until a concrete 4th strategy, or a second real bug caused by the scattered pattern, makes the maintenance cost real rather than projected.
 

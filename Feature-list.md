@@ -15,9 +15,13 @@ This document provides a comprehensive inventory of all implemented features, ca
 - **Zero-Config Virtual Auto-Injection**: Surgically transforms `vite.config.ts/js` to inject/override the target adapter inside `sveltekit({ adapter: adapter() })` while preserving runes, compiler options, and other plugins. `bunexec.Compiler.Prepare` generates `.pokkum/<viteConfigName>` and invokes `bun x vite build --config .pokkum/<viteConfigName>` without mutating user-authored files, with fallback to Option C (`checkEffectiveAdapter` fail-fast validation).
 - **Layered Runtime Hardening & Startup Attestation**:
   - Option A Compiled Stub Launcher (`--stub-launcher`): Replaces stock Bun CLI with a minimal non-foldable entrypoint launcher (`const p = "/app/server/" + "index.js"; await import(p);`) eliminating the `BUN_BE_BUN` / `bunx` attack surface.
-  - Option C Supervisor Startup Attestation (`POKKUM_ATTESTATION_DIGEST`): Computes a deterministic SHA-256 root digest over authoritative post-processing `/app` artifacts, verified by `/pokkum/init` prior to execution (exit 126 on mismatch).
+  - Option C Supervisor Startup Attestation (`POKKUM_ATTESTATION_DIGEST`): Computes a deterministic SHA-256 root digest over authoritative post-processing `/app` artifacts, verified by `/pokkum/init` prior to execution (exit 125 on mismatch, reserving exit 126 for binary exec failures).
 - **Composite Remote OCI Input Caching & Anti-Poisoning**: Computes deterministic composite input hashes (`sha256(source + lockfile + baseDigest + bunVersion + platforms + flags)`) to skip builds in sub-100ms on registry cache hits, with mandatory pre-promotion Cosign/Sigstore signature verification (`--cache-verify`).
-- **Static Asset Pre-Compression**: Build-time `.gz`, `.br`, and `.zst` sidecar compression for `/app/client` web assets.
+- **Registry Push Throughput & Zero-Egress Optimizations**:
+  - Parallel layer uploads over HTTP/2 with configurable concurrency (`--push-concurrency`, defaulting to 4 workers).
+  - Cross-repository blob mounting (`mount=`/`from=`) for zero-egress base layer reuse when targeting same-host registries.
+  - Idempotent registry pushes skipping unchanged digests (`remote.Head`).
+- **Static Asset Pre-Compression**: Build-time `.gz`/`.br` sidecar compression for `/app/client` web assets under the layered strategy (adapter-node's bundled `sirv` server never negotiates zstd); `--strategy=static` additionally generates `.zst`, which `pokkum-static` serves.
 - **Vendor Layer Pruning & ELF Stripping**: Automatic build-time removal of non-runtime files (`*.d.ts`, `*.map`, `tsconfig.json`, `README*`, tests) from `/app/vendor` and stripping of debug symbols from native `.node` addons.
 - **Configurable Layer Compression**: Supports `--compression=gzip` (default) and `--compression=zstd` for high-throughput registry pushes.
 - **Embedded PID-1 Process Supervisor (`/pokkum/init`)**:
@@ -25,6 +29,12 @@ This document provides a comprehensive inventory of all implemented features, ca
   - Graceful Shutdown & Readiness Drain: Instantly sets readiness probes (`/readyz`) to HTTP 503 on `SIGTERM` while holding open application draining before sending `SIGKILL` after `--shutdown-timeout` (default 30s).
   - Built-in Probes: Exposes lightweight health endpoints (`/livez`, `/readyz`) on dedicated probe port (default 8081).
 - **Hermetic Build Mode**: `--hermetic` enforces zero network egress (`BUN_OFFLINE=1`), cached base image resolution, and pre-populated `node_modules/` verification.
+
+### OpenTelemetry & Observability
+- **Zero-Config Virtual Instrumentation**: Automatically injects OpenTelemetry tracing and metrics instrumentation via `.pokkum/src/instrumentation.server.ts` or preserves user-authored `src/instrumentation.server.ts` intact.
+- **Unified Metrics & Tracing Controls**: Build-time configuration via `--telemetry`, `--no-telemetry`, `--otel-export`, `--telemetry-env` (`dev`, `preview`, `production`), `--trace-sample-rate` (`0.0`–`1.0`), and `--metrics-only`.
+- **Application Metrics Endpoint (`pokkum metrics`)**: Exposes dedicated metrics scraping server via `pokkum metrics` (`--metrics-port`, default 8889).
+- **Kubernetes Collector Sidecar Injection**: `--with-otel-sidecar` injects OpenTelemetry Collector sidecar specs (`4317` gRPC, `4318` HTTP, `8889` metrics) directly into generated Kubernetes workload manifests.
 
 ### Supply Chain Security & Attestation
 - **SLSA v1.0 Provenance Attestation**: Generates and attaches SLSA v1.0 provenance attestations (`<repo>:sha256-<hex>.att`) capturing builder metadata, invocation parameters, and cryptographic dependency digests.
@@ -37,9 +47,11 @@ This document provides a comprehensive inventory of all implemented features, ca
   - Static-key Cosign verification for custom base images (`--base-verify-mode=static-key`, `--base-verify-key=<path>`).
 - **Secret-Inlining Guard (`secretguard`)**: Build-time Shannon entropy and regex scanner that prevents bundler secret leaks into OCI layer tarballs (`--allow-secret-pattern` bypass).
 - **Runtime Environment Contract**: `--require-env=KEY1,KEY2` stamps runtime variable requirements into OCI annotations (`pokkum.dev/required-env`) and container environment, verified by PID-1 supervisor on boot to fail-fast if absent.
+- **Image Provenance Timeline (`pokkum history <image>`)**: Inspects published OCI manifests and extracts standard `org.opencontainers.image.*` provenance annotations (git commit, repository, build timestamp, version) with `--expect-source` validation.
 
 ### Base Image Security & Escrow Management
 - **Base Image Lockfile (`pokkum.lock`)**: Resolves and pins base image SHA256 digests across multi-platform indexes, tracking `last_scanned_at`, `vulnerabilities_count`, and `max_severity`.
+- **Lockfile Audit & Verification (`pokkum base check`)**: Inspects lockfile status, pinned digests, and vulnerability summaries without triggering image updates.
 - **Base Image Escrow / Mirroring**:
   - `pokkum base update --mirror-registry=<repo>` mirrors upstream base images and Cosign `.sig` tags to a project-controlled registry with automatic fallback on upstream unavailability.
   - Verifies Cosign signature claims (`docker-reference`) against the canonical upstream repository in `pokkum.lock` while pulling bytes from the escrow mirror.
@@ -58,7 +70,7 @@ This document provides a comprehensive inventory of all implemented features, ca
   - `pokkum verify <ref>` pulls remote manifests and verifies Cosign signatures, DSSE envelopes, SLSA provenance, and `--expect-source` assertions.
   - Multi-tier comparison (`--against <tarball>` or automatic rebuild):
     - **L1**: Exact bit-for-bit manifest digest match.
-    - **L2**: Semantic uncompressed RootFS DiffID and container configuration match (diagnosing gzip framing skew).
+    - **L2**: Semantic uncompressed RootFS DiffID and container configuration match — content-identical even if the compressed layer bytes differ (e.g. across a `klauspost/compress` version bump between two Pokkum releases).
     - **L3**: Layer-by-layer file diffs with root cause diagnostics.
 - **Non-Determinism Bisection (`pokkum repro doctor`)**: Double-builds project to bisect non-deterministic build inputs (unpinned `kit.version.name`, timestamps, unsorted files).
 
@@ -71,6 +83,10 @@ This document provides a comprehensive inventory of all implemented features, ca
 - **Multi-Registry Authentication (`--registry-config`)**: Shells out to dynamic `docker-credential-*` binaries (ECR, GCR, OSXKeychain) with in-memory caching and fallback to static `auths` blocks.
 
 ### Developer Experience & Diagnostics
+- **Workspace Initialization (`pokkum init`)**: Guided interactive setup questionnaire for `.pokkum.yaml` (registries, profiles, presets, CVE policy) and `.pokkumignore` (`--defaults` non-interactive mode).
+- **Configuration Management (`pokkum config`, `--profile`)**:
+  - Build profiles: `pokkum build --profile <name>` (`-P`) evaluates named profile overrides.
+  - Inspection & Validation: `pokkum config view` displays resolved configurations and `pokkum config validate` strictly checks schema structure, known fields, and profile consistency.
 - **Hot-Reload Development (`pokkum dev`)**: Builds, loads into Docker/Podman daemon, and watches source directories for rapid live reload with `--debug` shell inspection.
 - **Preflight Checks & Mechanical Repairs (`pokkum doctor`)**: Audits local Bun runtime, SvelteKit version compatibility, `.pokkumignore`, and registry credentials, offering automatic fixes (`--fix`).
 - **Layer & Origin Tracing (`pokkum explain`, `pokkum why`, `pokkum diff`)**: Breaks down layer compositions, tracks dependency origins, and visualizes diffs between images.
@@ -86,9 +102,7 @@ This document provides a comprehensive inventory of all implemented features, ca
    - `pokkum history` is an inspection tool that extracts and formats published standard OCI annotations (`org.opencontainers.image.*`). It deliberately does **not** cryptographically verify signatures or SLSA provenance. Users requiring cryptographic authenticity verification must use `pokkum verify`.
 2. **Rollback History Accumulation from Static Manifest Templates**:
    - `pokkum resolve` operating in isolation on a static, untouched `pokkum://` manifest file cannot accumulate multi-generation history across independent CLI runs unless intermediate annotations are committed or retrieved from live cluster state (`kubectl get`).
-3. **Reproducibility Gzip Framing & Skew (L1 vs L2)**:
-   - While Pokkum guarantees bit-for-bit determinism across identical toolchains, rebuilding on different OS/arch or differing Go stdlib `compress/gzip` versions may produce differing gzip compression headers while maintaining 100% semantic identity (L2 match). `pokkum verify` accurately categorizes and diagnoses this skew.
-4. **Bun CPU Architecture Variants on x86-64**:
+3. **Bun CPU Architecture Variants on x86-64**:
    - The default `standard` Bun binary requires AVX2 CPU instructions on `linux/amd64`. For legacy x86-64 hardware or older virtualization hypervisors lacking AVX2, `--bun-variant=baseline` must be specified.
-5. **Zero Clock Access & `SOURCE_DATE_EPOCH`**:
+4. **Zero Clock Access & `SOURCE_DATE_EPOCH`**:
    - Pokkum strictly forbids reading host system clocks during image compilation. All timestamps and tar headers derive from `req.SourceDateEpoch` (resolved from git commit timestamp or explicit environment variable). Outside of a git repo and without `SOURCE_DATE_EPOCH`, Pokkum falls back to a deterministic fallback epoch.

@@ -255,7 +255,10 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		if req.AppClientDir != "" {
 			if info, err := os.Stat(req.AppClientDir); err == nil && info.IsDir() {
 				if !req.NoPrecompress {
-					_ = precompressutils.PrecompressDirectory(req.AppClientDir, ts)
+					// Layered strategy's runtime (adapter-node's bundled sirv
+					// server) only ever negotiates gzip/brotli, never zstd —
+					// see precompressutils.PrecompressOptions's doc comment.
+					_ = precompressutils.PrecompressDirectory(req.AppClientDir, ts, precompressutils.PrecompressOptions{Gzip: true, Brotli: true})
 				}
 				clientLayer, _, clientRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppClientDir, ports.AppClientDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true})
 				if err != nil {
@@ -339,7 +342,9 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		if req.AppClientDir != "" {
 			if info, err := os.Stat(req.AppClientDir); err == nil && info.IsDir() {
 				if !req.NoPrecompress {
-					_ = precompressutils.PrecompressDirectory(req.AppClientDir, ts)
+					// pokkum-static genuinely negotiates zstd, unlike the
+					// layered strategy's sirv server — keep all three formats.
+					_ = precompressutils.PrecompressDirectory(req.AppClientDir, ts, precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: true})
 				}
 				clientLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppClientDir, ports.AppClientDirPrefix, ts, req.Compression)
 				if err != nil {
@@ -455,7 +460,10 @@ func appendPrerenderedLayer(ctx context.Context, req ports.PackageRequest, ts ti
 		return addenda, nil, nil
 	}
 	if !req.NoPrecompress {
-		_ = precompressutils.PrecompressDirectory(req.AppPrerenderedDir, ts)
+		// Only pokkum-static (--strategy=static) negotiates zstd; the layered
+		// strategy's sirv server never does, so skip generating dead bytes.
+		opts := precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: req.Strategy.ApplyStatic()}
+		_ = precompressutils.PrecompressDirectory(req.AppPrerenderedDir, ts, opts)
 	}
 	prerenderedLayer, _, prerenderedRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppPrerenderedDir, ports.AppPrerenderedDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true})
 	if err != nil {

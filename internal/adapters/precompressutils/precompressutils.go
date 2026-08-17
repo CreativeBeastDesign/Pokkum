@@ -1,7 +1,6 @@
 package precompressutils
 
 import (
-	"compress/gzip"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +8,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/poolutils"
@@ -42,9 +42,23 @@ func IsCompressible(filename string) bool {
 	return CompressibleExtensions[ext]
 }
 
-// PrecompressDirectory recursively traverses dir and generates .gz, .br, and .zst
-// precompressed sidecars for all compressible static assets.
-func PrecompressDirectory(dir string, modTime time.Time) error {
+// PrecompressOptions selects which sidecar formats PrecompressDirectory and
+// PrecompressFile generate. The zero value generates nothing — callers must
+// opt in to each format they want.
+//
+// Not every format pays off for every serving path: the layered strategy's
+// runtime (@sveltejs/adapter-node's bundled sirv server) only ever negotiates
+// gzip/brotli, so generating .zst sidecars there is wasted build time and
+// wasted layer bytes. Only pokkum-static (--strategy=static) negotiates zstd.
+type PrecompressOptions struct {
+	Gzip   bool
+	Brotli bool
+	Zstd   bool
+}
+
+// PrecompressDirectory recursively traverses dir and generates sidecars
+// (per opts) for all compressible static assets.
+func PrecompressDirectory(dir string, modTime time.Time, opts PrecompressOptions) error {
 	if dir == "" {
 		return nil
 	}
@@ -65,13 +79,13 @@ func PrecompressDirectory(dir string, modTime time.Time) error {
 		if ext == ".gz" || ext == ".br" || ext == ".zst" {
 			return nil
 		}
-		return PrecompressFile(p, modTime)
+		return PrecompressFile(p, modTime, opts)
 	})
 }
 
-// PrecompressFile generates .gz, .br, and .zst sidecars for srcPath if compressible,
+// PrecompressFile generates sidecars (per opts) for srcPath if compressible,
 // preserving modTime and only keeping sidecars that achieve positive compression savings.
-func PrecompressFile(srcPath string, modTime time.Time) error {
+func PrecompressFile(srcPath string, modTime time.Time, opts PrecompressOptions) error {
 	if !IsCompressible(srcPath) {
 		return nil
 	}
@@ -94,52 +108,58 @@ func PrecompressFile(srcPath string, modTime time.Time) error {
 	origSize := len(data)
 
 	// 1. Gzip (.gz)
-	gzPath := srcPath + ".gz"
-	if isStale(srcInfo, gzPath) {
-		buf := poolutils.GetByteBuffer()
-		gw, err := gzip.NewWriterLevel(buf, gzip.BestCompression)
-		if err == nil {
-			_, _ = gw.Write(data)
-			_ = gw.Close()
-			if buf.Len() < origSize {
-				if err := os.WriteFile(gzPath, buf.Bytes(), 0o644); err == nil {
-					_ = os.Chtimes(gzPath, modTime, modTime)
+	if opts.Gzip {
+		gzPath := srcPath + ".gz"
+		if isStale(srcInfo, gzPath) {
+			buf := poolutils.GetByteBuffer()
+			gw, err := gzip.NewWriterLevel(buf, gzip.BestCompression)
+			if err == nil {
+				_, _ = gw.Write(data)
+				_ = gw.Close()
+				if buf.Len() < origSize {
+					if err := os.WriteFile(gzPath, buf.Bytes(), 0o644); err == nil {
+						_ = os.Chtimes(gzPath, modTime, modTime)
+					}
 				}
 			}
+			poolutils.PutByteBuffer(buf)
 		}
-		poolutils.PutByteBuffer(buf)
 	}
 
 	// 2. Brotli (.br)
-	brPath := srcPath + ".br"
-	if isStale(srcInfo, brPath) {
-		buf := poolutils.GetByteBuffer()
-		bw := brotli.NewWriterLevel(buf, brotli.BestCompression)
-		_, _ = bw.Write(data)
-		_ = bw.Close()
-		if buf.Len() < origSize {
-			if err := os.WriteFile(brPath, buf.Bytes(), 0o644); err == nil {
-				_ = os.Chtimes(brPath, modTime, modTime)
+	if opts.Brotli {
+		brPath := srcPath + ".br"
+		if isStale(srcInfo, brPath) {
+			buf := poolutils.GetByteBuffer()
+			bw := brotli.NewWriterLevel(buf, brotli.BestCompression)
+			_, _ = bw.Write(data)
+			_ = bw.Close()
+			if buf.Len() < origSize {
+				if err := os.WriteFile(brPath, buf.Bytes(), 0o644); err == nil {
+					_ = os.Chtimes(brPath, modTime, modTime)
+				}
 			}
+			poolutils.PutByteBuffer(buf)
 		}
-		poolutils.PutByteBuffer(buf)
 	}
 
 	// 3. Zstandard (.zst)
-	zstPath := srcPath + ".zst"
-	if isStale(srcInfo, zstPath) {
-		buf := poolutils.GetByteBuffer()
-		zw, err := zstd.NewWriter(buf, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
-		if err == nil {
-			_, _ = zw.Write(data)
-			_ = zw.Close()
-			if buf.Len() < origSize {
-				if err := os.WriteFile(zstPath, buf.Bytes(), 0o644); err == nil {
-					_ = os.Chtimes(zstPath, modTime, modTime)
+	if opts.Zstd {
+		zstPath := srcPath + ".zst"
+		if isStale(srcInfo, zstPath) {
+			buf := poolutils.GetByteBuffer()
+			zw, err := zstd.NewWriter(buf, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+			if err == nil {
+				_, _ = zw.Write(data)
+				_ = zw.Close()
+				if buf.Len() < origSize {
+					if err := os.WriteFile(zstPath, buf.Bytes(), 0o644); err == nil {
+						_ = os.Chtimes(zstPath, modTime, modTime)
+					}
 				}
 			}
+			poolutils.PutByteBuffer(buf)
 		}
-		poolutils.PutByteBuffer(buf)
 	}
 
 	return nil

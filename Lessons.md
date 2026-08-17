@@ -5,6 +5,22 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-17 — Four shipped, `[x]`-marked, documented features were stubs or half-built; found only by verifying an outsider's review against the code instead of against the docs
+
+**Category:** overclaiming / fake-implementation (new category — distinct from this file's recurring `test-fixture-fidelity` theme: no test was wrong here, because for the worst offender *no test asserted real behavior at all*)
+
+**Root cause:** a documentation-first verification loop. Each of these features was described in `Feature-list.md` / `Roadmap.md` / `AdditionalFeatures.md`, and every subsequent review — human and agent — read those descriptions and treated them as evidence that the code existed. `pokkum explain`/`why`/`diff` shipped as three cobra commands returning hardcoded literals (`Digest: "sha256:base..."`, `"layer_index": 3`, `"modified": ["Layer #3 (App JS)"]`) and were marked `[x]` in the v0.4 milestone. The 143-line `cmd/pokkum/explain.go` never imports `remote`, never opens a tarball, never touches an image. `explain_test.go` exists and passes — it asserts the command's *output shape*, which the hardcoded data satisfies perfectly. Three further items were marked Done while only one of their two halves was built: supervisor `/metrics` (never built; only `/livez`+`/readyz` exist), app-side trace-context logging (no `trace_id` anywhere in `internal/` or `supervisor/`), and Helm/Kustomize GitOps export (raw-YAML `pokkum://` resolution only).
+
+The trigger that finally exposed it was external: two outside reviews of `Feature-list.md` arrived, and verifying *their* claims against the code — rather than against the feature list — surfaced the stubs incidentally. One reviewer even asked for a layer-churn *sub-mode* of `pokkum diff`, assuming the command worked. Notably, this is the second audit to find this drift class in this project (`fixes-to-v1.md` was the first), which makes it a process property rather than an accident.
+
+**Where:** `cmd/pokkum/explain.go:47`, `:100`, `:130` (stub data); `Feature-list.md:92` (the untrue claim); `Roadmap.md` v0.4 "Diff & Explain" (`[x]`); `AdditionalFeatures.md` matrix rows "Diff & Explain", "Built-in Metrics Endpoint (supervisor)", "Log Aggregation (app-side, trace context)", "Kubernetes (extended manifests/GitOps)" (all "Done").
+
+**Fix:** documentation corrected in this commit — the `[x]` un-checked with an inline correction note, all four matrix rows re-labeled with what is actually built vs. claimed, and the code fix tracked as `Roadmap.md` **PB-1** under a new Pre-Publication Gate. The code itself is deliberately **not** fixed here (see the commit note): PB-1 carries a real decision — implement genuine layer introspection on top of the existing `layerdiffutils`/`comparator` machinery, or delete the three commands per the core-vs-adjacent scope split — and that is the user's call, not a mechanical patch.
+
+**Preventative rule:** **A feature is not verified by reading a document that describes it, and a passing test is not evidence the feature is real if the test only asserts output shape.** Before marking any roadmap item `[x]` or any matrix row `Done`, grep the implementing file for the I/O the feature necessarily requires — a command that claims to inspect a remote image must reference `remote.`/`Fetch`/a tar reader somewhere; one that claims to expose an endpoint must register a handler for that exact path; one that claims to emit a field must contain that field's name. Absence of the required primitive is proof of absence of the feature, and it is a one-line check. Corollary for split features ("X and Y"): verify each half independently — three of the four items here had one real half, which is exactly what let them pass as done.
+
+---
+
 ## 2026-08-16 — Non-deterministic stub-launcher binary: the suspected root cause (ELF build-id) was wrong
 
 **Category:** determinism / external-tool-output (a new subcategory: non-determinism introduced by a *third-party compiler's* output, not by Pokkum's own code touching a clock or an unsorted collection)

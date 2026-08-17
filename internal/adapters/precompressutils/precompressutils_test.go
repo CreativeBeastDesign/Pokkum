@@ -54,7 +54,8 @@ func TestPrecompressFile(t *testing.T) {
 	}
 
 	modTime := time.Unix(1700000000, 0)
-	if err := precompressutils.PrecompressFile(filePath, modTime); err != nil {
+	allFormats := precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: true}
+	if err := precompressutils.PrecompressFile(filePath, modTime, allFormats); err != nil {
 		t.Fatalf("PrecompressFile failed: %v", err)
 	}
 
@@ -127,6 +128,7 @@ func TestPrecompressFile_RecompressesStaleSidecar(t *testing.T) {
 	newContent := strings.Repeat("console.log('v2 completely different build output!!');\n", 120)
 
 	buildModTime := time.Unix(1700000000, 0)
+	allFormats := precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: true}
 
 	// 1. Write v1 and precompress it. Pin the source mtime explicitly so the
 	// ordering against the sidecar's mtime (set below) is deterministic.
@@ -137,7 +139,7 @@ func TestPrecompressFile_RecompressesStaleSidecar(t *testing.T) {
 	if err := os.Chtimes(filePath, srcMTimeV1, srcMTimeV1); err != nil {
 		t.Fatalf("failed to set v1 mtime: %v", err)
 	}
-	if err := precompressutils.PrecompressFile(filePath, buildModTime); err != nil {
+	if err := precompressutils.PrecompressFile(filePath, buildModTime, allFormats); err != nil {
 		t.Fatalf("PrecompressFile (v1) failed: %v", err)
 	}
 
@@ -159,7 +161,7 @@ func TestPrecompressFile_RecompressesStaleSidecar(t *testing.T) {
 
 	// 3. Re-run precompression. The bug: the sidecar already exists, so the
 	// old existence-only check skipped regeneration entirely.
-	if err := precompressutils.PrecompressFile(filePath, buildModTime); err != nil {
+	if err := precompressutils.PrecompressFile(filePath, buildModTime, allFormats); err != nil {
 		t.Fatalf("PrecompressFile (v2) failed: %v", err)
 	}
 
@@ -267,7 +269,8 @@ func TestPrecompressFile_SkipsFreshSidecar(t *testing.T) {
 	}
 
 	buildModTime := time.Unix(1700000000, 0)
-	if err := precompressutils.PrecompressFile(filePath, buildModTime); err != nil {
+	allFormats := precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: true}
+	if err := precompressutils.PrecompressFile(filePath, buildModTime, allFormats); err != nil {
 		t.Fatalf("PrecompressFile failed: %v", err)
 	}
 
@@ -290,7 +293,8 @@ func TestPrecompressFile_SkipsTinyFiles(t *testing.T) {
 	}
 
 	modTime := time.Unix(1700000000, 0)
-	if err := precompressutils.PrecompressFile(filePath, modTime); err != nil {
+	allFormats := precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: true}
+	if err := precompressutils.PrecompressFile(filePath, modTime, allFormats); err != nil {
 		t.Fatalf("PrecompressFile failed: %v", err)
 	}
 
@@ -317,7 +321,8 @@ func TestPrecompressDirectory(t *testing.T) {
 	_ = os.WriteFile(pngFile, []byte("PNG_MOCK_DATA"), 0o644)
 
 	modTime := time.Unix(1700000000, 0)
-	if err := precompressutils.PrecompressDirectory(tmpDir, modTime); err != nil {
+	allFormats := precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: true}
+	if err := precompressutils.PrecompressDirectory(tmpDir, modTime, allFormats); err != nil {
 		t.Fatalf("PrecompressDirectory failed: %v", err)
 	}
 

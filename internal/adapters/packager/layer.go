@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"runtime"
@@ -23,6 +22,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/attestutils"
