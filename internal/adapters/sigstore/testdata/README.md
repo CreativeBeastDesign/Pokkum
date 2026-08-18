@@ -16,3 +16,13 @@ It exists solely so `TestVerify_WrongTrustedRootFailsClosed` in
 actually read and enforced, rather than the adapter silently falling back to
 the embedded default. It is not a real Sigstore instance and must never be
 used for anything but that one negative test.
+
+**Must be regenerated whenever `../trusted-root-public-good.json` is
+refreshed** (see `../README.md`'s refresh procedure) — this file's own
+"byte-for-byte copy... with exactly one field changed" claim is only true
+relative to whatever snapshot it was last derived from. There is no
+automated check that catches this drifting; regenerating it is a manual
+step in the refresh checklist, easy to forget precisely because the tests
+that use it will keep passing against a stale base snapshot without ever
+signaling that the two files no longer describe "one field changed" from
+each other.

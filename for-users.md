@@ -4,6 +4,43 @@ Most of [fixes-to-v1.md](fixes-to-v1.md) is invisible unless you were
 relying on the specific broken behavior. This page covers what you might
 actually notice, and what — if anything — you need to do.
 
+## 2026-08-19: `--runtime=node` — an escape hatch if Bun doesn't work for you
+
+Bun-only used to mean that a Bun compatibility bug (`AsyncLocalStorage`,
+`worker_threads`, an N-API gap) or a policy that simply disallows Bun in
+production left you with no path forward inside Pokkum at all. `pokkum
+build --runtime=node` now targets a distroless Node base instead:
+
+    pokkum build --runtime=node --tag myapp:latest .
+
+The Node version comes from the pinned base image, not a Pokkum-managed
+download — refresh it the same way you refresh any other base image,
+with `pokkum base update`. `--runtime=node` currently only works with the
+default `--strategy=layered`, and is incompatible with `--telemetry`,
+`--stub-launcher`, `--bun-binary`, an explicit `--bun-version`/
+`--bun-variant`, and the Bun-only base presets — each is rejected with a
+specific error rather than silently ignored. Existing Bun-runtime builds
+are unaffected: the image label this feature adds is only stamped for a
+non-default runtime, so nothing about a plain `bun` build changes.
+
+## 2026-08-19: `--strategy=static` actually works now — it did not before
+
+If you tried `--strategy=static` before this date, it did not work: the
+embedded static file server never bound to the port you configured
+(`PORT`/`POKKUM_PROBE_PORT` were silently ignored, so the container was
+unreachable), a preflight check rejected real `@sveltejs/adapter-static`
+projects outright, and — even past those two — every route except `/`
+404'd because prerendered pages weren't being served from where they
+were actually written. All of this is fixed; static builds are now
+covered by a real, boot-tested fixture. If you previously worked around
+any of this (a custom `PORT`, a hand-rolled preflight bypass, routing
+everything through your own fallback), you can likely remove that
+workaround now — but verify against your own build before doing so.
+
+If you built and published a `--strategy=static` image before this date,
+it's worth rebuilding: those images were not actually reachable on their
+documented ports regardless of anything else being correct.
+
 ## `pokkum verify --expect-source` now requires signed provenance
 
 **What changed.** `--expect-source` used to compare the repo and commit you asserted

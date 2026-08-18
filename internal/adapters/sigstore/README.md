@@ -66,56 +66,122 @@ registry and is skipped under `-short`.
 
 ## Provenance: how this copy was obtained
 
-Captured on **2026-08-12**, from the example trust root shipped inside the
-`sigstore-go` Go module itself:
+> [!IMPORTANT]
+> The previous version of this section instructed maintainers to refresh
+> this snapshot by copying `sigstore-go`'s bundled
+> `examples/trusted-root-public-good.json`. **Do not do that.** That file
+> is itself the stale, pre-2023 snapshot this package used to embed — it
+> was already missing the Rekor log Sigstore added in 2025-09, and
+> following that procedure would silently reinstall the exact bug fixed
+> on 2026-08-19 (see `Lessons.md`'s "embedded Sigstore trust root was
+> already rejecting valid signatures" entry). `sigstore-go`'s own example
+> is not a live source; it is a fixture bundled with a specific module
+> release and can lag the real Sigstore trust root by years.
+
+The current snapshot (`trusted-root-public-good.json`) and its provenance
+sidecar (`trusted-root-metadata.json`) are regenerated from the **raw,
+TUF-signature-verified `trusted_root.json` target**, fetched directly from
+Sigstore's live public-good TUF repository (`tuf-repo-cdn.sigstore.dev`,
+the same value as `github.com/sigstore/sigstore-go/pkg/tuf.DefaultMirror`
+— see `tufrefresh.go`'s `TrustedRootTUFRepository`). The raw target bytes
+are embedded verbatim, not sigstore-go's parsed-and-remarshalled struct,
+so what's on disk here is exactly what the TUF repository signed and can
+be digested/diffed byte-for-byte. This was verified reproducible: two
+independent fetches of the target produced identical bytes.
+
+`trusted-root-metadata.json` (`TrustedRootMetadata` in `trustedroot.go`)
+records `capturedAt` (when the snapshot was fetched) and `sha256` (a
+digest of the embedded snapshot bytes) as a provenance sidecar — this is
+what lets the freshness guards below detect both "this snapshot is old"
+and "this snapshot and its own provenance record disagree," independent
+of each other.
+
+## How the guards work — and why refresh instructions live in one place, not this file
+
+Trust root rotations are rare (Sigstore rotating the Fulcio root CA, a CT
+log key, or — the failure mode that actually bit this package — adding a
+**new Rekor transparency log shard**, which a snapshot captured before it
+existed rejects with an error that reads exactly like a forged signature,
+not a coverage gap). Because a stale snapshot fails *silently* until
+someone hits the specific log/cert it doesn't cover, this package does
+not rely on a maintainer remembering to check an expiry date. Three
+guards, spread across `trustedroot_freshness_test.go` and
+`trustedroot_network_test.go`:
+
+1. **Always-on age/expiry tests** (`TestEmbeddedTrustedRoot_IsFreshNow`,
+   `TestEmbeddedTrustedRoot_ActiveAnchorExpiryIsWhereExpected`) — fail,
+   not warn, once the snapshot is older than `TrustedRootMaxAge` (180
+   days) or an anchor is within `TrustedRootExpiryWindow` (90 days) of
+   expiring. Run in every `go test ./internal/adapters/sigstore/...`,
+   including `-short`.
+2. **Network divergence test** (`TestTrustedRootSnapshot_TracksLiveTUFRepository`,
+   `trustedroot_network_test.go`) — compares the embedded anchor set
+   against the live TUF repository in both directions. **Skips (never
+   fails) when the repository is unreachable**, deliberately, so network
+   flakiness can never get this guard disabled out of frustration; it
+   only runs without `-short`.
+3. **Digest tripwire** (`CheckTrustedRootFreshness`'s digest check) —
+   fails if the embedded snapshot's bytes don't hash to
+   `trusted-root-metadata.json`'s recorded `sha256`, so a snapshot and
+   its own provenance record can never silently drift apart and make the
+   age check meaningless.
+
+**The refresh command is `RefreshTrustedRootCommand`** (`trustedroot_freshness.go`):
 
 ```
-go get github.com/sigstore/sigstore-go@v1.3.0
-cp "$(go env GOMODCACHE)/github.com/sigstore/sigstore-go@v1.3.0/examples/trusted-root-public-good.json" \
-   internal/adapters/sigstore/trusted-root-public-good.json
+POKKUM_UPDATE_SIGSTORE_TRUSTED_ROOT=1 go test ./internal/adapters/sigstore/ \
+  -run TestTrustedRootSnapshot_TracksLiveTUFRepository -count=1
 ```
 
-The file was copied verbatim (byte-for-byte, no edits) — `md5` of the
-module-cache source and the copy in this package match.
+This is deliberately the *same* test the network divergence guard runs,
+following Go's golden-file `-update` convention: the code path that
+*detects* the embedded snapshot has drifted from the live TUF repository
+is the same code path that *fixes* it, so the two cannot disagree with
+each other the way a hand-copied file and a hand-written check can. Every
+staleness message in this package (runtime warning, unknown-log error,
+test failure) quotes this exact string rather than its own copy, so a
+future rename can't leave one of them stale.
 
-It was verified to:
+After running the refresh command:
 
-- Parse successfully via `root.NewTrustedRootFromJSON` from
-  `github.com/sigstore/sigstore-go/pkg/root` (see
-  `trustedroot_test.go`, which runs this check as part of `go test`).
-- Contain the expected public-good log identities: the Rekor tlog key ID
-  decodes (base64 -> hex) to `c0d23d6a...`, and one of the two CT log
-  entries decodes to `dd3d306a...` — both are the well-known public-good
-  Rekor/CT log key IDs.
+1. `git diff internal/adapters/sigstore/trusted-root-public-good.json
+   internal/adapters/sigstore/trusted-root-metadata.json` to see exactly
+   what changed (new CA cert, new log key, expiry window, new Rekor
+   shard) and sanity-check the diff before committing.
+2. Run `go test ./internal/adapters/sigstore/...` to confirm the refreshed
+   files parse and pass all three guards.
+3. **Regenerate `testdata/trusted-root-wrong-keys.json`** — it's derived
+   from the snapshot with exactly one field changed (see
+   `testdata/README.md`), so its own "one field changed" claim goes stale
+   the moment the snapshot it was derived from is regenerated. There is
+   no automated check for this; it must be done by hand each time.
 
-`sigstore-go` ships this file specifically so that consumers who want to
-pin a known-good snapshot (rather than fetch the live trust root at
-runtime via `root.FetchTrustedRoot()`, which hits Sigstore's TUF
-repository over the network) have a ready-made, versioned copy to embed.
-Using the module's own example keeps this package's trust root in lock
-step with whatever `sigstore-go` version Pokkum depends on.
+## Offline contract
 
-## How to refresh it
+`Verify` (this package's actual verification entry point) never performs
+network I/O, unconditionally — the trust root it verifies against is
+either the embedded snapshot or a caller-supplied `TrustedRootJSON`, never
+a live fetch. The **opt-in** TUF client (`tufrefresh.go`'s
+`FetchTrustedRootJSON`/`ResolveTrustedRootJSON`, `TUFOptions`) exists only
+for the refresh workflow above and for a caller that explicitly wants a
+live-refreshed root at runtime; it is not on any path `Verify` reaches.
+Its `Offline` option fails closed with `core.ErrHermeticViolation`
+*before constructing a TUF client at all* when set — sigstore-go's own TUF
+client has no guaranteed-offline mode (`ForceCache`/`CacheValidity` can
+both still trigger a network refresh), so "hermetic" has to be a decision
+made before the client exists, not a flag passed into it. This mirrors
+`bunruntime`'s hermetic-cache-miss contract. Not yet wired to a CLI flag —
+see `Roadmap.md`'s Tier 2 tracking for `--sigstore-tuf-refresh`.
 
-Trust root rotations are rare (they happen when Sigstore rotates the
-Fulcio root CA, the CT log, or the Rekor log key), but when one occurs:
+## Rekor-coverage diagnostic
 
-1. Bump the `github.com/sigstore/sigstore-go` dependency to the version
-   that ships the updated example (`go get
-   github.com/sigstore/sigstore-go@<new-version>` then `go mod tidy`).
-2. Re-run the copy command above against the new module cache path.
-3. `git diff internal/adapters/sigstore/trusted-root-public-good.json` to
-   see exactly what changed (new CA cert, new log key, expiry window
-   changes, etc.) and sanity-check the diff before committing.
-4. Run `go test ./internal/adapters/sigstore/...` to confirm the new file
-   still parses via `root.NewTrustedRootFromJSON`.
-5. Update the "Captured on" date and command output above in this README.
-
-If a future `sigstore-go` release ever stops shipping the `examples/`
-directory (some Go modules exclude non-`.go` files from what `go get`
-downloads), fall back to fetching the live trust root directly: write a
-throwaway Go program that imports `github.com/sigstore/sigstore-go/pkg/root`,
-calls `root.FetchTrustedRoot()` to pull the current snapshot from
-Sigstore's TUF repository, and serializes the result back to JSON. Inspect
-`pkg/root/trusted_root.go` in that module version for the exact
-marshal/unmarshal round trip it expects.
+A signature recorded on a Rekor log this package's trust root doesn't
+know about still fails closed — the verdict is deliberately unchanged,
+never relaxed to "trust unknown logs." What changed (2026-08-19) is the
+*diagnosis*: the error now names the logs the embedded snapshot actually
+covers and says the failure is most likely a trust-root coverage gap,
+rather than reading like a forged-signature error — because until this
+fix, that is exactly the failure this package produced for a genuinely
+valid signature on a log added after the snapshot was captured. Proven by
+reverting the message change alone and confirming only the diagnosis
+regressed, not the verdict.
