@@ -49,6 +49,38 @@ const (
 	probeHeaderTimeout = 3 * time.Second
 )
 
+// newContentServer builds the content http.Server for cfg. Addr is set
+// explicitly to bind all interfaces (host part empty, via net.JoinHostPort)
+// on cfg.Port: http.Server.ListenAndServe falls back to ":http" (port 80)
+// whenever Addr is the zero value, which silently discards the configured
+// PORT. Binding all interfaces, rather than a specific host, is the correct
+// choice here because this runs as PID 1 inside a container network
+// namespace — the Pod/Service only reaches the container through whatever
+// interface the runtime attaches (never loopback), so anything narrower
+// than the wildcard address would make the server unreachable from outside
+// the container.
+func newContentServer(cfg Config, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Port)),
+		Handler:           handler,
+		ReadHeaderTimeout: serverHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
+	}
+}
+
+// newProbeServer builds the probe http.Server for cfg, binding all
+// interfaces on cfg.ProbePort. See newContentServer's comment for why Addr
+// must be set explicitly and why the wildcard host is correct here.
+func newProbeServer(cfg Config, shuttingDown *atomic.Bool) *http.Server {
+	return &http.Server{
+		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.ProbePort)),
+		Handler:           probeHandler(shuttingDown),
+		ReadHeaderTimeout: probeHeaderTimeout,
+	}
+}
+
 func main() {
 	cfg, warnings, err := parseConfig(os.Args[1:], os.Getenv, os.Stderr)
 	switch {
@@ -71,18 +103,11 @@ func main() {
 	// real product and probes are best-effort): here if we cannot bind the
 	// content port there is nothing to serve, so that is fatal, whereas a
 	// probe-port bind failure is logged and the server still runs.
-	svc := &http.Server{
-		Handler:           newStaticServer(cfg.Roots, cfg.Fallback, log).handler(),
-		ReadHeaderTimeout: serverHeaderTimeout,
-		ReadTimeout:       serverReadTimeout,
-		WriteTimeout:      serverWriteTimeout,
-		IdleTimeout:       serverIdleTimeout,
-	}
+	svc := newContentServer(cfg, newStaticServer(cfg.Roots, cfg.Fallback, log).handler())
 
 	errc := make(chan error, 2)
 	go func() {
-		addr := net.JoinHostPort("", strconv.Itoa(cfg.Port))
-		log.Info("static server listening", "addr", addr, "roots", cfg.Roots)
+		log.Info("static server listening", "addr", svc.Addr, "roots", cfg.Roots)
 		if err := svc.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errc <- fmt.Errorf("static server: %w", err)
 		}
@@ -92,15 +117,11 @@ func main() {
 	var shuttingDown atomic.Bool
 
 	if cfg.Port != cfg.ProbePort {
-		probe := &http.Server{
-			Handler:           probeHandler(&shuttingDown),
-			ReadHeaderTimeout: probeHeaderTimeout,
-		}
+		probe := newProbeServer(cfg, &shuttingDown)
 		go func() {
-			addr := net.JoinHostPort("", strconv.Itoa(cfg.ProbePort))
-			log.Info("probe server listening", "addr", addr)
+			log.Info("probe server listening", "addr", probe.Addr)
 			if err := probe.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Warn("probe server failed", "addr", addr, "error", err)
+				log.Warn("probe server failed", "addr", probe.Addr, "error", err)
 			}
 		}()
 		defer func() {

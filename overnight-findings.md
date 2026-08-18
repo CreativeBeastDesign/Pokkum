@@ -49,4 +49,12 @@ Sigstore TUF root refresh.
 **Severity:** High, and the most instructive of the three: a mock encoding the same wrong assumption as the code it tests cannot ever detect the mismatch.
 **Status:** fix dispatched, including correcting the synthetic fixture so it stops agreeing with the bug.
 
+### 5. Single-port mode silently has no probe endpoints
+
+**Found by:** the F1 bind-address fix, while confirming neighbouring logic.
+**Where:** `supervisor/cmd/pokkum-static/main.go`'s `if cfg.Port != cfg.ProbePort` guard.
+**What:** the guard reads as "skip the redundant second listener because the content server covers probes in single-port mode" — but there is no mux merge anywhere in the package. When `PORT == POKKUM_PROBE_PORT`, the probe listener is skipped and `/healthz` and `/readyz` are served by *nothing*. A single-port deployment therefore has no working probes at all.
+**Severity:** Medium. Pre-existing and independent of the bind bug; not introduced or touched by that fix. Only bites operators who deliberately collapse the two ports, which is why it has gone unnoticed.
+**Status:** logged, not fixed — outside F1's stated scope, and it needs a deliberate decision (merge the probe handlers into the content mux vs. reject the collapsed configuration vs. document it) rather than a reflex patch. Tracked for the roadmap.
+
 _(appended as work proceeds)_
