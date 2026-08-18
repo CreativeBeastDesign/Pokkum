@@ -2,6 +2,9 @@
 
 The official **Pokkum GitHub Action** (`CreativeBeastDesign/pokkum`) enables fast, reproducible, and hardened container builds for SvelteKit and Bun applications directly inside GitHub Actions CI/CD workflows.
 
+> [!IMPORTANT]
+> The action wraps the `pokkum build` CLI subcommand. Its inputs are translated into the *real* flags/environment variables `pokkum build` actually accepts (verified against `pokkum build --help`) — not the invocation this action used before this doc was corrected. In particular: `repo` becomes the `POKKUM_DOCKER_REPO` environment variable (there is no `--repo` flag), and `output` becomes `--local`/`--tarball` (the CLI's own `--output` flag is an unrelated text/json serialization setting, not a push/local/tarball switch). See "Known limitation: `tags`" below for the one input that currently has no CLI-side effect at all.
+
 ---
 
 ## Quickstart
@@ -39,7 +42,6 @@ jobs:
         uses: CreativeBeastDesign/pokkum@v1
         with:
           repo: ghcr.io/${{ github.repository }}
-          tags: ${{ github.sha }},latest
           platforms: linux/amd64,linux/arm64
 
       - name: Output Pushed Image Reference
@@ -48,6 +50,8 @@ jobs:
           echo "Image Digest:     ${{ steps.pokkum.outputs.digest }}"
 ```
 
+This pushes `ghcr.io/<owner>/<repo>:latest` and exposes the immutable, digest-pinned `ref` output — use that output (not a tag) for deployments, since custom tags aren't wired up yet (see below).
+
 ---
 
 ## Inputs Reference
@@ -55,14 +59,24 @@ jobs:
 | Input | Description | Default | Required |
 | :--- | :--- | :--- | :--- |
 | `project-dir` | Path to the SvelteKit project directory. | `.` | No |
-| `repo` | Destination container repository (e.g. `ghcr.io/acme/app`). Can also be supplied via `POKKUM_DOCKER_REPO` env variable. | `""` | No |
-| `tags` | Comma-separated list of image tags (e.g. `latest,v1.0.0`). | `latest` | No |
-| `platforms` | Comma-separated target platforms (e.g. `linux/amd64,linux/arm64`). | `linux/amd64` | No |
-| `output` | Destination output mode (`push`, `local`, `tarball`). | `push` | No |
-| `dry-run` | Perform dry-run without side effects (`true`/`false`). | `false` | No |
-| `print-manifest` | Print generated hardened Kubernetes manifest after build (`true`/`false`). | `false` | No |
-| `log-level` | Logging level (`debug`, `info`, `warn`, `error`). | `info` | No |
-| `version` | Pokkum CLI version to install (e.g. `v0.1.1` or `latest`). | `v0.1.1` | No |
+| `repo` | Destination container repository (e.g. `ghcr.io/acme/app`). Passed to the CLI via the `POKKUM_DOCKER_REPO` environment variable (`pokkum build` has no `--repo` flag). Can also be left unset if `.pokkum.yaml`'s `docker.repo` already configures it. | `""` | No |
+| `tags` | **Not yet functional** — see "Known limitation" below. | `latest` | No |
+| `platforms` | Comma-separated target platforms (e.g. `linux/amd64,linux/arm64`), passed to `--platform`. | `linux/amd64` | No |
+| `output` | Build mode: `push` (default, publish to `repo`), `local` (load into the runner's local Docker daemon via `--local`), or `tarball` (export an OCI archive via `--tarball`; see `tarball-path`). | `push` | No |
+| `tarball-path` | Archive path written when `output: tarball`. Ignored otherwise. | `image.tar` | No |
+| `dry-run` | Resolve and validate the build without publishing anything (`--dry-run`). | `false` | No |
+| `print-manifest` | Print the generated Kubernetes manifest after build (`--print-manifest`). | `false` | No |
+| `log-level` | Logging level: `debug`, `info`, `warn`, `error`. | `info` | No |
+| `version` | Pokkum CLI version to install (e.g. `v1.0.1` or `latest`). | `v1.0.1` | No |
+
+### Known limitation: `tags`
+
+`pokkum build` has **no `--tag`/`--tags` flag** and `.pokkum.yaml` has no tags field either — every publish is tagged `latest` (the CLI's own default tag), regardless of what `tags` is set to here. Setting `tags` to anything other than `latest` makes the action emit a `::warning::` annotation in the build log rather than silently doing nothing.
+
+The `tags` input is kept for forward/backward compatibility and will start working once `pokkum build` gains a real tagging mechanism. Until then:
+
+- Rely on this action's `digest` and `ref` outputs (`repo@sha256:...`) for deployments — they're immutable and don't depend on tags at all.
+- If you need a human-readable tag today, apply it out-of-band after the push (e.g. `crane tag`/`docker buildx imagetools create`) using the `ref` output as the source.
 
 ---
 
@@ -72,6 +86,8 @@ jobs:
 | :--- | :--- | :--- |
 | `ref` | Primary, immutable image reference with digest. | `ghcr.io/acme/app@sha256:1111111...` |
 | `digest` | SHA256 digest of the published image manifest or index. | `sha256:1111111...` |
+
+Both outputs are populated by parsing the CLI's own structured `published` log line (captured with `--log-format json`) and are empty for `dry-run` or `print-manifest` runs, since those modes stop before anything is published.
 
 ---
 
@@ -135,7 +151,7 @@ jobs:
 
 ### Example 2: Deploying to Kubernetes with Immutable Digest Reference
 
-Use `steps.pokkum.outputs.ref` directly in your deployment pipeline to update Kubernetes manifests with immutable digests:
+Use `steps.pokkum.outputs.ref` directly in your deployment pipeline to update Kubernetes manifests with immutable digests — this is unaffected by the `tags` limitation above, since it's the digest-pinned reference, not a tag:
 
 ```yaml
       - name: Build & Push
@@ -143,7 +159,6 @@ Use `steps.pokkum.outputs.ref` directly in your deployment pipeline to update Ku
         uses: CreativeBeastDesign/pokkum@v1
         with:
           repo: ghcr.io/${{ github.repository }}
-          tags: ${{ github.sha }}
 
       - name: Deploy to Kubernetes Cluster
         run: |
@@ -151,7 +166,26 @@ Use `steps.pokkum.outputs.ref` directly in your deployment pipeline to update Ku
             app=${{ steps.pokkum.outputs.ref }}
 ```
 
-### Example 3: Reproducible Builds & `SOURCE_DATE_EPOCH` in CI
+### Example 3: Exporting a Local Tarball Instead of Pushing
+
+Use `output: tarball` for workflows that need the image artifact without pushing it anywhere (e.g. to hand off to a separate scanning or signing job):
+
+```yaml
+      - name: Build to OCI Tarball
+        uses: CreativeBeastDesign/pokkum@v1
+        with:
+          project-dir: .
+          output: tarball
+          tarball-path: app-image.tar
+
+      - name: Upload Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-image
+          path: app-image.tar
+```
+
+### Example 4: Reproducible Builds & `SOURCE_DATE_EPOCH` in CI
 
 Pokkum automatically derives `SOURCE_DATE_EPOCH` from the last git commit timestamp (`git log -1 --pretty=%ct`), ensuring that rebuilding from the exact same git commit SHA produces byte-identical image layer digests:
 

@@ -7,9 +7,9 @@ branding:
 
 inputs:
   version:
-    description: 'Pokkum CLI version to install (e.g. v0.1.1, latest)'
+    description: 'Pokkum CLI version to install (e.g. v1.0.1, latest)'
     required: false
-    default: 'v0.1.1'
+    default: 'v1.0.1'
 
   project-dir:
     description: 'Path to the SvelteKit project directory'
@@ -17,11 +17,17 @@ inputs:
     default: '.'
 
   repo:
-    description: 'Destination container repository (e.g. ghcr.io/acme/app)'
+    description: 'Destination container repository (e.g. ghcr.io/acme/app). Passed to the CLI via the POKKUM_DOCKER_REPO environment variable — pokkum build has no --repo flag.'
     required: false
 
   tags:
-    description: 'Comma-separated list of image tags (e.g. latest,v1.0.0)'
+    description: >-
+      NOT YET SUPPORTED by the installed pokkum CLI: there is no --tag/--tags
+      flag and no .pokkum.yaml field for custom tags, so every published
+      image is tagged "latest" regardless of this input. Setting it to
+      anything other than "latest" emits a build warning. Kept for
+      forward/backward compatibility; use the digest/ref outputs of this
+      action for an immutable reference in the meantime.
     required: false
     default: 'latest'
 
@@ -31,9 +37,14 @@ inputs:
     default: 'linux/amd64'
 
   output:
-    description: 'Output mode: push, local, or tarball'
+    description: 'Output mode: push (default, publish to repo), local (load into the local Docker daemon), or tarball (export an OCI archive; see tarball-path)'
     required: false
     default: 'push'
+
+  tarball-path:
+    description: "Archive path to write when output is 'tarball'. Ignored otherwise."
+    required: false
+    default: 'image.tar'
 
   dry-run:
     description: 'Dry run mode (show what would be built/pushed without side effects)'
@@ -104,21 +115,42 @@ runs:
       run: |
         ARGS=()
 
-        if [ -n "${{ inputs.repo }}" ]; then
-          ARGS+=("--repo" "${{ inputs.repo }}")
-        fi
+        # repo: pokkum build has no --repo flag. The destination repository
+        # is resolved from the POKKUM_DOCKER_REPO environment variable (or
+        # .pokkum.yaml's docker.repo) — never from a CLI argument.
+        export POKKUM_DOCKER_REPO="${{ inputs.repo }}"
 
-        if [ -n "${{ inputs.tags }}" ]; then
-          ARGS+=("--tag" "${{ inputs.tags }}")
+        # tags: pokkum build has no --tag/--tags flag and .pokkum.yaml has no
+        # tags field either — every publish is tagged "latest" (the CLI's own
+        # DefaultTag) regardless of what's requested here. Warn instead of
+        # silently dropping a value the caller asked for.
+        if [ -n "${{ inputs.tags }}" ] && [ "${{ inputs.tags }}" != "latest" ]; then
+          echo "::warning::pokkum-action: the 'tags' input (\"${{ inputs.tags }}\") was set, but the installed pokkum CLI has no mechanism to apply custom image tags. The published image will be tagged 'latest' only. Use this action's digest/ref outputs for an immutable reference instead."
         fi
 
         if [ -n "${{ inputs.platforms }}" ]; then
           ARGS+=("--platform" "${{ inputs.platforms }}")
         fi
 
-        if [ -n "${{ inputs.output }}" ]; then
-          ARGS+=("--output" "${{ inputs.output }}")
-        fi
+        # output: push/local/tarball is a build *mode*, controlled by the
+        # --local / --tarball flags — NOT the global --output flag, which is
+        # only the text/json serialization format for other subcommands and
+        # is not read by `pokkum build` at all.
+        case "${{ inputs.output }}" in
+          local)
+            ARGS+=("--local")
+            ;;
+          tarball)
+            ARGS+=("--tarball" "${{ inputs.tarball-path }}")
+            ;;
+          push|"")
+            : # default mode; no flag needed
+            ;;
+          *)
+            echo "::error::pokkum-action: invalid 'output' value \"${{ inputs.output }}\" — must be push, local, or tarball."
+            exit 1
+            ;;
+        esac
 
         if [ "${{ inputs.dry-run }}" = "true" ]; then
           ARGS+=("--dry-run")
@@ -133,8 +165,10 @@ runs:
         fi
 
         echo "Running: pokkum build ${ARGS[*]} ${{ inputs.project-dir }}"
-        
-        # Capture build execution JSON output
+
+        # --log-format json is fixed (not user-configurable): it's how this
+        # step parses the final "published" log line for digest/ref below.
+        # It is unrelated to the --output (text/json) global flag.
         BUILD_OUT=$(pokkum build "${ARGS[@]}" "${{ inputs.project-dir }}" --log-format json 2>&1)
         echo "$BUILD_OUT"
 
