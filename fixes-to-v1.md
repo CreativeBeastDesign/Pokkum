@@ -163,7 +163,7 @@ Verified default identities (confirmed by decoding real live Sigstore signatures
 New tests: `internal/adapters/sigstore` includes hermetic tests against real captured signature fixtures (no network, doesn't expire — verification uses Rekor entry's recorded time), plus `internal/adapters/baseimage/resolver_network_test.go`'s `TestResolve_LiveKeylessVerification` testing against live upstream images. The resolver level also has a test proving the anti-downgrade guarantee: an image signed only with a static key, resolved under forced keyless mode, correctly fails rather than silently falling back.
 
 **Independent re-verification** (a second audit pass, adversarial by design given this codebase's history of security features that looked real but weren't): confirmed the verifier calls real `sigstore-go` APIs for chain building, SCT checking, and Rekor inclusion — nothing hand-rolled; confirmed `req.ChainPEM` (the attacker-suppliable chain annotation) is referenced in zero non-test verification-path lines; confirmed the empty-identity refusal runs before any Sigstore call; confirmed the verifier uses the Rekor entry's integrated time rather than `time.Now()` (proven empirically — a real captured cert whose 10-minute validity window expired days before this check still verifies); and confirmed `TestResolve_LiveKeylessVerification` genuinely hits the live `distroless` and `chainguard` registries with the exact zero-extra-flags shape of a plain `pokkum build` and both verify. Three minor, non-security items surfaced and are now documented rather than silently left:
-- `pokkum base update`/`base check` pin digests into `pokkum.lock` without running verification (trust-on-first-use) — `pokkum build` re-verifies the locked digest at build time regardless, so this isn't a bypass, but see [Vocabulary.md](Vocabulary.md) §14.
+- `pokkum base update`/`base check` pin digests into `pokkum.lock` without running verification (trust-on-first-use) — `pokkum build` re-verifies the locked digest at build time regardless, so this isn't a bypass, but see [Vocabulary.md](Vocabulary.md) §14. **Correction (2026-08-18, commit `a149b28`): this claim was false on the escrow-mirror path until that commit.** A mirrored base was pulled by its mutable `mirror_ref` tag, and the locked `digest` field was written to `pokkum.lock` but never read back for comparison — so "re-verifies the locked digest" wasn't actually true for a mirrored base; only the signature was checked, against whatever the mirror happened to be serving at pull time. An attacker with push access to the mirror could retarget the tag at a different, older, but still genuinely-signed image and every check would pass. `Resolve` now compares the mirror-served digest against the locked one and fails closed on mismatch, so the claim below is accurate as of this date, not before it.
 - Setting only one of `--base-keyless-identity`/`--base-keyless-issuer` (not both) fails with a generic "must specify Issuer criteria" error instead of falling back to the preset's default for the unset half — fail-closed and safe, just a confusing message for a plausible mistake. See [Vocabulary.md](Vocabulary.md) §3.
 - The verification cache keys on the trusted-root file *path*, not its contents, so a mid-process edit of a custom `--sigstore-trusted-root` file could theoretically serve a stale cached result. Low real-world risk (the file doesn't change during a single build), noted for completeness.
 
@@ -234,7 +234,13 @@ cloud-provider SDKs. `pokkum base update`/`base check` pinning digests into
 `pokkum.lock` without running verification is accepted as trust-on-first-use,
 because `pokkum build` independently re-verifies the locked digest's real
 signature (static-key or keyless) at build time regardless — the lockfile
-entry is never trusted on its own.
+entry is never trusted on its own. **This was true for a direct pull but not
+for an escrow-mirrored one until 2026-08-18 (commit `a149b28`)**: the mirror
+path pulled by a mutable tag and never compared the result against the
+digest `pokkum.lock` had actually locked, so a compromised mirror's
+substituted-but-genuinely-signed content would pass every check. `Resolve`
+now enforces that comparison on every mirror pull, so the statement above
+is accurate for both paths as of this date.
 
 ## Real `cosign` dry-run found three more release-pipeline bugs
 

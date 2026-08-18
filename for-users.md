@@ -4,6 +4,90 @@ Most of [fixes-to-v1.md](fixes-to-v1.md) is invisible unless you were
 relying on the specific broken behavior. This page covers what you might
 actually notice, and what — if anything — you need to do.
 
+## 2026-08-18: static-key signature verification now requires a real key — no more silent placeholder
+
+**Before:** if you never set a `POKKUM_*_PUBKEY` env var, base-image
+static-key verification, remote-cache verification, and `pokkum verify`
+all quietly fell back to one shared, hardcoded placeholder public key.
+That key was real enough to parse, but nobody held its private half —
+its own doc comment admitted as much — so it could never actually verify
+anything. In practice this mostly failed safely (a genuine signature
+never matches a key nobody signed with), but it meant "verification
+happened" and "verification meant anything" were two different claims
+wearing the same clothes, and in one place — see below — the gap was
+worse than that.
+
+**Now:** the placeholder is gone. Deleted, not replaced — a trust anchor
+nobody owns is worse than having no default at all. All three sites fail
+closed with an explicit, actionable error instead:
+
+1. **`pokkum build --base-verify-mode=static-key`** (the default mode for
+   a `custom` base image preset) now **requires**
+   `POKKUM_BASE_IMAGE_PUBKEY` to be set. Without it, the build fails
+   immediately with an error telling you to set it — where before it
+   would attempt verification against the placeholder and fail with a
+   generic "signature invalid"-shaped error instead. If you sign your own
+   custom base image, set `POKKUM_BASE_IMAGE_PUBKEY` to your public key
+   PEM (path or literal text).
+2. **Remote-cache static-key verification** (`--cache-verify-mode=static-key`,
+   or `auto` mode encountering a static-key-signed cache candidate) now
+   requires one of `--cache-verify-key`, `POKKUM_CACHE_PUBKEY`,
+   `POKKUM_SIGNING_PUBKEY`, or `POKKUM_BASE_IMAGE_PUBKEY` to be set —
+   whichever you already use for your other signing/verification flows
+   works here too. Without any of them, that cache candidate is treated
+   as unverified: cleanly rejected, falling through to a full rebuild
+   (or a hard build failure under `--cache-verify-strict`), same as
+   before — just with a clearer reason in the log.
+3. **`pokkum verify` now hard-fails on a static-key-signed image when no
+   key is configured — in every mode, including the default
+   rebuild-and-compare path.** This is the one place the old placeholder
+   was a genuine, not just theoretical, gap: the previous implementation
+   returned `SignatureValid: false` with a **nil error**, so nothing in
+   `verify`'s rebuild/comparison logic ever actually checked
+   `SignatureValid` before proceeding — a signed image with no key
+   configured was silently treated the same as one that passed. Pass
+   `--public-key`, or set `POKKUM_SIGNING_PUBKEY`/`POKKUM_BASE_IMAGE_PUBKEY`,
+   to verify a static-key-signed image; `pokkum verify --no-rebuild`
+   attestation-only checks are affected the same way.
+
+**If you already had a real key configured** (the common case if you
+sign your own base images or use `--signing-key`), none of this changes
+anything for you — you were never relying on the placeholder in the
+first place. This only affects builds/verifications that had no key
+configured at all and were quietly getting a no-op check.
+
+## 2026-08-18: escrow-mirrored base images are now checked against the digest `pokkum.lock` actually locked
+
+**Before:** `pokkum base update --mirror-registry=<repo>` mirrors a base
+image and its Cosign `.sig` tag into a registry you control, and records
+a `mirror_ref` (a mutable `"<mirror>:sha256-<hex>"` tag, not a pinned
+digest) plus a `digest` field in `pokkum.lock`. `pokkum build` pulled the
+base image via that mirror tag — but never compared what the mirror
+actually served against the `digest` `pokkum.lock` had locked. Anyone
+with push access to your own mirror repository (a much lower bar than
+compromising the actual upstream image signer) could retarget that tag
+to point at a **different image** — say, an older, real, genuinely
+upstream-signed release of the same base with known CVEs — and the build
+would resolve against it with every signature check still passing: real
+certificate, correct identity, valid transparency-log entry, matching
+repository name. The digest lock in `pokkum.lock` existed and was
+written, but nothing ever read it back to compare.
+
+**Now:** every mirror pull compares the digest the mirror actually served
+against the locked `digest` in `pokkum.lock`, and fails the build closed
+— naming both digests — on any mismatch. The very first time a preset is
+mirrored (nothing locked yet) still works normally; every subsequent
+build enforces the match.
+
+**What this means for you:** if your mirror only ever serves the exact
+content you mirrored it from, this is invisible — it always matched, and
+still does. If you ever manually retag or repopulate a mirror repository
+outside of `pokkum base update --mirror-registry`, and end up with a tag
+serving different content than `pokkum.lock` expects, `pokkum build` will
+now refuse to build instead of silently proceeding against the swapped
+image. Re-run `pokkum base update --mirror-registry=<repo>` to
+re-mirror and re-lock the digest you actually want.
+
 ## `pokkum upgrade` now refuses to install an unverified binary
 
 **Before:** if release verification was misconfigured or unavailable for
@@ -124,7 +208,12 @@ and keyless Sigstore identities. Two modes are available:
   lockfile on trust-on-first-use, by design. `pokkum build` re-verifies the
   locked digest's real signature at build time regardless, so this isn't a
   way to slip an unverified image past you permanently — just don't treat
-  `base update` succeeding as itself a verification result.
+  `base update` succeeding as itself a verification result. **If you use
+  `--mirror-registry`**: as of 2026-08-18, that build-time re-verification
+  also checks the mirror-served digest against the digest `pokkum.lock`
+  actually locked (see the dedicated section above), closing a real gap
+  where a compromised mirror could previously serve different, older, but
+  still genuinely-signed content and pass every check.
 
 Separately, `--registry-config` staying a generic `docker config.json`
 reader (no ECR/GCR/ACR-specific credential-helper code) is also by design,
