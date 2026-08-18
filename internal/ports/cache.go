@@ -54,6 +54,27 @@ type RemoteCacheInputRequest struct {
 	SBOMFormat          string
 	SBOMAttachMode      string
 	SBOMNoAttach        bool
+
+	// AssetOverlaySourceDigests is the resolved list of predecessor image
+	// sources --asset-overlay pulled content from (empty when the flag is
+	// unused or resolved zero generations). Included so two builds that
+	// differ only in which predecessors were found — e.g. one run right
+	// after a new generation was pushed, another before — never collide on
+	// the same cache tag: a cache hit must only ever be served to a build
+	// whose overlay content would be byte-identical to what's cached.
+	//
+	// Despite the field name, an entry is not always a bare digest: one
+	// resolved via --asset-overlay's auto-discovery (predecessor-chain
+	// walk) is a bare digest at this build's own repo, but one resolved via
+	// an explicit --asset-overlay-from ref is a fully-qualified "repo@digest"
+	// string, since that ref may name a different repository entirely (see
+	// internal/adapters/assetoverlay.ResolveDigest). Both forms are equally
+	// valid cache-key inputs — the field just needs to change whenever the
+	// actual resolved source set changes, regardless of representation —
+	// and using the qualified form where available is what lets two
+	// same-digest sources in different repositories be told apart, rather
+	// than colliding on the same cache key.
+	AssetOverlaySourceDigests []string
 }
 
 // RemoteCacheVerifyMode specifies how signature verification on cache-hit images is performed.

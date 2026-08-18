@@ -351,7 +351,7 @@ func TestMergeLabelsAndAnnotationsWithRequireEnv(t *testing.T) {
 		RequireEnv: []string{"DATABASE_URL", "JWT_SECRET"},
 	}
 	hash := v1.Hash{Algorithm: "sha256", Hex: "1234567890abcdef"}
-	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc)
+	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc, "", nil)
 	if labels[ports.LabelRequiredEnv] != "DATABASE_URL,JWT_SECRET" {
 		t.Errorf("got LabelRequiredEnv = %q, want DATABASE_URL,JWT_SECRET", labels[ports.LabelRequiredEnv])
 	}
@@ -371,7 +371,7 @@ func TestMergeLabelsAndAnnotationsWithEnvBaked(t *testing.T) {
 		EnvBaked: []string{"PUBLIC_API_URL", "DB_PASSWORD"},
 	}
 	hash := v1.Hash{Algorithm: "sha256", Hex: "1234567890abcdef"}
-	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc)
+	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc, "", nil)
 	if labels[ports.LabelEnvBaked] != "DB_PASSWORD,PUBLIC_API_URL" {
 		t.Errorf("got LabelEnvBaked = %q, want DB_PASSWORD,PUBLIC_API_URL (sorted)", labels[ports.LabelEnvBaked])
 	}
@@ -391,7 +391,7 @@ func TestMergeLabelsAndAnnotationsWithVEXExemptions(t *testing.T) {
 		VEXExemptions: []string{"CVE-2024-99999", "CVE-2024-12345"},
 	}
 	hash := v1.Hash{Algorithm: "sha256", Hex: "1234567890abcdef"}
-	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc)
+	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc, "", nil)
 	if labels[ports.LabelVEXExemptions] != "CVE-2024-12345,CVE-2024-99999" {
 		t.Errorf("got LabelVEXExemptions = %q, want CVE-2024-12345,CVE-2024-99999 (sorted)", labels[ports.LabelVEXExemptions])
 	}
@@ -408,7 +408,7 @@ func TestMergeLabelsAndAnnotationsWithVEXExemptions(t *testing.T) {
 func TestMergeLabelsOmitsEnvBakedWhenUnset(t *testing.T) {
 	rc := ports.RuntimeConfig{}
 	hash := v1.Hash{Algorithm: "sha256", Hex: "1234567890abcdef"}
-	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc)
+	labels := mergeLabels(nil, nil, hash, time.Unix(0, 0).UTC(), rc, "", nil)
 	if _, ok := labels[ports.LabelEnvBaked]; ok {
 		t.Errorf("expected no LabelEnvBaked when EnvBaked is unset, got %q", labels[ports.LabelEnvBaked])
 	}

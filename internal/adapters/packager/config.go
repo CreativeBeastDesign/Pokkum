@@ -62,7 +62,7 @@ func applyRuntime(
 	cfg.Config.WorkingDir = rc.WorkingDir
 	cfg.Config.Env = mergeEnv(baseCfg.Config.Env, pokkumEnv(rc))
 	cfg.Config.ExposedPorts = exposedPorts(baseCfg.Config.ExposedPorts, rc)
-	cfg.Config.Labels = mergeLabels(baseCfg.Config.Labels, req.Labels, baseDigest, ts, rc)
+	cfg.Config.Labels = mergeLabels(baseCfg.Config.Labels, req.Labels, baseDigest, ts, rc, req.PredecessorDigest, req.AssetOverlaySourceDigests)
 
 	// Fields that record where an image was assembled rather than what it
 	// contains. They are pure build-host noise and would defeat reproducibility
@@ -200,7 +200,7 @@ func tcpPort(p int) string { return strconv.Itoa(p) + "/tcp" }
 // stage is a whole-map overlay onto a map, iteration order within a stage
 // cannot affect the result; only the order of the stages can, and that is
 // fixed.
-func mergeLabels(base, caller map[string]string, baseDigest v1.Hash, ts time.Time, rc ports.RuntimeConfig) map[string]string {
+func mergeLabels(base, caller map[string]string, baseDigest v1.Hash, ts time.Time, rc ports.RuntimeConfig, predecessorDigest string, assetOverlaySourceDigests []string) map[string]string {
 	out := make(map[string]string, len(base)+len(caller)+3)
 	maps.Copy(out, base)
 
@@ -227,6 +227,15 @@ func mergeLabels(base, caller map[string]string, baseDigest v1.Hash, ts time.Tim
 		slices.Sort(exempted)
 		exempted = slices.Compact(exempted)
 		out[ports.LabelVEXExemptions] = strings.Join(exempted, ",")
+	}
+	if predecessorDigest != "" {
+		out[ports.LabelPredecessor] = predecessorDigest
+	}
+	if len(assetOverlaySourceDigests) > 0 {
+		sources := slices.Clone(assetOverlaySourceDigests)
+		slices.Sort(sources)
+		sources = slices.Compact(sources)
+		out[ports.LabelAssetOverlaySources] = strings.Join(sources, ",")
 	}
 
 	maps.Copy(out, caller)
@@ -259,6 +268,12 @@ func imageAnnotations(labels map[string]string, baseRef string, caller map[strin
 	}
 	if v, ok := labels[ports.LabelVEXExemptions]; ok && v != "" {
 		out[ports.AnnotationVEXExemptions] = v
+	}
+	if v, ok := labels[ports.LabelPredecessor]; ok && v != "" {
+		out[ports.AnnotationPredecessor] = v
+	}
+	if v, ok := labels[ports.LabelAssetOverlaySources]; ok && v != "" {
+		out[ports.AnnotationAssetOverlaySources] = v
 	}
 	if _, ok := out[ports.LabelBaseName]; !ok && baseRef != "" {
 		out[ports.LabelBaseName] = baseRef

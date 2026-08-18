@@ -586,6 +586,21 @@ type CompileOptions struct {
 
 	// NoCache disables checking and publishing to the remote composite OCI input cache.
 	NoCache bool
+
+	// AssetOverlayGenerations is --asset-overlay's <n>: the maximum number
+	// of prior generations to auto-discover (via the pushed image's own
+	// pokkum.dev/predecessor annotation chain, walked from the push
+	// target's current tag) and merge immutable client assets from. 0 (the
+	// default) means the feature is off — no chain is walked, no overlay
+	// layer is added.
+	AssetOverlayGenerations int
+
+	// AssetOverlayFrom is --asset-overlay-from's explicit override: a
+	// caller-supplied list of image refs (not necessarily at the same
+	// repo/tag as this build's own push target) to pull asset-overlay
+	// content from instead of auto-discovering the predecessor chain. Nil
+	// means auto-discover. Ignored when AssetOverlayGenerations is 0.
+	AssetOverlayFrom []string
 }
 
 // BunRuntimeOptions configures Bun runtime resolution and caching for layer assembly.
@@ -903,6 +918,18 @@ func (r BuildRequest) Validate() error {
 
 	if r.PushConcurrency < 0 {
 		return fmt.Errorf("push concurrency %d must not be negative: %w", r.PushConcurrency, ErrInvalidRequest)
+	}
+
+	// maxAssetOverlayGenerations bounds --asset-overlay=<n> before it ever
+	// reaches make([]string, 0, maxDepth) in assetoverlay.ResolvePredecessorChain
+	// — an unvalidated huge or negative value would attempt an
+	// oversized allocation before any network call, or (negative) behave
+	// unpredictably against a >0 check elsewhere. 1000 is far beyond any
+	// realistic rolling-deploy generation count while still bounding the
+	// worst case.
+	const maxAssetOverlayGenerations = 1000
+	if r.Compile.AssetOverlayGenerations < 0 || r.Compile.AssetOverlayGenerations > maxAssetOverlayGenerations {
+		return fmt.Errorf("asset-overlay generations %d must be between 0 and %d: %w", r.Compile.AssetOverlayGenerations, maxAssetOverlayGenerations, ErrInvalidRequest)
 	}
 
 	if !r.Compile.Strategy.Valid() {

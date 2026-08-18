@@ -227,6 +227,41 @@ func TestComputeInputHash(t *testing.T) {
 // telemetry, SBOM attach settings) must never collide on the same hash — a
 // collision here is exactly what let one build's cached image get silently
 // promoted to a different build's release tags.
+// TestComputeInputHash_AssetOverlaySourceDigestsOrderIndependent guards the
+// slices.Sort call ComputeInputHash applies to AssetOverlaySourceDigests:
+// two requests naming the identical resolved predecessor set in a different
+// order (order depends only on registry response timing/chain-walk order,
+// not on anything meaningful) must hash identically, or a cache tag would
+// churn on every build purely from harmless non-determinism in the order
+// digests were resolved.
+func TestComputeInputHash_AssetOverlaySourceDigestsOrderIndependent(t *testing.T) {
+	base := remotecacheutils.InputParams{
+		BaseImageDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		Strategy:        "layered",
+		AssetOverlaySourceDigests: []string{
+			"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		},
+	}
+	reversed := base
+	reversed.AssetOverlaySourceDigests = []string{
+		"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+
+	h1, err := remotecacheutils.ComputeInputHash(base)
+	if err != nil {
+		t.Fatalf("ComputeInputHash(base): %v", err)
+	}
+	h2, err := remotecacheutils.ComputeInputHash(reversed)
+	if err != nil {
+		t.Fatalf("ComputeInputHash(reversed): %v", err)
+	}
+	if h1 != h2 {
+		t.Errorf("hash differs by AssetOverlaySourceDigests order alone: %s vs %s", h1, h2)
+	}
+}
+
 func TestComputeInputHash_CoversPreviouslyMissingFields(t *testing.T) {
 	base := remotecacheutils.InputParams{
 		BaseImageDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -264,6 +299,9 @@ func TestComputeInputHash_CoversPreviouslyMissingFields(t *testing.T) {
 		{"sbom no-attach", func(p *remotecacheutils.InputParams) { p.SBOMNoAttach = true }},
 		{"bun custom binary", func(p *remotecacheutils.InputParams) { p.BunCustomBinaryPath = "/opt/bun/bin/bun" }},
 		{"stub launcher", func(p *remotecacheutils.InputParams) { p.StubLauncher = true }},
+		{"asset overlay source digests", func(p *remotecacheutils.InputParams) {
+			p.AssetOverlaySourceDigests = []string{"sha256:2222222222222222222222222222222222222222222222222222222222222222"}
+		}},
 	}
 
 	for _, tc := range cases {

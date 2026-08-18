@@ -273,6 +273,23 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 			mutate.Addendum{Layer: serverLayer, MediaType: layerMediaType, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add /app/server"}},
 		)
 
+		// The asset overlay layer (if any) is appended BEFORE the current
+		// build's own client layer, deliberately — OCI layers apply in
+		// addenda order, and a later layer's file overwrites an earlier
+		// layer's file at the same path when the image is extracted. Since
+		// content-hashed filenames make a genuine same-path/different-bytes
+		// collision between a prior generation and the current build
+		// impossible in the ordinary case (that's the entire point of
+		// content hashing), this ordering is belt-and-suspenders: it
+		// guarantees the CURRENT build's bytes win, never a stale prior
+		// generation's, if that guarantee is ever violated. attestRecords
+		// below is deduped to match this same last-wins-by-Rel semantics.
+		var overlayRecs []attestutils.Record
+		if addenda, overlayRecs, err = appendAssetOverlayLayer(ctx, req, ts, layerMediaType, addenda); err != nil {
+			return nil, err
+		}
+		attestRecords = append(attestRecords, overlayRecs...)
+
 		if req.AppClientDir != "" {
 			if info, err := os.Stat(req.AppClientDir); err == nil && info.IsDir() {
 				if !req.NoPrecompress {
@@ -412,8 +429,30 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 	// which have no /app tree for this check, so this block is a no-op there.
 	// The supervisor layer itself is untouched, so its immutable cache is
 	// preserved.
+	//
+	// dedupeAttestRecordsByRel is REQUIRED, not an optimization: the asset
+	// overlay layer and the current build's own client layer both target
+	// /app/client, and share the same Rel for every file whose content is
+	// unchanged between the prior generation and the current build — the
+	// ordinary case, since content-hashed filenames only change when their
+	// content does. attestutils.RootDigest itself does not dedupe (it just
+	// sorts and hashes), so without this step the digest would count such a
+	// file's contribution TWICE — while pokkum-init's runtime walk of the
+	// real, layer-squashed /app/client tree sees it exactly ONCE, since OCI
+	// layers physically merge into one filesystem. That mismatch would make
+	// every --asset-overlay image with any unchanged carried-forward asset
+	// (i.e. nearly all of them) fail pokkum-init's startup check and refuse
+	// to exec — found by this feature's own end-to-end test against a real
+	// pushed image, not by any of the narrower unit tests, which happened to
+	// use fixtures with no overlapping paths. dedupeAttestRecordsByRel keeps
+	// the LAST occurrence of each Rel, matching attestRecords' append order,
+	// which itself matches addenda's append order (server, overlay, client,
+	// vendor, native, prerendered) — the same order OCI layers apply in, so
+	// "last append wins" here reproduces exactly what "later layer overwrites
+	// earlier layer at the same path" produces on disk at runtime.
 	if len(attestRecords) > 0 {
-		digest := attestutils.RootDigest(attestRecords)
+		dedupedRecords := dedupeAttestRecordsByRel(attestRecords)
+		digest := attestutils.RootDigest(dedupedRecords)
 		imgCfg, cfgErr := img.ConfigFile()
 		if cfgErr != nil {
 			return nil, fmt.Errorf("packager: build %s: read config for attestation: %w: %w", req.Platform, cfgErr, core.ErrPackageFailed)
@@ -425,7 +464,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		}
 		p.logger().Info("startup attestation digest stamped",
 			"platform", req.Platform.String(),
-			"files", len(attestRecords),
+			"files", len(dedupedRecords),
 			"digest", digest)
 	}
 
@@ -495,6 +534,73 @@ func appendPrerenderedLayer(ctx context.Context, req ports.PackageRequest, ts ti
 		MediaType: layerMediaType,
 		History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppPrerenderedDirPrefix},
 	}), prerenderedRecs, nil
+}
+
+// appendAssetOverlayLayer implements the --asset-overlay rolling-deploy
+// feature's packaging half: when req.AssetOverlayDir is set (populated by
+// core.Build via internal/adapters/assetoverlay.BuildOverlayDir, a merged
+// tree of prior generations' /app/client/_app/immutable content), it becomes
+// its own layer at ports.AppClientDirPrefix, alongside — not replacing —
+// the current build's own client layer.
+//
+// No precompression step here, unlike the current build's own client layer:
+// AssetOverlayDir's content was extracted verbatim from prior generations'
+// already-built layers, .gz/.br sidecars included (precompressutils wrote
+// them into the same directory tree at the time, so they're already present
+// among the tar entries assetoverlay.ExtractClientImmutableAssets pulled) —
+// re-running precompression here would be redundant work over bytes that
+// already have it.
+//
+// The caller MUST fold this function's returned []attestutils.Record into
+// attestRecords before RootDigest is computed — see the call site's own
+// comment. Skipping that is not a cosmetic omission: pokkum-init
+// independently re-derives the same digest from the live /app/client tree
+// at startup and refuses to exec on a mismatch, so an overlay layer whose
+// files were never counted in the expected digest fails every container
+// that ships it, at startup, not at build time.
+func appendAssetOverlayLayer(ctx context.Context, req ports.PackageRequest, ts time.Time, layerMediaType types.MediaType, addenda []mutate.Addendum) ([]mutate.Addendum, []attestutils.Record, error) {
+	if req.AssetOverlayDir == "" {
+		return addenda, nil, nil
+	}
+	info, err := os.Stat(req.AssetOverlayDir)
+	if err != nil || !info.IsDir() {
+		return addenda, nil, nil
+	}
+	overlayLayer, _, overlayRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AssetOverlayDir, ports.AppClientDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("packager: build %s: asset overlay layer: %w", req.Platform, err)
+	}
+	return append(addenda, mutate.Addendum{
+		Layer:     overlayLayer,
+		MediaType: layerMediaType,
+		History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppClientDirPrefix + " (asset overlay)"},
+	}), overlayRecs, nil
+}
+
+// dedupeAttestRecordsByRel collapses records to at most one per Rel, keeping
+// the LAST occurrence in records' order. Required whenever more than one
+// layer can legitimately target the same in-image path (currently: the
+// asset overlay layer and the current build's own client layer both target
+// /app/client) — attestutils.RootDigest sorts and hashes every record it's
+// given with no dedup of its own, so two records sharing a Rel would count
+// that file's contribution to the digest twice, while pokkum-init's runtime
+// walk of the real, layer-squashed filesystem sees the file exactly once.
+// "Last occurrence wins" is deliberate, not arbitrary: it must match the
+// real OCI layer-squash result, where a later-appended layer's file
+// physically overwrites an earlier layer's file at the same path — so the
+// caller MUST accumulate records in the same order it appends the
+// corresponding addenda, or this function's dedup choice would silently
+// disagree with what actually ends up on disk at container startup.
+func dedupeAttestRecordsByRel(records []attestutils.Record) []attestutils.Record {
+	byRel := make(map[string]attestutils.Record, len(records))
+	for _, r := range records {
+		byRel[r.Rel] = r
+	}
+	out := make([]attestutils.Record, 0, len(byRel))
+	for _, r := range byRel {
+		out = append(out, r)
+	}
+	return out
 }
 
 // Index implements ports.Packager.

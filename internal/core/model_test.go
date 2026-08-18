@@ -638,6 +638,24 @@ func TestBuildRequestValidate(t *testing.T) {
 			},
 			wantErr: core.ErrInvalidRequest,
 		},
+		{
+			name: "negative asset-overlay generations",
+			mutate: func(r *core.BuildRequest) {
+				r.Compile.AssetOverlayGenerations = -1
+			},
+			wantErr: core.ErrInvalidRequest,
+		},
+		{
+			// Guards against an unbounded make([]string, 0, maxDepth) in
+			// assetoverlay.ResolvePredecessorChain — an absurd value here
+			// would otherwise attempt a huge allocation before any network
+			// call even happens.
+			name: "asset-overlay generations far exceeding the sane cap",
+			mutate: func(r *core.BuildRequest) {
+				r.Compile.AssetOverlayGenerations = 2_000_000_000
+			},
+			wantErr: core.ErrInvalidRequest,
+		},
 	}
 
 	for _, tt := range tests {

@@ -199,18 +199,41 @@ const (
 // standard OCI annotation namespace where one exists so that generic tooling
 // can read them, and a pokkum namespace for the rest.
 const (
-	LabelCreated       = "org.opencontainers.image.created"
-	LabelBaseName      = "org.opencontainers.image.base.name"
-	LabelBaseDigest    = "org.opencontainers.image.base.digest"
-	LabelRevision      = "org.opencontainers.image.revision"
-	LabelSource        = "org.opencontainers.image.source"
-	LabelVersion       = "org.opencontainers.image.version"
-	LabelPokkumVersion = "dev.pokkum.version"
-	LabelSupervisor    = "dev.pokkum.supervisor.version"
-	LabelBunVersion    = "dev.pokkum.bun.version"
-	LabelRequiredEnv   = "dev.pokkum.required-env"
-	LabelEnvBaked      = "dev.pokkum.env-baked"
-	LabelVEXExemptions = "dev.pokkum.vex-exemptions"
+	LabelCreated             = "org.opencontainers.image.created"
+	LabelBaseName            = "org.opencontainers.image.base.name"
+	LabelBaseDigest          = "org.opencontainers.image.base.digest"
+	LabelRevision            = "org.opencontainers.image.revision"
+	LabelSource              = "org.opencontainers.image.source"
+	LabelVersion             = "org.opencontainers.image.version"
+	LabelPokkumVersion       = "dev.pokkum.version"
+	LabelSupervisor          = "dev.pokkum.supervisor.version"
+	LabelBunVersion          = "dev.pokkum.bun.version"
+	LabelRequiredEnv         = "dev.pokkum.required-env"
+	LabelEnvBaked            = "dev.pokkum.env-baked"
+	LabelVEXExemptions       = "dev.pokkum.vex-exemptions"
+	LabelPredecessor         = "dev.pokkum.predecessor"
+	LabelAssetOverlaySources = "dev.pokkum.asset-overlay-sources"
+
+	// AnnotationPredecessor is the manifest annotation key recording the
+	// digest of the image this one was built to replace at the same push
+	// target (the value PackageRequest.PredecessorDigest carries) — set on
+	// every image pokkum build pushes, whether or not --asset-overlay is
+	// used, so a later build's --asset-overlay auto-discovery can find this
+	// generation without depending on the mutable, Kubernetes-only
+	// pokkum.dev/image-history annotation. Empty/absent on the first image
+	// ever pushed to a given target.
+	AnnotationPredecessor = "pokkum.dev/predecessor"
+
+	// AnnotationAssetOverlaySources is the manifest annotation key recording
+	// the exact, resolved list of predecessor image digests --asset-overlay
+	// actually pulled content from for this build (PackageRequest's
+	// AssetOverlaySourceDigests). Durable record of what this image's
+	// overlay layer's bytes depend on, beyond its own source — needed so
+	// pokkum verify/a future rebuild can replay the same predecessor set
+	// rather than whatever pokkum.dev/predecessor's mutable chain currently
+	// resolves to by the time verification runs. Absent when --asset-overlay
+	// was not used or resolved zero generations.
+	AnnotationAssetOverlaySources = "pokkum.dev/asset-overlay-sources"
 
 	// AnnotationRequiredEnv is the manifest annotation key for required env contract.
 	AnnotationRequiredEnv = "pokkum.dev/required-env"
@@ -432,6 +455,33 @@ type PackageRequest struct {
 	// handler) or as a root of pokkum-static. Optional: when empty, no
 	// prerendered layer is added.
 	AppPrerenderedDir string
+
+	// AssetOverlayDir is the host directory containing merged prior-generation
+	// immutable client assets (rooted so its content lands under
+	// AppClientDirPrefix, same target as AppClientDir) for the opt-in
+	// --asset-overlay rolling-deploy feature. Optional: when empty, no
+	// overlay layer is added — this is the default, unchanged behavior.
+	// When non-empty, the packager appends it as its own layer AND folds its
+	// files into the layered-strategy startup attestation (AttestationRoots
+	// already covers AppClientDirPrefix) — omitting the second half would
+	// make every asset-overlay image fail to start; see
+	// appendAssetOverlayLayer's doc comment.
+	AssetOverlayDir string
+
+	// PredecessorDigest is the digest of the image this build is replacing
+	// at the same push target (resolved by core.Build before packaging, by
+	// GETting the current tag), stamped as AnnotationPredecessor on every
+	// pushed image regardless of whether --asset-overlay is used. Empty
+	// means no predecessor was found (the first image ever pushed to this
+	// target).
+	PredecessorDigest string
+
+	// AssetOverlaySourceDigests is the exact, resolved list of predecessor
+	// image digests --asset-overlay pulled content from for AssetOverlayDir,
+	// stamped as AnnotationAssetOverlaySources so a later pokkum verify or
+	// rebuild can replay the same set. Empty when --asset-overlay was not
+	// used or resolved zero generations.
+	AssetOverlaySourceDigests []string
 
 	// StaticFallback is the in-image path of the opt-in SPA-fallback page for a
 	// StrategyStatic build, e.g. AppClientDirPrefix + "/" + <rel> where <rel>

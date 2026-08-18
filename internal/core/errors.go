@@ -216,4 +216,20 @@ var (
 
 	// ErrReleaseUpgradeFailed reports failure during self-upgrade download or binary replacement.
 	ErrReleaseUpgradeFailed = errors.New("release self-upgrade failed")
+
+	// ErrAssetOverlayConflict reports that two resolved prior generations of
+	// an --asset-overlay build disagree on the content of the same
+	// content-hashed asset path. Content-hashed filenames should make this
+	// impossible — a collision means an upstream invariant broke (a hash
+	// collision, or a non-immutable file living under the immutable asset
+	// prefix) and needs a human, not a silent pick of either generation's
+	// bytes.
+	ErrAssetOverlayConflict = errors.New("asset overlay: conflicting content for the same hashed asset path across generations")
+
+	// ErrAssetOverlayResolutionFailed reports failure to resolve or pull a
+	// prior generation's image for --asset-overlay (registry unreachable,
+	// auth failure, or a predecessor digest that no longer resolves). Never
+	// returned merely because a build has no predecessor yet (a first push
+	// to a target resolves to zero generations, not an error).
+	ErrAssetOverlayResolutionFailed = errors.New("asset overlay: failed to resolve or pull a prior generation")
 )

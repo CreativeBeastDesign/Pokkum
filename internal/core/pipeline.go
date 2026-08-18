@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -97,6 +98,12 @@ type Deps struct {
 	// RemoteCache queries and reconciles remote OCI input caches. Optional.
 	RemoteCache ports.RemoteCacher
 
+	// AssetOverlay resolves rolling-deploy predecessor lineage and pulls
+	// prior generations' immutable client asset content. Required only when
+	// req.Compile.AssetOverlayGenerations > 0 (--asset-overlay is used);
+	// nil is safe otherwise.
+	AssetOverlay ports.AssetOverlayResolver
+
 	// Logger receives every progress and diagnostic line. Nil means
 	// slog.Default(). Everything the pipeline logs is a log line, never
 	// program output; see Stdout.
@@ -182,6 +189,9 @@ func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 	}
 	if d.NativeInspector == nil {
 		return missing("native inspector")
+	}
+	if req.Compile.AssetOverlayGenerations > 0 && d.AssetOverlay == nil {
+		return missing("asset overlay resolver")
 	}
 	if opts.DryRun {
 		return nil
@@ -582,6 +592,69 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		return res, nil
 	}
 
+	// Stage 4.4: --asset-overlay resolution.
+	//
+	// Runs unconditionally whenever the flag is set, regardless of whether
+	// the remote build cache is in use (Stage 4.5, next) — the cache-key
+	// hash below and the packaging stage after Stage 6 both need the SAME
+	// resolved digest list, so resolving it exactly once here and threading
+	// it through both is what keeps them from silently disagreeing about
+	// what this build's overlay content actually is.
+	//
+	// Auto-discovery (walking the push target's own predecessor chain) only
+	// makes sense for OutputPush: there is no "current tag at the target"
+	// to inspect for --local/--tarball output. --asset-overlay-from's
+	// explicit refs work regardless of output mode, since they name
+	// arbitrary external images, not this build's own push target.
+	var assetOverlayDigests []string
+	var predecessorDigest string
+	if req.Compile.AssetOverlayGenerations > 0 {
+		switch {
+		case len(req.Compile.AssetOverlayFrom) > 0:
+			n := len(req.Compile.AssetOverlayFrom)
+			if n > req.Compile.AssetOverlayGenerations {
+				n = req.Compile.AssetOverlayGenerations
+			}
+			for _, ref := range req.Compile.AssetOverlayFrom[:n] {
+				// digest is fully-qualified ("repo@sha256:...") — ref may
+				// name a repository other than req.Repo. NOT eligible to
+				// become predecessorDigest below: that annotation's own
+				// contract is specifically "the digest of whatever THIS
+				// push replaced at THIS build's own push target", which an
+				// explicit --asset-overlay-from entry may not be at all.
+				digest, err := deps.AssetOverlay.ResolveDigest(ctx, ref, req.RegistryConfigPath, req.Insecure)
+				if err != nil {
+					return BuildResult{}, err
+				}
+				assetOverlayDigests = append(assetOverlayDigests, digest)
+			}
+		case req.Output.Mode == OutputPush && req.Repo != "" && len(req.Tags) > 0:
+			chain, err := deps.AssetOverlay.ResolvePredecessorChain(ctx, req.Repo, req.Tags[0], req.RegistryConfigPath, req.Insecure, req.Compile.AssetOverlayGenerations)
+			if err != nil {
+				return BuildResult{}, err
+			}
+			assetOverlayDigests = chain
+			// The predecessor annotation is stamped ONLY on this
+			// auto-discovery branch, never from an --asset-overlay-from
+			// entry above: chain[0] (if present) is guaranteed to be
+			// req.Repo's own current tag digest, matching what
+			// ports.AnnotationPredecessor documents. An explicit
+			// --asset-overlay-from ref makes no such guarantee — it may
+			// name an unrelated image in a different repository entirely —
+			// so stamping assetOverlayDigests[0] unconditionally (the prior
+			// behavior) recorded false lineage whenever
+			// --asset-overlay-from was used instead of auto-discovery.
+			if len(chain) > 0 {
+				predecessorDigest = chain[0]
+			}
+		default:
+			log.Warn("--asset-overlay set but auto-discovery needs --output=push (or --asset-overlay-from with explicit refs); no overlay will be added to this build", "outputMode", req.Output.Mode)
+		}
+		if len(assetOverlayDigests) > 0 {
+			log.Info("asset overlay: resolved prior generations", "count", len(assetOverlayDigests), "digests", assetOverlayDigests)
+		}
+	}
+
 	// Stage 4.5: Composite Remote OCI Input Caching check.
 	//
 	// Cache-poisoning mitigation and verification:
@@ -602,33 +675,34 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			pStrs = append(pStrs, p.String())
 		}
 		inputHash, err := deps.RemoteCache.ComputeInputHash(ctx, ports.RemoteCacheInputRequest{
-			ProjectDir:          req.ProjectDir,
-			BaseImageDigest:     base.Digest.String(),
-			BunVersion:          toolchain.BunVersion,
-			BunVariant:          string(req.BunRuntime.Variant),
-			BunCustomBinaryPath: req.BunRuntime.CustomBinaryPath,
-			StubLauncher:        req.BunRuntime.StubLauncher,
-			Platforms:           pStrs,
-			Strategy:            string(req.Compile.Strategy),
-			Compression:         string(req.Compile.Compression),
-			NoPrune:             req.Compile.NoPrune,
-			KeepVendor:          slices.Clone(req.Compile.KeepVendor),
-			NoPrecompress:       req.Compile.NoPrecompress,
-			NoStrip:             req.Compile.NoStrip,
-			NoInject:            req.Compile.NoInject,
-			NoMinify:            req.Compile.NoMinify,
-			MinBunVersion:       req.Compile.MinBunVersion,
-			CompileEnv:          slices.Clone(req.Compile.Env),
-			Sourcemap:           req.Compile.Sourcemap,
-			Hermetic:            req.Hermetic,
-			SourceDateEpochUnix: req.SourceDateEpoch.Unix(),
-			Runtime:             req.Runtime,
-			Telemetry:           req.Telemetry,
-			Labels:              req.Labels,
-			Annotations:         req.Annotations,
-			SBOMFormat:          string(req.SBOM.Format),
-			SBOMAttachMode:      string(req.SBOM.AttachMode),
-			SBOMNoAttach:        req.SBOM.NoAttach,
+			ProjectDir:                req.ProjectDir,
+			BaseImageDigest:           base.Digest.String(),
+			BunVersion:                toolchain.BunVersion,
+			BunVariant:                string(req.BunRuntime.Variant),
+			BunCustomBinaryPath:       req.BunRuntime.CustomBinaryPath,
+			StubLauncher:              req.BunRuntime.StubLauncher,
+			Platforms:                 pStrs,
+			Strategy:                  string(req.Compile.Strategy),
+			Compression:               string(req.Compile.Compression),
+			NoPrune:                   req.Compile.NoPrune,
+			KeepVendor:                slices.Clone(req.Compile.KeepVendor),
+			NoPrecompress:             req.Compile.NoPrecompress,
+			NoStrip:                   req.Compile.NoStrip,
+			NoInject:                  req.Compile.NoInject,
+			NoMinify:                  req.Compile.NoMinify,
+			MinBunVersion:             req.Compile.MinBunVersion,
+			CompileEnv:                slices.Clone(req.Compile.Env),
+			Sourcemap:                 req.Compile.Sourcemap,
+			Hermetic:                  req.Hermetic,
+			SourceDateEpochUnix:       req.SourceDateEpoch.Unix(),
+			Runtime:                   req.Runtime,
+			Telemetry:                 req.Telemetry,
+			Labels:                    req.Labels,
+			Annotations:               req.Annotations,
+			SBOMFormat:                string(req.SBOM.Format),
+			SBOMAttachMode:            string(req.SBOM.AttachMode),
+			SBOMNoAttach:              req.SBOM.NoAttach,
+			AssetOverlaySourceDigests: slices.Clone(assetOverlayDigests),
 		})
 		if err == nil && inputHash != "" {
 			compositeInputHash = inputHash
@@ -690,6 +764,22 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		}
 		req.Annotations["pokkum.dev/build-input-hash"] = compositeInputHash
 		req.Tags = append(req.Tags, "cache-"+compositeInputHash)
+	}
+
+	// Build the merged asset-overlay content now — never earlier: a cache
+	// hit above returns before this point, and pulling N generations' full
+	// client layer content is real network/CPU cost not worth spending on a
+	// build that's about to be skipped entirely.
+	var assetOverlayDir string
+	if len(assetOverlayDigests) > 0 {
+		dir, err := deps.AssetOverlay.BuildOverlayDir(ctx, req.Repo, assetOverlayDigests, req.RegistryConfigPath, req.Insecure)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		assetOverlayDir = dir
+		if assetOverlayDir != "" {
+			defer os.RemoveAll(assetOverlayDir)
+		}
 	}
 
 	// The scratch directory for the compiled binaries. An explicit WorkDir is
@@ -806,7 +896,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 
 	// Stage 6: the parallel section.
-	built, doc, err := fanOut(ctx, deps, req, base, prep, workDir, imageLabels(req, baseInfo, toolchain), bunToolchain)
+	built, doc, err := fanOut(ctx, deps, req, base, prep, workDir, imageLabels(req, baseInfo, toolchain), bunToolchain, predecessorDigest, assetOverlayDigests, assetOverlayDir)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -845,9 +935,31 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	multi := len(built) > 1
 	payload := ports.Payload{Image: built[0].image}
 	if multi {
+		// The index has no config/labels of its own to mirror
+		// pokkum.dev/predecessor and pokkum.dev/asset-overlay-sources from
+		// the way each per-platform image's own manifest annotations
+		// already get them (via mergeLabels/imageAnnotations) — Index()
+		// only ever writes req.Annotations verbatim. Without this explicit
+		// merge, a multi-platform push (Pokkum's default: linux/amd64 +
+		// linux/arm64) would leave assetoverlay.ResolvePredecessorChain
+		// unable to find this generation via <repo>:<tag>, which resolves
+		// to the INDEX, not a per-platform child.
+		indexAnnotations := req.Annotations
+		if predecessorDigest != "" || len(assetOverlayDigests) > 0 {
+			indexAnnotations = make(map[string]string, len(req.Annotations)+2)
+			maps.Copy(indexAnnotations, req.Annotations)
+			if predecessorDigest != "" {
+				indexAnnotations[ports.AnnotationPredecessor] = predecessorDigest
+			}
+			if len(assetOverlayDigests) > 0 {
+				sources := slices.Clone(assetOverlayDigests)
+				slices.Sort(sources)
+				indexAnnotations[ports.AnnotationAssetOverlaySources] = strings.Join(sources, ",")
+			}
+		}
 		idx, err := deps.Packager.Index(ctx, ports.IndexRequest{
 			Images:      images,
-			Annotations: req.Annotations,
+			Annotations: indexAnnotations,
 			CreatedAt:   req.SourceDateEpoch,
 		})
 		if err != nil {
@@ -1051,6 +1163,9 @@ func fanOut(
 	workDir string,
 	labels map[string]string,
 	bunToolchain ports.BunResolverResult,
+	predecessorDigest string,
+	assetOverlayDigests []string,
+	assetOverlayDir string,
 ) ([]platformBuild, *ports.SBOMDocument, error) {
 	log := deps.logger()
 	built := make([]platformBuild, len(req.Platforms))
@@ -1172,6 +1287,11 @@ func fanOut(
 				Sourcemap:     req.Compile.Sourcemap,
 				NoPrecompress: req.Compile.NoPrecompress,
 				NoStrip:       req.Compile.NoStrip,
+				// Lineage annotations apply uniformly across strategies —
+				// only the overlay LAYER itself (AssetOverlayDir, set below,
+				// StrategyLayered only for now) needs per-strategy care.
+				PredecessorDigest:         predecessorDigest,
+				AssetOverlaySourceDigests: slices.Clone(assetOverlayDigests),
 			}
 
 			switch req.Compile.Strategy {
@@ -1205,6 +1325,15 @@ func fanOut(
 				// insert `bun --preload <path>` into the layered Entrypoint
 				// argv instead of the unconditional DefaultLayeredEntrypoint().
 				pkgReq.TelemetryPreloadRelPath = prep.TelemetryPreloadRelPath
+				// --asset-overlay: merged prior-generation immutable client
+				// assets, empty unless the flag resolved at least one
+				// generation (see Stage 4.4 above). StrategyLayered only for
+				// now — StrategyStatic could benefit equally (pokkum-static
+				// serves /app/client too) but has its own packaging branch
+				// in internal/adapters/packager/packager.go that doesn't yet
+				// call appendAssetOverlayLayer; tracked as a scoped follow-up
+				// in Roadmap.md rather than folded into this same change.
+				pkgReq.AssetOverlayDir = assetOverlayDir
 			case StrategyStatic:
 				// No server JS, vendor or native trees for a static site; the
 				// .svelte-kit/output staging holds the client and prerendered

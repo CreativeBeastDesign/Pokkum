@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/assetoverlay"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/baseimage"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunexec"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunruntime"
@@ -112,15 +113,17 @@ type buildFlags struct {
 	xffDepth       int
 	bodySizeLimit  string
 
-	failOnCVE       string
-	allowIncomplete bool
-	vexOutput       string
-	noPrune         bool
-	keepVendor      []string
-	noPrecompress   bool
-	noStrip         bool
-	noCache         bool
-	stubLauncher    bool
+	failOnCVE        string
+	allowIncomplete  bool
+	vexOutput        string
+	noPrune          bool
+	keepVendor       []string
+	noPrecompress    bool
+	noStrip          bool
+	noCache          bool
+	stubLauncher     bool
+	assetOverlay     int
+	assetOverlayFrom []string
 
 	// Cache verification flags
 	noCacheVerify        bool
@@ -277,6 +280,10 @@ The project directory defaults to the current working directory.`,
 		"Disable build-time stripping of non-runtime files (*.d.ts, *.map, tests, docs) from the vendor layer")
 	cmd.Flags().StringSliceVar(&flags.keepVendor, "keep-vendor", nil,
 		"Custom glob pattern(s) of vendor files to preserve during pruning, repeatable (e.g. --keep-vendor='*.md')")
+	cmd.Flags().IntVar(&flags.assetOverlay, "asset-overlay", 0,
+		"Rolling-deploy asset overlay: merge up to <n> prior generations' immutable client assets into a new layer, so browsers holding stale HTML can still fetch old hashed chunks during a rolling update. 0 (default) disables the feature. Auto-discovers predecessors via the pushed image's own lineage annotation (--output=push only); use --asset-overlay-from to override")
+	cmd.Flags().StringSliceVar(&flags.assetOverlayFrom, "asset-overlay-from", nil,
+		"Explicit image ref(s) to pull --asset-overlay content from instead of auto-discovering the predecessor chain, repeatable. Truncated to --asset-overlay's <n> if longer. Ignored unless --asset-overlay is also set")
 	cmd.Flags().BoolVar(&flags.noPrecompress, "no-precompress", false,
 		"Disable build-time static asset pre-compression (.gz, .br, .zst)")
 	cmd.Flags().BoolVar(&flags.noStrip, "no-strip", false,
@@ -445,6 +452,7 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 			remotecacheutils.WithCosignSigner(cosign.NewSigner(logger)),
 			remotecacheutils.WithKeylessVerifier(sigstore.NewVerifier(logger)),
 		),
+		AssetOverlay: assetoverlay.NewResolver(),
 
 		Logger:    logger,
 		Stdout:    stdout,
@@ -626,6 +634,9 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 		NoPrecompress: flags.noPrecompress,
 		NoStrip:       flags.noStrip,
 		NoCache:       noCacheSetting,
+
+		AssetOverlayGenerations: flags.assetOverlay,
+		AssetOverlayFrom:        flags.assetOverlayFrom,
 	}
 
 	// Runtime options

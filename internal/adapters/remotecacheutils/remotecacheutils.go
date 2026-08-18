@@ -103,35 +103,36 @@ var IgnoredBuildDirs = map[string]bool{
 // build's output. See ports.RemoteCacheInputRequest's doc comment for why
 // this must stay exhaustive, and why Sign is deliberately excluded.
 type InputParams struct {
-	ProjectDir          string                 `json:"-"`
-	SourceTreeHash      string                 `json:"source_tree_hash"`
-	LockfileHash        string                 `json:"lockfile_hash"`
-	BaseImageDigest     string                 `json:"base_image_digest"`
-	BunVersion          string                 `json:"bun_version"`
-	BunVariant          string                 `json:"bun_variant"`
-	BunCustomBinaryPath string                 `json:"bun_custom_binary_path"`
-	StubLauncher        bool                   `json:"stub_launcher"`
-	Platforms           []string               `json:"platforms"`
-	Strategy            string                 `json:"strategy"`
-	Compression         string                 `json:"compression"`
-	NoPrune             bool                   `json:"no_prune"`
-	KeepVendor          []string               `json:"keep_vendor"`
-	NoPrecompress       bool                   `json:"no_precompress"`
-	NoStrip             bool                   `json:"no_strip"`
-	NoInject            bool                   `json:"no_inject"`
-	NoMinify            bool                   `json:"no_minify"`
-	MinBunVersion       string                 `json:"min_bun_version"`
-	CompileEnv          []string               `json:"compile_env"`
-	Sourcemap           bool                   `json:"sourcemap"`
-	Hermetic            bool                   `json:"hermetic"`
-	SourceDateEpochUnix int64                  `json:"source_date_epoch_unix"`
-	Runtime             ports.RuntimeConfig    `json:"runtime"`
-	Telemetry           ports.TelemetryOptions `json:"telemetry"`
-	Labels              map[string]string      `json:"labels"`
-	Annotations         map[string]string      `json:"annotations"`
-	SBOMFormat          string                 `json:"sbom_format"`
-	SBOMAttachMode      string                 `json:"sbom_attach_mode"`
-	SBOMNoAttach        bool                   `json:"sbom_no_attach"`
+	ProjectDir                string                 `json:"-"`
+	SourceTreeHash            string                 `json:"source_tree_hash"`
+	LockfileHash              string                 `json:"lockfile_hash"`
+	BaseImageDigest           string                 `json:"base_image_digest"`
+	BunVersion                string                 `json:"bun_version"`
+	BunVariant                string                 `json:"bun_variant"`
+	BunCustomBinaryPath       string                 `json:"bun_custom_binary_path"`
+	StubLauncher              bool                   `json:"stub_launcher"`
+	Platforms                 []string               `json:"platforms"`
+	Strategy                  string                 `json:"strategy"`
+	Compression               string                 `json:"compression"`
+	NoPrune                   bool                   `json:"no_prune"`
+	KeepVendor                []string               `json:"keep_vendor"`
+	NoPrecompress             bool                   `json:"no_precompress"`
+	NoStrip                   bool                   `json:"no_strip"`
+	NoInject                  bool                   `json:"no_inject"`
+	NoMinify                  bool                   `json:"no_minify"`
+	MinBunVersion             string                 `json:"min_bun_version"`
+	CompileEnv                []string               `json:"compile_env"`
+	Sourcemap                 bool                   `json:"sourcemap"`
+	Hermetic                  bool                   `json:"hermetic"`
+	SourceDateEpochUnix       int64                  `json:"source_date_epoch_unix"`
+	Runtime                   ports.RuntimeConfig    `json:"runtime"`
+	Telemetry                 ports.TelemetryOptions `json:"telemetry"`
+	Labels                    map[string]string      `json:"labels"`
+	Annotations               map[string]string      `json:"annotations"`
+	SBOMFormat                string                 `json:"sbom_format"`
+	SBOMAttachMode            string                 `json:"sbom_attach_mode"`
+	SBOMNoAttach              bool                   `json:"sbom_no_attach"`
+	AssetOverlaySourceDigests []string               `json:"asset_overlay_source_digests"`
 }
 
 // ComputeSourceTreeHash walks projectDir and computes a deterministic SHA-256
@@ -297,6 +298,7 @@ func ComputeInputHash(params InputParams) (string, error) {
 	slices.Sort(params.CompileEnv)
 	slices.Sort(params.Runtime.RequireEnv)
 	slices.Sort(params.Runtime.ExposedPorts)
+	slices.Sort(params.AssetOverlaySourceDigests)
 
 	data, err := json.Marshal(params)
 	if err != nil {
@@ -321,33 +323,34 @@ func (c *Cacher) ComputeInputHash(_ context.Context, req ports.RemoteCacheInputR
 	runtime.ExposedPorts = slices.Clone(req.Runtime.ExposedPorts)
 
 	return ComputeInputHash(InputParams{
-		ProjectDir:          req.ProjectDir,
-		BaseImageDigest:     req.BaseImageDigest,
-		BunVersion:          req.BunVersion,
-		BunVariant:          req.BunVariant,
-		BunCustomBinaryPath: req.BunCustomBinaryPath,
-		StubLauncher:        req.StubLauncher,
-		Platforms:           slices.Clone(req.Platforms),
-		Strategy:            req.Strategy,
-		Compression:         req.Compression,
-		NoPrune:             req.NoPrune,
-		KeepVendor:          slices.Clone(req.KeepVendor),
-		NoPrecompress:       req.NoPrecompress,
-		NoStrip:             req.NoStrip,
-		NoInject:            req.NoInject,
-		NoMinify:            req.NoMinify,
-		MinBunVersion:       req.MinBunVersion,
-		CompileEnv:          slices.Clone(req.CompileEnv),
-		Sourcemap:           req.Sourcemap,
-		Hermetic:            req.Hermetic,
-		SourceDateEpochUnix: req.SourceDateEpochUnix,
-		Runtime:             runtime,
-		Telemetry:           req.Telemetry,
-		Labels:              req.Labels,
-		Annotations:         req.Annotations,
-		SBOMFormat:          req.SBOMFormat,
-		SBOMAttachMode:      req.SBOMAttachMode,
-		SBOMNoAttach:        req.SBOMNoAttach,
+		ProjectDir:                req.ProjectDir,
+		BaseImageDigest:           req.BaseImageDigest,
+		BunVersion:                req.BunVersion,
+		BunVariant:                req.BunVariant,
+		BunCustomBinaryPath:       req.BunCustomBinaryPath,
+		StubLauncher:              req.StubLauncher,
+		Platforms:                 slices.Clone(req.Platforms),
+		Strategy:                  req.Strategy,
+		Compression:               req.Compression,
+		NoPrune:                   req.NoPrune,
+		KeepVendor:                slices.Clone(req.KeepVendor),
+		NoPrecompress:             req.NoPrecompress,
+		NoStrip:                   req.NoStrip,
+		NoInject:                  req.NoInject,
+		NoMinify:                  req.NoMinify,
+		MinBunVersion:             req.MinBunVersion,
+		CompileEnv:                slices.Clone(req.CompileEnv),
+		Sourcemap:                 req.Sourcemap,
+		Hermetic:                  req.Hermetic,
+		SourceDateEpochUnix:       req.SourceDateEpochUnix,
+		Runtime:                   runtime,
+		Telemetry:                 req.Telemetry,
+		Labels:                    req.Labels,
+		Annotations:               req.Annotations,
+		SBOMFormat:                req.SBOMFormat,
+		SBOMAttachMode:            req.SBOMAttachMode,
+		SBOMNoAttach:              req.SBOMNoAttach,
+		AssetOverlaySourceDigests: slices.Clone(req.AssetOverlaySourceDigests),
 	})
 }
 
