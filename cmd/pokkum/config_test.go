@@ -659,3 +659,44 @@ func TestConfigView_AdversarialErrors(t *testing.T) {
 		t.Fatal("expected error when viewing non-existent profile, got nil")
 	}
 }
+
+// TestConfigValidateCommand_RuntimeField is checklist row 10's validation
+// half for the new runtime field, at BOTH call sites: a bad runtime in the
+// base config and a bad runtime in a named profile must each fail
+// `pokkum config validate`, and valid values (bun/node, top-level and
+// per-profile) must pass.
+func TestConfigValidateCommand_RuntimeField(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, ports.ConfigFilename)
+	opts := &configValidateOptions{dir: tmpDir, output: "json"}
+
+	validCfg := `version: 1
+runtime: node
+profiles:
+  bun-dev:
+    runtime: bun
+`
+	_ = os.WriteFile(cfgPath, []byte(validCfg), 0644)
+	if err := runConfigValidate(nil, opts); err != nil {
+		t.Fatalf("expected valid runtime values to pass validation, got: %v", err)
+	}
+
+	badBaseCfg := `version: 1
+runtime: deno
+`
+	_ = os.WriteFile(cfgPath, []byte(badBaseCfg), 0644)
+	if err := runConfigValidate(nil, opts); err == nil {
+		t.Fatal("expected invalid top-level runtime to fail validation, got nil")
+	}
+
+	badProfileCfg := `version: 1
+runtime: bun
+profiles:
+  prod:
+    runtime: nodejs
+`
+	_ = os.WriteFile(cfgPath, []byte(badProfileCfg), 0644)
+	if err := runConfigValidate(nil, opts); err == nil {
+		t.Fatal("expected invalid profile runtime to fail validation, got nil")
+	}
+}

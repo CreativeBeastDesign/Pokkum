@@ -27,8 +27,21 @@ import (
 // only cache-tag push access. Including Sign in the hash would not fix that:
 // an attacker computing a colliding hash can set Sign the same way.
 type RemoteCacheInputRequest struct {
-	ProjectDir          string
-	BaseImageDigest     string
+	ProjectDir      string
+	BaseImageDigest string
+
+	// AppRuntime is the image's application runtime ("bun" or "node") — the
+	// second dimension on everything BunVersion already keys. Omitting it
+	// would be exactly the correctness bug this struct's doc comment warns
+	// about: a Bun-built and a Node-built image of the same source differ in
+	// their runtime layer and entrypoint but could otherwise hash
+	// identically whenever they happen to share a base digest, letting one
+	// silently serve a cache hit for the other. (Today the two runtimes'
+	// DEFAULT bases differ, so BaseImageDigest usually separates them too —
+	// but a custom --base shared across both runtimes makes that protection
+	// evaporate, so the runtime must be keyed in its own right.)
+	AppRuntime string
+
 	BunVersion          string
 	BunVariant          string
 	BunCustomBinaryPath string

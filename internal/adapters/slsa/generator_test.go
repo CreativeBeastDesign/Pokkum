@@ -195,3 +195,39 @@ func TestSLSAGenerator_MissingOutputDigest(t *testing.T) {
 		t.Errorf("err = %v, want wrapping core.ErrInvalidRequest", err)
 	}
 }
+
+// TestSLSAGenerator_RuntimeExternalParameter pins the --runtime dimension in
+// provenance: a supplied Toolchain.AppRuntime must land in
+// externalParameters["runtime"] (a verifier has to replay the same --runtime
+// to reproduce the image), and an unset one must leave the key absent so
+// statements from callers predating the field are byte-identical to before.
+func TestSLSAGenerator_RuntimeExternalParameter(t *testing.T) {
+	gen := NewGenerator(nil)
+	outHash, err := v1.NewHash("sha256:1111111111111111111111111111111111111111111111111111111111111111")
+	if err != nil {
+		t.Fatalf("parse output hash: %v", err)
+	}
+
+	stmt, err := gen.Generate(context.Background(), ports.SLSAGeneratorRequest{
+		Repo:         "acme/app",
+		OutputDigest: outHash,
+		Toolchain:    ports.SLSAToolchain{AppRuntime: "node"},
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if got := stmt.Predicate.BuildDefinition.ExternalParameters["runtime"]; got != "node" {
+		t.Errorf("ExternalParameters[runtime] = %v, want %q", got, "node")
+	}
+
+	stmt2, err := gen.Generate(context.Background(), ports.SLSAGeneratorRequest{
+		Repo:         "acme/app",
+		OutputDigest: outHash,
+	})
+	if err != nil {
+		t.Fatalf("Generate (no runtime) failed: %v", err)
+	}
+	if v, ok := stmt2.Predicate.BuildDefinition.ExternalParameters["runtime"]; ok {
+		t.Errorf("expected runtime key absent when Toolchain.AppRuntime is unset, got %v", v)
+	}
+}

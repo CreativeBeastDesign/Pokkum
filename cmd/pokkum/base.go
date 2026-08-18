@@ -86,6 +86,7 @@ func runBaseUpdate(ctx context.Context, logger *slog.Logger, flags *baseUpdateFl
 	presetsToUpdate := []ports.BaseImagePreset{
 		ports.BaseImageDistroless,
 		ports.BaseImageChainguard,
+		ports.BaseImageDistrolessNode,
 	}
 
 	if flags.preset != "" {

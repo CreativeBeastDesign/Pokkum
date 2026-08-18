@@ -27,6 +27,23 @@ const (
 	// distroless. Same libc contract, different maintainer.
 	BaseImageChainguard BaseImagePreset = "chainguard"
 
+	// BaseImageDistrolessNode selects gcr.io/distroless/nodejs24-debian12:nonroot,
+	// the default base for --runtime=node builds. Unlike the cc/glibc-dynamic
+	// presets above — which ship a libc for an *embedded* Bun runtime but no
+	// JS runtime of their own — this image ships Node.js itself, at
+	// NodeBinaryPath (/nodejs/bin/node), which is where AppRuntime==RuntimeNode
+	// gets its runtime from (see AppRuntime's doc comment for why Node is
+	// base-provided rather than downloaded-and-embedded the way Bun is).
+	//
+	// This is a distinct preset, not a Ref override on BaseImageDistroless,
+	// for the same reason the --static shorthand pins BaseImageChainguard for
+	// chainguard/static: the preset string is the pokkum.lock key
+	// (internal/adapters/baseimage's lockKey = string(req.Preset)), so
+	// sharing the "distroless" key between cc-debian12 and nodejs24-debian12
+	// would let a plain build and a --runtime=node build in the same project
+	// silently overwrite each other's pinned digest in one lock slot.
+	BaseImageDistrolessNode BaseImagePreset = "distroless-node"
+
 	// BaseImageCustom means the user supplied an explicit reference in
 	// BaseImageRequest.Ref. Pokkum performs the same libc compatibility check
 	// but does not otherwise vet the image.
@@ -80,6 +97,23 @@ const DefaultBaseImagePreset = BaseImageDistroless
 const (
 	DistrolessBaseRef = "gcr.io/distroless/cc-debian12:nonroot"
 	ChainguardBaseRef = "cgr.dev/chainguard/glibc-dynamic:latest"
+
+	// DistrolessNodeBaseRef is the canonical reference for
+	// BaseImageDistrolessNode. nodejs24 is Node's active LTS line as of this
+	// constant's verification date (2026-08-18); the tag is pinned to a
+	// digest by pokkum.lock at resolve time like every other preset.
+	//
+	// Verified live on 2026-08-18 (same procedure as DefaultKeylessIdentity's
+	// doc comment): the tag resolves to a multi-arch OCI index covering
+	// linux/amd64 and linux/arm64/v8; its per-arch image config's Entrypoint
+	// is ["/nodejs/bin/node"] (NodeBinaryPath) and User is 65532; and its
+	// Cosign signature's Fulcio leaf certificate carries SAN
+	// "email:keyless@distroless.iam.gserviceaccount.com" with OIDC issuer
+	// extension "https://accounts.google.com" — byte-identical to the
+	// identity the existing distroless preset already pins, chaining to
+	// O=sigstore.dev, CN=sigstore-intermediate with a ~10-minute validity
+	// window (a genuine ephemeral Fulcio keyless cert).
+	DistrolessNodeBaseRef = "gcr.io/distroless/nodejs24-debian12:nonroot"
 )
 
 // StaticBaseRef is the default base image for --strategy=static builds: a
@@ -153,7 +187,7 @@ const (
 // core normalises it to DefaultBaseImagePreset before validating.
 func (p BaseImagePreset) Valid() bool {
 	switch p {
-	case BaseImageDistroless, BaseImageChainguard, BaseImageCustom:
+	case BaseImageDistroless, BaseImageChainguard, BaseImageDistrolessNode, BaseImageCustom:
 		return true
 	default:
 		return false
@@ -172,6 +206,8 @@ func (p BaseImagePreset) DefaultRef() (string, bool) {
 		return DistrolessBaseRef, true
 	case BaseImageChainguard:
 		return ChainguardBaseRef, true
+	case BaseImageDistrolessNode:
+		return DistrolessNodeBaseRef, true
 	default:
 		return "", false
 	}
@@ -184,7 +220,7 @@ func (p BaseImagePreset) DefaultRef() (string, bool) {
 // behavior for a self-signed base image.
 func (p BaseImagePreset) DefaultVerifyMode() BaseImageVerifyMode {
 	switch p {
-	case BaseImageDistroless, BaseImageChainguard:
+	case BaseImageDistroless, BaseImageChainguard, BaseImageDistrolessNode:
 		return BaseImageVerifyKeyless
 	default:
 		return BaseImageVerifyStaticKey
@@ -217,7 +253,12 @@ func (p BaseImagePreset) DefaultVerifyMode() BaseImageVerifyMode {
 // on whether Pokkum trusts an upstream base image signature.
 func (p BaseImagePreset) DefaultKeylessIdentity() (KeylessIdentity, bool) {
 	switch p {
-	case BaseImageDistroless:
+	case BaseImageDistroless, BaseImageDistrolessNode:
+		// One identity for both distroless presets, deliberately: the
+		// distroless project signs every image it publishes with the same
+		// keyless identity. Confirmed empirically for nodejs24-debian12 on
+		// 2026-08-18 (see DistrolessNodeBaseRef's doc comment) in addition
+		// to the cc-debian12/base-debian12 evidence above.
 		return KeylessIdentity{
 			Issuer: DistrolessKeylessIssuer,
 			SAN:    DistrolessKeylessSAN,

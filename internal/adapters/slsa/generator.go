@@ -162,6 +162,15 @@ func (g *Generator) Generate(ctx context.Context, req ports.SLSAGeneratorRequest
 		"platforms":  platformStrs,
 		"outputMode": req.OutputMode,
 	}
+	// The application runtime (--runtime) is an external parameter in SLSA
+	// terms: user-supplied, and a verifier must replay the same value to
+	// reproduce the image (a bun and a node build of identical source are
+	// different images). Only recorded when the caller supplied it, so
+	// statements from callers predating the field are byte-identical to
+	// before.
+	if req.Toolchain.AppRuntime != "" {
+		extParams["runtime"] = req.Toolchain.AppRuntime
+	}
 
 	// 4. Build Internal Parameters
 	intParams := map[string]any{

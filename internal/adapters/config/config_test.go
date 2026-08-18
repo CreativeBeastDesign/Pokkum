@@ -778,3 +778,44 @@ profiles:
 		t.Errorf("expected withstub profile StubLauncher = true")
 	}
 }
+
+// TestApplyProfile_RuntimeOverride is checklist row 10's merge half for the
+// new runtime field: a profile's runtime must override the base config's, a
+// profile omitting it must inherit the base value, and the base config must
+// never be mutated. Without the explicit ApplyProfile merge line this test
+// pins, `profiles.<name>.runtime` would parse fine, validate fine, and then
+// be silently discarded under --profile.
+func TestApplyProfile_RuntimeOverride(t *testing.T) {
+	mgr, err := New(".", nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	baseCfg := &ports.ProjectConfig{
+		Version: 1,
+		Runtime: "bun",
+		Profiles: map[string]ports.BuildProfile{
+			"node-prod": {Runtime: "node"},
+			"inherits":  {},
+		},
+	}
+
+	merged, err := mgr.ApplyProfile(baseCfg, "node-prod")
+	if err != nil {
+		t.Fatalf("ApplyProfile failed: %v", err)
+	}
+	if merged.Runtime != "node" {
+		t.Errorf("expected Runtime overridden to node, got %q", merged.Runtime)
+	}
+	if baseCfg.Runtime != "bun" {
+		t.Errorf("baseCfg.Runtime was unexpectedly mutated: %q", baseCfg.Runtime)
+	}
+
+	inherited, err := mgr.ApplyProfile(baseCfg, "inherits")
+	if err != nil {
+		t.Fatalf("ApplyProfile(inherits) failed: %v", err)
+	}
+	if inherited.Runtime != "bun" {
+		t.Errorf("expected Runtime inherited as bun, got %q", inherited.Runtime)
+	}
+}

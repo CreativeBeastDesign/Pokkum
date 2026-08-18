@@ -27,6 +27,16 @@ const (
 	// BunBinaryPath is where the resolved Bun executable is placed in the image for StrategyLayered.
 	BunBinaryPath = "/usr/local/bin/bun"
 
+	// NodeBinaryPath is where the Node.js executable lives in a
+	// --runtime=node image. Unlike BunBinaryPath, Pokkum does not place a
+	// binary here — the path is the distroless nodejs base image's own
+	// documented location (verified live against
+	// gcr.io/distroless/nodejs24-debian12:nonroot, whose upstream Entrypoint
+	// is exactly ["/nodejs/bin/node"]; see DistrolessNodeBaseRef). A custom
+	// --base used with --runtime=node must provide a Node executable at this
+	// exact path, or the container cannot start.
+	NodeBinaryPath = "/nodejs/bin/node"
+
 	// AppServerIndexPath is the entrypoint JS file for StrategyLayered.
 	AppServerIndexPath = "/app/server/index.js"
 
@@ -199,15 +209,23 @@ const (
 // standard OCI annotation namespace where one exists so that generic tooling
 // can read them, and a pokkum namespace for the rest.
 const (
-	LabelCreated             = "org.opencontainers.image.created"
-	LabelBaseName            = "org.opencontainers.image.base.name"
-	LabelBaseDigest          = "org.opencontainers.image.base.digest"
-	LabelRevision            = "org.opencontainers.image.revision"
-	LabelSource              = "org.opencontainers.image.source"
-	LabelVersion             = "org.opencontainers.image.version"
-	LabelPokkumVersion       = "dev.pokkum.version"
-	LabelSupervisor          = "dev.pokkum.supervisor.version"
-	LabelBunVersion          = "dev.pokkum.bun.version"
+	LabelCreated       = "org.opencontainers.image.created"
+	LabelBaseName      = "org.opencontainers.image.base.name"
+	LabelBaseDigest    = "org.opencontainers.image.base.digest"
+	LabelRevision      = "org.opencontainers.image.revision"
+	LabelSource        = "org.opencontainers.image.source"
+	LabelVersion       = "org.opencontainers.image.version"
+	LabelPokkumVersion = "dev.pokkum.version"
+	LabelSupervisor    = "dev.pokkum.supervisor.version"
+	LabelBunVersion    = "dev.pokkum.bun.version"
+
+	// LabelRuntime records the image's application runtime (AppRuntime).
+	// Stamped only when the runtime is NOT the default (i.e. only for
+	// --runtime=node today): every image Pokkum ever built before this label
+	// existed runs Bun, so absence already unambiguously means "bun", and
+	// stamping only the non-default keeps every existing bun image's label
+	// set — and therefore its golden-pinned digests — byte-identical.
+	LabelRuntime             = "dev.pokkum.runtime"
 	LabelRequiredEnv         = "dev.pokkum.required-env"
 	LabelEnvBaked            = "dev.pokkum.env-baked"
 	LabelVEXExemptions       = "dev.pokkum.vex-exemptions"
@@ -263,6 +281,17 @@ const (
 // the supervisor, "--", the Bun runtime executable, then the application server index.js.
 func DefaultLayeredEntrypoint() []string {
 	return []string{SupervisorPath, "--", BunBinaryPath, AppServerIndexPath}
+}
+
+// DefaultLayeredNodeEntrypoint returns the image entrypoint for
+// StrategyLayered with AppRuntime==RuntimeNode: the supervisor, "--", the
+// base image's own Node executable (NodeBinaryPath), then the application
+// server index.js — the substitution DefaultLayeredEntrypoint's Bun slot
+// makes room for, and the entire runtime swap as far as the image config is
+// concerned (@sveltejs/adapter-node's output is written for Node in the
+// first place).
+func DefaultLayeredNodeEntrypoint() []string {
+	return []string{SupervisorPath, "--", NodeBinaryPath, AppServerIndexPath}
 }
 
 // DefaultEntrypoint returns the image entrypoint for StrategyExe: the supervisor, a bare "--"
@@ -431,10 +460,20 @@ type PackageRequest struct {
 	// Strategy selects the packaging strategy (StrategyLayered or StrategyExe).
 	Strategy BuildStrategy
 
+	// AppRuntime selects which JS runtime a StrategyLayered image executes
+	// under (see AppRuntime's doc comment). The zero value means
+	// DefaultAppRuntime (bun), preserving every pre-existing caller. With
+	// RuntimeNode, the packager appends NO Bun runtime layer (BunRuntime is
+	// ignored and may be zero) and the entrypoint targets NodeBinaryPath —
+	// the base image itself provides the runtime. Ignored by StrategyExe and
+	// StrategyStatic, which core's validation restricts to RuntimeBun.
+	AppRuntime AppRuntime
+
 	// App is the compiled application binary for Platform (used when Strategy == StrategyExe).
 	App Artifact
 
-	// BunRuntime is the resolved Bun runtime binary (used when Strategy == StrategyLayered).
+	// BunRuntime is the resolved Bun runtime binary (used when Strategy ==
+	// StrategyLayered and AppRuntime is RuntimeBun).
 	BunRuntime BunResolverResult
 
 	// AppServerDir is the host directory containing server JS files to package at /app/server (StrategyLayered).

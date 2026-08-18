@@ -421,6 +421,7 @@ func TestUtilityPackagesNotImportedFromCoreOrPorts(t *testing.T) {
 // (add its type name here).
 var enumFamilyTypeNames = map[string]bool{
 	"BuildStrategy":         true, // ports.BuildStrategy
+	"AppRuntime":            true, // ports.AppRuntime (bun/node — the --runtime dimension)
 	"SBOMFormat":            true, // ports.SBOMFormat
 	"SBOMAttachMode":        true, // ports.SBOMAttachMode
 	"BaseImageVerifyMode":   true, // ports.BaseImageVerifyMode

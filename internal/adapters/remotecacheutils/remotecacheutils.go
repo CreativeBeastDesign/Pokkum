@@ -110,10 +110,21 @@ var IgnoredBuildDirs = map[string]bool{
 // build's output. See ports.RemoteCacheInputRequest's doc comment for why
 // this must stay exhaustive, and why Sign is deliberately excluded.
 type InputParams struct {
-	ProjectDir                string                 `json:"-"`
-	SourceTreeHash            string                 `json:"source_tree_hash"`
-	LockfileHash              string                 `json:"lockfile_hash"`
-	BaseImageDigest           string                 `json:"base_image_digest"`
+	ProjectDir      string `json:"-"`
+	SourceTreeHash  string `json:"source_tree_hash"`
+	LockfileHash    string `json:"lockfile_hash"`
+	BaseImageDigest string `json:"base_image_digest"`
+
+	// AppRuntime is the image's application runtime ("bun" or "node"). A
+	// correctness-critical key dimension, not metadata: two builds
+	// differing only in runtime produce different images (runtime layer,
+	// entrypoint), so omitting it would let one serve a cache hit for the
+	// other. The json tag has NO omitempty deliberately — an empty value
+	// must still hash differently from a populated one, and adding the
+	// field changes every pre-existing hash exactly once (a universal cache
+	// miss on upgrade, the safe direction).
+	AppRuntime string `json:"app_runtime"`
+
 	BunVersion                string                 `json:"bun_version"`
 	BunVariant                string                 `json:"bun_variant"`
 	BunCustomBinaryPath       string                 `json:"bun_custom_binary_path"`
@@ -332,6 +343,7 @@ func (c *Cacher) ComputeInputHash(_ context.Context, req ports.RemoteCacheInputR
 	return ComputeInputHash(InputParams{
 		ProjectDir:                req.ProjectDir,
 		BaseImageDigest:           req.BaseImageDigest,
+		AppRuntime:                req.AppRuntime,
 		BunVersion:                req.BunVersion,
 		BunVariant:                req.BunVariant,
 		BunCustomBinaryPath:       req.BunCustomBinaryPath,

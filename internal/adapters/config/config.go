@@ -166,6 +166,9 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 	if profile.Strategy != "" {
 		merged.Strategy = profile.Strategy
 	}
+	if profile.Runtime != "" {
+		merged.Runtime = profile.Runtime
+	}
 	if profile.StubLauncher != nil {
 		val := *profile.StubLauncher
 		merged.StubLauncher = &val

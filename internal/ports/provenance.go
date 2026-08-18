@@ -49,8 +49,14 @@ type PinnedBuildInputs struct {
 	// trusting the comparison at all.
 	SourceProvenance SourceProvenance `json:"source_provenance,omitempty"`
 
-	BaseImageRef   string            `json:"base_image_ref"`
-	BaseImageHash  string            `json:"base_image_hash"`
+	BaseImageRef  string `json:"base_image_ref"`
+	BaseImageHash string `json:"base_image_hash"`
+
+	// Runtime is the application runtime the statement's externalParameters
+	// recorded ("bun" or "node"). Empty for statements generated before the
+	// field existed — which all ran Bun, so absence means bun.
+	Runtime string `json:"runtime,omitempty"`
+
 	BunVersion     string            `json:"bun_version"`
 	BunBinaryHash  string            `json:"bun_binary_hash"`
 	GoVersion      string            `json:"go_version"`

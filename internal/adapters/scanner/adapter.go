@@ -110,7 +110,7 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 
 	if isDir {
 		// 1. Directory scan: toolchain and project dependencies
-		tAdvisories, toolchainIncomplete, err := s.scanProjectToolchain(ctx, target, req.Offline)
+		tAdvisories, toolchainIncomplete, err := s.scanProjectToolchain(ctx, req.AppRuntime, target, req.Offline)
 		if err == nil {
 			toolchainAdvisories = append(toolchainAdvisories, tAdvisories...)
 		}
@@ -158,7 +158,7 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 	// made this literal correctly evaluate as NOT older/vulnerable, which silently
 	// broke the "there's always a fallback advisory" contract this code comments on.
 	if len(toolchainAdvisories) == 0 {
-		toolchainAdvisories = append(toolchainAdvisories, s.checkEmbeddedAdvisories(ports.DefaultBunVersion, "2.2.0")...)
+		toolchainAdvisories = append(toolchainAdvisories, s.checkEmbeddedAdvisories(req.AppRuntime, ports.DefaultBunVersion, "2.2.0")...)
 	}
 
 	allFound := append([]ports.Vulnerability{}, vulnerabilities...)
@@ -225,7 +225,7 @@ func activeVEXExemption(adv ports.Vulnerability, exemptions []ports.VEXExemption
 	return false
 }
 
-func (s *Adapter) scanProjectToolchain(ctx context.Context, projectDir string, offline bool) ([]ports.Vulnerability, bool, error) {
+func (s *Adapter) scanProjectToolchain(ctx context.Context, appRuntime, projectDir string, offline bool) ([]ports.Vulnerability, bool, error) {
 	pkgJSON, err := sveltekitutils.ReadPackageJSON(projectDir)
 	if err != nil {
 		return nil, false, err
@@ -235,7 +235,7 @@ func (s *Adapter) scanProjectToolchain(ctx context.Context, projectDir string, o
 	bunVer := ports.DefaultBunVersion
 
 	var advisories []ports.Vulnerability
-	advisories = append(advisories, s.checkEmbeddedAdvisories(bunVer, kitVer)...)
+	advisories = append(advisories, s.checkEmbeddedAdvisories(appRuntime, bunVer, kitVer)...)
 
 	incomplete := false
 	if !offline {
@@ -339,11 +339,15 @@ func (s *Adapter) scanImageOrTarball(ctx context.Context, target string, offline
 		}
 	}
 
-	// Toolchain advisories from embedded checks on the packages discovered
+	// Toolchain advisories from embedded checks on the packages discovered.
+	// appRuntime is deliberately passed as "bun" (i.e. ungated) here: these
+	// packages were positively OBSERVED inside the image being scanned, and
+	// evidence of presence beats whatever runtime the build requested — see
+	// checkEmbeddedAdvisories' doc comment.
 	var toolchainAdvisories []ports.Vulnerability
 	for _, p := range packages {
 		if p.Name == "bun" || p.Name == "@sveltejs/kit" {
-			toolchainAdvisories = append(toolchainAdvisories, s.checkEmbeddedAdvisories(p.Version, p.Version)...)
+			toolchainAdvisories = append(toolchainAdvisories, s.checkEmbeddedAdvisories(string(ports.RuntimeBun), p.Version, p.Version)...)
 		}
 	}
 
@@ -359,10 +363,21 @@ func (s *Adapter) scanImageOrTarball(ctx context.Context, target string, offline
 	return vulns, toolchainAdvisories, incomplete, nil
 }
 
-func (s *Adapter) checkEmbeddedAdvisories(bunVer, kitVer string) []ports.Vulnerability {
+// checkEmbeddedAdvisories matches the embedded advisory list against the
+// given toolchain versions. appRuntime keys which runtime advisories can
+// apply at all (the second dimension the --runtime flag introduced): a
+// "node" build ships no Bun anywhere in the produced image, so a Bun
+// advisory reported against it would be a false claim — the advisory's
+// subject simply is not present. Empty appRuntime means bun, matching
+// ports.ScanRequest.AppRuntime's documented default and every pre-existing
+// caller. An advisory for a package the scan positively OBSERVED (e.g. a
+// "bun" package found inside an image's own metadata — see
+// scanImageOrTarball) is deliberately NOT gated by this: evidence of
+// presence beats the requested runtime, so those call sites pass "bun".
+func (s *Adapter) checkEmbeddedAdvisories(appRuntime, bunVer, kitVer string) []ports.Vulnerability {
 	var matches []ports.Vulnerability
 	for _, adv := range embeddedAdvisories {
-		if adv.Package == "bun" && isVersionOlderThan(bunVer, adv.FixedVersion) {
+		if adv.Package == "bun" && appRuntime != string(ports.RuntimeNode) && isVersionOlderThan(bunVer, adv.FixedVersion) {
 			adv.Version = bunVer
 			matches = append(matches, adv)
 		}

@@ -186,6 +186,9 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 		fmt.Printf("Source Verify: %s\n", sourceProvenanceDisplay)
 		fmt.Printf("Attestation: %t\n", provSummary.HasProvenance)
 		fmt.Printf("Signature:   %t (%s)\n", provSummary.SignatureValid, provSummary.SignerIdentity)
+		if provSummary.PinnedInputs.Runtime != "" {
+			fmt.Printf("Runtime:     %s\n", provSummary.PinnedInputs.Runtime)
+		}
 		if provSummary.PinnedInputs.BunVersion != "" {
 			fmt.Printf("Toolchain:   Bun %s\n", provSummary.PinnedInputs.BunVersion)
 		}

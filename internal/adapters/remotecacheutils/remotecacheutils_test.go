@@ -233,6 +233,37 @@ func TestComputeInputHash(t *testing.T) {
 // telemetry, SBOM attach settings) must never collide on the same hash — a
 // collision here is exactly what let one build's cached image get silently
 // promoted to a different build's release tags.
+// TestCacher_ComputeInputHash_AppRuntimeFlowsThroughPort proves the port
+// request's AppRuntime field is actually wired into the hash by the Cacher
+// adapter — a field existing on ports.RemoteCacheInputRequest is not
+// evidence its value reaches InputParams (mem:self_review_checklist row 16),
+// and this exact wiring is what keeps a bun-built cache entry from
+// satisfying a node-requested build.
+func TestCacher_ComputeInputHash_AppRuntimeFlowsThroughPort(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(`{"name":"test"}`), 0o644)
+
+	c := remotecacheutils.New()
+	req := ports.RemoteCacheInputRequest{
+		ProjectDir:      tmpDir,
+		BaseImageDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		Strategy:        "layered",
+		AppRuntime:      "bun",
+	}
+	bunHash, err := c.ComputeInputHash(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ComputeInputHash(bun): %v", err)
+	}
+	req.AppRuntime = "node"
+	nodeHash, err := c.ComputeInputHash(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ComputeInputHash(node): %v", err)
+	}
+	if bunHash == nodeHash {
+		t.Fatalf("bun and node builds collided on the same cache hash %s — the runtime dimension is not keyed", bunHash)
+	}
+}
+
 // TestComputeInputHash_AssetOverlaySourceDigestsOrderIndependent guards the
 // slices.Sort call ComputeInputHash applies to AssetOverlaySourceDigests:
 // two requests naming the identical resolved predecessor set in a different
@@ -286,6 +317,11 @@ func TestComputeInputHash_CoversPreviouslyMissingFields(t *testing.T) {
 		name   string
 		modify func(p *remotecacheutils.InputParams)
 	}{
+		// The --runtime dimension: a bun-built and a node-built image of
+		// identical source are different images (runtime layer, entrypoint),
+		// so a hash collision between them would let one silently serve a
+		// cache hit for the other — the exact bug class this test exists for.
+		{"app runtime", func(p *remotecacheutils.InputParams) { p.AppRuntime = "node" }},
 		{"runtime port", func(p *remotecacheutils.InputParams) { p.Runtime.Port = 8080 }},
 		{"runtime user", func(p *remotecacheutils.InputParams) { p.Runtime.User = "1000" }},
 		{"runtime env", func(p *remotecacheutils.InputParams) { p.Runtime.Env = map[string]string{"FOO": "bar"} }},

@@ -69,10 +69,26 @@ type SLSAStatement struct {
 
 // SLSAToolchain records the tool versions involved in the build for SLSA provenance.
 type SLSAToolchain struct {
-	PokkumVersion       string
-	PokkumCommit        string
-	GoVersion           string
-	BuilderOSArch       string
+	PokkumVersion string
+	PokkumCommit  string
+	GoVersion     string
+	BuilderOSArch string
+
+	// AppRuntime is the image's application runtime ("bun" or "node"),
+	// recorded as the externalParameters "runtime" entry — it is a
+	// user-supplied build parameter in SLSA terms, and a verifier replaying
+	// the build must supply the same --runtime to reproduce the image. For
+	// RuntimeNode there is no per-runtime version/hash pair recorded here
+	// the way BunVersion/BunBinaryHash record the embedded Bun: the Node
+	// binary is base-image content, already pinned by the base-image
+	// resolved dependency's digest.
+	AppRuntime string
+
+	// BunVersion names the Bun involved in the build. For a
+	// StrategyLayered + RuntimeBun build this is the embedded runtime's
+	// resolved version; for every other build it is the HOST toolchain's bun
+	// (the tool that ran the SvelteKit build), which remains a genuine
+	// resolved build dependency even when no Bun ships in the image.
 	BunVersion          string
 	BunBinaryHash       string
 	SupervisorVersion   string

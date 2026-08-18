@@ -163,23 +163,41 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		// silently defeating a nil-check here. Mirror the static strategy's own
 		// unconditional overwrite below instead of trusting a guard an earlier
 		// generic pass can pre-empt. See Lessons.md's 2026-08-16 entry.
-		if req.TelemetryPreloadRelPath != "" {
-			// Telemetry SDK bootstrap for the layered (default) strategy: insert
-			// `bun --preload <path>` ahead of the real entrypoint so the SDK
-			// starts first (Bun's --preload runs a file's side effects before
-			// the main entrypoint executes — confirmed to work with this exact
-			// bare invocation form, no `run` subcommand, empirically before
-			// this mechanism was built; see
-			// sveltekitutils.PrepareLayeredTelemetryBootstrap's doc comment).
-			// The path MUST be absolute (join against AppServerDirPrefix, not
-			// left as a bare relative filename) — also confirmed empirically:
-			// Bun's --preload treats an unprefixed relative specifier as an
-			// npm package name to resolve, not a local file, and fails with
-			// "preload not found" for exactly that reason.
-			preloadPath := ports.AppServerDirPrefix + "/" + req.TelemetryPreloadRelPath
-			req.Runtime.Entrypoint = []string{ports.SupervisorPath, "--", ports.BunBinaryPath, "--preload", preloadPath, ports.AppServerIndexPath}
-		} else {
-			req.Runtime.Entrypoint = ports.DefaultLayeredEntrypoint()
+		//
+		// The entrypoint is selected by a positive runtime switch (checklist
+		// row 11): bun and node are the only two runtimes, everything else
+		// is an error here rather than a silent fall-through to the Bun
+		// shape — an image whose entrypoint names a runtime binary that
+		// isn't in the image cannot start, which is the worst possible
+		// place to discover an unhandled enum value.
+		switch effectiveAppRuntime(req.AppRuntime) {
+		case ports.RuntimeBun:
+			if req.TelemetryPreloadRelPath != "" {
+				// Telemetry SDK bootstrap for the layered (default) strategy: insert
+				// `bun --preload <path>` ahead of the real entrypoint so the SDK
+				// starts first (Bun's --preload runs a file's side effects before
+				// the main entrypoint executes — confirmed to work with this exact
+				// bare invocation form, no `run` subcommand, empirically before
+				// this mechanism was built; see
+				// sveltekitutils.PrepareLayeredTelemetryBootstrap's doc comment).
+				// The path MUST be absolute (join against AppServerDirPrefix, not
+				// left as a bare relative filename) — also confirmed empirically:
+				// Bun's --preload treats an unprefixed relative specifier as an
+				// npm package name to resolve, not a local file, and fails with
+				// "preload not found" for exactly that reason.
+				preloadPath := ports.AppServerDirPrefix + "/" + req.TelemetryPreloadRelPath
+				req.Runtime.Entrypoint = []string{ports.SupervisorPath, "--", ports.BunBinaryPath, "--preload", preloadPath, ports.AppServerIndexPath}
+			} else {
+				req.Runtime.Entrypoint = ports.DefaultLayeredEntrypoint()
+			}
+		case ports.RuntimeNode:
+			// The runtime swap: the base image's own Node executes
+			// adapter-node's output directly. No telemetry-preload variant
+			// exists for node (validatePackageRequest rejects the
+			// combination), so this arm has exactly one shape.
+			req.Runtime.Entrypoint = ports.DefaultLayeredNodeEntrypoint()
+		default:
+			return nil, fmt.Errorf("packager: build %s: unhandled app runtime %q: %w", req.Platform, req.AppRuntime, core.ErrPackageFailed)
 		}
 	}
 	rc := req.Runtime.WithDefaults()
@@ -262,9 +280,19 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		// and Roadmap.md item 3f. The layers below that DO derive from ts
 		// (server, client, vendor, native, prerendered) are exactly the ones
 		// that legitimately reflect this build's own source snapshot.
-		bunLayer, err := BuildCustomFileLayer(ctx, req.Platform, ports.BunBinaryPath, req.BunRuntime.BinaryPath, pinnedImmutableBinaryEpoch, req.Compression)
-		if err != nil {
-			return nil, fmt.Errorf("packager: build %s: bun layer: %w", req.Platform, err)
+		// The Bun runtime layer exists only for RuntimeBun: a --runtime=node
+		// image's runtime is the base image's own Node (NodeBinaryPath), so
+		// there is no runtime binary for Pokkum to add — the layered layout
+		// simply starts at the supervisor. effectiveAppRuntime already
+		// rejected anything but bun/node in the entrypoint switch above.
+		if effectiveAppRuntime(req.AppRuntime) == ports.RuntimeBun {
+			bunLayer, err := BuildCustomFileLayer(ctx, req.Platform, ports.BunBinaryPath, req.BunRuntime.BinaryPath, pinnedImmutableBinaryEpoch, req.Compression)
+			if err != nil {
+				return nil, fmt.Errorf("packager: build %s: bun layer: %w", req.Platform, err)
+			}
+			addenda = append(addenda,
+				mutate.Addendum{Layer: bunLayer, MediaType: layerMediaType, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.BunBinaryPath}},
+			)
 		}
 		supervisorLayer, err := buildSupervisorLayer(ctx, req, pinnedImmutableBinaryEpoch)
 		if err != nil {
@@ -281,7 +309,6 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		attestRecords = append(attestRecords, serverRecs...)
 
 		addenda = append(addenda,
-			mutate.Addendum{Layer: bunLayer, MediaType: layerMediaType, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.BunBinaryPath}},
 			mutate.Addendum{Layer: supervisorLayer, MediaType: layerMediaType, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: historySupervisorCreatedBy}},
 			mutate.Addendum{Layer: serverLayer, MediaType: layerMediaType, History: v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add /app/server"}},
 		)
@@ -701,8 +728,25 @@ func validatePackageRequest(req ports.PackageRequest) error {
 	}
 	switch req.Strategy {
 	case ports.StrategyLayered:
-		if req.BunRuntime.BinaryPath == "" {
-			return fmt.Errorf("packager: build %s: bun runtime binary path is required for layered strategy: %w", req.Platform, core.ErrPackageFailed)
+		switch effectiveAppRuntime(req.AppRuntime) {
+		case ports.RuntimeBun:
+			if req.BunRuntime.BinaryPath == "" {
+				return fmt.Errorf("packager: build %s: bun runtime binary path is required for layered strategy: %w", req.Platform, core.ErrPackageFailed)
+			}
+		case ports.RuntimeNode:
+			// No embedded runtime binary to check — the base image provides
+			// Node at ports.NodeBinaryPath. But the telemetry preload
+			// mechanism is `bun --preload` of a TypeScript file, which Node
+			// can execute neither half of; core's validation already rejects
+			// the combination, and this second, independent check keeps a
+			// future caller from packaging an image whose entrypoint would
+			// crash at startup (belt-and-suspenders, same discipline as
+			// checklist row 22's dual containment checks).
+			if req.TelemetryPreloadRelPath != "" {
+				return fmt.Errorf("packager: build %s: telemetry preload is Bun-specific and cannot be packaged into a node-runtime image: %w", req.Platform, core.ErrPackageFailed)
+			}
+		default:
+			return fmt.Errorf("packager: build %s: unhandled app runtime %q: %w", req.Platform, req.AppRuntime, core.ErrPackageFailed)
 		}
 		if req.AppServerDir == "" {
 			return fmt.Errorf("packager: build %s: application server directory is required for layered strategy: %w", req.Platform, core.ErrPackageFailed)
@@ -736,6 +780,20 @@ func validatePackageRequest(req ports.PackageRequest) error {
 		return fmt.Errorf("packager: build %s: created timestamp is required: %w", req.Platform, core.ErrPackageFailed)
 	}
 	return nil
+}
+
+// effectiveAppRuntime maps the zero AppRuntime to ports.DefaultAppRuntime.
+// The zero value must keep meaning "bun" inside this adapter — every
+// pre-existing caller (and every test built before the runtime dimension
+// existed) constructs PackageRequest without the field, and treating that as
+// anything but the historical behavior would silently change what they
+// package. core.Build always normalises the field before it gets here; this
+// is for the direct-construction callers.
+func effectiveAppRuntime(r ports.AppRuntime) ports.AppRuntime {
+	if r == "" {
+		return ports.DefaultAppRuntime
+	}
+	return r
 }
 
 // pinnedTime normalises a build timestamp to UTC whole seconds.

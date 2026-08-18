@@ -960,6 +960,12 @@ func (r *Resolver) populateInputsFromSLSA(inputs *ports.PinnedBuildInputs, stmt 
 				}
 			}
 		}
+		// The application runtime (--runtime) the build recorded; absent in
+		// statements generated before the field existed, all of which ran
+		// Bun (see ports.PinnedBuildInputs.Runtime).
+		if v, ok := ep["runtime"].(string); ok {
+			inputs.Runtime = v
+		}
 	}
 	return sawSourceCode
 }

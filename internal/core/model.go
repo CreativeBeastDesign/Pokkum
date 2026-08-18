@@ -93,6 +93,9 @@ type (
 	// BuildStrategy specifies the packaging strategy (StrategyLayered or StrategyExe).
 	BuildStrategy = ports.BuildStrategy
 
+	// AppRuntime names the JS runtime the built image executes under (bun or node).
+	AppRuntime = ports.AppRuntime
+
 	// Severity indicates the security risk level of a vulnerability.
 	Severity = ports.Severity
 
@@ -190,6 +193,16 @@ const (
 	StrategyStatic = ports.StrategyStatic
 	// DefaultBuildStrategy is StrategyLayered.
 	DefaultBuildStrategy = ports.DefaultBuildStrategy
+
+	// RuntimeBun runs the application under the embedded Bun runtime (default).
+	RuntimeBun = ports.RuntimeBun
+	// RuntimeNode runs the application under the base image's own Node.js.
+	RuntimeNode = ports.RuntimeNode
+	// DefaultAppRuntime is RuntimeBun.
+	DefaultAppRuntime = ports.DefaultAppRuntime
+
+	// BaseImageDistrolessNode is the default base preset for --runtime=node.
+	BaseImageDistrolessNode = ports.BaseImageDistrolessNode
 
 	// CompressionGzip applies gzip compression (default).
 	CompressionGzip = ports.CompressionGzip
@@ -395,6 +408,22 @@ func ParseVEXExemptions(cfgs []ports.VEXExemptionConfig, now time.Time) ([]VEXEx
 		out = append(out, ex)
 	}
 	return out, nil
+}
+
+// ParseAppRuntime converts user input to an AppRuntime, accepting any case
+// and surrounding whitespace. An empty string is the zero value, which
+// Normalize replaces with DefaultAppRuntime — so "" is accepted here and
+// returned as-is rather than rejected, mirroring ParseCacheVerifyMode's
+// handling of its own defaultable zero value.
+func ParseAppRuntime(s string) (AppRuntime, error) {
+	r := AppRuntime(strings.ToLower(strings.TrimSpace(s)))
+	if r == "" {
+		return "", nil
+	}
+	if !r.Valid() {
+		return "", fmt.Errorf("runtime %q (supported: %s, %s): %w", s, RuntimeBun, RuntimeNode, ErrInvalidRequest)
+	}
+	return r, nil
 }
 
 // ParseBaseImagePreset converts user input to a BaseImagePreset, accepting any
@@ -721,6 +750,15 @@ type BuildRequest struct {
 	// source map.
 	Compile CompileOptions
 
+	// AppRuntime selects the JS runtime the built image executes under
+	// (--runtime). Zero value means DefaultAppRuntime (bun). RuntimeNode is
+	// supported for StrategyLayered only and swaps the embedded Bun runtime
+	// layer for the base image's own Node.js — Normalize defaults the base
+	// preset to BaseImageDistrolessNode when no base was chosen, and
+	// Validate rejects every (runtime × strategy/option) combination that
+	// cannot work; see Validate's runtime switch.
+	AppRuntime AppRuntime
+
 	// Runtime describes the runtime contract baked into the image. Zero value
 	// means the documented defaults: port 3000, probe port 8081, user
 	// 65532:65532, 30s shutdown timeout.
@@ -817,6 +855,9 @@ func (r *BuildRequest) Normalize() {
 	if r.Compile.Strategy == "" {
 		r.Compile.Strategy = DefaultBuildStrategy
 	}
+	if r.AppRuntime == "" {
+		r.AppRuntime = DefaultAppRuntime
+	}
 	if r.BunRuntime.Version == "" {
 		r.BunRuntime.Version = DefaultBunVersion
 	}
@@ -841,9 +882,16 @@ func (r *BuildRequest) Normalize() {
 	}
 
 	if r.BaseImage.Preset == "" {
-		if r.BaseImage.Ref != "" {
+		switch {
+		case r.BaseImage.Ref != "":
 			r.BaseImage.Preset = BaseImageCustom
-		} else {
+		case r.AppRuntime == RuntimeNode:
+			// A node image's runtime comes from the base image itself, and
+			// the ordinary default (distroless cc-debian12) ships no Node —
+			// default to the preset that does. An explicit preset or ref
+			// always wins; Validate rejects the presets known to lack Node.
+			r.BaseImage.Preset = BaseImageDistrolessNode
+		default:
 			r.BaseImage.Preset = DefaultBaseImagePreset
 		}
 	}
@@ -983,6 +1031,57 @@ func (r BuildRequest) Validate() error {
 
 	if r.BunRuntime.StubLauncher && r.Compile.Strategy != StrategyLayered {
 		return fmt.Errorf("stub launcher is only meaningful for --strategy=layered (embeds a Bun runtime); %q does not: %w", r.Compile.Strategy, ErrInvalidRequest)
+	}
+
+	// The (runtime × strategy) support matrix, as a positive switch (see
+	// mem:self_review_checklist row 11 — a negative "not bun" check would
+	// silently include every future runtime nobody thought about):
+	//
+	//   bun  × layered/exe/static — supported (the pre-existing behavior).
+	//   node × layered            — supported (this is what --runtime=node is).
+	//   node × exe                — rejected: exe compiles a single binary
+	//                               via `bun build --compile`, which has no
+	//                               Node equivalent.
+	//   node × static             — rejected: a static image ships no JS
+	//                               runtime at all, so a runtime selection
+	//                               is a contradiction; failing loudly beats
+	//                               silently ignoring the flag.
+	switch r.AppRuntime {
+	case RuntimeBun:
+		// Every strategy supports the default runtime.
+	case RuntimeNode:
+		if r.Compile.Strategy != StrategyLayered {
+			return fmt.Errorf("--runtime=node supports --strategy=layered only (exe compiles via `bun build --compile`, which has no Node equivalent; static ships no JS runtime at all), got %q: %w", r.Compile.Strategy, ErrInvalidRequest)
+		}
+		if r.BunRuntime.StubLauncher {
+			return fmt.Errorf("--stub-launcher compiles a Bun launcher stub and cannot be combined with --runtime=node: %w", ErrInvalidRequest)
+		}
+		if r.BunRuntime.CustomBinaryPath != "" {
+			return fmt.Errorf("--bun-binary selects the embedded Bun runtime binary, which a --runtime=node image does not contain: %w", ErrInvalidRequest)
+		}
+		if r.Telemetry.Enabled {
+			// The layered telemetry bootstrap is a TypeScript file started
+			// via `bun --preload`; Node can neither execute the TS file nor
+			// the flag. Reject rather than silently ship an image whose
+			// requested telemetry does nothing — a Node-native bootstrap
+			// (`node --import` of a generated .mjs) is tracked as follow-up
+			// work, not faked here.
+			return fmt.Errorf("--telemetry is not yet supported with --runtime=node (the layered telemetry bootstrap is Bun-specific `bun --preload` TypeScript): %w", ErrInvalidRequest)
+		}
+		// The runtime is base-image content for node, so a base that ships
+		// no Node cannot work. The two presets known to lack it are
+		// rejected outright; distroless-node and a custom ref (which the
+		// operator asserts provides ports.NodeBinaryPath) are allowed.
+		switch r.BaseImage.Preset {
+		case BaseImageDistroless, BaseImageChainguard:
+			return fmt.Errorf("base preset %q ships no Node.js runtime; --runtime=node needs --base=%s (the default) or a custom base image providing %s: %w", r.BaseImage.Preset, BaseImageDistrolessNode, ports.NodeBinaryPath, ErrInvalidBaseImage)
+		case BaseImageDistrolessNode, BaseImageCustom:
+			// Supported.
+		default:
+			return fmt.Errorf("base image preset %q: %w", r.BaseImage.Preset, ErrInvalidBaseImage)
+		}
+	default:
+		return fmt.Errorf("runtime %q (supported: %s, %s): %w", r.AppRuntime, RuntimeBun, RuntimeNode, ErrInvalidRequest)
 	}
 
 	// --require-signed is a CI gate: every precondition that would make the

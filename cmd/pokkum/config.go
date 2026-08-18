@@ -163,6 +163,7 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 	// the per-profile call further down populates it.
 	validationErrors = append(validationErrors, validateConfigFields(configFieldsToValidate{
 		strategy:            cfg.Strategy,
+		runtime:             cfg.Runtime,
 		base:                cfg.Base,
 		platforms:           cfg.Platforms,
 		dockerRepo:          cfg.Docker.Repo,
@@ -193,6 +194,7 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 		validationErrors = append(validationErrors, validateConfigFields(configFieldsToValidate{
 			profileName:         name,
 			strategy:            profile.Strategy,
+			runtime:             profile.Runtime,
 			base:                profile.Base,
 			platforms:           profile.Platforms,
 			dockerRepo:          profile.Docker.Repo,
@@ -245,6 +247,7 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 type configFieldsToValidate struct {
 	profileName   string
 	strategy      string
+	runtime       string
 	base          string
 	platforms     []string
 	dockerRepo    string
@@ -289,6 +292,12 @@ func validateConfigFields(f configFieldsToValidate) []string {
 
 	if f.strategy != "" && f.strategy != "layered" && f.strategy != "static" && f.strategy != "exe" {
 		errs = append(errs, fmt.Sprintf("%sinvalid strategy %q (must be layered or static)", prefix, f.strategy))
+	}
+
+	if f.runtime != "" {
+		if _, err := core.ParseAppRuntime(f.runtime); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid runtime %q (must be bun or node)", prefix, f.runtime))
+		}
 	}
 
 	if f.base != "" {

@@ -81,7 +81,22 @@ type buildFlags struct {
 	bunBinary  string
 	bunVariant string
 	bunVersion string
-	strategy   string
+	runtime    string
+	// runtimeExplicit records whether --runtime was actually passed on the
+	// command line (vs. sitting at its "bun" default), so config/profile
+	// values can fill in only when the flag was untouched — the same
+	// pattern as strategyExplicit below.
+	runtimeExplicit bool
+	// explicitBunFlags lists which of the embedded-Bun-selection flags
+	// (bun-version, bun-variant, bun-binary, stub-launcher) were explicitly
+	// passed on the command line — needed to reject their use with an
+	// effective --runtime=node (from flag OR config), since silently
+	// ignoring an explicitly-passed flag is checklist row 16's exact
+	// failure mode, and two of them (--bun-version/--bun-variant) have
+	// non-empty normalized defaults core's Validate cannot tell apart from
+	// an explicit choice.
+	explicitBunFlags []string
+	strategy         string
 	// strategyExplicit records whether --strategy was actually passed on the
 	// command line, as opposed to sitting at its "layered" default — needed
 	// to detect a genuine --strategy=layered --static conflict, since
@@ -160,6 +175,12 @@ The project directory defaults to the current working directory.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.strategyExplicit = cmd.Flags().Changed("strategy")
+			flags.runtimeExplicit = cmd.Flags().Changed("runtime")
+			for _, bunFlag := range []string{"bun-version", "bun-variant", "bun-binary", "stub-launcher"} {
+				if cmd.Flags().Changed(bunFlag) {
+					flags.explicitBunFlags = append(flags.explicitBunFlags, bunFlag)
+				}
+			}
 			flags.platformExplicit = cmd.Flags().Changed("platform")
 			flags.baseExplicit = cmd.Flags().Changed("base")
 			flags.sbomExplicit = cmd.Flags().Changed("sbom")
@@ -245,6 +266,8 @@ The project directory defaults to the current working directory.`,
 		"Bun release version to embed (default: the pinned "+core.DefaultBunVersion+"). Any version is checksum-verified against Bun's GPG-signed release manifest before use")
 	cmd.Flags().BoolVar(&flags.stubLauncher, "stub-launcher", false,
 		"Compile a minimal entrypoint launcher stub instead of embedding stock Bun runtime (layered strategy hardening)")
+	cmd.Flags().StringVar(&flags.runtime, "runtime", "bun",
+		"Application runtime the built image executes under: bun (default, embedded and checksum-pinned) or node (provided by the base image; defaults the base to the distroless-node preset, keyless-verified like distroless). node supports --strategy=layered only")
 	cmd.Flags().StringVar(&flags.strategy, "strategy", "layered",
 		"Packaging strategy: layered (multi-layer arch-independent layout [default] — see 'pokkum explain' for a given build's real breakdown), exe (single executable, deprecated), or static (purely static site served by an embedded Go file server, no Bun runtime)")
 	cmd.Flags().BoolVar(&flags.static, "static", false,
@@ -603,6 +626,22 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	strategy := flags.strategy
 	if !flags.strategyExplicit && projCfg != nil && projCfg.Strategy != "" {
 		strategy = projCfg.Strategy
+	}
+
+	// Runtime: explicit flag > project config / profile > default (bun, via
+	// Normalize). projCfg has already had any active profile's runtime
+	// merged in above (cfg.ApplyProfile), same as Strategy.
+	runtimeSetting := flags.runtime
+	if !flags.runtimeExplicit && projCfg != nil && projCfg.Runtime != "" {
+		runtimeSetting = projCfg.Runtime
+	}
+	appRuntime, err := core.ParseAppRuntime(runtimeSetting)
+	if err != nil {
+		return nil, fmt.Errorf("invalid runtime: %w", err)
+	}
+	req.AppRuntime = appRuntime
+	if appRuntime == core.RuntimeNode && len(flags.explicitBunFlags) > 0 {
+		return nil, fmt.Errorf("--%s configures the embedded Bun runtime, which a --runtime=node image does not contain", flags.explicitBunFlags[0])
 	}
 
 	// SBOM format and attachment mode: explicit flag > project config / profile > default

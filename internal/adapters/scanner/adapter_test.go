@@ -393,3 +393,38 @@ func TestIsVersionOlderThan_NumericDotSegmentComparison(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckEmbeddedAdvisories_RuntimeKeysBunAdvisories pins the --runtime
+// dimension of the toolchain advisory check: a Bun advisory must never be
+// reported for a build whose image ships no Bun (--runtime=node), while the
+// @sveltejs/kit advisory — runtime-independent application-framework code —
+// must keep firing for both runtimes, and the bun/empty runtimes must keep
+// the pre-existing behavior byte-for-byte.
+func TestCheckEmbeddedAdvisories_RuntimeKeysBunAdvisories(t *testing.T) {
+	s := NewAdapter(nil)
+	vulnBun := "1.0.0" // older than the embedded bun advisory's FixedVersion 1.1.0
+	vulnKit := "2.2.0" // older than the embedded kit advisory's FixedVersion 2.3.0
+
+	countByPackage := func(advisories []ports.Vulnerability) map[string]int {
+		out := map[string]int{}
+		for _, a := range advisories {
+			out[a.Package]++
+		}
+		return out
+	}
+
+	for _, runtime := range []string{"", "bun"} {
+		got := countByPackage(s.checkEmbeddedAdvisories(runtime, vulnBun, vulnKit))
+		if got["bun"] != 1 || got["@sveltejs/kit"] != 1 {
+			t.Errorf("runtime %q: advisories = %v, want 1 bun + 1 kit", runtime, got)
+		}
+	}
+
+	got := countByPackage(s.checkEmbeddedAdvisories("node", vulnBun, vulnKit))
+	if got["bun"] != 0 {
+		t.Errorf("runtime node: %d bun advisories reported against an image that ships no Bun", got["bun"])
+	}
+	if got["@sveltejs/kit"] != 1 {
+		t.Errorf("runtime node: kit advisories = %d, want 1 (kit is runtime-independent)", got["@sveltejs/kit"])
+	}
+}

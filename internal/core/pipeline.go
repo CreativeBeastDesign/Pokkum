@@ -528,8 +528,13 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			}
 		} else {
 			scanRes, scanErr := deps.Scanner.Scan(ctx, ports.ScanRequest{
-				Target:          base.PinnedRef,
-				FailOn:          effectiveFailOn,
+				Target: base.PinnedRef,
+				FailOn: effectiveFailOn,
+				// Note: req.Normalize() ran at the top of Build, so
+				// AppRuntime is never empty here — the scanner uses it to
+				// key which embedded toolchain advisories can apply to the
+				// image this build ships (a node image contains no Bun).
+				AppRuntime:      string(req.AppRuntime),
 				AllowIncomplete: req.AllowIncompleteScan,
 				VEXExemptions:   req.VEXExemptions,
 				// Real wall-clock time, not SOURCE_DATE_EPOCH — see
@@ -726,6 +731,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		inputHash, err := deps.RemoteCache.ComputeInputHash(ctx, ports.RemoteCacheInputRequest{
 			ProjectDir:                req.ProjectDir,
 			BaseImageDigest:           base.Digest.String(),
+			AppRuntime:                string(req.AppRuntime),
 			BunVersion:                toolchain.BunVersion,
 			BunVariant:                string(req.BunRuntime.Variant),
 			BunCustomBinaryPath:       req.BunRuntime.CustomBinaryPath,
@@ -995,8 +1001,14 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	// cache hit (Resolver's own on-disk cache), and this keeps fanOut's
 	// concurrent per-platform logic completely untouched rather than special
 	// -casing one platform's goroutine to reuse a pre-fetched result.
+	// Gated on RuntimeBun as well as the strategy: a --runtime=node image
+	// embeds no Bun runtime at all — nothing to resolve, and an SBOM/SLSA
+	// bun component naming an embedded runtime that isn't there would be a
+	// false claim. The SLSA statement still records the HOST bun (the build
+	// tool, from Preflight) via slsaGeneratorRequest's firstNonEmpty
+	// fallback, which is the honest dependency for a node build.
 	var bunToolchain ports.BunResolverResult
-	if req.Compile.Strategy == StrategyLayered && deps.BunRuntime != nil && len(req.Platforms) > 0 {
+	if req.Compile.Strategy == StrategyLayered && req.AppRuntime == ports.RuntimeBun && deps.BunRuntime != nil && len(req.Platforms) > 0 {
 		bunToolchain, err = deps.BunRuntime.Resolve(ctx, ports.BunResolverRequest{
 			Platform:         req.Platforms[0],
 			Version:          req.BunRuntime.Version,
@@ -1259,6 +1271,11 @@ func slsaGeneratorRequest(deps Deps, req BuildRequest, base *ports.BaseImage, to
 			PokkumVersion: deps.Version,
 			GoVersion:     runtime.Version(),
 			BuilderOSArch: runtime.GOOS + "/" + runtime.GOARCH,
+			// The image's application runtime is an external parameter a
+			// verifier must replay (--runtime) to reproduce this build —
+			// recorded unconditionally, bun included, since an explicit
+			// value in a signed statement beats "absent means default".
+			AppRuntime: string(req.AppRuntime),
 			// bunToolchain is the resolved embedded-runtime artifact
 			// (StrategyLayered only) — the correct thing for a dependency
 			// descriptor to name. For strategies with no resolved runtime
@@ -1517,28 +1534,37 @@ func fanOut(
 			var art ports.Artifact
 			var bunResult ports.BunResolverResult
 
-			if req.Compile.Strategy == StrategyLayered {
-				if deps.BunRuntime == nil {
-					return fmt.Errorf("core: bun runtime resolver unavailable for layered strategy: %w", ErrPackageFailed)
+			switch req.Compile.Strategy {
+			case StrategyLayered:
+				// Only the Bun runtime is Pokkum-embedded; --runtime=node
+				// images get their runtime from the base image itself
+				// (ports.NodeBinaryPath), so there is nothing to resolve —
+				// and resolving anyway would gate a node build on Bun
+				// release infrastructure it doesn't depend on.
+				if req.AppRuntime == ports.RuntimeBun {
+					if deps.BunRuntime == nil {
+						return fmt.Errorf("core: bun runtime resolver unavailable for layered strategy: %w", ErrPackageFailed)
+					}
+					res, err := deps.BunRuntime.Resolve(gctx, ports.BunResolverRequest{
+						Platform:         p,
+						Version:          req.BunRuntime.Version,
+						Variant:          req.BunRuntime.Variant,
+						CustomBinaryPath: req.BunRuntime.CustomBinaryPath,
+						StubLauncher:     req.BunRuntime.StubLauncher,
+						Offline:          req.Hermetic,
+						SourceDateEpoch:  req.SourceDateEpoch,
+					})
+					if err != nil {
+						return fmt.Errorf("core: resolve bun runtime for %s: %w", p, err)
+					}
+					bunResult = res
+					log.Info("resolved bun runtime", "platform", p.String(), "version", bunResult.Version, "sha256", bunResult.SHA256)
 				}
-				res, err := deps.BunRuntime.Resolve(gctx, ports.BunResolverRequest{
-					Platform:         p,
-					Version:          req.BunRuntime.Version,
-					Variant:          req.BunRuntime.Variant,
-					CustomBinaryPath: req.BunRuntime.CustomBinaryPath,
-					StubLauncher:     req.BunRuntime.StubLauncher,
-					Offline:          req.Hermetic,
-					SourceDateEpoch:  req.SourceDateEpoch,
-				})
-				if err != nil {
-					return fmt.Errorf("core: resolve bun runtime for %s: %w", p, err)
-				}
-				bunResult = res
-				log.Info("resolved bun runtime", "platform", p.String(), "version", bunResult.Version, "sha256", bunResult.SHA256)
-			} else if !req.Compile.Strategy.ApplyStatic() {
+			case StrategyStatic:
 				// Static builds have nothing to compile: the SvelteKit build
 				// output (.svelte-kit/output) is the entire artifact, served by
 				// pokkum-static with no Bun runtime and no bundled executable.
+			case StrategyExe:
 				outPath := filepath.Join(workDir, "app-"+platformSlug(p))
 				log.Info("compiling", "platform", p.String(), "output", outPath)
 				compiledArt, err := deps.Compiler.Compile(gctx, ports.CompileRequest{
@@ -1558,6 +1584,11 @@ func fanOut(
 				}
 				art = compiledArt
 				log.Info("compiled", "platform", p.String(), "size", art.Size, "sha256", art.SHA256)
+			default:
+				// Mirrors the packaging switch below: an unrecognized
+				// strategy must fail loudly, not silently skip the
+				// per-strategy work above.
+				return fmt.Errorf("core: unhandled build strategy %q in compile fan-out: %w", req.Compile.Strategy, ErrInvalidStrategy)
 			}
 			// art.Platform must be set regardless of strategy: it is the map
 			// key used below (images[b.artifact.Platform] = b.image) to
@@ -1594,6 +1625,7 @@ func fanOut(
 				Platform:      p,
 				Base:          baseImg,
 				Strategy:      req.Compile.Strategy,
+				AppRuntime:    req.AppRuntime,
 				Compression:   req.Compile.Compression,
 				App:           art,
 				BunRuntime:    bunResult,
@@ -1830,6 +1862,13 @@ func imageLabels(req BuildRequest, base BaseImageInfo, tc Toolchain) map[string]
 	}
 	if tc.SupervisorVersion != "" {
 		out[ports.LabelSupervisor] = tc.SupervisorVersion
+	}
+	// Stamped only for the non-default runtime, per LabelRuntime's doc
+	// comment: absence already means bun (no pre-existing image carries the
+	// label), and skipping the default keeps every existing bun image's
+	// labels — and golden-pinned digests — byte-identical.
+	if req.AppRuntime != "" && req.AppRuntime != ports.RuntimeBun {
+		out[ports.LabelRuntime] = string(req.AppRuntime)
 	}
 	for k, v := range req.Labels {
 		out[k] = v

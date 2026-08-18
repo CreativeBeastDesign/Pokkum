@@ -90,10 +90,14 @@ type OTelConfig struct {
 
 // BuildProfile defines partial overrides for build parameters.
 type BuildProfile struct {
-	Output       string         `yaml:"output,omitempty" json:"output,omitempty"`
-	Platforms    []string       `yaml:"platforms,omitempty" json:"platforms,omitempty"`
-	Base         string         `yaml:"base,omitempty" json:"base,omitempty"`
-	Strategy     string         `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	Output    string   `yaml:"output,omitempty" json:"output,omitempty"`
+	Platforms []string `yaml:"platforms,omitempty" json:"platforms,omitempty"`
+	Base      string   `yaml:"base,omitempty" json:"base,omitempty"`
+	Strategy  string   `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// Runtime overrides the top-level runtime ("bun" or "node") for this
+	// profile. Empty means inherit.
+	Runtime      string         `yaml:"runtime,omitempty" json:"runtime,omitempty"`
 	StubLauncher *bool          `yaml:"stub_launcher,omitempty" json:"stub_launcher,omitempty"`
 	Sourcemap    *bool          `yaml:"sourcemap,omitempty" json:"sourcemap,omitempty"`
 	Docker       DockerConfig   `yaml:"docker,omitempty" json:"docker,omitempty"`
@@ -106,9 +110,13 @@ type BuildProfile struct {
 
 // ProjectConfig represents the root .pokkum.yaml configuration structure.
 type ProjectConfig struct {
-	Version      int                     `yaml:"version" json:"version"`
-	Docker       DockerConfig            `yaml:"docker,omitempty" json:"docker,omitempty"`
-	Strategy     string                  `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	Version  int          `yaml:"version" json:"version"`
+	Docker   DockerConfig `yaml:"docker,omitempty" json:"docker,omitempty"`
+	Strategy string       `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// Runtime is the image's application runtime ("bun" or "node"),
+	// mirroring the --runtime flag. Empty means bun.
+	Runtime      string                  `yaml:"runtime,omitempty" json:"runtime,omitempty"`
 	StubLauncher *bool                   `yaml:"stub_launcher,omitempty" json:"stub_launcher,omitempty"`
 	Base         string                  `yaml:"base,omitempty" json:"base,omitempty"`
 	Platforms    []string                `yaml:"platforms,omitempty" json:"platforms,omitempty"`

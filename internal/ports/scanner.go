@@ -76,6 +76,15 @@ type ScanRequest struct {
 	// ToolchainOnly restricts scanning to embedded runtime & dependency advisories.
 	ToolchainOnly bool `json:"toolchain_only"`
 
+	// AppRuntime is the application runtime of the build this scan gates
+	// ("bun" or "node"; see AppRuntime in runtime.go). It keys which
+	// embedded toolchain advisories can apply to the produced image: a
+	// --runtime=node image ships no Bun at all, so reporting Bun advisories
+	// against it would be a false claim. Empty means bun — the default, and
+	// the correct assumption for every standalone `pokkum scan` invocation,
+	// which has no build request to read a runtime from.
+	AppRuntime string `json:"app_runtime,omitempty"`
+
 	// Offline disables remote vulnerability database lookups (OSV.dev).
 	Offline bool `json:"offline"`
 
