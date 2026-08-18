@@ -204,3 +204,67 @@ func PrepareVirtualTelemetryEntry(projectDir, realEntrypointPath string, opts po
 
 	return &VirtualTelemetryEntryResult{EntrypointPath: entryPath}, nil
 }
+
+// LayeredTelemetryBootstrapResult holds the output of
+// PrepareLayeredTelemetryBootstrap.
+type LayeredTelemetryBootstrapResult struct {
+	// PreloadRelPath is the bootstrap file's path relative to outputDir
+	// (e.g. "otel-bootstrap.ts") — the caller packages outputDir as-is, so
+	// this relative path is what ends up sitting next to the real
+	// entrypoint inside the image (e.g. /app/server/otel-bootstrap.ts).
+	// Empty when Skipped is true.
+	PreloadRelPath string
+
+	// Skipped indicates opts.Enabled was false, or the project already has
+	// its own real src/instrumentation.server.ts (InstrumentationExists) —
+	// same precedence rule as PrepareVirtualTelemetryEntry.
+	Skipped bool
+}
+
+// PrepareLayeredTelemetryBootstrap is the --strategy=layered counterpart to
+// PrepareVirtualTelemetryEntry: --strategy=exe wraps the *compile*
+// entrypoint (a source-level import, resolved by bun build --compile), but
+// StrategyLayered has no compile step at all — it packages outputDir
+// directly and the packaged image execs a fixed argv
+// (ports.DefaultLayeredEntrypoint) against the interpreted runtime. There is
+// nothing for a wrapper *import* to be compiled into.
+//
+// Instead, this writes otel-bootstrap.ts directly into outputDir (NOT
+// .pokkum/ — unlike PrepareVirtualTelemetryEntry's wrapper files, this one
+// must actually be packaged into the image, since nothing compiles it in).
+// The caller is expected to have the packager insert `bun --preload
+// <absolute-path>` ahead of the real entrypoint in the image's Entrypoint
+// argv (see internal/adapters/packager/packager.go, which joins
+// PreloadRelPath against ports.AppServerDirPrefix to build that absolute
+// path) — Bun's --preload flag runs a file's side effects before the main
+// entrypoint runs, which is exactly what starting the SDK first requires.
+// Empirically confirmed to work with the bare `bun --preload <file> <entry>`
+// invocation form (no `run` subcommand) this codebase actually uses, not
+// just `bun run --preload`. The path itself MUST be absolute (or
+// "./"-prefixed) — confirmed the hard way, via a failing real-run test, not
+// assumed: an unprefixed relative filename (e.g. "otel-bootstrap.ts") makes
+// Bun try to resolve it as an npm package specifier ("error: preload not
+// found") rather than a local file. This is why the caller builds an
+// absolute in-container path rather than passing PreloadRelPath through
+// unmodified.
+//
+// Writing into outputDir (SvelteKit/adapter-node's own generated build
+// output, e.g. <projectDir>/build) rather than the user's real project tree
+// does NOT violate the Zero-Mutation Build Sandbox invariant — that
+// invariant protects user-*authored* source files, not the adapter's own
+// generated output, which this codebase already writes/patches today (see
+// patchPrerenderedHandler in internal/adapters/bunexec/prerendered_patch.go,
+// which modifies build/handler.js for the same strategy).
+func PrepareLayeredTelemetryBootstrap(projectDir, outputDir string, opts ports.TelemetryOptions) (*LayeredTelemetryBootstrapResult, error) {
+	if !opts.Enabled || InstrumentationExists(projectDir) {
+		return &LayeredTelemetryBootstrapResult{Skipped: true}, nil
+	}
+
+	const bootstrapFilename = "otel-bootstrap.ts"
+	bootstrapPath := filepath.Join(outputDir, bootstrapFilename)
+	if err := os.WriteFile(bootstrapPath, []byte(GenerateInstrumentationServer(opts)), 0o600); err != nil {
+		return nil, fmt.Errorf("write layered otel-bootstrap.ts: %w", err)
+	}
+
+	return &LayeredTelemetryBootstrapResult{PreloadRelPath: bootstrapFilename}, nil
+}

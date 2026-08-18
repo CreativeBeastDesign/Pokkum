@@ -721,18 +721,19 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	var prep ports.PrepareResult
 	g.Go(func() error {
 		p, err := deps.Compiler.Prepare(gctx, ports.PrepareRequest{
-			Strategy:        req.Compile.Strategy,
-			ProjectDir:      req.ProjectDir,
-			SourceDateEpoch: req.SourceDateEpoch,
-			Env:             req.Compile.Env,
-			Platforms:       slices.Clone(req.Platforms),
-			NoInject:        req.Compile.NoInject,
-			Hermetic:        req.Hermetic,
-			NoPrune:         req.Compile.NoPrune,
-			KeepVendor:      slices.Clone(req.Compile.KeepVendor),
-			NoPrecompress:   req.Compile.NoPrecompress,
-			NoStrip:         req.Compile.NoStrip,
-			Telemetry:       req.Telemetry,
+			Strategy:               req.Compile.Strategy,
+			ProjectDir:             req.ProjectDir,
+			SourceDateEpoch:        req.SourceDateEpoch,
+			Env:                    req.Compile.Env,
+			Platforms:              slices.Clone(req.Platforms),
+			NoInject:               req.Compile.NoInject,
+			Hermetic:               req.Hermetic,
+			HermeticMountIsolation: req.HermeticMountIsolation,
+			NoPrune:                req.Compile.NoPrune,
+			KeepVendor:             slices.Clone(req.Compile.KeepVendor),
+			NoPrecompress:          req.Compile.NoPrecompress,
+			NoStrip:                req.Compile.NoStrip,
+			Telemetry:              req.Telemetry,
 		})
 		if err != nil {
 			return err
@@ -1105,15 +1106,16 @@ func fanOut(
 				outPath := filepath.Join(workDir, "app-"+platformSlug(p))
 				log.Info("compiling", "platform", p.String(), "output", outPath)
 				compiledArt, err := deps.Compiler.Compile(gctx, ports.CompileRequest{
-					ProjectDir:      req.ProjectDir,
-					EntrypointPath:  prep.EntrypointPath,
-					Platform:        p,
-					OutputPath:      outPath,
-					SourceDateEpoch: req.SourceDateEpoch,
-					Env:             req.Compile.Env,
-					Minify:          !req.Compile.NoMinify,
-					Sourcemap:       req.Compile.Sourcemap,
-					Hermetic:        req.Hermetic,
+					ProjectDir:             req.ProjectDir,
+					EntrypointPath:         prep.EntrypointPath,
+					Platform:               p,
+					OutputPath:             outPath,
+					SourceDateEpoch:        req.SourceDateEpoch,
+					Env:                    req.Compile.Env,
+					Minify:                 !req.Compile.NoMinify,
+					Sourcemap:              req.Compile.Sourcemap,
+					Hermetic:               req.Hermetic,
+					HermeticMountIsolation: req.HermeticMountIsolation,
 				})
 				if err != nil {
 					return err
@@ -1197,6 +1199,12 @@ func fanOut(
 				// instead of being dropped; POKKUM_PRERENDERED_DIR points the
 				// patched handler at it.
 				pkgReq.AppPrerenderedDir = filepath.Join(prep.OutputDir, "prerendered")
+				// Non-empty only when Prepare generated a layered telemetry
+				// bootstrap (req.Telemetry.Enabled and no user-owned
+				// src/instrumentation.server.ts); the packager uses it to
+				// insert `bun --preload <path>` into the layered Entrypoint
+				// argv instead of the unconditional DefaultLayeredEntrypoint().
+				pkgReq.TelemetryPreloadRelPath = prep.TelemetryPreloadRelPath
 			case StrategyStatic:
 				// No server JS, vendor or native trees for a static site; the
 				// .svelte-kit/output staging holds the client and prerendered

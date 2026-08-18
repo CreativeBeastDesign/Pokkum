@@ -336,6 +336,21 @@ type PrepareRequest struct {
 	// Hermetic enforces zero-network egress during compile.
 	Hermetic bool
 
+	// HermeticMountIsolation additionally blocks path-based Unix domain
+	// socket access (e.g. /var/run/docker.sock, if bind-mounted into
+	// Pokkum's own runtime) for the build subprocess. Opt-in and additive —
+	// ignored unless Hermetic is also true — since it relies on genuinely
+	// new, previously-unexercised raw-syscall code (a /proc/self/exe
+	// re-exec helper masking specific known paths via a bind mount inside a
+	// fresh CLONE_NEWNS mount namespace) unlike Hermetic's own
+	// CLONE_NEWNET-based network isolation, which has shipped as the
+	// default --hermetic behavior since 2026-08-17 with no incident. Linux
+	// only (see hermeticSandboxSupported); a Warn is logged and this is
+	// silently ignored on other platforms, matching Hermetic's own
+	// advisory-only fallback there. See internal/adapters/bunexec's
+	// hermetic_reexec_linux.go and Roadmap.md's residual-hermetic-gap item.
+	HermeticMountIsolation bool
+
 	// Platforms is the set of targets the subsequent Compile calls will use. It
 	// is passed so the adapter can fail fast on an unsupported target before
 	// spending a full SvelteKit build. May be nil, meaning SupportedPlatforms.
@@ -410,6 +425,20 @@ type PrepareResult struct {
 	// AppClientDirPrefix/<rel>) and the packager stamps EnvStaticFallback.
 	// Empty means the project has no SPA fallback.
 	StaticFallbackRelPath string
+
+	// TelemetryPreloadRelPath is the OTel SDK bootstrap file's path relative
+	// to OutputDir (e.g. "otel-bootstrap.ts"), set only for StrategyLayered
+	// builds with telemetry enabled (see
+	// sveltekitutils.PrepareLayeredTelemetryBootstrap). The packager joins
+	// this with AppServerDirPrefix and inserts `bun --preload <path>` ahead
+	// of the real entrypoint in the image's Entrypoint argv instead of the
+	// unconditional DefaultLayeredEntrypoint(). Empty means no layered
+	// telemetry bootstrap was generated (telemetry disabled, a different
+	// strategy, or the project already has its own
+	// src/instrumentation.server.ts). StrategyExe's telemetry wrapper uses a
+	// different mechanism (EntrypointPath itself, see compiler.go's Prepare)
+	// and never sets this field.
+	TelemetryPreloadRelPath string
 }
 
 // CompileRequest drives stage two: `bun build --compile --target=…` against the
@@ -459,6 +488,13 @@ type CompileRequest struct {
 	// hermetic: a malicious build script only has to wait for this stage to
 	// run before making its network call.
 	Hermetic bool
+
+	// HermeticMountIsolation is PrepareRequest.HermeticMountIsolation's
+	// counterpart for Compile — see its doc comment. Applies to the exact
+	// same `bun build --compile` stage described in Hermetic's own doc
+	// comment above (row 18 of mem:self_review_checklist: a security
+	// control must cover every untrusted-execution site, not just one).
+	HermeticMountIsolation bool
 }
 
 // Compiler turns a SvelteKit project into one self-contained executable per

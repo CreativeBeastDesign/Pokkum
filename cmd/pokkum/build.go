@@ -91,16 +91,17 @@ type buildFlags struct {
 	sourcemapExplicit    bool
 	stubLauncherExplicit bool
 
-	noVerifyBase        bool
-	baseVerifyMode      string
-	baseKeylessIdentity string
-	baseKeylessIssuer   string
-	sigstoreTrustedRoot string
-	allowSecretPatterns []string
-	hermetic            bool
-	registryConfig      string
-	pushConcurrency     int
-	requireEnv          []string
+	noVerifyBase           bool
+	baseVerifyMode         string
+	baseKeylessIdentity    string
+	baseKeylessIssuer      string
+	sigstoreTrustedRoot    string
+	allowSecretPatterns    []string
+	hermetic               bool
+	hermeticMountIsolation bool
+	registryConfig         string
+	pushConcurrency        int
+	requireEnv             []string
 
 	// adapter-node reverse-proxy contract flags (see ports.EnvOrigin's doc
 	// comment for the full rationale)
@@ -246,6 +247,8 @@ The project directory defaults to the current working directory.`,
 
 	cmd.Flags().BoolVar(&flags.hermetic, "hermetic", false,
 		"Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required)")
+	cmd.Flags().BoolVar(&flags.hermeticMountIsolation, "hermetic-mount-isolation", false,
+		"With --hermetic on Linux, additionally block path-based Unix domain socket access (e.g. a bind-mounted /var/run/docker.sock) for the build subprocess. Opt-in: new raw-syscall code, ignored (with a warning) on non-Linux hosts or without --hermetic")
 	cmd.Flags().StringVar(&flags.registryConfig, "registry-config", "",
 		"Path to custom OCI registry auth config file (config.json)")
 	cmd.Flags().IntVar(&flags.pushConcurrency, "push-concurrency", 0,
@@ -824,6 +827,7 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	}
 
 	req.Hermetic = flags.hermetic
+	req.HermeticMountIsolation = flags.hermeticMountIsolation
 	req.RegistryConfigPath = flags.registryConfig
 	req.PushConcurrency = flags.pushConcurrency
 

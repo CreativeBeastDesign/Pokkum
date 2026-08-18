@@ -708,6 +708,14 @@ type BuildRequest struct {
 	// Hermetic enforces zero-network egress and offline mode during build.
 	Hermetic bool
 
+	// HermeticMountIsolation additionally blocks path-based Unix domain
+	// socket access (e.g. /var/run/docker.sock) for the build subprocess.
+	// Ignored unless Hermetic is also true. Opt-in (default false) and
+	// Linux-only — see ports.PrepareRequest.HermeticMountIsolation's doc
+	// comment for why this is additive rather than folded into Hermetic's
+	// own default behavior.
+	HermeticMountIsolation bool
+
 	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
 	RegistryConfigPath string
 

@@ -207,6 +207,80 @@ func TestBuild_LayeredServerDirIsUnconditional(t *testing.T) {
 	}
 }
 
+// TestBuild_LayeredEntrypoint_DefaultWhenNoTelemetry pins that a layered
+// build with no telemetry bootstrap uses ports.DefaultLayeredEntrypoint()
+// unchanged — the pre-2026-08-18 behavior, which must not regress now that
+// the same branch has a second, telemetry-aware path.
+func TestBuild_LayeredEntrypoint_DefaultWhenNoTelemetry(t *testing.T) {
+	req := newRequest(t, ports.LinuxAMD64)
+	req.Strategy = ports.StrategyLayered
+	req.BunRuntime = ports.BunResolverResult{BinaryPath: writeBinary(t, "bun", []byte("bun"))}
+	req.AppServerDir = writeStrategyDir(t, map[string]string{"index.js": "server entry"})
+
+	img, err := NewPackager(testLogger()).Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	cfg := configOf(t, img)
+	want := ports.DefaultLayeredEntrypoint()
+	if !slices.Equal(cfg.Config.Entrypoint, want) {
+		t.Errorf("entrypoint = %q, want %q (DefaultLayeredEntrypoint unchanged)", cfg.Config.Entrypoint, want)
+	}
+}
+
+// TestBuild_LayeredEntrypoint_TelemetryInsertsPreload proves the
+// TelemetryPreloadRelPath -> Entrypoint wiring PR-5's layered-strategy
+// extension added: a non-empty path must produce
+// [supervisor, --, bun, --preload, <AppServerDirPrefix>/<rel>, index] rather
+// than the unconditional DefaultLayeredEntrypoint().
+func TestBuild_LayeredEntrypoint_TelemetryInsertsPreload(t *testing.T) {
+	req := newRequest(t, ports.LinuxAMD64)
+	req.Strategy = ports.StrategyLayered
+	req.BunRuntime = ports.BunResolverResult{BinaryPath: writeBinary(t, "bun", []byte("bun"))}
+	req.AppServerDir = writeStrategyDir(t, map[string]string{
+		"index.js":          "server entry",
+		"otel-bootstrap.ts": "otel bootstrap",
+	})
+	req.TelemetryPreloadRelPath = "otel-bootstrap.ts"
+
+	img, err := NewPackager(testLogger()).Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	cfg := configOf(t, img)
+	want := []string{
+		ports.SupervisorPath, "--", ports.BunBinaryPath,
+		"--preload", ports.AppServerDirPrefix + "/otel-bootstrap.ts",
+		ports.AppServerIndexPath,
+	}
+	if !slices.Equal(cfg.Config.Entrypoint, want) {
+		t.Errorf("entrypoint = %q, want %q", cfg.Config.Entrypoint, want)
+	}
+}
+
+// TestBuild_ExeStrategyIgnoresTelemetryPreloadRelPath guards row 11
+// (mem:self_review_checklist): the new branch inside packager.go's
+// `if req.Strategy == ports.StrategyLayered` block must never leak into
+// StrategyExe — setting TelemetryPreloadRelPath on a StrategyExe request
+// (which nothing in this codebase actually does; PrepareResult only ever
+// sets it for StrategyLayered) must have zero effect on the entrypoint,
+// since StrategyExe's own telemetry mechanism (the compile-entrypoint
+// wrapper) works entirely through EntrypointPath, not this field.
+func TestBuild_ExeStrategyIgnoresTelemetryPreloadRelPath(t *testing.T) {
+	req := newRequest(t, ports.LinuxAMD64)
+	req.TelemetryPreloadRelPath = "otel-bootstrap.ts"
+
+	img, err := NewPackager(testLogger()).Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	cfg := configOf(t, img)
+	want := []string{ports.SupervisorPath, "--", ports.AppBinaryPath}
+	if !slices.Equal(cfg.Config.Entrypoint, want) {
+		t.Errorf("entrypoint = %q, want %q (StrategyExe must ignore TelemetryPreloadRelPath)", cfg.Config.Entrypoint, want)
+	}
+}
+
 // TestBuild_LayeredOptionalDirsSkippedWhenAbsent is the mirror of the test
 // above: AppClientDir/AppVendorDir/AppNativeDir pointed at paths that do not
 // exist must be silently skipped (no layer, no error), because each is

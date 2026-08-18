@@ -443,6 +443,16 @@ type PackageRequest struct {
 	// dropped). Empty (the default) means no SPA fallback.
 	StaticFallback string
 
+	// TelemetryPreloadRelPath is PrepareResult.TelemetryPreloadRelPath,
+	// relative to AppServerDir (e.g. "otel-bootstrap.ts"). Set only for
+	// StrategyLayered builds with telemetry enabled. When non-empty, the
+	// packager inserts `bun --preload AppServerDirPrefix/<rel>` ahead of the
+	// real entrypoint in the Entrypoint argv instead of the unconditional
+	// DefaultLayeredEntrypoint(). Empty (the default) means no layered
+	// telemetry bootstrap — the packager uses DefaultLayeredEntrypoint()
+	// unchanged.
+	TelemetryPreloadRelPath string
+
 	// StaticServer is the pokkum-static PID-1 static file server binary for
 	// Platform, from StaticServerProvider.Binary. Required and non-empty for
 	// StrategyStatic. It becomes a single-file layer at StaticServerPath with

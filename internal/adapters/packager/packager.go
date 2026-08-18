@@ -157,7 +157,24 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		// silently defeating a nil-check here. Mirror the static strategy's own
 		// unconditional overwrite below instead of trusting a guard an earlier
 		// generic pass can pre-empt. See Lessons.md's 2026-08-16 entry.
-		req.Runtime.Entrypoint = ports.DefaultLayeredEntrypoint()
+		if req.TelemetryPreloadRelPath != "" {
+			// Telemetry SDK bootstrap for the layered (default) strategy: insert
+			// `bun --preload <path>` ahead of the real entrypoint so the SDK
+			// starts first (Bun's --preload runs a file's side effects before
+			// the main entrypoint executes — confirmed to work with this exact
+			// bare invocation form, no `run` subcommand, empirically before
+			// this mechanism was built; see
+			// sveltekitutils.PrepareLayeredTelemetryBootstrap's doc comment).
+			// The path MUST be absolute (join against AppServerDirPrefix, not
+			// left as a bare relative filename) — also confirmed empirically:
+			// Bun's --preload treats an unprefixed relative specifier as an
+			// npm package name to resolve, not a local file, and fails with
+			// "preload not found" for exactly that reason.
+			preloadPath := ports.AppServerDirPrefix + "/" + req.TelemetryPreloadRelPath
+			req.Runtime.Entrypoint = []string{ports.SupervisorPath, "--", ports.BunBinaryPath, "--preload", preloadPath, ports.AppServerIndexPath}
+		} else {
+			req.Runtime.Entrypoint = ports.DefaultLayeredEntrypoint()
+		}
 	}
 	rc := req.Runtime.WithDefaults()
 	if req.Strategy.ApplyStatic() {

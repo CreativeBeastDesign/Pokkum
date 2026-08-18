@@ -132,6 +132,7 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 
 	rootCmd.AddCommand(newReproDoctorCommand(ctx, logger))
 	rootCmd.AddCommand(newVersionCommand(ctx, logger))
+	rootCmd.AddCommand(newHermeticReexecCommand(ctx, logger))
 
 	return rootCmd
 }

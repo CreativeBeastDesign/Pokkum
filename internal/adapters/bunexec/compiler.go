@@ -343,15 +343,35 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	setNewProcessGroup(cmd)
 
 	hermeticSandboxApplied := false
+	hermeticMountIsolationApplied := false
 	if req.Hermetic {
 		if hermeticSandboxSupported {
 			applyHermeticSandbox(cmd)
 			hermeticSandboxApplied = true
+			if req.HermeticMountIsolation {
+				// Reads cmd.Path/Args/Dir/Env (the real `bun run build` /
+				// `bun x vite build` invocation) and retargets cmd to the
+				// hidden reexec subcommand instead — see
+				// hermetic_reexec_linux.go's applyHermeticMountIsolation doc
+				// comment for the full mechanism. Must run after cmd.Env is
+				// finalized (baseEnv above) and before cmd.Start().
+				log.Debug("bunexec: real (pre-reexec) argv", "argv", cmd.Args, "dir", cmd.Dir)
+				if err := applyHermeticMountIsolation(cmd); err != nil {
+					return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w: %w", req.ProjectDir, err, core.ErrPrepareFailed)
+				}
+				hermeticMountIsolationApplied = true
+			}
 		} else {
 			log.Warn(
 				"bunexec: --hermetic requested, but kernel-enforced network isolation is only implemented on Linux; this platform falls back to advisory-only isolation (BUN_OFFLINE=1/NODE_ENV=production/NO_UPDATE_NOTIFIER=1), which a compromised or malicious build-time dependency can simply ignore",
 				"projectDir", req.ProjectDir, "goos", runtime.GOOS,
 			)
+			if req.HermeticMountIsolation {
+				log.Warn(
+					"bunexec: --hermetic-mount-isolation requested, but is only implemented on Linux; ignored on this platform",
+					"projectDir", req.ProjectDir, "goos", runtime.GOOS,
+				)
+			}
 		}
 	}
 
@@ -368,6 +388,11 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 
 	if hermeticSandboxApplied {
 		if err := verifyHermeticSandboxApplied(cmd); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w: %w", req.ProjectDir, err, core.ErrPrepareFailed)
+		}
+	}
+	if hermeticMountIsolationApplied {
+		if err := verifyHermeticMountIsolationApplied(cmd); err != nil {
 			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w: %w", req.ProjectDir, err, core.ErrPrepareFailed)
 		}
 	}
@@ -488,29 +513,29 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		}
 	}
 
-	// Telemetry SDK bootstrap: wraps the compile entrypoint rather than
-	// touching svelte.config.js/src/instrumentation.server.ts — see
-	// sveltekitutils.PrepareVirtualTelemetryEntry's doc comment for why
-	// SvelteKit's own on-disk-only config loading rules that out.
+	// Telemetry SDK bootstrap. Two different mechanisms depending on
+	// strategy, deliberately a positive switch rather than a negative "not
+	// static" check (mem:self_review_checklist row 11's own prescribed
+	// pattern — a negative check silently includes every strategy nobody
+	// thought about; this exact function's earlier StrategyLayered-is-a-
+	// silent-no-op bug is row 11's own origin-note incident, see
+	// Lessons.md's 2026-08-18 entry, bug 4):
 	//
-	// StrategyExe ONLY, deliberately a positive check rather than "not
-	// static" (mem:self_review_checklist row 11's own prescribed pattern —
-	// a negative check silently includes every strategy nobody thought
-	// about). This wrapper only takes effect through PrepareResult.EntrypointPath,
-	// which is read exactly once downstream: pipeline.go's
-	// ports.CompileRequest{EntrypointPath: prep.EntrypointPath} construction,
-	// itself only reached for StrategyExe (StrategyLayered's fan-out never
-	// calls Compile at all — it packages prep.OutputDir directly and the
-	// packaged image execs a fixed ports.AppServerIndexPath via
-	// ports.DefaultLayeredEntrypoint(), neither of which this wrapper
-	// touches). Setting entrypoint here for StrategyLayered would silently
-	// generate a real file that nothing ever reads or compiles — exactly
-	// the "looks wired, isn't" failure this codebase has repeatedly caught
-	// itself on. Making telemetry work for the default layered strategy
-	// needs a materially different mechanism (packaging the bootstrap file
-	// into the image and conditionally adding a `bun --preload <path>` to
-	// DefaultLayeredEntrypoint's argv) — tracked as a real, scoped follow-up
-	// in Roadmap.md rather than attempted here.
+	//   - StrategyExe wraps the *compile* entrypoint (a source-level import
+	//     bun build --compile bundles in) — see
+	//     sveltekitutils.PrepareVirtualTelemetryEntry's doc comment for why
+	//     SvelteKit's own on-disk-only config loading rules out touching
+	//     svelte.config.js/src/instrumentation.server.ts directly.
+	//   - StrategyLayered has no compile step to wrap an import into — it
+	//     packages outputDir directly and execs a fixed argv. Instead,
+	//     sveltekitutils.PrepareLayeredTelemetryBootstrap writes the
+	//     bootstrap file straight into outputDir (so the packager includes
+	//     it automatically, no packaging-layer change needed) and returns
+	//     its path relative to outputDir; the packager inserts
+	//     `bun --preload <path>` ahead of the real entrypoint in the
+	//     image's Entrypoint argv instead of the unconditional
+	//     ports.DefaultLayeredEntrypoint() (see packager.go).
+	var telemetryPreloadRelPath string
 	if req.Telemetry.Enabled {
 		switch req.Strategy {
 		case ports.StrategyExe:
@@ -525,15 +550,26 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 				entrypoint = telemetryRes.EntrypointPath
 			}
 		case ports.StrategyLayered:
-			log.Warn(
-				"bunexec: --telemetry has no effect for --strategy=layered (the default) yet — only --strategy=exe is currently supported, since the layered strategy has no compile step for the SDK bootstrap to wrap; see Roadmap.md",
-				"projectDir", req.ProjectDir,
-			)
+			layeredRes, err := sveltekitutils.PrepareLayeredTelemetryBootstrap(req.ProjectDir, outputDir, req.Telemetry)
+			if err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: telemetry layered bootstrap: %w: %w", req.ProjectDir, err, core.ErrPrepareFailed)
+			}
+			if layeredRes.Skipped {
+				log.Info("bunexec: telemetry enabled but skipped — project already has its own src/instrumentation.server.{ts,js,mjs}", "projectDir", req.ProjectDir)
+			} else {
+				log.Info("bunexec: telemetry SDK bootstrap packaged for layered runtime preload", "bootstrap", layeredRes.PreloadRelPath)
+				telemetryPreloadRelPath = layeredRes.PreloadRelPath
+			}
 		}
 	}
 
 	log.Info("bunexec: prepare complete", "entrypoint", entrypoint, "outputDir", outputDir, "staticFallback", staticFallbackRel)
-	return ports.PrepareResult{EntrypointPath: entrypoint, OutputDir: outputDir, StaticFallbackRelPath: staticFallbackRel}, nil
+	return ports.PrepareResult{
+		EntrypointPath:          entrypoint,
+		OutputDir:               outputDir,
+		StaticFallbackRelPath:   staticFallbackRel,
+		TelemetryPreloadRelPath: telemetryPreloadRelPath,
+	}, nil
 }
 
 // readConfigSource returns the raw source text of <projectDir>/svelte.config.js,
@@ -670,15 +706,29 @@ func (c *Compiler) Compile(ctx context.Context, req ports.CompileRequest) (ports
 	// sandboxes Prepare is not actually hermetic, since a malicious
 	// build-time dependency can simply wait for this stage to run.
 	hermeticSandboxApplied := false
+	hermeticMountIsolationApplied := false
 	if req.Hermetic {
 		if hermeticSandboxSupported {
 			applyHermeticSandbox(cmd)
 			hermeticSandboxApplied = true
+			if req.HermeticMountIsolation {
+				log.Debug("bunexec: real (pre-reexec) argv", "argv", cmd.Args, "dir", cmd.Dir)
+				if err := applyHermeticMountIsolation(cmd); err != nil {
+					return ports.Artifact{}, fmt.Errorf("bunexec: compile %s: %w: %w", req.Platform, err, core.ErrCompileFailed)
+				}
+				hermeticMountIsolationApplied = true
+			}
 		} else {
 			log.Debug(
 				"bunexec: --hermetic requested, but kernel-enforced network isolation is only implemented on Linux; this platform's compile stage also falls back to advisory-only isolation (see Prepare's Warn log for the full explanation, logged once per build rather than once per platform here)",
 				"platform", req.Platform, "goos", runtime.GOOS,
 			)
+			if req.HermeticMountIsolation {
+				log.Debug(
+					"bunexec: --hermetic-mount-isolation requested, but is only implemented on Linux; ignored on this platform's compile stage",
+					"platform", req.Platform, "goos", runtime.GOOS,
+				)
+			}
 		}
 	}
 
@@ -696,6 +746,11 @@ func (c *Compiler) Compile(ctx context.Context, req ports.CompileRequest) (ports
 
 	if hermeticSandboxApplied {
 		if err := verifyHermeticSandboxApplied(cmd); err != nil {
+			return ports.Artifact{}, fmt.Errorf("bunexec: compile %s: %w: %w", req.Platform, err, core.ErrCompileFailed)
+		}
+	}
+	if hermeticMountIsolationApplied {
+		if err := verifyHermeticMountIsolationApplied(cmd); err != nil {
 			return ports.Artifact{}, fmt.Errorf("bunexec: compile %s: %w: %w", req.Platform, err, core.ErrCompileFailed)
 		}
 	}
