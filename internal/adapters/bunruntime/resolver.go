@@ -622,10 +622,35 @@ func (r *Resolver) fetchSmall(ctx context.Context, url string) ([]byte, error) {
 	return body, nil
 }
 
+// isHexDigest reports whether s is a well-formed 64-char lowercase hex
+// SHA-256 digest — the only shape parseSHASUMSEntry may ever return as a
+// success. Mirrors supervisor/cmd/pokkum-init/attest.go's helper of the
+// same name/contract, kept independent (no shared internal dependency
+// between the CLI and the PID-1 supervisor binary) rather than exported and
+// shared.
+func isHexDigest(s string) bool {
+	if len(s) != sha256.Size*2 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // parseSHASUMSEntry finds the SHA256 hex digest for filename in
 // SHASUMS256.txt-format plaintext (one "<hex>  <filename>" line per file,
 // GNU coreutils sha256sum output format — two spaces, but strings.Fields
 // splits on any run of whitespace so this tolerates either).
+//
+// The returned string, on a nil error, is always a well-formed 64-char
+// lowercase hex digest (checked via isHexDigest) — never merely
+// 64 characters of arbitrary content. This plaintext is GPG-clearsigned
+// but otherwise attacker-shaped content (see fetchVerifiedChecksum's own
+// doc comment), so a checksum field can't be trusted to actually be hex
+// just because it's the right length.
 func parseSHASUMSEntry(plaintext []byte, filename string) (string, error) {
 	for _, line := range strings.Split(string(plaintext), "\n") {
 		fields := strings.Fields(line)
@@ -633,8 +658,8 @@ func parseSHASUMSEntry(plaintext []byte, filename string) (string, error) {
 			continue
 		}
 		sha := strings.ToLower(fields[0])
-		if len(sha) != 64 {
-			return "", fmt.Errorf("malformed checksum length %d for %s", len(sha), filename)
+		if !isHexDigest(sha) {
+			return "", fmt.Errorf("malformed checksum %q (want %d lowercase hex characters) for %s", sha, sha256.Size*2, filename)
 		}
 		return sha, nil
 	}

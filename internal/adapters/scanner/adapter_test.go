@@ -326,3 +326,70 @@ func writeFile(t *testing.T, path, content string) error {
 	t.Helper()
 	return os.WriteFile(path, []byte(content), 0o644)
 }
+
+// TestIsVersionOlderThan_NumericDotSegmentComparison covers the CVE-gate
+// version comparator's confirmed reproducer table (isVersionOlderThan used
+// to do a plain lexicographic string compare, silently misclassifying any
+// pair whose segment widths differ) plus the distro-suffix, pre-release,
+// and non-numeric-garbage edge cases the fix must also handle without
+// panicking or flipping to the unsafe (false-negative) direction.
+func TestIsVersionOlderThan_NumericDotSegmentComparison(t *testing.T) {
+	tests := []struct {
+		name  string
+		v     string
+		fixed string
+		want  bool
+	}{
+		// Confirmed reproducer table from the bug report: a plain byte-wise
+		// compare gets every one of these wrong.
+		{"width mismatch, minor: 1.2.0 vs 1.10.0", "1.2.0", "1.10.0", true},
+		{"width mismatch, minor: 1.9.0 vs 1.10.0", "1.9.0", "1.10.0", true},
+		{"width mismatch, minor: 2.9.0 vs 2.10.0", "2.9.0", "2.10.0", true},
+		{"v-prefixed installed version", "v1.9.0", "1.10.0", true},
+		{"pre-release precedes its own release", "1.2.0-beta", "1.2.0", true},
+
+		// Sanity: equal and newer-than-fixed must not falsely trigger.
+		{"equal versions are not older", "1.0.0", "1.0.0", false},
+		{"newer patch is not older", "1.0.1", "1.0.0", false},
+		{"major width mismatch, newer is not older", "10.0.0", "2.0.0", false},
+
+		// Multi-digit segments beyond the confirmed table.
+		{"double-digit major", "9.0.0", "10.0.0", true},
+		{"triple-digit segment", "1.99.0", "1.100.0", true},
+
+		// Differing segment counts: implicit trailing-zero padding.
+		{"shorter core equal to zero-padded longer core", "1.2", "1.2.0", false},
+		{"shorter core older than longer, non-zero tail", "1.2", "1.2.1", true},
+		{"shorter core newer than longer", "1.3", "1.2.9", false},
+
+		// cleanVersion-stripped range-prefix operators.
+		{"caret and tilde prefixes both stripped", "^1.2.0", "~1.10.0", true},
+		{"gte/lte prefixes stripped", ">=1.2.0", "<=1.10.0", true},
+
+		// Distro-style build/package revision suffixes (e.g. Debian/Ubuntu).
+		{"distro revision suffix is older than bare release", "1.2.3-1ubuntu4", "1.2.3", true},
+		{"bare release is not older than a distro-suffixed release", "1.2.3", "1.2.3-1ubuntu4", false},
+		{"distro suffix does not mask a genuinely newer core", "1.3.0-1ubuntu1", "1.2.3", false},
+
+		// Non-numeric garbage: must not panic, must fail safe (lean toward
+		// "older"/potentially-still-vulnerable rather than an ASCII-accident
+		// byte compare with no security meaning).
+		{"garbage vs garbage fails safe", "not-a-version", "also-not-a-version", true},
+		{"garbage installed version fails safe against a clean fixed version", "garbage", "1.0.0", true},
+		{"clean installed version vs garbage fixed version fails safe", "1.0.0", "garbage", true},
+
+		// Blank version strings: unresolved/unknown version is not flagged
+		// (pre-existing, unchanged contract — out of scope for this fix).
+		{"both blank", "", "", false},
+		{"blank installed version", "", "1.0.0", false},
+		{"blank fixed version", "1.0.0", "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isVersionOlderThan(tc.v, tc.fixed); got != tc.want {
+				t.Errorf("isVersionOlderThan(%q, %q) = %v, want %v", tc.v, tc.fixed, got, tc.want)
+			}
+		})
+	}
+}

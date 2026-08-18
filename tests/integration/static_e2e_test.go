@@ -20,6 +20,12 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+// Port interface conformance assertions for mock implementations.
+var (
+	_ ports.Compiler          = (*staticFixtureCompiler)(nil)
+	_ ports.BaseImageResolver = (*recordingBaseResolver)(nil)
+)
+
 // Fixture content for the static-strategy client tree. These live in this
 // file (rather than harness_test.go/e2e_test.go) so a concurrent task
 // editing the shared mocks doesn't collide with this one. Both must be >=64

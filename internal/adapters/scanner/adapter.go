@@ -146,8 +146,19 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 	}
 
 	// Always ensure embedded toolchain advisories are checked as fallback if none found
+	// (e.g. no readable package.json, so scanProjectToolchain couldn't resolve a real
+	// @sveltejs/kit version). "2.2.0" is a placeholder that is deliberately OLDER than
+	// embeddedAdvisories' "@sveltejs/kit" FixedVersion ("2.3.0"), so this fallback
+	// path deterministically still has something to report/fail on.
+	//
+	// This was previously "2.15.0" — a genuinely newer, non-vulnerable version — which
+	// only appeared vulnerable because isVersionOlderThan did a plain lexicographic
+	// string compare ("2.15.0" < "2.3.0" byte-wise, since '1' < '3') instead of a
+	// numeric one. Fixing that comparator bug (see isVersionOlderThan/compareVersions)
+	// made this literal correctly evaluate as NOT older/vulnerable, which silently
+	// broke the "there's always a fallback advisory" contract this code comments on.
 	if len(toolchainAdvisories) == 0 {
-		toolchainAdvisories = append(toolchainAdvisories, s.checkEmbeddedAdvisories(ports.DefaultBunVersion, "2.15.0")...)
+		toolchainAdvisories = append(toolchainAdvisories, s.checkEmbeddedAdvisories(ports.DefaultBunVersion, "2.2.0")...)
 	}
 
 	allFound := append([]ports.Vulnerability{}, vulnerabilities...)
@@ -571,5 +582,121 @@ func cleanVersion(v string) string {
 func isVersionOlderThan(v, fixed string) bool {
 	v = cleanVersion(v)
 	fixed = cleanVersion(fixed)
-	return v != "" && v < fixed
+	if v == "" || fixed == "" {
+		return false
+	}
+	return compareVersions(v, fixed) < 0
+}
+
+// compareVersions performs a dot-segment-wise, numeric-aware comparison of
+// two already-cleaned version strings (see cleanVersion), returning -1, 0,
+// or 1 depending on whether v is older than, equal to, or newer than fixed.
+//
+// Unlike a plain byte-wise string compare, each '.'-delimited segment of
+// the NUMERIC core is compared as an integer whenever both sides parse as
+// one, so width differences ("1.9.0" vs "1.10.0") compare correctly instead
+// of lexicographically. A version with fewer core segments than the other
+// is padded with implicit trailing zeros ("1.2" == "1.2.0"), matching
+// ordinary semantic-version comparison.
+//
+// A trailing "-suffix" (a semver pre-release tag such as "-beta", or a
+// distro build/package revision such as Debian/Ubuntu's "-1ubuntu4") is
+// split off the numeric core before the core comparison runs. If the
+// numeric cores are equal, a version carrying a suffix is treated as OLDER
+// than the bare numeric version with no suffix. That is correct per semver
+// for pre-release tags ("a pre-release version precedes the associated
+// normal version", semver.org #11) and is a deliberately conservative
+// choice for unrecognized distro-style suffixes: this is a CVE gate, so
+// when the exact meaning of a suffix can't be determined, treating the
+// suffixed build as still-vulnerable (rather than silently trusting an
+// unfamiliar suffix format to mean "already patched") is the fail-safe
+// direction. A false positive here costs a human a few seconds re-reading a
+// report; a false negative would let an unpatched dependency silently pass
+// the exact check meant to catch it.
+//
+// Any core segment that isn't a clean non-negative integer on both sides
+// (and isn't byte-identical to its counterpart) can't be numerically
+// ordered at all. Rather than fall back to an incidental byte-wise compare
+// — whose result would depend on arbitrary ASCII code points and carries no
+// real security meaning — this also resolves in the fail-safe direction:
+// v is treated as NOT provably newer-or-equal, i.e. as older /
+// potentially-still-vulnerable. Same reasoning applies when both versions
+// carry different, mutually-unordered suffixes.
+func compareVersions(v, fixed string) int {
+	vCore, vSuffix := splitVersionSuffix(v)
+	fCore, fSuffix := splitVersionSuffix(fixed)
+
+	if c := compareNumericCores(vCore, fCore); c != 0 {
+		return c
+	}
+
+	switch {
+	case vSuffix == "" && fSuffix == "":
+		return 0
+	case vSuffix == "" && fSuffix != "":
+		return 1
+	case vSuffix != "" && fSuffix == "":
+		return -1
+	case vSuffix == fSuffix:
+		return 0
+	default:
+		// Two differently-suffixed builds of the same numeric core: no
+		// universal ordering exists (pre-release ordering rules vary, and
+		// distro revision schemes aren't standardized), so this also
+		// resolves fail-safe rather than via an arbitrary byte compare.
+		return -1
+	}
+}
+
+// splitVersionSuffix separates a version's numeric dotted core from a
+// trailing "-suffix" (pre-release tag or distro build revision), e.g.
+// "1.2.0-beta" -> ("1.2.0", "beta"), "1.2.3-1ubuntu4" -> ("1.2.3", "1ubuntu4").
+// A version with no hyphen returns itself as the core with an empty suffix.
+func splitVersionSuffix(v string) (core, suffix string) {
+	if i := strings.IndexByte(v, '-'); i >= 0 {
+		return v[:i], v[i+1:]
+	}
+	return v, ""
+}
+
+// compareNumericCores compares two dot-delimited numeric cores segment by
+// segment, returning -1, 0, or 1. Missing trailing segments on the shorter
+// side are treated as an implicit "0". A segment that isn't a clean integer
+// on both sides falls back to the fail-safe -1 (treat v as not provably
+// newer-or-equal) rather than an arbitrary byte-wise compare — see
+// compareVersions' doc comment for the full justification.
+func compareNumericCores(v, fixed string) int {
+	vSegs := strings.Split(v, ".")
+	fSegs := strings.Split(fixed, ".")
+	n := len(vSegs)
+	if len(fSegs) > n {
+		n = len(fSegs)
+	}
+	for i := 0; i < n; i++ {
+		vSeg, fSeg := "0", "0"
+		if i < len(vSegs) {
+			vSeg = vSegs[i]
+		}
+		if i < len(fSegs) {
+			fSeg = fSegs[i]
+		}
+		if vSeg == fSeg {
+			continue
+		}
+		vNum, vErr := strconv.Atoi(vSeg)
+		fNum, fErr := strconv.Atoi(fSeg)
+		if vErr != nil || fErr != nil {
+			// Non-numeric segment(s) that aren't byte-identical: no
+			// reliable numeric ordering exists. Fail safe (see
+			// compareVersions' doc comment).
+			return -1
+		}
+		if vNum != fNum {
+			if vNum < fNum {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }

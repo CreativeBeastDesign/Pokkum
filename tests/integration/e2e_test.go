@@ -18,6 +18,14 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+// Port interface conformance assertions for mock implementations.
+var (
+	_ ports.Compiler             = (*mockCompiler)(nil)
+	_ ports.BaseImageResolver    = (*mockBaseResolver)(nil)
+	_ ports.SupervisorProvider   = (*mockSupervisorProvider)(nil)
+	_ ports.StaticServerProvider = (*mockStaticServerProvider)(nil)
+)
+
 // mockCompiler simulates the Compiler port for fixture testing.
 type mockCompiler struct{}
 

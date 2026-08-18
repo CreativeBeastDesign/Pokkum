@@ -31,6 +31,11 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+// Port interface conformance assertions for mock implementations.
+var (
+	_ ports.KeylessVerifier = (*mockKeylessVerifier)(nil)
+)
+
 func TestComputeSourceTreeHash(t *testing.T) {
 	tmpDir := t.TempDir()
 

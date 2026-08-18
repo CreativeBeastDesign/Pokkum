@@ -1266,3 +1266,127 @@ func TestResolver_StubLauncher_CompileIsDeterministic(t *testing.T) {
 		})
 	}
 }
+
+// TestParseSHASUMSEntry_HexCharsetValidation covers parseSHASUMSEntry's
+// checksum charset validation. It used to check only the LENGTH of the
+// checksum field (len(sha) != 64), never its character set, so a
+// SHASUMS256.txt line whose first field was 64 characters of anything —
+// e.g. 64 'g' characters — was accepted and returned as if it were a
+// genuine SHA-256 digest (found by FuzzParseSHASUMSEntry's own seed
+// corpus). The table below includes a multi-line manifest where the
+// malformed entry is not the first line, and a manifest with a mix of
+// valid/invalid lines whose per-line outcomes differ.
+func TestParseSHASUMSEntry_HexCharsetValidation(t *testing.T) {
+	realSHA := strings.Repeat("a1b2c3d4", 8) // 64 valid lowercase hex chars
+	upperSHA := strings.ToUpper(realSHA)
+	nonHexSHA := strings.Repeat("g", 64) // 64 chars, right length, not hex
+
+	tests := []struct {
+		name      string
+		plaintext string
+		filename  string
+		wantSHA   string
+		wantErr   bool
+	}{
+		{
+			name:      "valid lowercase hex digest is accepted",
+			plaintext: realSHA + "  bun-linux-x64.zip",
+			filename:  "bun-linux-x64.zip",
+			wantSHA:   realSHA,
+		},
+		{
+			name:      "valid uppercase hex digest is accepted and normalized to lowercase",
+			plaintext: upperSHA + "  bun-linux-x64.zip",
+			filename:  "bun-linux-x64.zip",
+			wantSHA:   realSHA,
+		},
+		{
+			// The exact reproducer from the bug report.
+			name:      "64 non-hex characters of the right length must be rejected",
+			plaintext: nonHexSHA + "  bun-linux-x64.zip",
+			filename:  "bun-linux-x64.zip",
+			wantErr:   true,
+		},
+		{
+			name:      "a single non-hex character among 64 is still rejected",
+			plaintext: realSHA[:63] + "g" + "  bun-linux-x64.zip",
+			filename:  "bun-linux-x64.zip",
+			wantErr:   true,
+		},
+		{
+			name:      "63-character valid-hex-but-too-short digest is rejected",
+			plaintext: realSHA[:63] + "  bun-linux-x64.zip",
+			filename:  "bun-linux-x64.zip",
+			wantErr:   true,
+		},
+		{
+			// Multi-item manifest (checklist row 3) where the malformed
+			// entry is the SECOND of three lines, not the first (checklist
+			// row 4): a decoy real entry, then the non-hex entry for the
+			// target file, then another real entry.
+			name: "non-hex entry for the target file is rejected even when it is not the first line",
+			plaintext: realSHA + "  bun-darwin-aarch64.zip\n" +
+				nonHexSHA + "  bun-linux-x64.zip\n" +
+				realSHA + "  bun-windows-x64.zip\n",
+			filename: "bun-linux-x64.zip",
+			wantErr:  true,
+		},
+		{
+			// Same three-line shape, but the target's own entry (now
+			// third, not first or second) is valid — proves a malformed
+			// entry for a DIFFERENT file doesn't cause a false rejection
+			// of the target's own valid entry.
+			name: "a malformed entry for a different file does not affect the target's own valid entry",
+			plaintext: nonHexSHA + "  bun-darwin-aarch64.zip\n" +
+				realSHA + "  bun-windows-x64.zip\n" +
+				realSHA + "  bun-linux-x64.zip\n",
+			filename: "bun-linux-x64.zip",
+			wantSHA:  realSHA,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSHASUMSEntry([]byte(tc.plaintext), tc.filename)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseSHASUMSEntry(%q, %q) = (%q, nil), want an error", tc.plaintext, tc.filename, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseSHASUMSEntry(%q, %q) failed: %v", tc.plaintext, tc.filename, err)
+			}
+			if got != tc.wantSHA {
+				t.Errorf("parseSHASUMSEntry(%q, %q) = %q, want %q", tc.plaintext, tc.filename, got, tc.wantSHA)
+			}
+			if !isHexDigest(got) {
+				t.Errorf("parseSHASUMSEntry(%q, %q) returned %q, which is not a well-formed hex digest", tc.plaintext, tc.filename, got)
+			}
+		})
+	}
+}
+
+// TestIsHexDigest covers the isHexDigest helper directly: it must accept
+// only exactly 64 lowercase hex characters.
+func TestIsHexDigest(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"valid lowercase hex", strings.Repeat("a1b2c3d4", 8), true},
+		{"uppercase hex is rejected (caller must lowercase first)", strings.ToUpper(strings.Repeat("a1b2c3d4", 8)), false},
+		{"non-hex letters of the right length", strings.Repeat("g", 64), false},
+		{"too short", strings.Repeat("a", 63), false},
+		{"too long", strings.Repeat("a", 65), false},
+		{"empty string", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isHexDigest(tc.in); got != tc.want {
+				t.Errorf("isHexDigest(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}

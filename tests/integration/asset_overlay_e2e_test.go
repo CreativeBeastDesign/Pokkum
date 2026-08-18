@@ -23,6 +23,11 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+// Port interface conformance assertions for mock implementations.
+var (
+	_ ports.Compiler = (*assetOverlayMockCompiler)(nil)
+)
+
 // assetOverlayMockCompiler is a per-generation variant of mockCompiler
 // (e2e_test.go) that writes content-hashed client assets under
 // _app/immutable/ — the real SvelteKit build-output convention this
