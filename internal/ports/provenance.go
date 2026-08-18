@@ -38,9 +38,46 @@ type ProvenanceResolverRequest struct {
 	ImageRef           string
 	ExpectSource       string // Optional repo@commit filter
 	RegistryConfigPath string // Optional custom docker config.json path
+
+	// KeylessIdentity is the expected Fulcio certificate identity that a
+	// keyless Sigstore signature on the image must have been issued to.
+	//
+	// It MUST be supplied by the caller — from a flag, a config file, or an
+	// explicitly-chosen default for a known publisher. It must NEVER be
+	// derived from the certificate under verification: reading the expected
+	// issuer/SAN out of the very certificate being checked makes the
+	// comparison tautological, so every certificate Fulcio ever issued (i.e.
+	// anyone with a GitHub or Google account) would satisfy it. See
+	// KeylessIdentity's own doc comment and KeylessVerifier's empty-identity
+	// refusal.
+	//
+	// An empty value does not mean "accept any signer": it means the resolver
+	// has no basis on which to judge keyless material, and
+	// ResolveProvenance refuses to continue if the image actually carries
+	// any (see ProvenanceResolver).
+	KeylessIdentity KeylessIdentity
+
+	// PublicKeyPEM is the static Cosign public key used to verify a
+	// static-key signature on the image. Empty means the implementation falls
+	// back to its own configured default key — which is still a specific key,
+	// never "any key", so unlike KeylessIdentity an empty value here is not a
+	// fail-open condition.
+	PublicKeyPEM []byte
+
+	// TrustedRootJSON is an optional Sigstore trusted-root snapshot (the
+	// application/vnd.dev.sigstore.trustedroot+json format) to verify keyless
+	// material against. Empty means the KeylessVerifier's own embedded
+	// public-good snapshot.
+	TrustedRootJSON []byte
 }
 
 // ProvenanceResolver defines the port for fetching and verifying image attestations and provenance.
+//
+// ResolveProvenance fails closed on an unconstrained keyless verification: if
+// the image carries keyless Sigstore signature material that nothing else has
+// already verified, and req.KeylessIdentity is Empty(), it returns an error
+// naming the missing configuration rather than reporting an unverified — or,
+// worse, trivially-satisfiable — result.
 type ProvenanceResolver interface {
 	ResolveProvenance(ctx context.Context, req ProvenanceResolverRequest) (ProvenanceSummary, error)
 }

@@ -535,8 +535,20 @@ func TestResolveProvenance_Adversarial_FakeKeylessCert_IsRejected(t *testing.T) 
 	r := provenance.NewResolver(nil)
 	ctx := context.Background()
 
+	// An expected identity must be supplied, otherwise the resolver refuses to
+	// judge the keyless material at all (see
+	// TestResolveProvenance_Keyless_UnconstrainedFailsClosed). Supplying one
+	// here is what makes this test exercise the thing it is named for: the real
+	// sigstore verifier rejecting a certificate that does not chain to a
+	// trusted Fulcio root. The identity is deliberately the *rogue*
+	// certificate's own SAN, so the rejection cannot be attributed to an
+	// identity mismatch — it has to come from chain validation.
 	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
 		ImageRef: targetRepo + ":v1.0.0",
+		KeylessIdentity: ports.KeylessIdentity{
+			Issuer: "https://accounts.google.com",
+			SAN:    "attacker@rogue-domain.test",
+		},
 	})
 	if err != nil {
 		t.Fatalf("resolve provenance: %v", err)

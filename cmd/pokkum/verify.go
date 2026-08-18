@@ -14,11 +14,15 @@ import (
 )
 
 type verifyOptions struct {
-	noRebuild      bool
-	expectSource   string
-	against        string
-	registryConfig string
-	output         string
+	noRebuild       bool
+	expectSource    string
+	against         string
+	registryConfig  string
+	output          string
+	keylessIdentity string
+	keylessIssuer   string
+	publicKey       string
+	trustedRoot     string
 }
 
 var exitFunc = os.Exit
@@ -46,18 +50,66 @@ func newVerifyCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
 	cmd.Flags().StringVar(&opts.against, "against", "", "Explicit local tarball path to compare against instead of remote registry")
 	cmd.Flags().StringVar(&opts.registryConfig, "registry-config", "", "Path to docker config.json-style auth file for private registries")
 
+	// Signature verification flags. Naming mirrors the existing
+	// --base-keyless-identity/--base-keyless-issuer and
+	// --cache-keyless-identity/--cache-keyless-issuer pairs on `pokkum build`;
+	// `verify` has exactly one verification subject (the image named on the
+	// command line), so it takes the unprefixed form.
+	cmd.Flags().StringVar(&opts.keylessIdentity, "keyless-identity", "",
+		"Expected Fulcio certificate Subject Alternative Name for keyless signature verification. Required to verify a keyless-signed image; without it verification is refused rather than accepting any Fulcio signer")
+	cmd.Flags().StringVar(&opts.keylessIssuer, "keyless-issuer", "",
+		"Expected OIDC issuer URL for keyless signature verification (e.g. https://token.actions.githubusercontent.com). Required alongside --keyless-identity")
+	cmd.Flags().StringVar(&opts.publicKey, "public-key", "",
+		"Path or PEM string for the static Cosign public key to verify the image signature against")
+	cmd.Flags().StringVar(&opts.trustedRoot, "sigstore-trusted-root", "",
+		"Path to a Sigstore trusted-root JSON snapshot to verify keyless material against, instead of the embedded public-good snapshot")
+
 	return cmd
 }
 
 func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, imageRef string) error {
 	outputFormat := ports.OutputFormat(opts.output)
 
-	provResolver := provenance.NewResolver(logger)
-	provSummary, err := provResolver.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+	provReq := ports.ProvenanceResolverRequest{
 		ImageRef:           imageRef,
 		ExpectSource:       opts.expectSource,
 		RegistryConfigPath: opts.registryConfig,
-	})
+		KeylessIdentity: ports.KeylessIdentity{
+			SAN:    opts.keylessIdentity,
+			Issuer: opts.keylessIssuer,
+		},
+	}
+
+	// Same "path first, literal PEM second" handling as
+	// --cache-verify-key in build.go, so a key can be passed either way.
+	if opts.publicKey != "" {
+		if data, rerr := os.ReadFile(opts.publicKey); rerr == nil {
+			provReq.PublicKeyPEM = data
+		} else {
+			provReq.PublicKeyPEM = []byte(opts.publicKey)
+		}
+	}
+	if opts.trustedRoot != "" {
+		data, rerr := os.ReadFile(opts.trustedRoot)
+		if rerr != nil {
+			// Fail closed: silently falling back to the embedded trust root
+			// would verify against a different root than the operator asked
+			// for, which is exactly the substitution they were trying to avoid.
+			msg := fmt.Sprintf("cannot read --sigstore-trusted-root %q: %v", opts.trustedRoot, rerr)
+			if outputFormat == ports.FormatJSON {
+				_ = jsonutils.WriteError(os.Stdout, "verify", "ERR_INVALID_ARGUMENT", msg, "")
+				exitFunc(2)
+				return nil
+			}
+			fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+			exitFunc(2)
+			return nil
+		}
+		provReq.TrustedRootJSON = data
+	}
+
+	provResolver := provenance.NewResolver(logger)
+	provSummary, err := provResolver.ResolveProvenance(ctx, provReq)
 
 	if err != nil {
 		msg := fmt.Sprintf("failed to resolve provenance for %s: %v", imageRef, err)
