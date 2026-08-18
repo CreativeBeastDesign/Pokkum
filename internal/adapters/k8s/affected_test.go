@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/k8s"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -404,5 +405,118 @@ spec:
 	}
 	if ref := byPath["./apps/web"]; ref.Skipped || ref.Resolved != buildDigest {
 		t.Errorf("expected apps/web built+not-skipped, got %+v", ref)
+	}
+}
+
+// TestResolve_Since_DetectorErrorOnNonFirstPath_NoOrphanedBuildGoroutine is
+// the regression test for the goroutine-leak bug in Resolve's
+// affected-detection fan-out (see Lessons.md and Serena mem:core's
+// "Monorepo Affected-Detection" entry, and mem:self_review_checklist rows 1
+// and 4, whose Origin note describes this exact function): an
+// AffectedDetector error on a non-first path used to return before g.Wait(),
+// stranding any build goroutine already dispatched for an earlier path —
+// each one a full image build (compile + package + registry push) whose
+// error is silently discarded and which may still be pushing when the
+// process exits.
+//
+// TestResolve_Since_DetectorErrorFailsClosed (above) is exactly the
+// coverage gap this fills: it uses a single-project manifest, and with
+// only one path there is no earlier build to ever orphan. This test uses
+// two distinct paths and, because Go map iteration order is unspecified,
+// injects the detector failure on the SECOND call made — by call order,
+// not by path identity — so "non-first" holds regardless of which of the
+// two paths Resolve happens to process first.
+func TestResolve_Since_DetectorErrorOnNonFirstPath_NoOrphanedBuildGoroutine(t *testing.T) {
+	r := k8s.NewResolver()
+	ctx := context.Background()
+
+	doc := ports.Document{
+		Name: "deploy.yaml",
+		Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+spec:
+  template:
+    spec:
+      containers:
+      - name: web
+        image: pokkum://./apps/web
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-app
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: pokkum://./apps/api
+`),
+	}
+
+	var detectorCalls atomic.Int32
+	var buildStarted atomic.Int32
+	buildStartedSignal := make(chan string, 2)
+	release := make(chan struct{})
+	buildFinished := make(chan struct{}, 2)
+
+	_, err := r.Resolve(ctx, ports.ResolveRequest{
+		Documents: []ports.Document{doc},
+		Since:     "abc123",
+		AffectedDetector: func(_ context.Context, _, _ string) (bool, error) {
+			// The first call made (whichever path it lands on) reports
+			// "affected" so that path needs a build. The SECOND call --
+			// necessarily landing on the other, non-first path -- fails.
+			if detectorCalls.Add(1) == 1 {
+				return true, nil
+			}
+			return false, core.ErrInvalidRequest
+		},
+		Build: func(_ context.Context, path string) (string, error) {
+			buildStarted.Add(1)
+			buildStartedSignal <- path
+			<-release
+			buildFinished <- struct{}{}
+			return testDigest("d"), nil
+		},
+	})
+
+	// Always release and drain, so a leaked goroutine from a genuinely
+	// buggy implementation cannot hang this test process past its own
+	// completion.
+	defer func() {
+		close(release)
+		for i := int32(0); i < buildStarted.Load(); i++ {
+			select {
+			case <-buildFinished:
+			case <-time.After(2 * time.Second):
+			}
+		}
+	}()
+
+	if !errors.Is(err, core.ErrManifestUnresolved) {
+		t.Fatalf("expected ErrManifestUnresolved on non-first-path detector failure, got %v", err)
+	}
+
+	// The structural fix runs every path's AffectedDetector check to
+	// completion (pass 1) before dispatching any build goroutine (pass 2).
+	// A failure on the second call must therefore prevent the FIRST,
+	// already-decided-affected path's build from ever starting at all --
+	// not merely prevent Resolve from waiting on it. Poll briefly rather
+	// than checking immediately: on the pre-fix code a dispatched build
+	// goroutine may not have run yet at the exact instant Resolve returns,
+	// so an instantaneous check could false-negative on the very bug this
+	// test exists to catch.
+	select {
+	case path := <-buildStartedSignal:
+		t.Fatalf("build goroutine was dispatched for %q despite a non-first-path detector "+
+			"error -- orphaned build goroutine (goroutine leak)", path)
+	case <-time.After(300 * time.Millisecond):
+		// No build was ever dispatched -- correct.
+	}
+	if got := buildStarted.Load(); got != 0 {
+		t.Fatalf("expected zero build dispatches when detector errors on a non-first path, got %d", got)
 	}
 }

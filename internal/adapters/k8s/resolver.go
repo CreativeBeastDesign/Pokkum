@@ -533,20 +533,34 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 		}
 	}
 
+	// Sorted for deterministic ordering: distinctPathsMap above is built by
+	// iterating parsedDocs' targets, but Go map iteration order is
+	// unspecified, so which path's AffectedDetector check (and, on error,
+	// which error) surfaces first would otherwise vary run to run in
+	// violation of this project's bit-for-bit reproducibility invariant.
 	distinctPaths := make([]string, 0, len(distinctPathsMap))
 	for p := range distinctPathsMap {
 		distinctPaths = append(distinctPaths, p)
 	}
+	sort.Strings(distinctPaths)
 
 	resolvedMap := make(map[string]string)
 	skippedMap := make(map[string]bool)
-	var g errgroup.Group
 	var mu sync.Mutex
 	clusterCache := make(map[string]ports.ClusterWorkloadState)
 
-	for _, path := range distinctPaths {
-		p := path
-
+	// Pass 1 (sequential, no goroutines dispatched yet): resolve every
+	// path's affected-detection/skip decision first, and collect only the
+	// paths that actually need a build. This is deliberately structural,
+	// not a patch on the old shape: every fallible call that can fail
+	// (AffectedDetector) now happens strictly before any g.Go, so there is
+	// no line of code at which an early return can strand an
+	// already-dispatched build goroutine — the ordering makes the leak
+	// impossible to reintroduce by construction, rather than relying on
+	// every future edit to preserve a "return only after Wait" convention
+	// by hand.
+	toBuild := make([]string, 0, len(distinctPaths))
+	for _, p := range distinctPaths {
 		// Monorepo affected-detection (--since): an unaffected project with a
 		// known prior digest can skip compilation and packaging entirely. We
 		// only ever skip when we can reuse a real, previously-known digest;
@@ -565,9 +579,20 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.ResolveRequest) (ports
 				}
 			}
 		}
+		toBuild = append(toBuild, p)
+	}
 
+	// Pass 2: dispatch builds for whatever survived pass 1's skip decisions.
+	// errgroup.WithContext (matching pipeline.go's fanOut/publish groups)
+	// means the first build failure cancels gctx, so peer builds still
+	// in-flight are told to stop rather than running to completion — the
+	// same first-error-wins behaviour pipeline.go already relies on, now
+	// consistent across both fan-out sites.
+	g, gctx := errgroup.WithContext(ctx)
+	for _, path := range toBuild {
+		p := path
 		g.Go(func() error {
-			ref, err := req.Build(ctx, p)
+			ref, err := req.Build(gctx, p)
 			if err != nil {
 				return fmt.Errorf("build %q: %w", p, err)
 			}
