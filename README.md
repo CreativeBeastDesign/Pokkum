@@ -6,7 +6,9 @@
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**Pokkum** is a zero-dependency OCI container image compiler for SvelteKit applications. In a single command, Pokkum compiles your SvelteKit app into a zero-daemon, multi-layer cached OCI container image (the exact layer set and count depend on the strategy and what a given build actually produces — run `pokkum explain` for the real breakdown) complete with SBOMs, an opt-in OpenTelemetry SDK bootstrap, signed SLSA provenance, and hardened Kubernetes deployment manifests.
+**Pokkum** is a zero-dependency OCI container image compiler for SvelteKit applications. In a single command, Pokkum compiles your SvelteKit app into a zero-daemon, multi-layer cached OCI container image (the exact layer set and count depend on the strategy and what a given build actually produces — run `pokkum explain` for the real breakdown) complete with SBOMs, an opt-in OpenTelemetry SDK bootstrap, SLSA provenance, and hardened Kubernetes deployment manifests.
+
+**A signing key is required to actually get a signed image.** `--sign` defaults on and generates a real SLSA statement either way, but Pokkum only produces a cryptographic Cosign signature and DSSE attestation — and self-verifies them against the registry before reporting success — when you configure `--signing-key`/`POKKUM_SIGNING_KEY`. Without a key, a signing-enabled build pushes **unsigned**, with a loud warning; pass `--require-signed` to make that a hard failure instead of a warning. The SLSA-3 badge above describes what the pipeline is capable of producing, not an unconditional guarantee for every build — see [Vocabulary.md](Vocabulary.md) for the flag reference.
 
 Think of it as `ko` for SvelteKit: zero Dockerfile, zero Docker daemon required, and bit-for-bit reproducible builds out of the box.
 
@@ -46,9 +48,9 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum build ./my-app \
 ```
 
 - **What this does**:
-  - `--hardened`: Uses `ghcr.io/chainguard-images/glibc-dynamic:latest` base image.
+  - `--hardened`: Uses `cgr.dev/chainguard/glibc-dynamic:latest` base image.
   - `--hermetic`: Enforces strict zero-network egress during compilation, requiring pre-cached base images and pre-populated `node_modules/`.
-  - **Secret Guard**: Scans project source files for accidentally inlined secrets or high-entropy tokens before packaging layers.
+  - **Secret Guard**: Scans both pre-build source and, since 2026-08-18, the actual packaged build output against five fixed regex patterns (private key headers, AWS/GitHub/Google API key shapes, generic password/secret/token assignments) — not entropy analysis; entropy-based detection of arbitrary high-randomness tokens is tracked as future work, not shipped.
   - **Base Image Verification**: Verifies both static-key Cosign signatures (for custom/self-signed bases) and keyless Sigstore signatures (Fulcio + Rekor, for stock `distroless`/`chainguard` presets by default).
 
 **Resolve Hardened Kubernetes Manifests:**
@@ -82,7 +84,7 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum resolve -f deployment.yaml \
 
 ## Scope, Philosophy & Telemetry
 
-**What Pokkum optimizes for.** Pokkum is designed for maximum security and bit-for-bit reproducibility, not the fastest possible path to a running deployment. Hermetic builds, signed SLSA provenance, keyless base-image verification, and reproducibility checks (`pokkum verify --rebuild`) are all either on by default or one flag away — and there is no "just build it, verify later" fast path that skips them. If your priority is the shortest possible time-to-first-deploy over a verifiable supply chain, that trade-off is a deliberate design choice here, not an oversight; expect the defaults to feel stricter than a typical `docker build`.
+**What Pokkum optimizes for.** Pokkum is designed for maximum security and bit-for-bit reproducibility, not the fastest possible path to a running deployment. Hermetic builds, SLSA provenance generation, keyless base-image verification, and reproducibility checks (`pokkum verify --rebuild`) are all either on by default or one flag away — and there is no "just build it, verify later" fast path that skips them. Turning that provenance into a cryptographically signed, self-verified artifact needs one more thing from you: a signing key (`--signing-key`/`POKKUM_SIGNING_KEY`; `--require-signed` to enforce it in CI) — see above. If your priority is the shortest possible time-to-first-deploy over a verifiable supply chain, that trade-off is a deliberate design choice here, not an oversight; expect the defaults to feel stricter than a typical `docker build`.
 
 **What Pokkum does not do.** Pokkum compiles SvelteKit applications into OCI container images — it does not target edge/isolate runtimes (Cloudflare Workers, Deno Deploy, Vercel Edge Functions). Those aren't OCI images; they're a fundamentally different deployment model, and SvelteKit's own `adapter-cloudflare`/`adapter-vercel`/`adapter-deno` already serve that use case directly. This is an explicit non-goal, not an unaddressed gap — if edge deployment is what you need, Pokkum isn't the tool for that half of your stack.
 

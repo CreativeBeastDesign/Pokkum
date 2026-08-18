@@ -251,9 +251,10 @@ When the container exits with a non-zero status during local testing, automatica
 ### Secret-Inlining Guard
 
 - Bun's bundler can inline build-machine environment variables into output — a CI runner with cloud credentials exported can silently bake them into the image
-- Force `--env=disable` during bundling, then run an entropy/pattern scan (gitleaks-style) over final layer contents before push
+- Force `--env=disable` during bundling, then run a pattern scan over final layer contents before push. **As actually shipped: five fixed regex patterns** (private key headers, AWS access keys, GitHub PATs, Google API keys, generic password/secret/token assignments) — not Shannon entropy analysis; a gitleaks-style entropy scan was the original design language here but was never built, and remains tracked as future work rather than implied covered.
 - `.pokkumignore` protects files; this protects against the bundler and build environment themselves
-- Fail the build on findings, with `--allow-secret-pattern` escape hatch for false positives
+- Since 2026-08-18, scans the actual packaged build output too, not just pre-build source (scoped per strategy; a compiled `exe` binary itself is a documented gap — text-scanning can't see inside it)
+- Fail the build on findings, with `--allow-secret-pattern` escape hatch for false positives; a file too large/unreadable to scan also fails the build (`ErrSecretScanIncomplete`) rather than reporting a false-clean pass
 
 ### `pokkum repro doctor` — Non-Determinism Bisection
 
@@ -361,7 +362,7 @@ property "every emitted/promoted image traces to a verified base, hit or miss":
 - `--strategy=layered` (default since v0.3) ships stock `bun`, which exposes its full CLI via `BUN_BE_BUN=1` — an attacker with an existing exec primitive can run arbitrary scripts, unlike v0.1's sealed compiled-exe strategy
 - Two composable mitigations shipped 2026-08-17:
   - **Option A (Compiled Stub Launcher)**: compiles a minimal non-foldable entrypoint launcher (`const p = "/app/server/" + "index.js"; await import(p);`) via `--stub-launcher` (`POKKUM_STUB_LAUNCHER`), cached per `(version, variant, platform)`.
-  - **Option C (Supervisor Startup Attestation)**: packager computes a SHA-256 root digest over the authoritative `/app` tree (`POKKUM_ATTESTATION_DIGEST`) and `pokkum-init` re-derives and verifies it at startup, exit 126 on mismatch.
+  - **Option C (Supervisor Startup Attestation)**: packager computes a SHA-256 root digest over the authoritative `/app` tree (`POKKUM_ATTESTATION_DIGEST`) and `pokkum-init` re-derives and verifies it at startup, exit **125** on mismatch (126 is reserved for the pre-existing binary-exec-failure meaning; see `Vocabulary.md` §19).
 - Tracking: Completed on `Roadmap.md` (see `concepts/archive/layered-strategy-runtime-hardening-concept.md` and `concepts/archive/pokkum-layer-caching-concept.md` §5.2)
 
 ### Dedicated `chainguard-static` Base Image Preset
@@ -383,7 +384,7 @@ SvelteKit inlines `$env/static/private` and `$env/static/public` **at build time
 Why this is worse than any CVE currently gated on:
 
 - A project importing from `$env/static/private` produces an image **pinned to one environment**. Build-once-promote-dev→staging→prod is impossible, and *every* downstream guarantee — digest pinning, `pokkum resolve`, `pokkum rollback`, SLSA provenance — quietly becomes per-environment without saying so.
-- Secrets from `$env/static/private` are baked into the server bundle. `secretguard` may catch some by entropy, but entropy scanning is the wrong layer: the correct response is "your architecture makes this image environment-specific," not "this string looks random."
+- Secrets from `$env/static/private` are baked into the server bundle. `secretguard` may catch some by its five fixed regex patterns (it does not do entropy analysis — see the Secret-Inlining Guard section below), but pattern matching is the wrong layer for this specific problem regardless: the correct response is "your architecture makes this image environment-specific," not "this string looks random" or "this string matches a known key shape."
 - `PUBLIC_API_URL` baked into a client chunk means a carefully-signed immutable digest is environment-specific with **nothing in any annotation** revealing it. A user can promote to prod and silently ship staging's API URL.
 
 Design:
