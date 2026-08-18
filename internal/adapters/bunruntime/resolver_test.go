@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -218,6 +219,63 @@ func TestResolver_DownloadAndCache(t *testing.T) {
 	}
 	if res2.BinaryPath != res.BinaryPath {
 		t.Errorf("expected same cached binary path %s, got %s", res.BinaryPath, res2.BinaryPath)
+	}
+}
+
+// TestResolver_ExpandedPinTable_EntriesAreWellFormed guards the real
+// pinnedReleaseChecksums entries added 2026-08-18 (the most recent handful
+// of Bun releases, beyond just ports.DefaultBunVersion): every key must be
+// "<version>/<target-name>" with a target name Resolve's own
+// resolveBunTargetName can actually produce, and every value a syntactically
+// valid 64-hex-char SHA256 digest — a typo'd key silently never matches at
+// runtime (falling through to the dynamic GPG path instead, functionally
+// harmless but defeating the whole point of pinning it), and a malformed
+// value would make every real resolve of that key fail checksum comparison.
+// The actual cryptographic correctness of each value was verified for real
+// by scripts/pin-bun-checksums against Bun's live, GPG-signed release
+// manifest at the time it was added (see the doc comment on
+// pinnedReleaseChecksums) — not re-verified here, since that would require
+// downloading real multi-megabyte release archives in a unit test.
+func TestResolver_ExpandedPinTable_EntriesAreWellFormed(t *testing.T) {
+	validTargets := map[string]bool{
+		"bun-linux-x64":          true,
+		"bun-linux-x64-baseline": true,
+		"bun-linux-aarch64":      true,
+	}
+	shaPattern := regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+	if len(pinnedReleaseChecksums) < 6 {
+		t.Fatalf("test premise broken: expected at least 6 pinned versions (1.2.2 plus the 2026-08-18 expansion), got %d entries — did the expansion get reverted?", len(pinnedReleaseChecksums))
+	}
+
+	for key, sha := range pinnedReleaseChecksums {
+		parts := strings.SplitN(key, "/", 2)
+		if len(parts) != 2 {
+			t.Errorf("pinnedReleaseChecksums key %q is not in <version>/<target-name> format", key)
+			continue
+		}
+		version, target := parts[0], parts[1]
+		if version == "" {
+			t.Errorf("pinnedReleaseChecksums key %q has an empty version component", key)
+		}
+		if !validTargets[target] {
+			t.Errorf("pinnedReleaseChecksums key %q names target %q, which resolveBunTargetName does not produce for any supported linux/{amd64,arm64} + variant combination", key, target)
+		}
+		if !shaPattern.MatchString(sha) {
+			t.Errorf("pinnedReleaseChecksums[%q] = %q is not a 64-char lowercase hex SHA256 digest", key, sha)
+		}
+	}
+
+	// Spot-check the specific 2026-08-18 additions are present, not just
+	// that *some* 6+ entries exist (which the count check above allows to
+	// pass even if unrelated entries were substituted).
+	for _, version := range []string{"1.3.14", "1.3.13", "1.3.12", "1.3.11", "1.3.10"} {
+		for target := range validTargets {
+			key := version + "/" + target
+			if _, ok := pinnedReleaseChecksums[key]; !ok {
+				t.Errorf("expected pinnedReleaseChecksums to contain %q (2026-08-18 expansion)", key)
+			}
+		}
 	}
 }
 

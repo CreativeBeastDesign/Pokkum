@@ -29,17 +29,55 @@ import (
 // Known pinned SHA256 digests for official Bun zip release archives.
 // Key format: "<version>/<target-name>" (e.g. "1.2.2/bun-linux-x64").
 //
-// These entries are a fast, network-free path for the one version Pokkum
-// defaults to (ports.DefaultBunVersion) — not the only source of integrity
-// verification. Any version not listed here still gets verified, via
-// fetchVerifiedChecksum below, against Bun's own GPG-signed release
-// manifest. This map existing or not existing for a given version has no
-// bearing on whether that version's download is checked; it only decides
-// whether checking it costs a network round trip.
+// These entries are a fast, network-free path for ports.DefaultBunVersion
+// (1.2.2) plus the most recent handful of Bun releases as of 2026-08-18 —
+// not the only source of integrity verification. Any version not listed
+// here still gets verified, via fetchVerifiedChecksum below, against Bun's
+// own GPG-signed release manifest. This map existing or not existing for a
+// given version has no bearing on whether that version's download is
+// checked; it only decides whether checking it costs a network round trip
+// AND whether that version's very first resolve on a fresh cache is
+// protected against a first-contact MITM (see checkAndPinChecksum's doc
+// comment: TOFU pinning cannot protect a first resolve; only a compiled-in
+// entry here can, and only for the versions actually listed).
+//
+// Maintained via scripts/pin-bun-checksums (go run
+// ./scripts/pin-bun-checksums <version> [<version> ...]), which performs
+// the identical real GPG-signature verification fetchVerifiedChecksum does
+// at resolve time — an entry here was not hand-typed or trusted on faith,
+// it was cryptographically verified once, by this exact codebase's own
+// verification path, before being pinned. Re-run periodically (e.g. when
+// bumping ports.DefaultBunVersion, or to keep pace with new Bun releases)
+// to keep this list current; there is no automated schedule for this today.
+//
+// Honest scope, stated plainly (see fetchVerifiedChecksum's doc comment for
+// the full first-contact-MITM threat model): this closes the gap for
+// exactly the versions listed. Any other version — including a version
+// released after this list was last updated — is exactly as protected as
+// before: real-time GPG verification plus TOFU pinning on repeat use, with
+// no protection on a version's very first resolve on a fresh cache.
 var pinnedReleaseChecksums = map[string]string{
 	"1.2.2/bun-linux-x64":          "3f4efb8afd1f84ac2a98c04661c898561d1d35527d030cb4571e99b7c85f5079",
 	"1.2.2/bun-linux-x64-baseline": "cad7756a6ee16f3432a328f8023fc5cd431106822eacfa6d6d3afbad6fdc24db",
 	"1.2.2/bun-linux-aarch64":      "d1dbaa3e9af24549fad92bdbe4fb21fa53302cd048a8f004e85a240984c93d4d",
+
+	// Verified by scripts/pin-bun-checksums against a real, GPG-signed
+	// SHASUMS256.txt.asc for each version below (2026-08-18).
+	"1.3.14/bun-linux-x64":          "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f",
+	"1.3.14/bun-linux-x64-baseline": "a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7",
+	"1.3.14/bun-linux-aarch64":      "a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b",
+	"1.3.13/bun-linux-x64":          "79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a",
+	"1.3.13/bun-linux-x64-baseline": "9d8a24292a7068090205daac0a5a223f5f69736f5287e37bf88d3b4031edc750",
+	"1.3.13/bun-linux-aarch64":      "70bae41b3908b0a120e1e58c5c8af30e74afae3b8d11b0d3fdd8e787ddfb4b22",
+	"1.3.12/bun-linux-x64":          "11dc3ee11bc1695e149737c6ca3d5619302cf4346e6b8a6ec7988967ef01ddc5",
+	"1.3.12/bun-linux-x64-baseline": "f8bb377a9ae93d44697ff91a2611164d2aedc9263415d623b0c3af24a6f55dab",
+	"1.3.12/bun-linux-aarch64":      "c40bc0ebca11bde7d75af497a654a874d0c7fd8d6a8d6031c173c10c9064297b",
+	"1.3.11/bun-linux-x64":          "8611ba935af886f05a6f38740a15160326c15e5d5d07adef966130b4493607ed",
+	"1.3.11/bun-linux-x64-baseline": "abe346f63414547cdf6b35b7a649a490c728b93d006226156923918a84c0e59b",
+	"1.3.11/bun-linux-aarch64":      "d13944da12a53ecc74bf6a720bd1d04c4555c038dfe422365356a7be47691fdf",
+	"1.3.10/bun-linux-x64":          "f57bc0187e39623de716ba3a389fda5486b2d7be7131a980ba54dc7b733d2e08",
+	"1.3.10/bun-linux-x64-baseline": "41201a8c5ee74a9dcbb1ce25a1104f1f929838b57a845aa78d98379b0ce7cde2",
+	"1.3.10/bun-linux-aarch64":      "fa5ecb25cafa8e8f5c87a0f833719d46dd0af0a86c7837d806531212d55636d3",
 }
 
 // embeddedBunReleaseKeyArmored is Bun's official release-signing OpenPGP
@@ -410,12 +448,35 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 // attacker positioned to tamper with that first fetch establishes the
 // "trusted" baseline the pin mechanism then faithfully protects. On an
 // ephemeral CI runner with a fresh cache every run, TOFU provides no
-// protection at all. Full protection against a first-contact MITM would
-// still require either cross-checking against release-tag-scoped metadata
-// from an independent trust anchor, or a genuinely out-of-band pin (shipped
-// in the Pokkum binary itself, like pinnedReleaseChecksums above, but for
-// every version rather than a curated few) — both meaningfully larger
-// changes, tracked as a further roadmap follow-up.
+// protection at all.
+//
+// The only real fix for a first-contact MITM is a genuinely out-of-band pin
+// — shipped in the Pokkum binary itself (pinnedReleaseChecksums above) —
+// since this function's own fetch has no independent trust root to
+// cross-check against: researched 2026-08-18, GitHub's Releases API shares
+// the exact same trust root as this download (same host, same HTTPS cert
+// chain) and doesn't even expose per-asset SHA256 digests to compare
+// against, so it would add no real signal, only the appearance of one.
+// pinnedReleaseChecksums was expanded 2026-08-18 to cover the most recent
+// handful of Bun releases in addition to ports.DefaultBunVersion, closing
+// this gap for exactly those versions — any other version (including one
+// released after that list was last updated) remains exactly as protected
+// as described above: real-time GPG verification with no first-contact
+// guarantee. There is no plan to pin every version that has ever existed;
+// that would require re-verifying and re-pinning on every Bun release
+// indefinitely with no automated trigger for doing so.
+
+// FetchAndVerifyChecksum is an exported pass-through to fetchVerifiedChecksum
+// for scripts/pin-bun-checksums (see pinnedReleaseChecksums's doc comment) —
+// the maintenance tool that expands the static pin table. Production code
+// never calls this directly; Resolve always calls the unexported
+// fetchVerifiedChecksum. Exists so the maintenance script reuses the exact
+// GPG-verification path that ships in the binary, rather than a
+// reimplementation that could silently drift from it.
+func (r *Resolver) FetchAndVerifyChecksum(ctx context.Context, version, targetName string) (string, error) {
+	return r.fetchVerifiedChecksum(ctx, version, targetName)
+}
+
 func (r *Resolver) fetchVerifiedChecksum(ctx context.Context, version, targetName string) (string, error) {
 	ascURL := fmt.Sprintf("https://github.com/oven-sh/bun/releases/download/bun-v%s/SHASUMS256.txt.asc", version)
 
