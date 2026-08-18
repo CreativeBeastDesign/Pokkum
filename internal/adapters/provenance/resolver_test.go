@@ -215,7 +215,11 @@ func TestResolveProvenance_WithSLSAAttestation(t *testing.T) {
 	}
 
 	// Resolve provenance
-	r := provenance.NewResolver(nil)
+	r := provenance.NewResolver(nil,
+		provenance.WithCosignSigner(cosign.NewSigner(nil)),
+		provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+		provenance.WithDSSESigner(dsse.NewSigner(nil)),
+	)
 	ctx := context.Background()
 
 	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
@@ -320,7 +324,11 @@ func TestResolveProvenance_SLSAWithoutSourceDep_RepoStaysEmpty(t *testing.T) {
 	}
 
 	// Resolve provenance
-	r := provenance.NewResolver(nil)
+	r := provenance.NewResolver(nil,
+		provenance.WithCosignSigner(cosign.NewSigner(nil)),
+		provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+		provenance.WithDSSESigner(dsse.NewSigner(nil)),
+	)
 	ctx := context.Background()
 
 	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
@@ -400,7 +408,11 @@ func TestResolveProvenance_Adversarial_BogusDSSESignature_IsRejected(t *testing.
 		t.Fatalf("push attestation image: %v", err)
 	}
 
-	r := provenance.NewResolver(nil)
+	r := provenance.NewResolver(nil,
+		provenance.WithCosignSigner(cosign.NewSigner(nil)),
+		provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+		provenance.WithDSSESigner(dsse.NewSigner(nil)),
+	)
 	ctx := context.Background()
 
 	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
@@ -474,7 +486,11 @@ func TestResolveProvenance_Adversarial_BareUnsignedStatement_IsRejected(t *testi
 		t.Fatalf("push attestation image: %v", err)
 	}
 
-	r := provenance.NewResolver(nil)
+	r := provenance.NewResolver(nil,
+		provenance.WithCosignSigner(cosign.NewSigner(nil)),
+		provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+		provenance.WithDSSESigner(dsse.NewSigner(nil)),
+	)
 	ctx := context.Background()
 
 	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
@@ -556,7 +572,11 @@ func TestResolveProvenance_WithCosignSignature(t *testing.T) {
 	}
 
 	// Resolve provenance
-	r := provenance.NewResolver(nil)
+	r := provenance.NewResolver(nil,
+		provenance.WithCosignSigner(cosign.NewSigner(nil)),
+		provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+		provenance.WithDSSESigner(dsse.NewSigner(nil)),
+	)
 	ctx := context.Background()
 
 	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
@@ -642,7 +662,11 @@ func TestResolveProvenance_NoKeyConfigured_FailsClosed(t *testing.T) {
 		t.Fatalf("push signature image: %v", err)
 	}
 
-	r := provenance.NewResolver(nil)
+	r := provenance.NewResolver(nil,
+		provenance.WithCosignSigner(cosign.NewSigner(nil)),
+		provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+		provenance.WithDSSESigner(dsse.NewSigner(nil)),
+	)
 	ctx := context.Background()
 
 	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
@@ -723,7 +747,11 @@ func TestResolveProvenance_Adversarial_FakeKeylessCert_IsRejected(t *testing.T) 
 		t.Fatalf("push signature image: %v", err)
 	}
 
-	r := provenance.NewResolver(nil)
+	r := provenance.NewResolver(nil,
+		provenance.WithCosignSigner(cosign.NewSigner(nil)),
+		provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+		provenance.WithDSSESigner(dsse.NewSigner(nil)),
+	)
 	ctx := context.Background()
 
 	// An expected identity must be supplied, otherwise the resolver refuses to
@@ -872,7 +900,11 @@ func TestResolveProvenance_ExpectSource_GatedOnVerifiedProvenance(t *testing.T) 
 		targetRepo := fmt.Sprintf("%s/app-expect-source-verified", host)
 		pushVerifiedSLSAAttestedImage(t, targetRepo, "github.com/my-org/my-sveltekit-app", "c0ffee1234567890abcdef1234567890abcdef12")
 
-		r := provenance.NewResolver(nil)
+		r := provenance.NewResolver(nil,
+			provenance.WithCosignSigner(cosign.NewSigner(nil)),
+			provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+			provenance.WithDSSESigner(dsse.NewSigner(nil)),
+		)
 
 		summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
 			ImageRef:     targetRepo + ":v1.0.0",
@@ -915,7 +947,11 @@ func TestResolveProvenance_ExpectSource_GatedOnVerifiedProvenance(t *testing.T) 
 			t.Fatalf("push test image: %v", err)
 		}
 
-		r := provenance.NewResolver(nil)
+		r := provenance.NewResolver(nil,
+			provenance.WithCosignSigner(cosign.NewSigner(nil)),
+			provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+			provenance.WithDSSESigner(dsse.NewSigner(nil)),
+		)
 
 		// This annotation-only image's repo/commit are exactly what the
 		// pre-fix bug would have compared and accepted. Proving the fix
@@ -951,7 +987,11 @@ func TestResolveProvenance_ExpectSource_GatedOnVerifiedProvenance(t *testing.T) 
 			t.Fatalf("push test image: %v", err)
 		}
 
-		r := provenance.NewResolver(nil)
+		r := provenance.NewResolver(nil,
+			provenance.WithCosignSigner(cosign.NewSigner(nil)),
+			provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+			provenance.WithDSSESigner(dsse.NewSigner(nil)),
+		)
 
 		// Matching, with the hatch: proceeds, but must come back stamped
 		// unverified so a caller (or a human reading the JSON/text report)
@@ -1030,4 +1070,238 @@ func importTar(w *bytes.Buffer, filename string, content []byte) {
 		w.Write(make([]byte, pad))
 	}
 	w.Write(make([]byte, 1024))
+}
+
+// TestResolveProvenance_NoVerifierInjected_FailsClosed proves the resolver
+// refuses rather than reports-as-unverified when a verifier it needs was never
+// injected.
+//
+// This is the regression guard for removing the constructor defaults. All three
+// verifiers used to be defaulted inside NewResolver by constructing
+// cosign.NewSigner(log) / sigstore.NewVerifier(log) / dsse.NewSigner(log)
+// directly — the adapter-imports-adapter edges internal/architecture_test.go
+// used to allowlist. With the defaults gone, "no verifier" is reachable on
+// three branches that were previously written to tolerate nil
+// (`case r.signer != nil:`, `&& r.keyless != nil`, `if r.dsse == nil ...
+// return false`), each of which would have skipped verification silently and
+// produced exactly the fail-open a149b28 removed from this file: SignatureValid
+// false with a nil error for a genuinely signed image.
+//
+// Every subtest below signs for real and pushes real material to a real
+// in-process registry, and configures a real, correct key — so the only
+// variable is whether a verifier was injected. A refusal against unsigned or
+// unkeyed input would prove nothing, since those are refused anyway.
+func TestResolveProvenance_NoVerifierInjected_FailsClosed(t *testing.T) {
+	t.Run("static-key signature without a CosignSigner", func(t *testing.T) {
+		_, host := startTestRegistry(t)
+		targetRepo := fmt.Sprintf("%s/app-no-signer", host)
+
+		img := createTestImage(t, nil)
+		tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+		if err := remote.Write(tagRef, img); err != nil {
+			t.Fatalf("push test image: %v", err)
+		}
+		imgDigest, _ := img.Digest()
+
+		privKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		privDer, _ := x509.MarshalPKCS8PrivateKey(privKey)
+		privPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDer})
+		pubDer, _ := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+		pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDer})
+
+		bundle, err := cosign.NewSigner(nil).Sign(context.Background(), ports.CosignSignRequest{
+			Repo:   targetRepo,
+			Digest: imgDigest,
+			KeyPEM: privPEM,
+		})
+		if err != nil {
+			t.Fatalf("cosign sign: %v", err)
+		}
+
+		sigLayer := static.NewLayer(bundle.PayloadBytes, types.MediaType("application/vnd.dev.cosign.simplesigning.v1+json"))
+		sigImg, err := mutate.Append(empty.Image, mutate.Addendum{
+			Layer: sigLayer,
+			Annotations: map[string]string{
+				ports.CosignSignatureAnnotation: bundle.Base64Signature,
+			},
+			MediaType: types.MediaType("application/vnd.dev.cosign.simplesigning.v1+json"),
+		})
+		if err != nil {
+			t.Fatalf("mutate.Append: %v", err)
+		}
+		sigImg = mutate.MediaType(sigImg, types.OCIManifestSchema1)
+
+		sigTagStr := fmt.Sprintf("%s:%s-%s.sig", targetRepo, imgDigest.Algorithm, imgDigest.Hex)
+		sigRef, _ := name.ParseReference(sigTagStr, name.WeakValidation)
+		if err := remote.Write(sigRef, sigImg); err != nil {
+			t.Fatalf("push signature image: %v", err)
+		}
+
+		// Everything injected EXCEPT the Cosign signer. A correct key is
+		// supplied, so ErrStaticKeyRequired ("nothing to check against")
+		// cannot be the reason for the refusal.
+		r := provenance.NewResolver(nil,
+			provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+			provenance.WithDSSESigner(dsse.NewSigner(nil)),
+		)
+
+		summary, err := r.ResolveProvenance(context.Background(), ports.ProvenanceResolverRequest{
+			ImageRef:     targetRepo + ":v1.0.0",
+			PublicKeyPEM: pubPEM,
+		})
+		if err == nil {
+			t.Fatalf("ResolveProvenance accepted an image with no ports.CosignSigner injected, got summary: %+v", summary)
+		}
+		if !errors.Is(err, provenance.ErrVerifierNotInjected) {
+			t.Fatalf("err = %v, want wrapping provenance.ErrVerifierNotInjected", err)
+		}
+		if !errors.Is(err, core.ErrInvalidRequest) {
+			t.Fatalf("err = %v, want wrapping core.ErrInvalidRequest", err)
+		}
+		if summary.SignatureValid {
+			t.Fatal("BUG: SignatureValid was true with no signer injected — nothing verified this signature")
+		}
+		if !strings.Contains(err.Error(), "WithCosignSigner") {
+			t.Errorf("error should name the missing injection point, got: %v", err)
+		}
+	})
+
+	t.Run("keyless material without a KeylessVerifier", func(t *testing.T) {
+		_, host := startTestRegistry(t)
+		targetRepo := fmt.Sprintf("%s/app-no-keyless", host)
+
+		img := createTestImage(t, nil)
+		tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+		if err := remote.Write(tagRef, img); err != nil {
+			t.Fatalf("push test image: %v", err)
+		}
+		imgDigest, _ := img.Digest()
+
+		// Keyless material only needs to be *present* for this branch: the
+		// point is that a missing verifier must not turn "there is Fulcio and
+		// Rekor material here" into "this image is not keyless-signed". Whether
+		// the material would have verified is precisely what cannot be known
+		// without a verifier, which is why the answer has to be a refusal.
+		sigLayer := static.NewLayer([]byte(`{"critical":{}}`), types.MediaType("application/vnd.dev.cosign.simplesigning.v1+json"))
+		sigImg, err := mutate.Append(empty.Image, mutate.Addendum{
+			Layer: sigLayer,
+			Annotations: map[string]string{
+				ports.CosignSignatureAnnotation:   base64.StdEncoding.EncodeToString([]byte("sig")),
+				ports.CosignCertificateAnnotation: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+				ports.CosignBundleAnnotation:      `{"SignedEntryTimestamp":"AAAA","Payload":{"body":"e30=","integratedTime":1,"logIndex":1,"logID":"00"}}`,
+			},
+			MediaType: types.MediaType("application/vnd.dev.cosign.simplesigning.v1+json"),
+		})
+		if err != nil {
+			t.Fatalf("mutate.Append: %v", err)
+		}
+		sigImg = mutate.MediaType(sigImg, types.OCIManifestSchema1)
+
+		sigTagStr := fmt.Sprintf("%s:%s-%s.sig", targetRepo, imgDigest.Algorithm, imgDigest.Hex)
+		sigRef, _ := name.ParseReference(sigTagStr, name.WeakValidation)
+		if err := remote.Write(sigRef, sigImg); err != nil {
+			t.Fatalf("push signature image: %v", err)
+		}
+
+		// Everything injected EXCEPT the keyless verifier, and a full expected
+		// identity is supplied, so ErrKeylessIdentityRequired cannot be the
+		// reason for the refusal either.
+		r := provenance.NewResolver(nil,
+			provenance.WithCosignSigner(cosign.NewSigner(nil)),
+			provenance.WithDSSESigner(dsse.NewSigner(nil)),
+		)
+
+		summary, err := r.ResolveProvenance(context.Background(), ports.ProvenanceResolverRequest{
+			ImageRef: targetRepo + ":v1.0.0",
+			KeylessIdentity: ports.KeylessIdentity{
+				Issuer: "https://token.actions.githubusercontent.com",
+				SAN:    "https://github.com/my-org/my-app/.github/workflows/release.yml@refs/heads/main",
+			},
+		})
+		if err == nil {
+			t.Fatalf("ResolveProvenance accepted an image with no ports.KeylessVerifier injected, got summary: %+v", summary)
+		}
+		if !errors.Is(err, provenance.ErrVerifierNotInjected) {
+			t.Fatalf("err = %v, want wrapping provenance.ErrVerifierNotInjected", err)
+		}
+		if summary.SignatureValid {
+			t.Fatal("BUG: SignatureValid was true with no keyless verifier injected")
+		}
+		if !strings.Contains(err.Error(), "WithKeylessVerifier") {
+			t.Errorf("error should name the missing injection point, got: %v", err)
+		}
+	})
+
+	t.Run("DSSE attestation without a DSSESigner", func(t *testing.T) {
+		_, host := startTestRegistry(t)
+		targetRepo := fmt.Sprintf("%s/app-no-dsse", host)
+
+		img := createTestImage(t, nil)
+		tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+		if err := remote.Write(tagRef, img); err != nil {
+			t.Fatalf("push test image: %v", err)
+		}
+		imgDigest, _ := img.Digest()
+
+		privKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		privDer, _ := x509.MarshalPKCS8PrivateKey(privKey)
+		privPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDer})
+		pubDer, _ := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+		pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDer})
+
+		stmtJSON, _ := json.Marshal(ports.SLSAStatement{
+			Type:          ports.InTotoStatementType,
+			PredicateType: ports.SLSAProvenancePredicateType,
+			Subject: []ports.ResourceDescriptor{{
+				Name:   targetRepo,
+				Digest: map[string]string{imgDigest.Algorithm: imgDigest.Hex},
+			}},
+		})
+		env, err := dsse.NewSigner(nil).Sign(context.Background(), ports.DSSESignRequest{
+			PayloadBytes: stmtJSON,
+			PayloadType:  ports.InTotoPayloadType,
+			KeyPEM:       privPEM,
+		})
+		if err != nil {
+			t.Fatalf("sign DSSE: %v", err)
+		}
+		envJSON, _ := json.Marshal(env)
+
+		attLayer := static.NewLayer(envJSON, types.MediaType("application/vnd.dsse.envelope.v1+json"))
+		attImg, _ := mutate.Append(empty.Image, mutate.Addendum{Layer: attLayer})
+		attImg = mutate.MediaType(attImg, types.OCIManifestSchema1)
+
+		attTagStr := fmt.Sprintf("%s:%s-%s.att", targetRepo, imgDigest.Algorithm, imgDigest.Hex)
+		attRef, _ := name.ParseReference(attTagStr, name.WeakValidation)
+		if err := remote.Write(attRef, attImg); err != nil {
+			t.Fatalf("push attestation image: %v", err)
+		}
+
+		// Everything injected EXCEPT the DSSE signer, and the matching public
+		// key IS configured — so the envelope would have verified. Reporting
+		// HasProvenance: false here would be a claim about the image that the
+		// resolver is in no position to make, and it is load-bearing:
+		// --expect-source decides purely from SourceProvenance.
+		r := provenance.NewResolver(nil,
+			provenance.WithCosignSigner(cosign.NewSigner(nil)),
+			provenance.WithKeylessVerifier(sigstore.NewVerifier(nil)),
+		)
+
+		summary, err := r.ResolveProvenance(context.Background(), ports.ProvenanceResolverRequest{
+			ImageRef:     targetRepo + ":v1.0.0",
+			PublicKeyPEM: pubPEM,
+		})
+		if err == nil {
+			t.Fatalf("ResolveProvenance accepted an image with no ports.DSSESigner injected, got summary: %+v", summary)
+		}
+		if !errors.Is(err, provenance.ErrVerifierNotInjected) {
+			t.Fatalf("err = %v, want wrapping provenance.ErrVerifierNotInjected", err)
+		}
+		if summary.HasProvenance {
+			t.Fatal("BUG: HasProvenance was true with no DSSE verifier injected")
+		}
+		if !strings.Contains(err.Error(), "WithDSSESigner") {
+			t.Errorf("error should name the missing injection point, got: %v", err)
+		}
+	})
 }

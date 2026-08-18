@@ -29,3 +29,9 @@ testdata/fixtures/*/dist/
 .idea/
 .vscode/
 .gomodcache/cache/download/
+
+# Generated .pokkum/ sandboxes inside test fixtures. Pokkum writes virtual
+# configs and patched handlers here during a build; e2e runs leave one
+# content-hashed handler per run, so tracking them grows the repo on every
+# test run. The deliberate patch-target corpus lives in testdata/adapter-node/.
+testdata/fixtures/*/.pokkum/

@@ -224,56 +224,31 @@ func utilityPackageDirs(t *testing.T, adaptersDir string) map[string]bool {
 // together and creates hidden, untestable coupling between adapters that
 // are meant to be independently swappable.
 //
-// Building the real graph surfaced genuine existing violations of exactly
-// this rule (see allowedAdapterAdapterEdges below) — they are NOT silently
-// permitted; each is an explicit, justified, narrowly-scoped exception, and
-// every one is called out prominently in this task's final report as a
-// real finding rather than swept under an unexplained allowlist.
-var allowedAdapterAdapterEdges = map[string]map[string]string{
-	"baseimage": {
-		"cosign": "baseimage.Resolver defaults its optional CosignSigner " +
-			"dependency to cosign.NewSigner(log) (resolver.go ~L219) for " +
-			"static-key base-image signature verification (--base-verify-mode). " +
-			"Pre-existing default-wiring pattern, not something this task's " +
-			"scope owns; flagged as a real finding rather than fixed here.",
-		"sigstore": "baseimage.Resolver defaults its optional KeylessVerifier " +
-			"dependency to sigstore.NewVerifier(log) (resolver.go ~L220) for " +
-			"keyless Sigstore verification of the distroless/chainguard presets, " +
-			"and reads sigstore's Cosign annotation-name constants directly " +
-			"(sigstore.CosignSignatureAnnotation etc.). Same pre-existing " +
-			"default-wiring pattern as the cosign edge above.",
-	},
-	"provenance": {
-		"cosign": "provenance.Resolver defaults its CosignSigner dependency to " +
-			"cosign.NewSigner(log) (resolver.go ~L144). Same default-wiring " +
-			"pattern as baseimage's edge to cosign. (It formerly also read " +
-			"cosign.DefaultPublicKeyPEM as a fallback trust anchor; that " +
-			"placeholder key was deleted and static-key verification now fails " +
-			"closed when no key is configured.)",
-		"dsse": "provenance.Resolver defaults its DSSESigner dependency to " +
-			"dsse.NewSigner(log) (resolver.go ~L132) to envelope the generated " +
-			"SLSA provenance statement.",
-		"sigstore": "provenance.Resolver defaults its KeylessVerifier dependency " +
-			"to sigstore.NewVerifier(log) (resolver.go ~L131) and reads " +
-			"sigstore's Cosign annotation-name constants directly, mirroring " +
-			"baseimage's edge to sigstore.",
-	},
-	// remotecacheutils is a *utils package (declares IsUtilityPackage), so an
-	// edge to another *utils package would need no allowlisting at all — but
-	// these two targets are concrete port adapters, not utils, so the same
-	// rule applies to it as to any concrete adapter importer.
-	"remotecacheutils": {
-		"cosign": "remotecacheutils.Cacher verifies Cosign static-key Simple " +
-			"Signing signatures on cache-hit images before promoting a cache " +
-			"tag to a release tag (--cache-verify, mem:core \"Composite Remote " +
-			"OCI Input Caching\"), constructing cosign.NewSigner(log) directly " +
-			"as its default verifier (remotecacheutils.go ~L219).",
-		"sigstore": "remotecacheutils.Cacher verifies keyless Sigstore signatures " +
-			"on cache-hit images the same way, defaulting to " +
-			"sigstore.NewVerifier(log) (remotecacheutils.go ~L219) for " +
-			"--cache-verify-mode=keyless/auto.",
-	},
-}
+// This allowlist is EMPTY, and that is the invariant worth protecting.
+//
+// It used to hold seven real violations, all of one shape: baseimage,
+// provenance and remotecacheutils each defaulted their optional verifier
+// dependencies by constructing a concrete peer adapter inside their own
+// constructor (cosign.NewSigner(log), dsse.NewSigner(log),
+// sigstore.NewVerifier(log)) and read sigstore's Cosign annotation-name
+// constants directly. Two changes removed all seven:
+//
+//  1. The Cosign annotation names and the "no keyless material" sentinel moved
+//     into the ports vocabulary (ports.CosignSignatureAnnotation and friends,
+//     ports.ErrNoKeylessBundle), where a wire-format constant and an interface's
+//     own error sentinel belong. sigstore re-exports them for its own use.
+//  2. The constructor defaults were deleted. The verifiers are injected by the
+//     composition root (cmd/pokkum's newBaseImageResolver /
+//     newProvenanceResolver / buildDeps' remotecacheutils.New call) and a
+//     missing one now fails CLOSED at the point of use — it never means "skip
+//     verification and accept".
+//
+// Adding an entry back is therefore not a routine allowlisting decision: for
+// these three packages specifically it would mean re-creating the very
+// self-wiring that the fail-closed verification paths were refactored to
+// remove. Prefer moving shared vocabulary into internal/ports, or injecting
+// through a ports interface from cmd/pokkum, over adding a row here.
+var allowedAdapterAdapterEdges = map[string]map[string]string{}
 
 // TestAdaptersDoNotImportEachOther enforces that a concrete port adapter
 // under internal/adapters may import shared `*utils` helper packages, but

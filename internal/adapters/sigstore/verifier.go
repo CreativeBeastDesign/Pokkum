@@ -13,23 +13,25 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
-// Cosign's legacy signature-tag annotation keys. They are named here so error
-// messages can say which annotation the bad material came from — during an
-// incident, "the bundle annotation's logID is not hex" is actionable and
-// "verification failed" is not.
+// Cosign's legacy signature-tag annotation keys, re-exported from the ports
+// vocabulary where they are defined (ports.CosignSignatureAnnotation etc.).
+// They live in ports because the adapters that extract this material off a
+// manifest — baseimage, provenance, remotecacheutils — must not import this
+// package to learn a wire-format constant; these aliases exist only so this
+// package's own error messages and tests can keep using the short names.
 const (
 	// CosignSignatureAnnotation carries the base64 signature over the payload.
-	CosignSignatureAnnotation = "dev.cosignproject.cosign/signature"
+	CosignSignatureAnnotation = ports.CosignSignatureAnnotation
 	// CosignCertificateAnnotation carries the Fulcio leaf certificate, as
 	// plain PEM text.
-	CosignCertificateAnnotation = "dev.sigstore.cosign/certificate"
+	CosignCertificateAnnotation = ports.CosignCertificateAnnotation
 	// CosignChainAnnotation carries the intermediate/root certificates as
 	// plain PEM text. Pokkum never trusts it for path building; see
 	// assembleV01Bundle.
-	CosignChainAnnotation = "dev.sigstore.cosign/chain"
+	CosignChainAnnotation = ports.CosignChainAnnotation
 	// CosignBundleAnnotation carries the Rekor inclusion material as plain
 	// JSON text.
-	CosignBundleAnnotation = "dev.sigstore.cosign/bundle"
+	CosignBundleAnnotation = ports.CosignBundleAnnotation
 )
 
 // Sentinel errors returned by Verifier.Verify. Every error it returns wraps
@@ -42,7 +44,12 @@ var (
 	// is distinct from "material is present but did not verify": a caller may
 	// legitimately fall back to another verification mode on ErrNoBundle, but
 	// must never fall back on any of the errors below.
-	ErrNoBundle = errors.New("sigstore: no keyless signature material")
+	//
+	// It IS ports.ErrNoKeylessBundle, not a copy of it: the "not signed this
+	// way, try another mode" signal belongs to the KeylessVerifier contract,
+	// so callers holding only the interface (baseimage) can match it without
+	// importing this adapter. errors.Is therefore matches under either name.
+	ErrNoBundle = ports.ErrNoKeylessBundle
 
 	// ErrMalformedMaterial means the material is present but structurally
 	// unusable: unparseable PEM, malformed Rekor bundle JSON, bad base64/hex,
@@ -171,7 +178,7 @@ func (v *Verifier) Verify(ctx context.Context, req ports.KeylessVerifyRequest) (
 	}
 	if len(missing) > 0 {
 		return ports.KeylessVerifyResult{}, fmt.Errorf(
-			"%w: signature is missing required annotation(s) %v — this signature is not a keyless (Fulcio/Rekor) signature",
+			"sigstore: %w: signature is missing required annotation(s) %v — this signature is not a keyless (Fulcio/Rekor) signature",
 			ErrNoBundle, missing)
 	}
 

@@ -28,6 +28,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/envbake"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/provenance"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/remotecacheutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sbom"
@@ -447,7 +448,7 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 	reg := registry.NewAdapter(logger)
 	return core.Deps{
 		Compiler:     bunexec.NewCompiler(logger),
-		BaseImages:   baseimage.NewResolver(logger),
+		BaseImages:   newBaseImageResolver(logger),
 		Supervisor:   supervisor.New(logger),
 		StaticServer: staticserver.New(logger),
 		Packager:     packager.NewPackager(logger),
@@ -477,6 +478,37 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		Version:   version,
 		UserAgent: "pokkum/" + version,
 	}
+}
+
+// newBaseImageResolver builds a fully-wired base-image resolver.
+//
+// It exists so there is exactly ONE place in the program that knows which
+// concrete verifiers the base-image resolver needs. baseimage.NewResolver has
+// no defaults on purpose — it used to construct cosign.NewSigner /
+// sigstore.NewVerifier itself, which meant an adapter importing two of its
+// peers — and an un-injected verifier makes the matching --base-verify-mode
+// fail closed rather than silently skip verification. Every command that
+// resolves base images therefore goes through here instead of calling
+// baseimage.NewResolver directly, so adding a command cannot quietly produce a
+// resolver that refuses to verify.
+func newBaseImageResolver(logger *slog.Logger) *baseimage.Resolver {
+	return baseimage.NewResolver(logger,
+		baseimage.WithCosignSigner(cosign.NewSigner(logger)),
+		baseimage.WithKeylessVerifier(sigstore.NewVerifier(logger)),
+	)
+}
+
+// newProvenanceResolver builds a fully-wired provenance resolver, for the same
+// reason and with the same discipline as newBaseImageResolver: provenance's
+// three verifier dependencies have no defaults, and a missing one is refused
+// with provenance.ErrVerifierNotInjected rather than reported as an unsigned or
+// unverified image.
+func newProvenanceResolver(logger *slog.Logger) *provenance.Resolver {
+	return provenance.NewResolver(logger,
+		provenance.WithCosignSigner(cosign.NewSigner(logger)),
+		provenance.WithKeylessVerifier(sigstore.NewVerifier(logger)),
+		provenance.WithDSSESigner(dsse.NewSigner(logger)),
+	)
 }
 
 func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, flags *buildFlags, projectDir string) (*core.BuildRequest, error) {

@@ -546,7 +546,10 @@ func TestResolve_BaseImageCosignSignatureVerification(t *testing.T) {
 	s, _ := newTestRegistry(t)
 	ref := pushImage(t, s, "app/unsigned:v1", ports.LinuxAMD64)
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	ctx := context.Background()
 
 	// 1. Unsigned image ref in test registry should fail when VerifySignature is true
@@ -656,7 +659,10 @@ func TestResolve_BaseImageCosignSignatureVerification_RealSignature(t *testing.T
 	ref := pushImage(t, s, "app/signed:v1", ports.LinuxAMD64)
 	privPEM, pubPEM := genECKeyPairPEM(t)
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	ctx := context.Background()
 
 	// Resolve once without verification to learn the pushed digest and repo
@@ -761,7 +767,10 @@ func TestResolve_BaseImageStaticKey_NoKeyConfigured_FailsClosed(t *testing.T) {
 	ref := pushImage(t, s, "app/signed-nokey:v1", ports.LinuxAMD64)
 	privPEM, _ := genECKeyPairPEM(t)
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	ctx := context.Background()
 
 	pre, err := r.Resolve(ctx, ports.BaseImageRequest{
@@ -836,7 +845,10 @@ func TestVerifyBaseImage_UsesResolvedRef_NoSecondNetworkCall(t *testing.T) {
 	ref := pushImage(t, s, "app/verify-once:v1", ports.LinuxAMD64)
 	privPEM, pubPEM := genECKeyPairPEM(t)
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	ctx := context.Background()
 
 	req := ports.BaseImageRequest{
@@ -892,7 +904,10 @@ func TestVerifyBaseImage_DigestMismatch_FailsClosed(t *testing.T) {
 	s, _ := newTestRegistry(t)
 	ref := pushImage(t, s, "app/verify-mismatch:v1", ports.LinuxAMD64)
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	ctx := context.Background()
 	req := ports.BaseImageRequest{
 		Preset:    ports.BaseImageCustom,
@@ -935,7 +950,10 @@ func TestVerifyBaseImage_KeylessAndStaticKey(t *testing.T) {
 		ref := pushImage(t, s, "app/verify-static-ok:v1", ports.LinuxAMD64)
 		privPEM, pubPEM := genECKeyPairPEM(t)
 
-		r := NewResolver(nil)
+		r := NewResolver(nil,
+			WithCosignSigner(cosign.NewSigner(nil)),
+			WithKeylessVerifier(sigstore.NewVerifier(nil)),
+		)
 		ctx := context.Background()
 		req := ports.BaseImageRequest{
 			Preset:          ports.BaseImageCustom,
@@ -966,7 +984,10 @@ func TestVerifyBaseImage_KeylessAndStaticKey(t *testing.T) {
 		ref := pushImage(t, s, "app/verify-static-bad:v1", ports.LinuxAMD64)
 		privPEM, pubPEM := genECKeyPairPEM(t)
 
-		r := NewResolver(nil)
+		r := NewResolver(nil,
+			WithCosignSigner(cosign.NewSigner(nil)),
+			WithKeylessVerifier(sigstore.NewVerifier(nil)),
+		)
 		ctx := context.Background()
 		req := ports.BaseImageRequest{
 			Preset:          ports.BaseImageCustom,
@@ -997,7 +1018,10 @@ func TestVerifyBaseImage_KeylessAndStaticKey(t *testing.T) {
 		s, _ := newTestRegistry(t)
 		ref := pushImage(t, s, "app/verify-keyless-mismatch:v1", ports.LinuxAMD64)
 
-		r := NewResolver(nil)
+		r := NewResolver(nil,
+			WithCosignSigner(cosign.NewSigner(nil)),
+			WithKeylessVerifier(sigstore.NewVerifier(nil)),
+		)
 		ctx := context.Background()
 		req := ports.BaseImageRequest{
 			Preset:          ports.BaseImageCustom,
@@ -1103,7 +1127,10 @@ func TestResolve_KeylessMode_RejectsStaticKeySignature(t *testing.T) {
 	ref := pushImage(t, s, "app/static-only:v1", ports.LinuxAMD64)
 	privPEM, _ := genECKeyPairPEM(t)
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	ctx := context.Background()
 
 	pre, err := r.Resolve(ctx, ports.BaseImageRequest{
@@ -1165,7 +1192,10 @@ func TestResolve_KeylessMode_PubkeyConflictGuard(t *testing.T) {
 
 	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", "irrelevant-value")
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	// ports.BaseImageDistroless has DefaultVerifyMode() == keyless.
 	// BaseImageRequest.Ref overriding a preset's default ref while keeping
 	// the preset's semantics is exactly what effectiveRef supports, so this
@@ -1267,7 +1297,10 @@ func TestResolve_KeylessMode_ClaimsMismatchFailsClosed(t *testing.T) {
 	s, _ := newTestRegistry(t)
 	ref := pushImage(t, s, "app/claims-mismatch:v1", ports.LinuxAMD64)
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	ctx := context.Background()
 
 	pre, err := r.Resolve(ctx, ports.BaseImageRequest{
@@ -1320,7 +1353,10 @@ func TestResolve_KeylessMode_EmptyIdentityRefused(t *testing.T) {
 	s, _ := newTestRegistry(t)
 	ref := pushImage(t, s, "app/empty-identity:v1", ports.LinuxAMD64)
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	_, err := r.Resolve(context.Background(), ports.BaseImageRequest{
 		Preset:          ports.BaseImageCustom,
 		Ref:             ref,
@@ -1783,7 +1819,10 @@ func TestResolve_EscrowMirror_VerifySignature_SucceedsAgainstUpstreamRepo(t *tes
 
 	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	res, resolveErr := r.Resolve(context.Background(), ports.BaseImageRequest{
 		Preset:          ports.BaseImageCustom,
 		Ref:             upstreamRef,
@@ -1918,7 +1957,10 @@ func TestResolve_EscrowMirror_VerifySignature_TamperedMirrorDigestFailsClosed(t 
 
 	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	_, resolveErr := r.Resolve(context.Background(), ports.BaseImageRequest{
 		Preset:          ports.BaseImageCustom,
 		Ref:             upstreamRef,
@@ -2077,7 +2119,10 @@ func TestResolve_EscrowMirror_DigestSubstitution_DifferentLegitimatelySignedImag
 
 	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	res, resolveErr := r.Resolve(context.Background(), ports.BaseImageRequest{
 		Preset:          ports.BaseImageCustom,
 		Ref:             upstreamRefA,
@@ -2368,4 +2413,137 @@ func TestResolve_MirrorRef_LayersAreMountableFromMirrorRepo(t *testing.T) {
 				"attempt for this layer would target the wrong source repository", i, got, wantMirrorRepoName)
 		}
 	}
+}
+
+// TestVerifyBaseImage_NoVerifierInjected_FailsClosed proves the resolver
+// refuses rather than accepts when the verifier its verify mode needs was
+// never injected.
+//
+// This is the regression guard for removing the constructor defaults. Both
+// verifiers used to be defaulted inside NewResolver by constructing
+// cosign.NewSigner(log) / sigstore.NewVerifier(log) directly — the
+// adapter-imports-adapter edges internal/architecture_test.go used to
+// allowlist. With the defaults gone, "no verifier" is reachable, and the one
+// unacceptable outcome is that it silently reads as "nothing to verify, carry
+// on": that is the same fail-open shape a149b28 removed from the placeholder
+// trust anchor and 812662e removed from the cache verify-mode default arm.
+//
+// Each subtest is otherwise byte-identical in setup to its passing sibling
+// elsewhere in this file — a real key pair, a real signature pushed to a real
+// in-process registry, a real key configured in the environment — so the ONLY
+// variable is whether the resolver was handed something able to verify. That
+// matters: without a genuinely verifiable image, a refusal proves nothing,
+// because an unsigned image would be refused anyway.
+func TestVerifyBaseImage_NoVerifierInjected_FailsClosed(t *testing.T) {
+	t.Run("static-key mode without a CosignSigner", func(t *testing.T) {
+		s, _ := newTestRegistry(t)
+		ref := pushImage(t, s, "app/no-signer-injected:v1", ports.LinuxAMD64)
+		privPEM, pubPEM := genECKeyPairPEM(t)
+
+		// Deliberately NO options: this is the composition-root wiring gap
+		// under test.
+		r := NewResolver(nil)
+		ctx := context.Background()
+
+		req := ports.BaseImageRequest{
+			Preset:    ports.BaseImageCustom,
+			Ref:       ref,
+			Platforms: []ports.Platform{ports.LinuxAMD64},
+			Insecure:  true,
+		}
+		resolved, err := r.Resolve(ctx, req)
+		if err != nil {
+			t.Fatalf("pre-resolve: %v", err)
+		}
+		parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+		if err != nil {
+			t.Fatalf("ParseReference: %v", err)
+		}
+		pushCosignSignature(t, s, parsedRef.Context().Name(), resolved.Digest, privPEM, false)
+
+		// A real, correct key IS configured, so "no key" cannot be the reason
+		// for the refusal.
+		t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
+
+		verifyReq := req
+		verifyReq.VerifySignature = true
+		verifyReq.VerifyMode = ports.BaseImageVerifyStaticKey
+		err = r.VerifyBaseImage(ctx, resolved, verifyReq)
+		if err == nil {
+			t.Fatal("VerifyBaseImage accepted a base image with no ports.CosignSigner injected; static-key verification must fail closed")
+		}
+		if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+			t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+		}
+		if !strings.Contains(err.Error(), "ports.CosignSigner") || !strings.Contains(err.Error(), "WithCosignSigner") {
+			t.Errorf("error should name the missing dependency and its injection point, got: %v", err)
+		}
+	})
+
+	t.Run("keyless mode without a KeylessVerifier", func(t *testing.T) {
+		s, _ := newTestRegistry(t)
+		ref := pushImage(t, s, "app/no-keyless-injected:v1", ports.LinuxAMD64)
+
+		r := NewResolver(nil)
+		ctx := context.Background()
+
+		req := ports.BaseImageRequest{
+			Preset:    ports.BaseImageCustom,
+			Ref:       ref,
+			Platforms: []ports.Platform{ports.LinuxAMD64},
+			Insecure:  true,
+		}
+		resolved, err := r.Resolve(ctx, req)
+		if err != nil {
+			t.Fatalf("pre-resolve: %v", err)
+		}
+		parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+		if err != nil {
+			t.Fatalf("ParseReference: %v", err)
+		}
+		// Real captured Fulcio/Rekor material, so the refusal cannot be
+		// explained by absent keyless material either.
+		pushKeylessSignatureFixture(t, s, parsedRef.Context().Name(), resolved.Digest, "../sigstore/testdata/distroless-nonroot")
+
+		verifyReq := req
+		verifyReq.VerifySignature = true
+		verifyReq.VerifyMode = ports.BaseImageVerifyKeyless
+		verifyReq.KeylessIdentity = ports.KeylessIdentity{
+			Issuer: ports.DistrolessKeylessIssuer,
+			SAN:    ports.DistrolessKeylessSAN,
+		}
+		err = r.VerifyBaseImage(ctx, resolved, verifyReq)
+		if err == nil {
+			t.Fatal("VerifyBaseImage accepted a base image with no ports.KeylessVerifier injected; keyless verification must fail closed")
+		}
+		if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+			t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+		}
+		if !strings.Contains(err.Error(), "ports.KeylessVerifier") || !strings.Contains(err.Error(), "WithKeylessVerifier") {
+			t.Errorf("error should name the missing dependency and its injection point, got: %v", err)
+		}
+	})
+
+	t.Run("un-injected resolver still resolves when not verifying", func(t *testing.T) {
+		// The other half of the contract, and the reason these are options
+		// rather than required constructor parameters: a resolver that never
+		// verifies (e.g. `pokkum base check`) legitimately needs no verifier,
+		// and must not be broken by the refusals above.
+		s, _ := newTestRegistry(t)
+		ref := pushImage(t, s, "app/no-verifiers-resolve-ok:v1", ports.LinuxAMD64)
+
+		r := NewResolver(nil)
+		resolved, err := r.Resolve(context.Background(), ports.BaseImageRequest{
+			Preset:    ports.BaseImageCustom,
+			Ref:       ref,
+			Platforms: []ports.Platform{ports.LinuxAMD64},
+			Insecure:  true,
+		})
+		if err != nil {
+			t.Fatalf("Resolve without verifiers: %v", err)
+		}
+		if resolved.Digest.Hex == "" {
+			t.Fatal("Resolve returned no digest")
+		}
+	})
 }

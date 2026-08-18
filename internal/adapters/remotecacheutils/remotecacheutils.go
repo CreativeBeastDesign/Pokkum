@@ -23,11 +23,9 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/ignoreutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/poolutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/transportutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -45,6 +43,15 @@ type Cacher struct {
 }
 
 // Option configures a Cacher instance.
+//
+// Neither verifier dependency has a default. Both were previously defaulted at
+// point of use by constructing cosign.NewSigner(c.log) / sigstore.NewVerifier(
+// c.log) directly, which made this package import two concrete port adapters
+// and wire them behind the composition root's back. Injection is now the only
+// source; cmd/pokkum supplies both. A Cacher built without them still caches —
+// but verifyCandidate refuses the candidate outright rather than promoting an
+// unverified cache hit, exactly as it does for a missing key or an
+// unrecognized verify mode.
 type Option func(*Cacher)
 
 // WithLogger sets the logger for the Cacher.
@@ -520,32 +527,32 @@ func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Has
 
 		if i < len(manifest.Layers) && manifest.Layers[i].Annotations != nil {
 			ann := manifest.Layers[i].Annotations
-			if s, ok := ann[sigstore.CosignSignatureAnnotation]; ok {
+			if s, ok := ann[ports.CosignSignatureAnnotation]; ok {
 				sigStr = s
 			} else if s, ok := ann["org.opencontainers.image.signature"]; ok {
 				sigStr = s
 			}
-			if c, ok := ann[sigstore.CosignCertificateAnnotation]; ok {
+			if c, ok := ann[ports.CosignCertificateAnnotation]; ok {
 				certPEM = []byte(c)
 			}
-			if ch, ok := ann[sigstore.CosignChainAnnotation]; ok {
+			if ch, ok := ann[ports.CosignChainAnnotation]; ok {
 				chainPEM = []byte(ch)
 			}
-			if b, ok := ann[sigstore.CosignBundleAnnotation]; ok {
+			if b, ok := ann[ports.CosignBundleAnnotation]; ok {
 				bundleJSON = []byte(b)
 			}
 		}
 		if sigStr == "" && manifest.Annotations != nil {
-			if s, ok := manifest.Annotations[sigstore.CosignSignatureAnnotation]; ok {
+			if s, ok := manifest.Annotations[ports.CosignSignatureAnnotation]; ok {
 				sigStr = s
 			}
-			if c, ok := manifest.Annotations[sigstore.CosignCertificateAnnotation]; ok {
+			if c, ok := manifest.Annotations[ports.CosignCertificateAnnotation]; ok {
 				certPEM = []byte(c)
 			}
-			if ch, ok := manifest.Annotations[sigstore.CosignChainAnnotation]; ok {
+			if ch, ok := manifest.Annotations[ports.CosignChainAnnotation]; ok {
 				chainPEM = []byte(ch)
 			}
-			if b, ok := manifest.Annotations[sigstore.CosignBundleAnnotation]; ok {
+			if b, ok := manifest.Annotations[ports.CosignBundleAnnotation]; ok {
 				bundleJSON = []byte(b)
 			}
 		}
@@ -579,7 +586,17 @@ func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Has
 		case ports.CacheVerifyStaticKey:
 			signer := c.signer
 			if signer == nil {
-				signer = cosign.NewSigner(c.log)
+				// Fail closed on a composition-root wiring gap, on the same
+				// path as every other rejection in this loop. This branch used
+				// to construct cosign.NewSigner(c.log) here — an adapter
+				// wiring its own peer — so "not injected" was unreachable.
+				// With that default gone, silently continuing would promote an
+				// unverified (possibly poisoned) cache hit, which is precisely
+				// the fail-open 812662e closed on the default arm below.
+				errs = append(errs, fmt.Errorf(
+					"layer %d: static-key verification requested but no ports.CosignSigner was injected into the cacher "+
+						"(pass remotecacheutils.WithCosignSigner from the composition root)", i))
+				continue
 			}
 			pubKey := req.Verify.PublicKeyPEM
 			if len(pubKey) == 0 {
@@ -627,7 +644,11 @@ func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Has
 		case ports.CacheVerifyKeyless:
 			keyless := c.keyless
 			if keyless == nil {
-				keyless = sigstore.NewVerifier(c.log)
+				// Same fail-closed rule as the static-key arm above.
+				errs = append(errs, fmt.Errorf(
+					"layer %d: keyless verification requested but no ports.KeylessVerifier was injected into the cacher "+
+						"(pass remotecacheutils.WithKeylessVerifier from the composition root)", i))
+				continue
 			}
 			if len(certPEM) == 0 || len(bundleJSON) == 0 {
 				errs = append(errs, fmt.Errorf("layer %d: keyless verification requires certificate and rekor bundle annotations", i))

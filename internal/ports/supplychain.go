@@ -209,6 +209,37 @@ type CosignSignRequest struct {
 	Annotations map[string]string
 }
 
+// Cosign's legacy signature-tag annotation keys — the OCI annotation names a
+// "<repo>:<alg>-<hex>.sig" manifest (or one of its layers) uses to carry
+// signature material.
+//
+// They live here, in the ports vocabulary, rather than in the Sigstore
+// adapter that verifies them, because reading these annotations off a manifest
+// is not the verifier's job: several adapters (base-image resolution, remote
+// cache verification, provenance resolution) have to extract the material
+// before they can hand it to a CosignSigner or KeylessVerifier, and none of
+// them may import a concrete adapter to learn a wire-format constant. Naming
+// them also lets error messages say which annotation the bad material came
+// from — during an incident, "the bundle annotation's logID is not hex" is
+// actionable and "verification failed" is not.
+const (
+	// CosignSignatureAnnotation carries the base64 signature over the payload.
+	CosignSignatureAnnotation = "dev.cosignproject.cosign/signature"
+
+	// CosignCertificateAnnotation carries the Fulcio leaf certificate, as
+	// plain PEM text.
+	CosignCertificateAnnotation = "dev.sigstore.cosign/certificate"
+
+	// CosignChainAnnotation carries the intermediate/root certificates as
+	// plain PEM text. It is never trusted for path building — a correct
+	// KeylessVerifier resolves the chain from its own trusted root.
+	CosignChainAnnotation = "dev.sigstore.cosign/chain"
+
+	// CosignBundleAnnotation carries the Rekor inclusion material as plain
+	// JSON text.
+	CosignBundleAnnotation = "dev.sigstore.cosign/bundle"
+)
+
 // CosignSignatureBundle contains the generated Simple Signing payload and signature details.
 type CosignSignatureBundle struct {
 	// PayloadBytes is the canonical Simple Signing JSON payload.

@@ -82,4 +82,21 @@ Sigstore TUF root refresh.
 **Why it survived:** the synthetic fixture only ever fabricated a root `index.html` (finding 4), so no test exercised a non-root prerendered route.
 **Status:** fix dispatched, with the traversal guards preserved and the embedded blob regenerated afterwards.
 
+### 8. Two latent fail-opens in `provenance`, reachable only once a default was deleted
+
+**Found by:** the composition-root refactor, while removing the `cosign.NewSigner`/`sigstore.NewVerifier` defaults.
+**Where:** `internal/adapters/provenance/resolver.go` — a `case r.signer != nil:` with no `default`, and a `&& r.keyless != nil` folded into the *material-presence* condition. Also `tryParseAndVerifySLSA` returning a bare `false` for a nil DSSE signer.
+**What:** while the constructor always supplied a verifier these conditions were unreachable, so they read as harmless guards. With the default gone, each one silently *skips* verification instead of refusing: the first two produce `SignatureValid: false` with a **nil error** for a genuinely signed image, and the third yields `HasProvenance: false`, which is load-bearing for `--expect-source`.
+**Severity:** High as a latent class — this is the third distinct instance tonight of the same shape (`false, nil` being indistinguishable from a working refusal). Not exploitable before the refactor, since the nil branch could not be entered.
+**Fixed:** tracked via `sigVerifyOutcome.verifierMissing` and refused with a new `ErrVerifierNotInjected`; the SLSA path now returns a fatal error rather than a bare false. Each was confirmed by reintroducing the default and watching the new tests print the fail-open shape verbatim.
+**Generalizable rule (proposed for the checklist):** a nil-tolerant condition that reads as a guard is a fail-open in waiting the moment whatever made nil unreachable is removed. When deleting a default, grep every `== nil`/`!= nil` test on that field and confirm each one *refuses* rather than *skips*.
+
+### 9. Generated `.pokkum/` sandboxes inside fixtures were being committed, 16 of them by me
+
+**What:** `testdata/fixtures/sveltekit-adapter-node/.pokkum/` accumulated 27 tracked content-hashed `handler-*.js` files, ~1.2MB. Pokkum writes virtual configs and patched handlers into `.pokkum/` during a build, and the adapter-node e2e path leaves one per run, so the directory grows every time the suite runs.
+**Attribution, stated plainly:** 11 predated this session; **16 were added by my own commits during it**, swept in by `git add -A`. That is my error, not an agent's — I used a broad add while several agents were writing to the tree.
+**Severity:** Low technically, but it is repo hygiene that compounds silently, and it was caused by exactly the kind of shortcut I should not have taken while orchestrating parallel work.
+**Fixed:** `testdata/fixtures/*/.pokkum/` added to `.gitignore` and all 27 untracked (files left on disk; they are regenerable output). Verified first that the *deliberate* patch-target corpus lives separately in `testdata/adapter-node/` and remains tracked, and that the only test reading a fixture `.pokkum` path creates the file it reads.
+**Preventative note for the rest of this run:** stage explicit paths, not `-A`, when agents may be mid-write.
+
 _(appended as work proceeds)_

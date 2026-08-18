@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -87,7 +89,10 @@ func TestResolve_LiveRegistries_IncompatibleCustomBase(t *testing.T) {
 		t.Skip("skipping network-dependent base image resolution in -short mode")
 	}
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -149,7 +154,10 @@ func TestResolve_LiveKeylessVerification(t *testing.T) {
 		{name: "chainguard", preset: ports.BaseImageChainguard},
 	}
 
-	r := NewResolver(nil)
+	r := NewResolver(nil,
+		WithCosignSigner(cosign.NewSigner(nil)),
+		WithKeylessVerifier(sigstore.NewVerifier(nil)),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 

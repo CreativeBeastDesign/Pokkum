@@ -2,8 +2,22 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrNoKeylessBundle means the artifact carries no keyless signature material
+// at all — the Fulcio certificate and/or Rekor bundle annotations are absent.
+//
+// It is part of the KeylessVerifier contract rather than an implementation
+// detail of whichever adapter satisfies it: it is the ONE error a caller may
+// legitimately treat as "this artifact is not keyless-signed, try another
+// verification mode" instead of "verification failed". Every other error a
+// KeylessVerifier returns means material was present and did not verify, and
+// must never be downgraded to a skip. Callers therefore have to be able to
+// match this sentinel through the interface, without importing the concrete
+// verifier.
+var ErrNoKeylessBundle = errors.New("no keyless signature material")
 
 // KeylessIdentity is the expected Fulcio certificate identity a keyless
 // Sigstore signature must match. At least one of Issuer/IssuerRegex and one

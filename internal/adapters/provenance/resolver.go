@@ -18,10 +18,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/dsse"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -77,6 +74,25 @@ var (
 	// shape. req.AllowUnverifiedSource (--allow-unverified-source) is the
 	// explicit, visibly-marked escape hatch.
 	ErrUnverifiedSourceProvenance = errors.New("provenance resolver: --expect-source requires a cryptographically verified SLSA source-code attestation")
+
+	// ErrVerifierNotInjected means signature or attestation material was
+	// present and the Resolver had no injected verifier able to check it —
+	// no ports.CosignSigner for a static-key signature, no
+	// ports.KeylessVerifier for Fulcio/Rekor material, or no ports.DSSESigner
+	// for a DSSE-enveloped SLSA statement.
+	//
+	// This is a composition-root wiring defect, not an operator mistake, but
+	// it is reported with the same fail-closed discipline as
+	// ErrStaticKeyRequired and ErrKeylessIdentityRequired, and for the same
+	// reason: each of those verifier fields used to be defaulted inside
+	// NewResolver by constructing a concrete peer adapter, so "not injected"
+	// was unreachable. With the defaults gone it is reachable, and the branches
+	// that used to be written `case r.signer != nil:` / `&& r.keyless != nil`
+	// would have silently skipped verification — producing SignatureValid:
+	// false with a nil error for a genuinely signed image, which is exactly
+	// the fail-open a149b28 removed from this file. Skipping is therefore
+	// tracked as its own outcome and refused here.
+	ErrVerifierNotInjected = errors.New("provenance resolver: signature material is present but no verifier was injected to check it")
 )
 
 // maxSignatureBlobBytes caps how much of any single registry-supplied blob or
@@ -122,10 +138,21 @@ type Resolver struct {
 	dsse    ports.DSSESigner
 }
 
-// Option configures a Resolver instance.
+// Option injects a Resolver dependency.
+//
+// None of the three verifier dependencies has a default. They were previously
+// defaulted inside NewResolver by constructing cosign.NewSigner(log),
+// sigstore.NewVerifier(log) and dsse.NewSigner(log) directly, which made this
+// adapter import three of its peers and wire them behind the composition
+// root's back. Injection is now the only source; cmd/pokkum supplies all
+// three. An un-injected verifier never means "skip that check" — every path
+// that needs one and does not have one fails closed with
+// ErrVerifierNotInjected.
 type Option func(*Resolver)
 
-// WithCosignSigner overrides the static-key Cosign signer.
+// WithCosignSigner injects the static-key Cosign signer. A nil signer is
+// ignored, which leaves the static-key path unverifiable (and refused), never
+// silently self-wired.
 func WithCosignSigner(signer ports.CosignSigner) Option {
 	return func(r *Resolver) {
 		if signer != nil {
@@ -134,7 +161,8 @@ func WithCosignSigner(signer ports.CosignSigner) Option {
 	}
 }
 
-// WithKeylessVerifier overrides the keyless Sigstore verifier.
+// WithKeylessVerifier injects the keyless Sigstore verifier. A nil verifier is
+// ignored, with the same consequence described on WithCosignSigner.
 func WithKeylessVerifier(verifier ports.KeylessVerifier) Option {
 	return func(r *Resolver) {
 		if verifier != nil {
@@ -143,7 +171,9 @@ func WithKeylessVerifier(verifier ports.KeylessVerifier) Option {
 	}
 }
 
-// WithDSSESigner overrides the DSSE signer/verifier.
+// WithDSSESigner injects the DSSE signer/verifier used to check DSSE-enveloped
+// SLSA statements. A nil signer is ignored, with the same consequence described
+// on WithCosignSigner.
 func WithDSSESigner(signer ports.DSSESigner) Option {
 	return func(r *Resolver) {
 		if signer != nil {
@@ -152,16 +182,16 @@ func WithDSSESigner(signer ports.DSSESigner) Option {
 	}
 }
 
-// NewResolver constructs a ProvenanceResolver instance.
+// NewResolver constructs a ProvenanceResolver instance. A nil logger defaults
+// to slog.Default(). The verifier dependencies have no defaults and must be
+// injected with WithCosignSigner / WithKeylessVerifier / WithDSSESigner by the
+// composition root; see Option.
 func NewResolver(log *slog.Logger, opts ...Option) *Resolver {
 	if log == nil {
 		log = slog.Default()
 	}
 	r := &Resolver{
-		log:     log,
-		signer:  cosign.NewSigner(log),
-		keyless: sigstore.NewVerifier(log),
-		dsse:    dsse.NewSigner(log),
+		log: log,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -265,6 +295,20 @@ func (r *Resolver) ResolveProvenance(ctx context.Context, req ports.ProvenanceRe
 			summary.SignatureValid = outcome.valid
 			summary.SignerIdentity = outcome.identity
 
+			// Fail closed first on a wiring gap: this image carries signature
+			// material and the Resolver was handed nothing able to judge it.
+			// Checked before the operator-facing refusals below because it is
+			// the more fundamental problem — with no verifier injected, the
+			// static-key and keyless outcome flags cannot be trusted to have
+			// been evaluated at all — and because reporting SignatureValid:
+			// false here would be indistinguishable from a forged signature.
+			if outcome.verifierMissing && !outcome.valid {
+				return summary, fmt.Errorf(
+					"%w: %s carries signature material on %s but no %s was injected into the provenance resolver; "+
+						"refusing to report the image as unverified when nothing attempted to verify it: %w",
+					ErrVerifierNotInjected, req.ImageRef, sigTagStr, outcome.verifierMissingWhat, core.ErrInvalidRequest)
+			}
+
 			// Fail closed: keyless material is present, nothing else
 			// verified the image, and we were given no identity to check the
 			// certificate against. Reporting SignatureValid=false here would
@@ -309,7 +353,20 @@ func (r *Resolver) ResolveProvenance(ctx context.Context, req ports.ProvenanceRe
 	attTagStr := fmt.Sprintf("%s:%s-%s.att", repo, desc.Digest.Algorithm, desc.Digest.Hex)
 	if attRef, aErr := name.ParseReference(attTagStr, nameOpts...); aErr == nil {
 		if attImg, iErr := remote.Image(attRef, opts...); iErr == nil {
-			if stmt, serr := r.extractSLSAStatement(ctx, attImg, desc.Digest, pubKeyPEM); serr == nil {
+			stmt, serr := r.extractSLSAStatement(ctx, attImg, desc.Digest, pubKeyPEM)
+			// A missing DSSE verifier must not read as "this image has no
+			// provenance". Downstream that answer is load-bearing: step 3
+			// below decides --expect-source purely from
+			// PinnedInputs.SourceProvenance, so an unwired verifier that
+			// silently produced HasProvenance == false would let
+			// --allow-unverified-source compare against unsigned annotations
+			// while the operator believes a verifier merely found nothing.
+			// Every other error here genuinely means "no verified statement in
+			// these layers" and is still ignored, as before.
+			if serr != nil && errors.Is(serr, ErrVerifierNotInjected) {
+				return summary, fmt.Errorf("provenance resolver: %s: %w", req.ImageRef, serr)
+			}
+			if serr == nil {
 				summary.HasProvenance = true
 				if r.populateInputsFromSLSA(&summary.PinnedInputs, stmt) {
 					// A verified statement actually carried a
@@ -445,6 +502,25 @@ type sigVerifyOutcome struct {
 	// so the caller can distinguish "there was something to verify and
 	// nothing to verify it against" from an ordinary verification failure.
 	staticSigSeenNoKey bool
+
+	// verifierMissing reports whether any layer carried signature material
+	// that could not be judged because the Resolver has no injected verifier
+	// for it — no ports.CosignSigner for a static-key signature, or no
+	// ports.KeylessVerifier for Fulcio/Rekor material.
+	//
+	// It is a third, distinct member of the same family as keylessMaterialSeen
+	// and staticSigSeenNoKey, and exists for exactly the same reason: without
+	// it, "no verifier wired" collapses onto valid == false with no error,
+	// which a caller cannot tell apart from "checked and found invalid" or
+	// from "unsigned image". The caller fails closed on it with
+	// ErrVerifierNotInjected.
+	verifierMissing bool
+
+	// verifierMissingWhat names the missing dependency for the caller's error
+	// message (e.g. "ports.CosignSigner (provenance.WithCosignSigner)"), so
+	// the message points at the injection that is absent rather than making
+	// the reader guess which of the three it was.
+	verifierMissingWhat string
 }
 
 func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, digest v1.Hash, sigImg v1.Image, pubKeyPEM []byte, req ports.ProvenanceResolverRequest) sigVerifyOutcome {
@@ -481,29 +557,29 @@ func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, diges
 
 		if i < len(m.Layers) && m.Layers[i].Annotations != nil {
 			ann := m.Layers[i].Annotations
-			sigStr = ann[sigstore.CosignSignatureAnnotation]
+			sigStr = ann[ports.CosignSignatureAnnotation]
 			if sigStr == "" {
 				sigStr = ann["org.opencontainers.image.signature"]
 			}
-			if c, ok := ann[sigstore.CosignCertificateAnnotation]; ok {
+			if c, ok := ann[ports.CosignCertificateAnnotation]; ok {
 				certPEM = []byte(c)
 			}
-			if ch, ok := ann[sigstore.CosignChainAnnotation]; ok {
+			if ch, ok := ann[ports.CosignChainAnnotation]; ok {
 				chainPEM = []byte(ch)
 			}
-			if b, ok := ann[sigstore.CosignBundleAnnotation]; ok {
+			if b, ok := ann[ports.CosignBundleAnnotation]; ok {
 				bundleJSON = []byte(b)
 			}
 		}
 		if sigStr == "" && m.Annotations != nil {
-			sigStr = m.Annotations[sigstore.CosignSignatureAnnotation]
-			if c, ok := m.Annotations[sigstore.CosignCertificateAnnotation]; ok {
+			sigStr = m.Annotations[ports.CosignSignatureAnnotation]
+			if c, ok := m.Annotations[ports.CosignCertificateAnnotation]; ok {
 				certPEM = []byte(c)
 			}
-			if ch, ok := m.Annotations[sigstore.CosignChainAnnotation]; ok {
+			if ch, ok := m.Annotations[ports.CosignChainAnnotation]; ok {
 				chainPEM = []byte(ch)
 			}
-			if b, ok := m.Annotations[sigstore.CosignBundleAnnotation]; ok {
+			if b, ok := m.Annotations[ports.CosignBundleAnnotation]; ok {
 				bundleJSON = []byte(b)
 			}
 		}
@@ -518,7 +594,18 @@ func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, diges
 				// see ErrStaticKeyRequired — rather than silently skipped,
 				// which would be indistinguishable from "checked, invalid".
 				out.staticSigSeenNoKey = true
-			case r.signer != nil:
+			case r.signer == nil:
+				// A key IS configured and there is a signature to check with
+				// it, but no ports.CosignSigner was injected to do the
+				// checking. Written as an explicit arm rather than left to
+				// fall off the end of the switch: `case r.signer != nil:` with
+				// no default silently produced valid == false and no recorded
+				// reason, i.e. the same fail-open shape (SignatureValid: false,
+				// nil error, genuinely signed image) that a149b28 removed from
+				// this function.
+				out.verifierMissing = true
+				out.verifierMissingWhat = "ports.CosignSigner (provenance.WithCosignSigner)"
+			default:
 				sigBytes, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(sigStr))
 				bundle := ports.CosignSignatureBundle{
 					PayloadBytes:    payloadBytes,
@@ -572,7 +659,19 @@ func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, diges
 		// exactly this reason; a self-derived identity walks straight past that
 		// guard, so the guard has to be respected here, at the point the
 		// expectation is chosen.
-		if len(certPEM) > 0 && len(bundleJSON) > 0 && r.keyless != nil {
+		if len(certPEM) > 0 && len(bundleJSON) > 0 {
+			// The nil-verifier test used to sit in this condition
+			// (`&& r.keyless != nil`), which meant a missing verifier skipped
+			// the branch entirely and left keylessMaterialSeen false — so the
+			// caller's fail-closed gate on keylessMaterialSeen never fired for
+			// a genuinely keyless-signed image. Material presence and verifier
+			// availability are separate facts and are now recorded separately.
+			if r.keyless == nil {
+				out.verifierMissing = true
+				out.verifierMissingWhat = "ports.KeylessVerifier (provenance.WithKeylessVerifier)"
+				continue
+			}
+
 			out.keylessMaterialSeen = true
 
 			if req.KeylessIdentity.Empty() {
@@ -585,7 +684,7 @@ func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, diges
 			sigBytes, derr := base64.StdEncoding.DecodeString(strings.TrimSpace(sigStr))
 			if derr != nil || len(sigBytes) == 0 {
 				out.keylessErr = fmt.Errorf("keyless signature annotation %s is not usable base64: %w",
-					sigstore.CosignSignatureAnnotation, derr)
+					ports.CosignSignatureAnnotation, derr)
 				continue
 			}
 
@@ -642,7 +741,11 @@ func (r *Resolver) extractSLSAStatement(ctx context.Context, attImg v1.Image, di
 		}
 
 		// 1. Try parsing directly as JSON / DSSE
-		if stmt, ok := r.tryParseAndVerifySLSA(ctx, data, digest, pubKeyPEM); ok {
+		stmt, ok, fatal := r.tryParseAndVerifySLSA(ctx, data, digest, pubKeyPEM)
+		if fatal != nil {
+			return ports.SLSAStatement{}, fatal
+		}
+		if ok {
 			return stmt, nil
 		}
 
@@ -659,7 +762,11 @@ func (r *Resolver) extractSLSAStatement(ctx context.Context, attImg v1.Image, di
 					r.log.WarnContext(ctx, "stopping attestation tar walk", "err", rerr)
 					break
 				}
-				if stmt, ok := r.tryParseAndVerifySLSA(ctx, entryData, digest, pubKeyPEM); ok {
+				stmt, ok, fatal := r.tryParseAndVerifySLSA(ctx, entryData, digest, pubKeyPEM)
+				if fatal != nil {
+					return ports.SLSAStatement{}, fatal
+				}
+				if ok {
 					return stmt, nil
 				}
 			}
@@ -669,28 +776,49 @@ func (r *Resolver) extractSLSAStatement(ctx context.Context, attImg v1.Image, di
 	return ports.SLSAStatement{}, errors.New("no matching or verified SLSA statement found in attestation layers")
 }
 
-func (r *Resolver) tryParseAndVerifySLSA(ctx context.Context, data []byte, digest v1.Hash, pubKeyPEM []byte) (ports.SLSAStatement, bool) {
+// tryParseAndVerifySLSA reports whether data is a DSSE envelope carrying a
+// verified SLSA statement for digest.
+//
+// The third return value is a *fatal* error: non-nil only when the blob cannot
+// be judged at all because a dependency is missing, never for "this blob is not
+// a statement" or "this envelope failed to verify" (both of which are an
+// ordinary false and let the caller keep walking the remaining layers/entries).
+// It exists so a missing ports.DSSESigner cannot masquerade as "this image has
+// no provenance": those two look identical in the bool, and only one of them is
+// a real observation about the image.
+func (r *Resolver) tryParseAndVerifySLSA(ctx context.Context, data []byte, digest v1.Hash, pubKeyPEM []byte) (ports.SLSAStatement, bool, error) {
 	// Try DSSE envelope
 	var env ports.DSSEEnvelope
 	if err := json.Unmarshal(data, &env); err == nil && env.Payload != "" && len(env.Signatures) > 0 {
-		if r.dsse == nil || len(pubKeyPEM) == 0 {
-			return ports.SLSAStatement{}, false
+		if r.dsse == nil {
+			return ports.SLSAStatement{}, false, fmt.Errorf(
+				"%w: a DSSE-enveloped attestation is present but no ports.DSSESigner "+
+					"(provenance.WithDSSESigner) was injected into the provenance resolver: %w",
+				ErrVerifierNotInjected, core.ErrInvalidRequest)
+		}
+		if len(pubKeyPEM) == 0 {
+			// Distinct from the wiring gap above and deliberately NOT fatal: no
+			// key configured is the operator-facing case, and it is already
+			// handled by the signature path's ErrStaticKeyRequired refusal.
+			// Here it only means this envelope stays unverified, so no
+			// provenance is reported from it — never that it is trusted.
+			return ports.SLSAStatement{}, false, nil
 		}
 		payloadBytes, err := r.dsse.Verify(ctx, env, pubKeyPEM)
 		if err != nil {
 			r.log.DebugContext(ctx, "dsse signature verification failed", "err", err)
-			return ports.SLSAStatement{}, false
+			return ports.SLSAStatement{}, false, nil
 		}
 		var stmt ports.SLSAStatement
 		if err := json.Unmarshal(payloadBytes, &stmt); err == nil {
 			if statementMatchesDigest(stmt, digest) {
-				return stmt, true
+				return stmt, true, nil
 			}
 		}
-		return ports.SLSAStatement{}, false
+		return ports.SLSAStatement{}, false, nil
 	}
 
-	return ports.SLSAStatement{}, false
+	return ports.SLSAStatement{}, false, nil
 }
 
 // statementMatchesDigest reports whether a cryptographically-verified SLSA

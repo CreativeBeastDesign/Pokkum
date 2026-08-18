@@ -20,9 +20,10 @@
 // When BaseImageRequest.VerifySignature is set, Resolve verifies the base
 // image's Cosign signature by one of two paths — a static public key, or a
 // keyless Sigstore signature (Fulcio certificate + Rekor transparency log,
-// delegated to internal/adapters/sigstore). Which path runs is decided from
-// the request and the preset before any signature material is fetched, never
-// from what happens to be published alongside the image; see verifyBaseImage.
+// delegated to the injected ports.KeylessVerifier). Which path runs is decided
+// from the request and the preset before any signature material is fetched,
+// never from what happens to be published alongside the image; see
+// verifyBaseImage.
 //
 // # Caching
 //
@@ -77,10 +78,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/transportutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -176,17 +175,30 @@ type verifyKey struct {
 	registryConfigPath string
 }
 
-// Option supplies an optional Resolver dependency to NewResolver.
+// Option supplies a Resolver dependency to NewResolver.
 //
-// Go permits only one variadic parameter, so the Resolver's two optional
+// Go permits only one variadic parameter, so the Resolver's two verifier
 // adapters — the static-key Cosign signer and the keyless Sigstore verifier —
 // are passed as options rather than as two variadic dependency lists. A nil
-// Option is accepted and ignored, so NewResolver(log, nil) still means "all
-// defaults", exactly as the previous `signer ...ports.CosignSigner` form did.
+// Option is accepted and ignored.
+//
+// There are no defaults. Both verifiers were previously defaulted here by
+// constructing cosign.NewSigner(log) / sigstore.NewVerifier(log) directly,
+// which made this adapter import two of its peers and reach around the
+// composition root to wire them. Injection is now the only way to obtain one;
+// the composition root (cmd/pokkum) supplies both. An un-injected verifier is
+// not "verification off" — verifyBaseImage refuses to report a signature as
+// verified when the verifier its mode needs is absent (see the
+// BaseImageVerifyStaticKey / BaseImageVerifyKeyless arms there).
+//
+// Omitting them is legitimate for a Resolver that only ever resolves, never
+// verifies (`pokkum base check` listing lockfile entries, say) — which is
+// exactly why these are options and not required constructor parameters.
 type Option func(*Resolver)
 
-// WithCosignSigner overrides the static-key Cosign signer used by the
-// static-key verification path. A nil signer is ignored (the default stands).
+// WithCosignSigner injects the static-key Cosign signer used by the static-key
+// verification path. A nil signer is ignored, leaving the path unverifiable
+// (and therefore refused) rather than silently self-wired.
 func WithCosignSigner(signer ports.CosignSigner) Option {
 	return func(r *Resolver) {
 		if signer != nil {
@@ -195,8 +207,9 @@ func WithCosignSigner(signer ports.CosignSigner) Option {
 	}
 }
 
-// WithKeylessVerifier overrides the keyless Sigstore verifier used by the
-// keyless verification path. A nil verifier is ignored (the default stands).
+// WithKeylessVerifier injects the keyless Sigstore verifier used by the
+// keyless verification path. A nil verifier is ignored, with the same
+// consequence described on WithCosignSigner.
 func WithKeylessVerifier(verifier ports.KeylessVerifier) Option {
 	return func(r *Resolver) {
 		if verifier != nil {
@@ -206,18 +219,14 @@ func WithKeylessVerifier(verifier ports.KeylessVerifier) Option {
 }
 
 // NewResolver constructs a Resolver. A nil logger defaults to slog.Default().
-// The optional dependencies default to cosign.NewSigner(log) for static-key
-// signature verification and sigstore.NewVerifier(log) for keyless
-// verification; pass WithCosignSigner / WithKeylessVerifier to override
-// either.
+// The verifier dependencies have no defaults and must be injected with
+// WithCosignSigner / WithKeylessVerifier by the composition root; see Option.
 func NewResolver(log *slog.Logger, opts ...Option) *Resolver {
 	if log == nil {
 		log = slog.Default()
 	}
 	r := &Resolver{
 		log:           log,
-		signer:        cosign.NewSigner(log),
-		keyless:       sigstore.NewVerifier(log),
 		pulls:         make(map[pullKey]pullEntry),
 		images:        make(map[imageKey]imageEntry),
 		verifications: make(map[verifyKey]struct{}),
@@ -786,7 +795,15 @@ func (r *Resolver) verifyBaseImage(ctx context.Context, ref, upstreamRef string,
 	switch mode {
 	case ports.BaseImageVerifyStaticKey:
 		if r.signer == nil {
-			return fmt.Errorf("baseimage: no Cosign signer configured, refusing to treat %s as verified: %w", ref, core.ErrBaseSignatureInvalid)
+			// Fail closed on a composition-root wiring gap, exactly as on a
+			// missing key: static-key verification was requested and there is
+			// nothing here to perform it, so the only safe answer is "not
+			// verified". Names the injection point, because the fix is in the
+			// caller, not in the operator's flags.
+			return fmt.Errorf(
+				"baseimage: %s: static-key verification requested but no ports.CosignSigner was injected into the resolver "+
+					"(pass baseimage.WithCosignSigner from the composition root); refusing to treat the image as verified: %w",
+				ref, core.ErrBaseSignatureInvalid)
 		}
 		pubKeyPEM = []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
 		if len(pubKeyPEM) == 0 {
@@ -805,7 +822,11 @@ func (r *Resolver) verifyBaseImage(ctx context.Context, ref, upstreamRef string,
 
 	case ports.BaseImageVerifyKeyless:
 		if r.keyless == nil {
-			return fmt.Errorf("baseimage: no keyless verifier configured, refusing to treat %s as verified: %w", ref, core.ErrBaseSignatureInvalid)
+			// Same fail-closed rule as the static-key arm above.
+			return fmt.Errorf(
+				"baseimage: %s: keyless verification requested but no ports.KeylessVerifier was injected into the resolver "+
+					"(pass baseimage.WithKeylessVerifier from the composition root); refusing to treat the image as verified: %w",
+				ref, core.ErrBaseSignatureInvalid)
 		}
 
 		// An operator who sets POKKUM_BASE_IMAGE_PUBKEY on a preset that
@@ -930,9 +951,9 @@ type cosignSigLayer struct {
 
 	payloadBytes []byte
 	b64Sig       string
-	certPEM      []byte // sigstore.CosignCertificateAnnotation, nil if absent
-	chainPEM     []byte // sigstore.CosignChainAnnotation, nil if absent
-	bundleJSON   []byte // sigstore.CosignBundleAnnotation, nil if absent
+	certPEM      []byte // ports.CosignCertificateAnnotation, nil if absent
+	chainPEM     []byte // ports.CosignChainAnnotation, nil if absent
+	bundleJSON   []byte // ports.CosignBundleAnnotation, nil if absent
 }
 
 // fetchCosignSigLayers pulls the Cosign signature manifest for pull's digest
@@ -999,20 +1020,20 @@ func (r *Resolver) fetchCosignSigLayers(ctx context.Context, ref string, pull *p
 			// dev.cosignproject.cosign/signature is Cosign's real
 			// static-signature annotation key (see sigstore/cosign
 			// pkg/oci/static); the OCI one is a defensive fallback.
-			if sig, ok := ann[sigstore.CosignSignatureAnnotation]; ok {
+			if sig, ok := ann[ports.CosignSignatureAnnotation]; ok {
 				sl.b64Sig = sig
 			} else if sig, ok := ann["org.opencontainers.image.signature"]; ok {
 				sl.b64Sig = sig
 			}
-			sl.certPEM = annotationBytes(ann, sigstore.CosignCertificateAnnotation)
-			sl.chainPEM = annotationBytes(ann, sigstore.CosignChainAnnotation)
-			sl.bundleJSON = annotationBytes(ann, sigstore.CosignBundleAnnotation)
+			sl.certPEM = annotationBytes(ann, ports.CosignCertificateAnnotation)
+			sl.chainPEM = annotationBytes(ann, ports.CosignChainAnnotation)
+			sl.bundleJSON = annotationBytes(ann, ports.CosignBundleAnnotation)
 		}
 		// Manifest-level fallback, kept from the original single-layer
 		// implementation for signature artifacts that annotate the manifest
 		// rather than the layer descriptor.
 		if sl.b64Sig == "" && manifest.Annotations != nil {
-			if sig, ok := manifest.Annotations[sigstore.CosignSignatureAnnotation]; ok {
+			if sig, ok := manifest.Annotations[ports.CosignSignatureAnnotation]; ok {
 				sl.b64Sig = sig
 			}
 		}
@@ -1057,7 +1078,7 @@ func (r *Resolver) verifyStaticKeySignature(ctx context.Context, ref, repo, upst
 
 	for _, l := range layers {
 		if l.b64Sig == "" {
-			errs = append(errs, fmt.Errorf("layer %d: no %s annotation found on signature manifest %s", l.index, sigstore.CosignSignatureAnnotation, sigRefStr))
+			errs = append(errs, fmt.Errorf("layer %d: no %s annotation found on signature manifest %s", l.index, ports.CosignSignatureAnnotation, sigRefStr))
 			continue
 		}
 		sigBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(l.b64Sig))
@@ -1123,7 +1144,7 @@ func (r *Resolver) verifyKeylessSignature(
 
 		sigBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(l.b64Sig))
 		if decErr != nil || len(sigBytes) == 0 {
-			errs = append(errs, fmt.Errorf("layer %d: decode base64 %s annotation from %s: %w", l.index, sigstore.CosignSignatureAnnotation, sigRefStr, decErr))
+			errs = append(errs, fmt.Errorf("layer %d: decode base64 %s annotation from %s: %w", l.index, ports.CosignSignatureAnnotation, sigRefStr, decErr))
 			continue
 		}
 
@@ -1141,7 +1162,7 @@ func (r *Resolver) verifyKeylessSignature(
 			// after all (it should have been filtered out above; the verifier
 			// is the authority on what counts). Skip it without recording a
 			// verification failure — and without downgrading it.
-			if errors.Is(err, sigstore.ErrNoBundle) {
+			if errors.Is(err, ports.ErrNoKeylessBundle) {
 				r.logger().Debug("skipping signature layer without keyless material", "ref", ref, "sig_ref", sigRefStr, "layer", l.index)
 				continue
 			}
@@ -1171,7 +1192,7 @@ func (r *Resolver) verifyKeylessSignature(
 				"annotations, so there is no Fulcio certificate or Rekor entry to verify; if this image is signed with a "+
 				"static key instead, pass --base-verify-mode=static-key (or the equivalent BaseImageRequest.VerifyMode) "+
 				"and set POKKUM_BASE_IMAGE_PUBKEY to that key: %w",
-			ref, sigRefStr, sigstore.CosignCertificateAnnotation, sigstore.CosignBundleAnnotation, core.ErrBaseSignatureInvalid)
+			ref, sigRefStr, ports.CosignCertificateAnnotation, ports.CosignBundleAnnotation, core.ErrBaseSignatureInvalid)
 	}
 	return fmt.Errorf("baseimage: keyless signature verification failed for %s (%s): %w: %w", ref, sigRefStr, errors.Join(errs...), core.ErrBaseSignatureInvalid)
 }

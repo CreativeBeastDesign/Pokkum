@@ -8,7 +8,6 @@ import (
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/comparator"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/provenance"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
 )
@@ -112,7 +111,7 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 		provReq.TrustedRootJSON = data
 	}
 
-	provResolver := provenance.NewResolver(logger)
+	provResolver := newProvenanceResolver(logger)
 	provSummary, err := provResolver.ResolveProvenance(ctx, provReq)
 
 	if err != nil {

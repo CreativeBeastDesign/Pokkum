@@ -19,9 +19,11 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/baseimage"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunexec"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunruntime"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/staticserver"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -127,8 +129,10 @@ func TestRuntimeSmoke_LayeredStrategy_BootsAndServes(t *testing.T) {
 
 	logger := testLogger()
 	deps := core.Deps{
-		Compiler:        bunexec.NewCompiler(logger),
-		BaseImages:      baseimage.NewResolver(logger),
+		Compiler: bunexec.NewCompiler(logger),
+		BaseImages: baseimage.NewResolver(logger,
+			baseimage.WithCosignSigner(cosign.NewSigner(logger)),
+			baseimage.WithKeylessVerifier(sigstore.NewVerifier(logger))),
 		Supervisor:      supervisor.New(logger),
 		Packager:        packager.NewPackager(logger),
 		BunRuntime:      bunruntime.NewResolver("", nil),
@@ -672,8 +676,10 @@ func TestRuntimeSmoke_StaticStrategy_BootsAndServes(t *testing.T) {
 
 	logger := testLogger()
 	deps := core.Deps{
-		Compiler:   bunexec.NewCompiler(logger),
-		BaseImages: baseimage.NewResolver(logger),
+		Compiler: bunexec.NewCompiler(logger),
+		BaseImages: baseimage.NewResolver(logger,
+			baseimage.WithCosignSigner(cosign.NewSigner(logger)),
+			baseimage.WithKeylessVerifier(sigstore.NewVerifier(logger))),
 		// Deps.validate requires Supervisor unconditionally, even though a
 		// static build never calls Supervisor.Binary/Version — see
 		// static_e2e_test.go's TestFixtureDrivenE2E_Static's identical note.

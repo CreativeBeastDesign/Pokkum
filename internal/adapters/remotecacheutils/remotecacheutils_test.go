@@ -28,6 +28,7 @@ import (
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/remotecacheutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
@@ -1443,4 +1444,146 @@ func TestCacher_Check_KeylessVerification_SuffixRepoClaimRejected(t *testing.T) 
 	if _, err := remote.Get(relTag); err == nil {
 		t.Fatalf("BUG: release tag was promoted despite the repo claim mismatch")
 	}
+}
+
+// TestCacher_Check_NoVerifierInjected_FailsClosed proves a genuinely, validly
+// signed cache candidate is refused — not promoted as an unverified hit — when
+// the verifier the requested mode needs was never injected.
+//
+// This is the regression guard for removing the point-of-use defaults. Both
+// arms of verifyCandidate's mode switch used to construct their verifier
+// themselves (`if signer == nil { signer = cosign.NewSigner(c.log) }`, and the
+// same for sigstore.NewVerifier) — the adapter-imports-adapter edges
+// internal/architecture_test.go used to allowlist. With those gone, "no
+// verifier" is reachable, and continuing past it would promote a cache tag to a
+// release tag without anything having verified the bytes: the exact fail-open
+// 812662e closed on this switch's default arm.
+//
+// The setup is otherwise identical to
+// TestCacher_Check_VerifiedCacheHit_StaticKey — a real key pair, a real
+// signature pushed to a real in-process registry, the correct public key
+// supplied — so the only variable is whether a verifier was injected.
+func TestCacher_Check_NoVerifierInjected_FailsClosed(t *testing.T) {
+	newSignedCandidate := func(t *testing.T, repoName string) (repo, inputHash string, pubPEM []byte, digest v1.Hash) {
+		t.Helper()
+		s := httptest.NewServer(registry.New())
+		t.Cleanup(s.Close)
+
+		host := strings.TrimPrefix(s.URL, "http://")
+		repo = host + "/" + repoName
+
+		privPEM, pubPEM := generateTestKey(t)
+
+		img, err := random.Image(256, 1)
+		if err != nil {
+			t.Fatalf("random.Image: %v", err)
+		}
+		digest, err = img.Digest()
+		if err != nil {
+			t.Fatalf("img.Digest: %v", err)
+		}
+
+		inputHash = strings.Repeat("c", 64)
+		cacheRef, err := name.NewTag(repo+":"+remotecacheutils.CacheTag(inputHash), name.WeakValidation)
+		if err != nil {
+			t.Fatalf("NewTag(cache tag): %v", err)
+		}
+		if err := remote.Write(cacheRef, img); err != nil {
+			t.Fatalf("push cache entry: %v", err)
+		}
+		pushTestCosignSignature(t, repo, digest, privPEM, false)
+		return repo, inputHash, pubPEM, digest
+	}
+
+	assertNoRelease := func(t *testing.T, repo string) {
+		t.Helper()
+		relTag, err := name.NewTag(repo+":v1.0.0", name.WeakValidation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := remote.Get(relTag); err == nil {
+			t.Fatal("BUG: release tag was created from an unverified cache candidate")
+		}
+	}
+
+	t.Run("static-key mode without a CosignSigner", func(t *testing.T) {
+		repo, inputHash, pubPEM, _ := newSignedCandidate(t, "acme/no-signer")
+
+		// Deliberately no WithCosignSigner. A correct key IS supplied, so "no
+		// key configured" cannot be the reason for the refusal.
+		c := remotecacheutils.New(remotecacheutils.WithKeylessVerifier(sigstore.NewVerifier(nil)))
+		res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+			Repo:      repo,
+			InputHash: inputHash,
+			Tags:      []string{"v1.0.0"},
+			Verify: ports.RemoteCacheVerifyOptions{
+				VerifySignature: true,
+				VerifyMode:      ports.CacheVerifyStaticKey,
+				PublicKeyPEM:    pubPEM,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Check (non-strict) should bypass the cache, not error: %v", err)
+		}
+		if res.Hit {
+			t.Fatal("BUG: reported a cache Hit with no ports.CosignSigner injected — an unverified image would be promoted")
+		}
+		if res.Verified {
+			t.Fatal("BUG: reported Verified with no ports.CosignSigner injected")
+		}
+		assertNoRelease(t, repo)
+	})
+
+	t.Run("static-key mode without a CosignSigner, strict", func(t *testing.T) {
+		repo, inputHash, pubPEM, _ := newSignedCandidate(t, "acme/no-signer-strict")
+
+		c := remotecacheutils.New()
+		_, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+			Repo:      repo,
+			InputHash: inputHash,
+			Tags:      []string{"v1.0.0"},
+			Verify: ports.RemoteCacheVerifyOptions{
+				VerifySignature: true,
+				VerifyMode:      ports.CacheVerifyStaticKey,
+				PublicKeyPEM:    pubPEM,
+				Strict:          true,
+			},
+		})
+		if err == nil {
+			t.Fatal("BUG: strict Check succeeded with no ports.CosignSigner injected")
+		}
+		if !strings.Contains(err.Error(), "WithCosignSigner") {
+			t.Errorf("error should name the missing injection point, got: %v", err)
+		}
+		assertNoRelease(t, repo)
+	})
+
+	t.Run("keyless mode without a KeylessVerifier, strict", func(t *testing.T) {
+		repo, inputHash, _, _ := newSignedCandidate(t, "acme/no-keyless-strict")
+
+		// A full expected identity IS supplied, so "keyless identity is
+		// required" cannot be the reason for the refusal.
+		c := remotecacheutils.New(remotecacheutils.WithCosignSigner(cosign.NewSigner(nil)))
+		_, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+			Repo:      repo,
+			InputHash: inputHash,
+			Tags:      []string{"v1.0.0"},
+			Verify: ports.RemoteCacheVerifyOptions{
+				VerifySignature: true,
+				VerifyMode:      ports.CacheVerifyKeyless,
+				KeylessIdentity: ports.KeylessIdentity{
+					Issuer: "https://token.actions.githubusercontent.com",
+					SAN:    "https://github.com/my-org/my-app/.github/workflows/release.yml@refs/heads/main",
+				},
+				Strict: true,
+			},
+		})
+		if err == nil {
+			t.Fatal("BUG: strict Check succeeded with no ports.KeylessVerifier injected")
+		}
+		if !strings.Contains(err.Error(), "WithKeylessVerifier") {
+			t.Errorf("error should name the missing injection point, got: %v", err)
+		}
+		assertNoRelease(t, repo)
+	})
 }

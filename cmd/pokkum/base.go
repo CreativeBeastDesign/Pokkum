@@ -10,7 +10,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/baseimage"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -82,7 +81,7 @@ func runBaseUpdate(ctx context.Context, logger *slog.Logger, flags *baseUpdateFl
 	}
 
 	lockPath := filepath.Join(absDir, ports.PokkumLockfileName)
-	resolver := baseimage.NewResolver(logger)
+	resolver := newBaseImageResolver(logger)
 
 	presetsToUpdate := []ports.BaseImagePreset{
 		ports.BaseImageDistroless,
@@ -145,7 +144,7 @@ func runBaseCheck(ctx context.Context, logger *slog.Logger, args []string) error
 		return fmt.Errorf("base check: %w", err)
 	}
 
-	resolver := baseimage.NewResolver(logger)
+	resolver := newBaseImageResolver(logger)
 	for name, entry := range lf.Bases {
 		preset, err := core.ParseBaseImagePreset(name)
 		if err != nil {
