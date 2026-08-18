@@ -1,0 +1,7 @@
+{
+  "capturedAt": "2026-08-18T00:00:00Z",
+  "sha256": "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
+  "source": "tuf-target",
+  "tufRepository": "https://tuf-repo-cdn.sigstore.dev",
+  "tufTarget": "trusted_root.json"
+}

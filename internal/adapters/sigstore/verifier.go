@@ -6,12 +6,29 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/verify"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
+
+// nowFunc is the clock used for trust-root freshness reporting. Adapters in
+// this codebase must not read the system clock for anything that reaches a
+// build artifact — that is what SourceDateEpoch exists for — but "is this
+// trust anchor still current?" is inherently a question about the present
+// moment and has no deterministic answer.
+//
+// It is a package var rather than an inline time.Now() call so the staleness
+// tests can pin it and stay deterministic. Nothing it feeds influences
+// verification outcomes: it is used only to phrase warnings and to decide
+// whether to append a staleness hint to an error that would be returned
+// either way. Certificate path validation still uses the Rekor entry's
+// integrated time, never this clock.
+var nowFunc = time.Now
 
 // Cosign's legacy signature-tag annotation keys, re-exported from the ports
 // vocabulary where they are defined (ports.CosignSignatureAnnotation etc.).
@@ -82,7 +99,15 @@ var (
 // Verification is fully offline: it needs the trusted root (embedded by
 // default, see DefaultTrustedRootJSON) and the material in the request, and
 // makes no network calls of its own. The caller is responsible for fetching
-// the .sig manifest and its annotations.
+// the .sig manifest and its annotations. A caller that wants a live trust root
+// fetches one itself via FetchTrustedRootJSON/ResolveTrustedRootJSON and passes
+// it as KeylessVerifyRequest.TrustedRootJSON; nothing on this path ever does
+// network I/O implicitly, so hermetic verification stays hermetic.
+//
+// When it falls back to the embedded trust-root snapshot, it reports staleness
+// on the logger (see CheckDefaultTrustedRootFreshness) but never fails a
+// verification for it. An expired snapshot is a maintenance problem, not
+// evidence about the signature under inspection.
 type Verifier struct {
 	log *slog.Logger
 }
@@ -186,15 +211,36 @@ func (v *Verifier) Verify(ctx context.Context, req ports.KeylessVerifyRequest) (
 	// the embedded Sigstore public-good snapshot.
 	trustedRootJSON := req.TrustedRootJSON
 	trustedRootSource := "caller-supplied"
+	usedEmbeddedRoot := false
 	if len(trustedRootJSON) == 0 {
 		trustedRootJSON = DefaultTrustedRootJSON()
 		trustedRootSource = "embedded public-good snapshot"
+		usedEmbeddedRoot = true
 	}
 	trustedRoot, err := root.NewTrustedRootFromJSON(trustedRootJSON)
 	if err != nil {
 		return ports.KeylessVerifyResult{}, fmt.Errorf(
 			"%w: cannot parse the %s Sigstore trusted root (%d bytes): %w",
 			ErrMalformedMaterial, trustedRootSource, len(trustedRootJSON), err)
+	}
+
+	// 3b. If we fell back to the embedded snapshot, say so out loud when it is
+	// stale. A stale snapshot is NOT treated as a verification failure —
+	// an air-gapped operator verifying a signature their snapshot does cover is
+	// doing nothing wrong, and failing here would break hermetic verification
+	// on a calendar date rather than on evidence. But it must never be silent:
+	// the way this breaks is that a signature logged to a Rekor shard the
+	// snapshot predates fails as if it were forged.
+	if usedEmbeddedRoot {
+		if freshness, ferr := CheckDefaultTrustedRootFreshness(nowFunc()); ferr != nil {
+			// The embedded provenance sidecar is unreadable. That is a build
+			// defect in this binary, not a property of the material under
+			// verification, so it warns rather than failing the verification.
+			v.logger().Warn("cannot assess the freshness of the embedded Sigstore trust root", "error", ferr)
+		} else if freshness.Stale() {
+			v.logger().Warn("keyless verification is using a stale embedded Sigstore trust root",
+				"detail", freshness.String())
+		}
 	}
 
 	// 4. Assemble a Sigstore v0.1 bundle out of the legacy annotation
@@ -232,6 +278,29 @@ func (v *Verifier) Verify(ctx context.Context, req ports.KeylessVerifyRequest) (
 		verify.WithArtifact(bytes.NewReader(req.PayloadBytes)),
 		verify.WithCertificateIdentity(certID),
 	)
+
+	// 7b. Before asking sigstore-go to verify the Rekor entry, check that the
+	// trusted root even knows the log the entry came from — and if it does not,
+	// say exactly that.
+	//
+	// This is the single most important consequence of the trust root being a
+	// snapshot. Sigstore brings new Rekor shards online over time (the
+	// public-good instance added log2025-1.rekor.sigstore.dev in September
+	// 2025). A snapshot captured before a shard existed carries no key for it,
+	// so every signature logged to that shard fails — and inside sigstore-go it
+	// fails as an ordinary verification error, indistinguishable from a forged
+	// signature or a tampered payload. An operator reading that error concludes
+	// their base image's signature is bad, when in fact their verifier is out
+	// of date.
+	//
+	// Checking log-ID membership ourselves is what turns that into an
+	// actionable message. It is not a relaxation: an unknown log still fails
+	// closed with ErrTlogInvalid, exactly as it did before. sigstore-go
+	// independently rejects it too — this check only runs first, so the error
+	// text is the true one.
+	if err := checkRekorLogKnown(trustedRoot, material.RekorLogID, trustedRootSource, usedEmbeddedRoot, nowFunc()); err != nil {
+		return ports.KeylessVerifyResult{}, err
+	}
 
 	// 8a. Run transparency-log verification on its own first, purely for
 	// error attribution. Verifier.Verify runs the same step internally as its
@@ -325,4 +394,57 @@ func (v *Verifier) classify(req ports.KeylessVerifyRequest, material *legacyMate
 		material.LeafCertificate.NotBefore.UTC().Format("2006-01-02T15:04:05Z"),
 		material.LeafCertificate.NotAfter.UTC().Format("2006-01-02T15:04:05Z"),
 		err)
+}
+
+// checkRekorLogKnown fails closed when the trusted root carries no key for the
+// transparency log the Rekor entry claims to come from.
+//
+// sigstore-go would reject the entry anyway — this does not add or relax a
+// check. What it adds is attribution. Without it, "your trust root is older
+// than the Rekor shard this signature was logged to" and "this signature is
+// forged" produce the same error text, and the first is the far more likely
+// cause in the field for anyone running a binary built months ago.
+//
+// now is passed in (see nowFunc) purely to phrase the staleness hint; the
+// verdict itself does not depend on it.
+func checkRekorLogKnown(trustedRoot *root.TrustedRoot, logID, trustedRootSource string, usedEmbeddedRoot bool, now time.Time) error {
+	logs := trustedRoot.RekorLogs()
+
+	// root.ParseTransparencyLogs keys this map by hex.EncodeToString of the
+	// log's key ID, which is lower-case; the bundle's logID is hex text from a
+	// registry annotation and its case is not guaranteed.
+	if _, ok := logs[strings.ToLower(strings.TrimSpace(logID))]; ok {
+		return nil
+	}
+
+	known := make([]string, 0, len(logs))
+	for id, tlog := range logs {
+		if tlog != nil && tlog.BaseURL != "" {
+			known = append(known, fmt.Sprintf("%s=%s", tlog.BaseURL, id))
+			continue
+		}
+		known = append(known, id)
+	}
+	sort.Strings(known)
+	knownList := strings.Join(known, ", ")
+	if knownList == "" {
+		knownList = "(none — the trusted root declares no transparency logs at all)"
+	}
+
+	hint := "Supply a trusted root that covers this log via --sigstore-trusted-root=<file>, " +
+		"or confirm the log is a legitimate Sigstore instance before trusting it."
+	if usedEmbeddedRoot {
+		hint = fmt.Sprintf("Refresh the embedded snapshot with: %s — or pass a current snapshot via "+
+			"--sigstore-trusted-root=<file>.", RefreshTrustedRootCommand)
+		if freshness, err := CheckDefaultTrustedRootFreshness(now); err == nil {
+			hint = freshness.String() + " " + hint
+		}
+	}
+
+	return fmt.Errorf(
+		"%w: the Rekor entry in annotation %s was recorded in transparency log %s, which the %s trusted root "+
+			"does not contain (it covers %d log(s): %s). This is most likely a trust-root coverage gap rather than a bad signature — "+
+			"Sigstore brings new Rekor shards online over time and a snapshot captured before a shard existed carries "+
+			"no key to verify entries from it. %s",
+		ErrTlogInvalid, CosignBundleAnnotation, logID, trustedRootSource, len(logs), knownList, hint)
 }
