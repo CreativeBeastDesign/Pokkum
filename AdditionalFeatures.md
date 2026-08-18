@@ -430,24 +430,25 @@ Zero-config injection is the headline DX feature and the thing a new user meets 
 
 **Note on provenance of this item:** the external reviewer arrived at it from a wrong premise (see the audit below) — they believed the adapter lives in `svelte.config.js` and that relocating a *Vite* config was the mistake. The premise is wrong; the path-resolution consequence they predicted is real. Worth recording as an instance of a correct finding reached by faulty reasoning, which is exactly the kind of claim that gets dismissed with its premise if not verified independently.
 
-### Rolling-Deploy Asset Overlay (`--asset-overlay`)
+### Rolling-Deploy Asset Overlay (`--asset-overlay`) — ✅ Shipped 2026-08-18
 
 SvelteKit's client polls `/_app/version.json`. During a rolling update across N replicas, a browser holding v1's HTML requests `/_app/immutable/chunks/<hash>.js`, gets routed to a v2 pod, and receives a **404 → white screen**. `updated.check()` improves the UX but does not close the 404 window, and it is worse with prerendered pages and long-lived tabs.
 
-Nobody solves this well, and Pokkum is unusually positioned to because it already controls layer composition *and* already records `pokkum.dev/image-history` for `pokkum rollback`:
+Nobody solves this well, and Pokkum is unusually positioned to because it already controls layer composition. **As shipped, this does NOT read `pokkum.dev/image-history`** as originally sketched below — that annotation is written and read exclusively by `internal/adapters/k8s` (`resolve`/`apply`/`rollback`), and `pokkum build` has no code path to parse a Kubernetes manifest at all, so a build-time flag structurally cannot depend on cluster state without either coupling `build` to Kubernetes or requiring every caller to already be using `resolve`/`apply`. The actual mechanism, entirely registry-side and Kubernetes-independent:
 
-1. Read the previous N generations' digests from `pokkum.dev/image-history`.
-2. Pull each one's `/app/client/_app/immutable` content by digest.
-3. Merge non-conflicting hashed files into a **separate** overlay layer.
-4. Because the merged bytes are byte-identical to what the node already pulled, the layer dedupes at the registry and on the node.
+1. Every image pushed with `--asset-overlay` set stamps a new `pokkum.dev/predecessor` OCI manifest annotation naming the digest it replaced at the same push target.
+2. `--asset-overlay=<n>` walks that chain backward via repeated `remote.Get` calls, up to N generations deep, self-bootstrapping (first-ever push to a target has no predecessor: 0 generations, not an error). `--asset-overlay-from=<ref1>,<ref2>,...` is an explicit override for hand-supplied refs.
+3. Each resolved generation's `/app/client` layer is pulled by digest and only content under `_app/immutable/` is extracted.
+4. Non-conflicting hashed files are merged into a **separate** overlay layer, appended to the current build.
+5. Because the merged bytes are byte-identical to what the node already pulled, the layer dedupes at the registry and on the node.
 
 Cost is near zero. Benefit is zero-downtime rolling deploys that actually work. Per the first reviewer, "a bigger differentiator than anything in your security section" — and given how dense the security surface already is, that judgment is worth weighing seriously.
 
-Open design questions:
+Design questions — resolved:
 
-- The overlay's source digests **must** join the composite input hash, or a cache hit will serve a stale overlay.
-- Conflict policy when the same hashed path carries different bytes across generations. Content hashing should make this impossible, which argues for a hard build failure rather than a silent pick — a collision means an upstream invariant broke.
-- Interaction with `--asset-overlay` and reproducibility: the overlay makes an image's bytes depend on its *predecessors*, so `pokkum verify --rebuild` needs the same history to reproduce it. This needs an explicit answer before implementation, not after.
+- The overlay's source digests **do** join the composite input hash (`ports.RemoteCacheInputRequest.AssetOverlaySourceDigests`, sorted before hashing, mirrors `BaseImageDigest`'s treatment) — a cache hit that differs only in resolved predecessors now produces a different cache key.
+- Conflict policy: same hashed path, different bytes, across generations is a **hard build failure** (`core.ErrAssetOverlayConflict`), never a silent pick, exactly as scoped.
+- **Interaction with `pokkum verify --rebuild`: still genuinely unresolved, not silently glossed over.** `pokkum verify` has no `--asset-overlay`/`--asset-overlay-from` flags today, and its rebuild path does not attempt to reproduce the overlay layer at all — running `pokkum verify` against an image that was built with `--asset-overlay` will report the overlay layer's content as a digest mismatch against a plain rebuild, even though the image is legitimate. Closing this needs `verify` to either accept the same `--asset-overlay-from` refs the original build used, or read them back off the image's own `pokkum.dev/asset-overlay-sources` annotation and re-resolve them automatically before rebuilding. Tracked as a follow-up, not yet built.
 
 ---
 
