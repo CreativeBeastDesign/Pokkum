@@ -71,12 +71,12 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--print-manifest` | — | — | `false` | Emit the computed OCI manifest/config without pushing. Mutually exclusive with `--dry-run`. |
 | `--log-level` | — | — | `INFO` | Same as global flag; redeclared for early pre-parse. |
 | `--log-format` | — | — | `text` | Same as global flag; redeclared for early pre-parse. |
-| `--telemetry` | — | — | `false` | Enable OpenTelemetry auto-instrumentation and metrics export. |
+| `--telemetry` | — | — | `false` | Enable a real OpenTelemetry NodeSDK + OTLP trace exporter bootstrap, compiled into the image's entrypoint. **`--strategy=exe` only — has no effect for the default `--strategy=layered`** (layered has no compile step for the bootstrap to wrap; see §3a). Does **not** auto-instrument HTTP/framework code, and does not export metrics — see §3a below for exactly what this does and doesn't do, and the required `hooks.server.ts` snippet to get any real spans at all. |
 | `--no-telemetry` | — | — | `false` | Explicitly disable telemetry; wins over `--telemetry` if both are set. |
 | `--otel-export` | — | — | (none) | Override the OTLP exporter endpoint URL. |
 | `--telemetry-env` | — | — | (none) | Target environment for telemetry (`dev`, `preview`, `production`). |
 | `--trace-sample-rate` | — | — | `1.0` | Trace span sampling ratio, `0.0`–`1.0`. |
-| `--metrics-only` | — | — | `false` | Disable trace spans while keeping OTEL metrics active. |
+| `--metrics-only` | — | — | `false` | ⚠️ **Currently non-functional** (see §3a) — combining an OTLP metrics exporter with the SDK crashes once compiled under Bun (a real Bun bundler bug, not a Pokkum bug). The compiled bootstrap detects this flag and logs a runtime warning rather than silently doing nothing or crashing. |
 | `--with-otel-sidecar` | — | — | `false` | Inject an OTEL Collector sidecar spec into generated Kubernetes manifests. |
 | `--sign` | — | — | `true` | Enable SLSA, Cosign, and DSSE signing. |
 | `--no-sign` | — | — | `false` | Explicitly disable signing; wins over `--sign` if both are set. |
@@ -109,6 +109,73 @@ Positional: `[dir]` — project directory, defaults to `.`.
 Reads environment variables: `POKKUM_DOCKER_REPO` (required for push mode), `SOURCE_DATE_EPOCH` (reproducible build timestamp), `POKKUM_CACHE_DIR` (custom base cache directory for layers and runtime binaries; defaults to `~/.cache/pokkum`), `POKKUM_SOURCEMAP` (enable source map preservation), `POKKUM_STUB_LAUNCHER` (compile minimal entrypoint launcher stub), `POKKUM_CACHE_PUBKEY` (static public key for remote cache verification), `POKKUM_CACHE_VERIFY_MODE`, `POKKUM_CACHE_KEYLESS_IDENTITY`, and `POKKUM_CACHE_KEYLESS_ISSUER`.
 
 **Automatic `$env/static/*` detection (no flag):** every build scans the project's `src/` tree for `$env/static/public`/`$env/static/private` imports — SvelteKit inlines these as literal values at build time, so an image importing from them is pinned to whatever environment built it. A `Warn` names the exact bindings found, and they're stamped as a `pokkum.dev/env-baked` manifest annotation (comma-separated binding names, mirroring the existing `pokkum.dev/required-env` convention). This is a source scan, not a data-flow analysis — it does not follow a re-export or a dynamically-computed import specifier. `$env/dynamic/*` is correctly excluded (read at container startup, never baked).
+
+---
+
+## 3a. OpenTelemetry: What `--telemetry` Actually Does (and Doesn't)
+
+> [!WARNING]
+> **`--strategy=exe` only.** `--telemetry` currently has **no effect** for `--strategy=layered`, Pokkum's default. The mechanism wraps the compiled entrypoint `Compile` produces (`bun build --compile`'s input) — but `--strategy=layered` has no compile step at all: it packages the SvelteKit adapter's raw build output directly and the image execs a fixed `/app/server/index.js` via the embedded Bun runtime. Requesting `--telemetry` with `--strategy=layered` logs a build-time warning and does nothing further; it is not a silent no-op. Making this work for layered builds needs a different mechanism (packaging the bootstrap into the image and conditionally adding `bun --preload <path>` to the layered entrypoint's argv) — tracked as a real, scoped follow-up in `Roadmap.md`, not yet implemented.
+
+`--telemetry` generates a small TypeScript bootstrap (`.pokkum/otel-bootstrap.ts`, never written to your real project tree) that imports and starts a real `@opentelemetry/sdk-node` `NodeSDK` with an OTLP trace exporter, then wraps your app's compiled entrypoint so the bootstrap runs first. For `--strategy=exe`, this part is real and automatic: enable `--telemetry`, and a real OTel SDK genuinely initializes at container startup and genuinely attempts to export spans to `--otel-export`'s endpoint.
+
+**What it does not do, both confirmed by actually compiling and running real code, not assumed:**
+
+- **No automatic HTTP/framework instrumentation.** `@opentelemetry/auto-instrumentations-node` (and every package like it) works by patching Node's module loader to intercept calls — and that patching does not take effect under Bun's runtime. A real HTTP request through a Bun-compiled binary, with the patch registered as early as technically possible, produces zero spans. This is a Bun limitation, not a Pokkum bug, and nothing in Pokkum's bootstrap can work around it.
+- **No metrics export (`--metrics-only` is currently non-functional).** Combining an OTLP metrics exporter with `NodeSDK` crashes at runtime once compiled via `bun build --compile` (`TypeError: Cannot call a class constructor OTLPExporterNodeBase without |new|`) — a real Bun bundler bug where the compiler produces two non-interoperable copies of a shared dependency in one binary. The bootstrap detects `--metrics-only` and logs a runtime warning rather than silently doing nothing or crashing; no metrics are exported either way. Tracked in `Roadmap.md`.
+
+**The SDK starting is not the same as spans existing.** Since nothing calls the SDK automatically, `--telemetry` alone produces a running exporter with nothing to export. To get real spans — including route-templated names (`/blog/[slug]`, not `/blog/hello-world`) — add this to your own `src/hooks.server.ts` (a real SvelteKit file you own; Pokkum does not generate or touch it, since safely auto-injecting into it would require either mutating your source or a much larger virtual-build-root mechanism):
+
+```ts
+// src/hooks.server.ts
+import { trace, SpanStatusCode } from "@opentelemetry/api";
+import type { Handle, HandleServerError } from "@sveltejs/kit";
+
+const tracer = trace.getTracer("my-app");
+
+export const handle: Handle = async ({ event, resolve }) => {
+  const routeId = event.route.id ?? "unknown";
+  const span = tracer.startSpan(`${event.request.method} ${routeId}`);
+  span.setAttribute("http.route", routeId);
+  span.setAttribute("http.method", event.request.method);
+  span.setAttribute("url.path", event.url.pathname);
+
+  try {
+    const response = await resolve(event);
+    span.setAttribute("http.status_code", response.status);
+    if (response.status >= 500) {
+      span.setStatus({ code: SpanStatusCode.ERROR });
+    }
+    return response;
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR });
+    throw err;
+  } finally {
+    span.end();
+  }
+};
+
+export const handleError: HandleServerError = ({ error, event }) => {
+  const span = trace.getActiveSpan();
+  if (span) {
+    span.recordException(error as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR });
+  }
+  return { message: "Internal Error" };
+};
+```
+
+`trace.getTracer(...)`/`trace.getActiveSpan()` are OpenTelemetry's own global API — this snippet needs nothing from Pokkum beyond `@opentelemetry/api` being installed (see below) and `--telemetry` having started the SDK it exports through.
+
+**Your project must have these npm packages installed** (`bun add -D` or `-d`, matching whichever the rest of your dependencies use) for a `--telemetry` build to compile at all — Pokkum's compile step does not install them for you, and a hermetic build (`--hermetic`) cannot reach the network to do so even if it tried:
+
+- `@opentelemetry/api`
+- `@opentelemetry/sdk-node`
+- `@opentelemetry/exporter-trace-otlp-proto`
+- `@opentelemetry/sdk-trace-base`
+
+If you use the `hooks.server.ts` snippet above, `@opentelemetry/api` is also a direct dependency of your own source, not just the generated bootstrap.
 
 ---
 

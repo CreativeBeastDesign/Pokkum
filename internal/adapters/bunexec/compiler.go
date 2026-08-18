@@ -488,6 +488,50 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		}
 	}
 
+	// Telemetry SDK bootstrap: wraps the compile entrypoint rather than
+	// touching svelte.config.js/src/instrumentation.server.ts — see
+	// sveltekitutils.PrepareVirtualTelemetryEntry's doc comment for why
+	// SvelteKit's own on-disk-only config loading rules that out.
+	//
+	// StrategyExe ONLY, deliberately a positive check rather than "not
+	// static" (mem:self_review_checklist row 11's own prescribed pattern —
+	// a negative check silently includes every strategy nobody thought
+	// about). This wrapper only takes effect through PrepareResult.EntrypointPath,
+	// which is read exactly once downstream: pipeline.go's
+	// ports.CompileRequest{EntrypointPath: prep.EntrypointPath} construction,
+	// itself only reached for StrategyExe (StrategyLayered's fan-out never
+	// calls Compile at all — it packages prep.OutputDir directly and the
+	// packaged image execs a fixed ports.AppServerIndexPath via
+	// ports.DefaultLayeredEntrypoint(), neither of which this wrapper
+	// touches). Setting entrypoint here for StrategyLayered would silently
+	// generate a real file that nothing ever reads or compiles — exactly
+	// the "looks wired, isn't" failure this codebase has repeatedly caught
+	// itself on. Making telemetry work for the default layered strategy
+	// needs a materially different mechanism (packaging the bootstrap file
+	// into the image and conditionally adding a `bun --preload <path>` to
+	// DefaultLayeredEntrypoint's argv) — tracked as a real, scoped follow-up
+	// in Roadmap.md rather than attempted here.
+	if req.Telemetry.Enabled {
+		switch req.Strategy {
+		case ports.StrategyExe:
+			telemetryRes, err := sveltekitutils.PrepareVirtualTelemetryEntry(req.ProjectDir, entrypoint, req.Telemetry)
+			if err != nil {
+				return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: telemetry entry wrapper: %w: %w", req.ProjectDir, err, core.ErrPrepareFailed)
+			}
+			if telemetryRes.Skipped {
+				log.Info("bunexec: telemetry enabled but skipped — project already has its own src/instrumentation.server.{ts,js,mjs}", "projectDir", req.ProjectDir)
+			} else {
+				log.Info("bunexec: telemetry SDK bootstrap wired into compile entrypoint", "wrapper", telemetryRes.EntrypointPath)
+				entrypoint = telemetryRes.EntrypointPath
+			}
+		case ports.StrategyLayered:
+			log.Warn(
+				"bunexec: --telemetry has no effect for --strategy=layered (the default) yet — only --strategy=exe is currently supported, since the layered strategy has no compile step for the SDK bootstrap to wrap; see Roadmap.md",
+				"projectDir", req.ProjectDir,
+			)
+		}
+	}
+
 	log.Info("bunexec: prepare complete", "entrypoint", entrypoint, "outputDir", outputDir, "staticFallback", staticFallbackRel)
 	return ports.PrepareResult{EntrypointPath: entrypoint, OutputDir: outputDir, StaticFallbackRelPath: staticFallbackRel}, nil
 }

@@ -732,6 +732,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			KeepVendor:      slices.Clone(req.Compile.KeepVendor),
 			NoPrecompress:   req.Compile.NoPrecompress,
 			NoStrip:         req.Compile.NoStrip,
+			Telemetry:       req.Telemetry,
 		})
 		if err != nil {
 			return err

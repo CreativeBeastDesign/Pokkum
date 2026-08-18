@@ -3,6 +3,7 @@ package bunexec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -497,6 +498,91 @@ exit 1
 	}
 	if !strings.Contains(err.Error(), "SSH_AUTH_SOCK_PRESENT") {
 		t.Fatalf("expected a non-hermetic build to keep inheriting SSH_AUTH_SOCK, got: %v", err)
+	}
+}
+
+// validAdapterNodeSvelteConfig configures @sveltejs/adapter-node, the real
+// adapter StrategyLayered expects — used by the telemetry gating tests
+// below, which need Prepare to reach the strategy-gated telemetry block
+// rather than fail fast on adapter misconfiguration.
+const validAdapterNodeSvelteConfig = `
+import adapter from "@sveltejs/adapter-node";
+
+export default {
+	kit: {
+		adapter: adapter()
+	}
+};
+`
+
+// TestPrepare_Telemetry_StrategyExeWiresWrapper is PR-5's strategy-scope
+// regression guard (mem:self_review_checklist row 11): confirms the
+// telemetry wrapper is only wired for StrategyExe, the one strategy whose
+// PrepareResult.EntrypointPath is actually read downstream (Compile's
+// ports.CompileRequest construction) — a project misconfigured with the
+// wrong adapter for StrategyExe would fail before reaching this, so the
+// real signal here is that a fake bun script that creates the expected exe
+// output still finds a live .pokkum/telemetry-entry.ts wrapper afterward.
+func TestPrepare_Telemetry_StrategyExeWiresWrapper(t *testing.T) {
+	dir := newProjectDir(t, validPackageJSON, validSvelteConfig)
+	tempServerDir := filepath.Join(dir, ".svelte-kit", "jesterkit-sveltekit", "temp-server")
+	entrypoint := filepath.Join(tempServerDir, "index.ts")
+	assetsPath := filepath.Join(tempServerDir, assetsGeneratedFilename)
+	putFakeBunOnPath(t, fmt.Sprintf(
+		`mkdir -p %q && touch %q && cat > %q <<'EOF'
+%s
+EOF
+exit 0`, tempServerDir, entrypoint, assetsPath, validAssetsGenerated))
+	c := NewCompiler(discardLogger())
+
+	res, err := c.Prepare(context.Background(), ports.PrepareRequest{
+		ProjectDir: dir, Strategy: ports.StrategyExe, SourceDateEpoch: time.Unix(0, 0),
+		Telemetry: ports.TelemetryOptions{Enabled: true},
+	})
+	if err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+
+	wantWrapper := filepath.Join(dir, ".pokkum", "telemetry-entry.ts")
+	if res.EntrypointPath != wantWrapper {
+		t.Errorf("EntrypointPath = %q, want the telemetry wrapper %q", res.EntrypointPath, wantWrapper)
+	}
+	if _, err := os.Stat(wantWrapper); err != nil {
+		t.Errorf("expected the telemetry wrapper to actually be written at %s: %v", wantWrapper, err)
+	}
+}
+
+// TestPrepare_Telemetry_StrategyLayeredDoesNotWireWrapper is the other half
+// of the same regression guard: StrategyLayered never calls Compile at all
+// (it packages prep.OutputDir directly — see internal/core/pipeline.go), so
+// a wrapper wired via EntrypointPath would be a real file nothing ever
+// reads. Confirms Prepare does NOT swap EntrypointPath and does NOT write a
+// wrapper for this strategy, even with telemetry enabled — silently
+// generating unread output would itself be a "looks wired, isn't" bug.
+func TestPrepare_Telemetry_StrategyLayeredDoesNotWireWrapper(t *testing.T) {
+	dir := newProjectDir(t, validPackageJSON, validAdapterNodeSvelteConfig)
+	entrypoint := filepath.Join(dir, "build", "index.js")
+	// handler.js's content must match one of patchPrerenderedHandler's
+	// recognized patterns (StrategyLayered's post-build step) — reusing the
+	// exact fixture content TestPrepare_ZeroConfigAutoInjection_EngagesViteWrapper
+	// already established as valid, above.
+	putFakeBunOnPath(t, `mkdir -p build && touch build/index.js && echo 'path.join(dir, "prerendered")' > build/handler.js && exit 0`)
+	c := NewCompiler(discardLogger())
+
+	res, err := c.Prepare(context.Background(), ports.PrepareRequest{
+		ProjectDir: dir, Strategy: ports.StrategyLayered, SourceDateEpoch: time.Unix(0, 0),
+		Telemetry: ports.TelemetryOptions{Enabled: true},
+	})
+	if err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+
+	if res.EntrypointPath != entrypoint {
+		t.Errorf("EntrypointPath = %q, want the unwrapped real entrypoint %q (StrategyLayered telemetry is not yet supported)", res.EntrypointPath, entrypoint)
+	}
+	wrapperPath := filepath.Join(dir, ".pokkum", "telemetry-entry.ts")
+	if _, err := os.Stat(wrapperPath); err == nil {
+		t.Errorf("expected no telemetry wrapper to be written for StrategyLayered (nothing would ever read it), but found one at %s", wrapperPath)
 	}
 }
 
