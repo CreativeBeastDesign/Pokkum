@@ -13,10 +13,16 @@
 // Every value that could vary between two runs is pinned:
 //
 //   - Timestamps. PackageRequest.CreatedAt (derived by the CLI from
-//     SOURCE_DATE_EPOCH or the git commit) is the mtime of every tar entry, the
-//     image config's created field, and the created field of the history entry
-//     this package adds. time.Now is never called; the package does not import
-//     time for anything but type declarations and Truncate.
+//     SOURCE_DATE_EPOCH or the git commit) is the mtime of every application-
+//     content tar entry (server/client/vendor/native/prerendered, and the
+//     exe strategy's compiled app binary), the image config's created field,
+//     and the created field of every history entry this package adds — but
+//     deliberately NOT the mtime of the three immutable embedded-binary
+//     layers (the Bun runtime, pokkum-init, pokkum-static), which are pinned
+//     to the fixed layer.go's pinnedImmutableBinaryEpoch instead; see that
+//     constant's doc comment and Roadmap.md item 3f for why. time.Now is
+//     never called; the package does not import time for anything but type
+//     declarations, Truncate and that one fixed constant.
 //
 //   - Tar headers. See layer.go. Uid/Gid are pinned to the distroless nonroot
 //     ids, Uname/Gname are empty, the format is set explicitly, and entries are
@@ -249,11 +255,18 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 	}
 
 	if req.Strategy == ports.StrategyLayered {
-		bunLayer, err := BuildCustomFileLayer(ctx, req.Platform, ports.BunBinaryPath, req.BunRuntime.BinaryPath, ts, req.Compression)
+		// The Bun runtime and the supervisor are immutable embedded binaries,
+		// not this build's own source content: their tar ModTime (and cache
+		// key) is deliberately pinnedImmutableBinaryEpoch, not ts
+		// (SOURCE_DATE_EPOCH) — see that constant's doc comment in layer.go
+		// and Roadmap.md item 3f. The layers below that DO derive from ts
+		// (server, client, vendor, native, prerendered) are exactly the ones
+		// that legitimately reflect this build's own source snapshot.
+		bunLayer, err := BuildCustomFileLayer(ctx, req.Platform, ports.BunBinaryPath, req.BunRuntime.BinaryPath, pinnedImmutableBinaryEpoch, req.Compression)
 		if err != nil {
 			return nil, fmt.Errorf("packager: build %s: bun layer: %w", req.Platform, err)
 		}
-		supervisorLayer, err := buildSupervisorLayer(ctx, req, ts)
+		supervisorLayer, err := buildSupervisorLayer(ctx, req, pinnedImmutableBinaryEpoch)
 		if err != nil {
 			return nil, err
 		}
@@ -367,7 +380,9 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 	} else if req.Strategy.ApplyStatic() {
 		// Static images carry no Bun runtime, no server JS and no supervisor:
 		// pokkum-static is PID 1 and serves the client + prerendered trees.
-		staticLayer, err := buildStaticServerLayer(ctx, req, ts)
+		// pokkum-static itself is an immutable embedded binary, so it is
+		// pinned like the Bun/supervisor layers above, not derived from ts.
+		staticLayer, err := buildStaticServerLayer(ctx, req, pinnedImmutableBinaryEpoch)
 		if err != nil {
 			return nil, err
 		}
@@ -400,7 +415,13 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 			return nil, err
 		}
 	} else {
-		supervisorLayer, err := buildSupervisorLayer(ctx, req, ts)
+		// StrategyExe: the supervisor is the same immutable embedded binary
+		// as in the layered branch above and is pinned the same way. The
+		// compiled application binary is this build's own source content —
+		// unlike the layered strategy's Bun runtime, it is produced by
+		// compiling THIS build's source with bun build --compile, so it
+		// correctly keeps deriving from ts (SOURCE_DATE_EPOCH).
+		supervisorLayer, err := buildSupervisorLayer(ctx, req, pinnedImmutableBinaryEpoch)
 		if err != nil {
 			return nil, err
 		}

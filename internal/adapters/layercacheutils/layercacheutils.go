@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
@@ -32,16 +30,31 @@ func ResolveCacheDir() string {
 	return filepath.Join(cacheDir, "pokkum", "layers")
 }
 
-// ComputeKey returns a deterministic SHA-256 hash identifying the immutable layer contents.
-func ComputeKey(targetPath string, contentSHA256 string, platform ports.Platform, modTime time.Time, compression ports.CompressionAlgorithm) string {
+// ComputeKey returns a deterministic SHA-256 hash identifying an immutable
+// binary layer's contents, keyed ONLY on what actually determines the
+// resulting tar/layer bytes: the in-image path, the source content's
+// SHA-256, the target platform, and the compression algorithm.
+//
+// A build timestamp is deliberately NOT one of the inputs, even though the
+// layer this key addresses is built with a pinned tar ModTime of its own
+// (see packager.pinnedImmutableBinaryEpoch). This cache is exclusively used
+// for the immutable third-party/embedded-binary layers — the Bun runtime,
+// pokkum-init, pokkum-static — whose bytes are fully determined by the four
+// parameters above and never by which commit or SOURCE_DATE_EPOCH triggered
+// the build. Earlier, this function also hashed in the caller's modTime
+// (effectively SOURCE_DATE_EPOCH), which meant every commit minted a new
+// cache key for a layer whose content had not changed at all: a guaranteed
+// on-disk cache miss on every single build. Dropping it here — rather than
+// merely passing a fixed modTime through from the caller — makes that
+// invariant impossible to violate by accident from this function's own
+// signature, for any future caller.
+func ComputeKey(targetPath string, contentSHA256 string, platform ports.Platform, compression ports.CompressionAlgorithm) string {
 	h := sha256.New()
 	h.Write([]byte(targetPath))
 	h.Write([]byte("\x00"))
 	h.Write([]byte(contentSHA256))
 	h.Write([]byte("\x00"))
 	h.Write([]byte(platform.String()))
-	h.Write([]byte("\x00"))
-	h.Write([]byte(strconv.FormatInt(modTime.Unix(), 10)))
 	h.Write([]byte("\x00"))
 	h.Write([]byte(string(compression.Normalize())))
 	return hex.EncodeToString(h.Sum(nil))

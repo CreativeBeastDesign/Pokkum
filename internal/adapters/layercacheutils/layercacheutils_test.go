@@ -27,26 +27,32 @@ func TestResolveCacheDir(t *testing.T) {
 }
 
 func TestComputeKey(t *testing.T) {
-	t1 := time.Unix(1000, 0)
-	t2 := time.Unix(2000, 0)
-
-	k1 := layercacheutils.ComputeKey("/usr/local/bin/bun", "hash1", ports.LinuxAMD64, t1, ports.CompressionGzip)
-	k2 := layercacheutils.ComputeKey("/usr/local/bin/bun", "hash1", ports.LinuxAMD64, t1, ports.CompressionGzip)
+	k1 := layercacheutils.ComputeKey("/usr/local/bin/bun", "hash1", ports.LinuxAMD64, ports.CompressionGzip)
+	k2 := layercacheutils.ComputeKey("/usr/local/bin/bun", "hash1", ports.LinuxAMD64, ports.CompressionGzip)
 	if k1 != k2 {
 		t.Errorf("expected keys to be identical, got %q vs %q", k1, k2)
 	}
 
-	kDifferentTime := layercacheutils.ComputeKey("/usr/local/bin/bun", "hash1", ports.LinuxAMD64, t2, ports.CompressionGzip)
-	if k1 == kDifferentTime {
-		t.Errorf("expected different keys for different timestamps")
+	// Same content hash, path, platform and compression must always produce
+	// the same key regardless of when the two calls happen — the whole point
+	// of this cache key is that it does NOT vary with build time (see
+	// ComputeKey's doc comment / Roadmap.md item 3f). There is deliberately
+	// no "different modTime" case here anymore: a build-timestamp parameter
+	// was removed from ComputeKey's signature entirely, rather than merely
+	// asking callers to pass a fixed value, so this invariant can't quietly
+	// regress by a future caller threading a real timestamp back in.
+
+	kDifferentHash := layercacheutils.ComputeKey("/usr/local/bin/bun", "hash2", ports.LinuxAMD64, ports.CompressionGzip)
+	if k1 == kDifferentHash {
+		t.Errorf("expected different keys for different content hashes")
 	}
 
-	kDifferentPlatform := layercacheutils.ComputeKey("/usr/local/bin/bun", "hash1", ports.LinuxARM64, t1, ports.CompressionGzip)
+	kDifferentPlatform := layercacheutils.ComputeKey("/usr/local/bin/bun", "hash1", ports.LinuxARM64, ports.CompressionGzip)
 	if k1 == kDifferentPlatform {
 		t.Errorf("expected different keys for different platforms")
 	}
 
-	kDifferentComp := layercacheutils.ComputeKey("/usr/local/bin/bun", "hash1", ports.LinuxAMD64, t1, ports.CompressionZstd)
+	kDifferentComp := layercacheutils.ComputeKey("/usr/local/bin/bun", "hash1", ports.LinuxAMD64, ports.CompressionZstd)
 	if k1 == kDifferentComp {
 		t.Errorf("expected different keys for different compressions")
 	}
@@ -103,7 +109,7 @@ func TestPutAndGet_RoundTrip(t *testing.T) {
 		t.Fatalf("layer.DiffID() error: %v", err)
 	}
 
-	key := layercacheutils.ComputeKey("/pokkum/init", layercacheutils.ComputeBytesSHA256(data), ports.LinuxAMD64, modTime, ports.CompressionGzip)
+	key := layercacheutils.ComputeKey("/pokkum/init", layercacheutils.ComputeBytesSHA256(data), ports.LinuxAMD64, ports.CompressionGzip)
 
 	// 1. Initial cache get must miss
 	if _, ok := layercacheutils.Get(cacheDir, key, ports.CompressionGzip); ok {

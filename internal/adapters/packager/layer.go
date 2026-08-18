@@ -72,6 +72,45 @@ const (
 	tarFormat = tar.FormatPAX
 )
 
+// pinnedImmutableBinaryEpoch is the fixed tar ModTime — and, by extension,
+// the only "time-shaped" input that used to reach
+// layercacheutils.ComputeKey's cache key, which no longer accepts a
+// timestamp parameter at all, see its doc comment — for every layer that
+// packages an IMMUTABLE, embedded third-party/tooling binary: the Bun
+// runtime (BuildCustomFileLayer), pokkum-init (buildSupervisorLayer), and
+// pokkum-static (buildStaticServerLayer).
+//
+// Deliberately NOT req.CreatedAt / SOURCE_DATE_EPOCH: those three binaries'
+// bytes are already fully determined by (in-image path, content, platform,
+// compression) — nothing about them derives from this build's source
+// snapshot, which is what SOURCE_DATE_EPOCH exists to pin. Baking the
+// per-build/per-commit SOURCE_DATE_EPOCH into their tar header instead meant
+// the layer's diffID/digest (and therefore its on-disk cache key and its
+// registry blob digest) changed on every commit even though the embedded
+// binary itself was byte-for-byte identical — defeating both
+// internal/adapters/layercacheutils' on-disk cache (guaranteed miss every
+// commit for unchanged content) and registry-side cross-image
+// deduplication of the ~90MB Bun blob across a fleet of differently
+// -committed images (Roadmap.md item 3f).
+//
+// Pinning these three layers to a fixed constant instead is strictly MORE
+// deterministic, not less: determinism means identical inputs produce
+// identical output bytes, and these binaries' real inputs (path, content,
+// platform, compression) do not include a build timestamp at all. Every
+// OTHER layer this package builds — server, client, vendor, native,
+// prerendered, and the exe-strategy's compiled app binary — legitimately
+// reflects this build's own source snapshot and continues to use
+// pinnedTime(req.CreatedAt) exactly as before; only these three do not.
+//
+// The Unix epoch was chosen as the fixed value because it is the
+// conventional "no meaningful timestamp" constant used by other
+// reproducible-build tooling, and because it can never collide with a real
+// SOURCE_DATE_EPOCH-derived build time (those are always many decades
+// later), so a log line or a test failure showing this value is
+// unambiguously "the pinned binary epoch", never "someone's real build
+// time".
+var pinnedImmutableBinaryEpoch = time.Unix(0, 0).UTC()
+
 // layerFile is one file destined for the application layer.
 type layerFile struct {
 	// path is the absolute in-image path, e.g. "/app/server".
@@ -140,7 +179,7 @@ func buildSupervisorLayer(ctx context.Context, req ports.PackageRequest, modTime
 
 	cacheDir := layercacheutils.ResolveCacheDir()
 	contentHash := layercacheutils.ComputeBytesSHA256(req.Supervisor)
-	cacheKey := layercacheutils.ComputeKey(ports.SupervisorPath, contentHash, req.Platform, modTime, req.Compression)
+	cacheKey := layercacheutils.ComputeKey(ports.SupervisorPath, contentHash, req.Platform, req.Compression)
 
 	if cached, ok := layercacheutils.Get(cacheDir, cacheKey, req.Compression); ok {
 		return cached, nil
@@ -170,7 +209,7 @@ func buildStaticServerLayer(ctx context.Context, req ports.PackageRequest, modTi
 
 	cacheDir := layercacheutils.ResolveCacheDir()
 	contentHash := layercacheutils.ComputeBytesSHA256(req.StaticServer)
-	cacheKey := layercacheutils.ComputeKey(ports.StaticServerPath, contentHash, req.Platform, modTime, req.Compression)
+	cacheKey := layercacheutils.ComputeKey(ports.StaticServerPath, contentHash, req.Platform, req.Compression)
 
 	if cached, ok := layercacheutils.Get(cacheDir, cacheKey, req.Compression); ok {
 		return cached, nil
@@ -662,7 +701,7 @@ func BuildCustomFileLayer(ctx context.Context, platform ports.Platform, targetPa
 	contentHash, hashErr := layercacheutils.ComputeFileSHA256(sourcePath)
 	var cacheKey string
 	if hashErr == nil {
-		cacheKey = layercacheutils.ComputeKey(targetPath, contentHash, platform, modTime, compression)
+		cacheKey = layercacheutils.ComputeKey(targetPath, contentHash, platform, compression)
 		if cached, ok := layercacheutils.Get(cacheDir, cacheKey, compression); ok {
 			return cached, nil
 		}

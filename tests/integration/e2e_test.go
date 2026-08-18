@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
@@ -313,8 +314,15 @@ func TestFixtureDrivenE2E(t *testing.T) {
 	if supBin.Mode != 0o555 && supBin.Mode != 0o755 {
 		t.Errorf("Supervisor binary mode = %o, want 0555 or 0755", supBin.Mode)
 	}
-	if !supBin.ModTime.Equal(testEpoch) {
-		t.Errorf("Supervisor layer timestamp = %v, want %v", supBin.ModTime, testEpoch)
+	// The supervisor is an immutable embedded binary, so its layer is pinned to
+	// a fixed epoch rather than SOURCE_DATE_EPOCH (see packager's
+	// pinnedImmutableBinaryEpoch and Roadmap item 3f). Deriving it from the
+	// build timestamp gave the ~90MB Bun layer and this one a fresh digest on
+	// every commit, defeating both the local layer cache and registry-side
+	// dedup across a fleet. The app layer below still asserts testEpoch, since
+	// that content genuinely reflects the source snapshot.
+	if !supBin.ModTime.Equal(time.Unix(0, 0).UTC()) {
+		t.Errorf("Supervisor layer timestamp = %v, want the pinned immutable-binary epoch %v", supBin.ModTime, time.Unix(0, 0).UTC())
 	}
 
 	// App layer check

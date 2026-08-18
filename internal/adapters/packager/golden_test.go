@@ -33,14 +33,30 @@ import (
 //     two while the diffID and config digest hold — which is worth knowing,
 //     because it means images rebuilt after the upgrade get new digests even
 //     though their contents are identical.
+//
+// # 2026-08-18 update: immutable-binary layer timestamp decoupling
+//
+// goldenSupervisorLayerDiffID/Digest, goldenConfigDigest, goldenManifestDigest
+// and goldenIndexDigest moved in this update; goldenAppLayerDiffID/Digest did
+// NOT. That split is expected, not a red flag: the supervisor layer is now
+// pinned to pinnedImmutableBinaryEpoch (the Unix epoch) instead of this
+// fixture's buildEpoch (see layer.go's pinnedImmutableBinaryEpoch doc comment
+// and Roadmap.md item 3f), so its tar bytes — and everything whose digest
+// transitively includes them (the config's rootfs diff_ids, the manifest's
+// layer digests, the index) — changed, while the app layer (this build's own
+// content, still keyed on buildEpoch) is untouched. Confirmed by diffing the
+// regenerated config/manifest JSON against the pre-change values: the only
+// substantive difference is the supervisor layer's ModTime (2023-11-14 ->
+// 1970-01-01) and the digests that derive from it; every label, annotation,
+// env var and history CreatedBy string is unchanged.
 const (
-	goldenSupervisorLayerDiffID = "sha256:dfbcaa2cb264f3acee10b7b6aeced293c3283460e07c0f63bca2d05177a60d4e"
-	goldenSupervisorLayerDigest = "sha256:39064dcb430d05629cfc39ac324657459f412d0424f9d0ad9d5a8da5d712cfba"
+	goldenSupervisorLayerDiffID = "sha256:63041eb6fe4836c3a90ce0d40dcf3ccd7db094a0b3ed104c4e6c911f48778f74"
+	goldenSupervisorLayerDigest = "sha256:8ead9ea773a6f603898992e1dbc6974ab1dfb85fcdc9ccbd95f15ae021db343d"
 	goldenAppLayerDiffID        = "sha256:444f537f1513ae1971fb23beaec92dd1fb046f8c533d411518d421ad94707602"
 	goldenAppLayerDigest        = "sha256:f145163ebb449b41bb6c46cf894839aabb2c80e937a8185c124ce234610fe62a"
-	goldenConfigDigest          = "sha256:50c44d23216338fcb78bf3b0f111f9c351d726642ee17e75b7c42d4ee27e549b"
-	goldenManifestDigest        = "sha256:270927be57664f7227452f2ab7dce976c128b6ae71f38883370d585f8ac0c5e7"
-	goldenIndexDigest           = "sha256:d92b441587e0da7577d540e1be691dcc3fd94ad76baa3b4f79a915aa3233cf86"
+	goldenConfigDigest          = "sha256:312cf9d417c34f1998f7b43327e27ca35646463e016cb777495fdfcdbf57ab39"
+	goldenManifestDigest        = "sha256:569636395239fe8281fd2ee40fe94246de3c02a555f2af09c88a6e0cc6077bc6"
+	goldenIndexDigest           = "sha256:fc447a4349407da547eaefa3b7becb05477ea02b1b48443b92b12aeb1f1b5d16"
 )
 
 func TestGoldenImageDigests(t *testing.T) {

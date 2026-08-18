@@ -266,10 +266,15 @@ func TestPokkumLayersOrderAndContents(t *testing.T) {
 		t.Errorf("supervisor and app layers share a digest %s; they should be distinct", supervisorDigest)
 	}
 
+	// The supervisor is an immutable embedded binary, not this build's own
+	// source content, so its tar ModTime is pinnedImmutableBinaryEpoch (the
+	// Unix epoch), not buildEpoch — see that constant's doc comment in
+	// layer.go and Roadmap.md item 3f. The app layer below is this build's
+	// own compiled content and correctly keeps using buildEpoch.
 	gotSupervisor := readLayer(t, supervisorLayer)
 	wantSupervisor := []tarMember{
-		{Name: "pokkum/", Typeflag: tar.TypeDir, Mode: 0o555, UID: 65532, GID: 65532, ModTime: buildEpoch, Size: 0, Format: tar.FormatUSTAR},
-		{Name: "pokkum/init", Typeflag: tar.TypeReg, Mode: 0o555, UID: 65532, GID: 65532, ModTime: buildEpoch, Size: int64(len(fakeSupervisorBytes)), Format: tar.FormatUSTAR},
+		{Name: "pokkum/", Typeflag: tar.TypeDir, Mode: 0o555, UID: 65532, GID: 65532, ModTime: pinnedImmutableBinaryEpoch, Size: 0, Format: tar.FormatUSTAR},
+		{Name: "pokkum/init", Typeflag: tar.TypeReg, Mode: 0o555, UID: 65532, GID: 65532, ModTime: pinnedImmutableBinaryEpoch, Size: int64(len(fakeSupervisorBytes)), Format: tar.FormatUSTAR},
 	}
 	if !reflect.DeepEqual(gotSupervisor, wantSupervisor) {
 		t.Errorf("supervisor layer members:\n got: %+v\nwant: %+v", gotSupervisor, wantSupervisor)
@@ -301,6 +306,14 @@ func TestPokkumLayersOrderAndContents(t *testing.T) {
 // TestLayerModTimeIsTruncated checks that a sub-second CreatedAt does not force
 // archive/tar into emitting a PAX mtime record, which would both bloat and
 // de-stabilise the layer.
+//
+// The supervisor layer (layers[1]) is an immutable embedded binary pinned to
+// pinnedImmutableBinaryEpoch regardless of CreatedAt (see that constant's
+// doc comment and Roadmap.md item 3f), so its entries are checked against
+// that fixed value, not against the (truncated) CreatedAt under test. The
+// app layer (layers[2]) is this build's own compiled content and still
+// derives from CreatedAt, so it is checked against the truncated buildEpoch
+// exactly as before this pinning was introduced.
 func TestLayerModTimeIsTruncated(t *testing.T) {
 	img := buildOne(t, func(r *ports.PackageRequest) {
 		r.CreatedAt = buildEpoch.Add(123456789 * time.Nanosecond)
@@ -312,13 +325,20 @@ func TestLayerModTimeIsTruncated(t *testing.T) {
 	if len(layers) != 3 {
 		t.Fatalf("got %d layers, want base layer plus exactly two pokkum layers", len(layers))
 	}
-	for _, l := range layers[1:] {
+
+	wantModTime := map[int]time.Time{
+		1: pinnedImmutableBinaryEpoch, // supervisor: immutable binary, pinned
+		2: buildEpoch,                 // app: this build's own content
+	}
+	for i, l := range layers[1:] {
+		idx := i + 1
+		want := wantModTime[idx]
 		for _, m := range readLayer(t, l) {
-			if !m.ModTime.Equal(buildEpoch) {
-				t.Errorf("entry %q modTime = %s, want %s", m.Name, m.ModTime, buildEpoch)
+			if !m.ModTime.Equal(want) {
+				t.Errorf("layer[%d] entry %q modTime = %s, want %s", idx, m.Name, m.ModTime, want)
 			}
 			if m.Format != tar.FormatUSTAR || m.PAXCount != 0 {
-				t.Errorf("entry %q became %v with %d PAX records", m.Name, m.Format, m.PAXCount)
+				t.Errorf("layer[%d] entry %q became %v with %d PAX records", idx, m.Name, m.Format, m.PAXCount)
 			}
 		}
 	}
