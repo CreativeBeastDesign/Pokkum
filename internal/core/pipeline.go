@@ -376,6 +376,15 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		MinBunVersion: req.Compile.MinBunVersion,
 		Env:           req.Compile.Env,
 		Hermetic:      req.Hermetic,
+		// req.Normalize() (called at the top of Build, above) has already
+		// defaulted a zero-value Strategy to DefaultBuildStrategy by this
+		// point, so Preflight's adapter-configured check is evaluated
+		// against the strategy this build will actually use — see
+		// ports.PreflightRequest.Strategy's doc comment and Lessons.md's
+		// "Preflight is not strategy-aware" entry for why this previously
+		// rejected every real --strategy=static project before Prepare's own
+		// correct, strategy-aware check ever ran.
+		Strategy: req.Compile.Strategy,
 	})
 	if err != nil {
 		return BuildResult{}, err

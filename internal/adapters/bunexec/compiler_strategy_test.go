@@ -174,8 +174,17 @@ exit 0
 			wantOutputDir: func(dir string) string {
 				return filepath.Join(dir, ".svelte-kit", "output")
 			},
+			// Real adapter-static output nests prerendered pages one level
+			// deeper, under a "pages" subdirectory (see
+			// testdata/fixtures/sveltekit-static's committed
+			// .svelte-kit/output/prerendered/pages/index.html) — the
+			// staticBuildScript-based tests below exercise Prepare's flatten
+			// step against this shape directly; this case only needs the
+			// directory to exist for the entrypoint/outputDir/patch-dispatch
+			// assertions above, so a minimal nested fixture is enough.
 			bunScript: `set -e
-mkdir -p .svelte-kit/output/prerendered
+mkdir -p .svelte-kit/output/prerendered/pages
+printf '<h1>index</h1>' > .svelte-kit/output/prerendered/pages/index.html
 exit 0
 `,
 			wantPatchInvoked: false,
@@ -241,6 +250,60 @@ exit 0
 	}
 }
 
+// TestPrepare_Static_FlattensNestedPrerenderedOutput drives Prepare's static
+// branch, through the real function (not FlattenPrerenderedOutput called
+// directly, unlike prerendered_flatten_test.go), against a fake `bun run
+// build` that emits prerendered output exactly the way a real
+// @sveltejs/adapter-static build does: nested under prerendered/pages/,
+// cross-checked against the real committed fixture at
+// testdata/fixtures/sveltekit-static/.svelte-kit/output/prerendered/pages/
+// (which has index.html and about.html, nothing else). Before
+// FlattenPrerenderedOutput existed, Prepare's only check here was
+// os.Stat(outputDir/"prerendered") existing — which this exact nested shape
+// already satisfied — so this test fails against that pre-fix code (the
+// asserted flat paths never existed) despite Prepare returning no error at
+// all; it is not a Prepare-error regression test, it is a
+// packaged-content-shape regression test, matching
+// mem:self_review_checklist row 20's "assert the exact final path, not just
+// that content landed somewhere."
+func TestPrepare_Static_FlattensNestedPrerenderedOutput(t *testing.T) {
+	svelteConfig := fmt.Sprintf(svCreateSvelteConfigFmt, "@sveltejs/adapter-static")
+	dir := newProjectDir(t, validPackageJSON, svelteConfig)
+	putFakeBunOnPath(t, `set -e
+mkdir -p .svelte-kit/output/prerendered/pages
+printf '<h1>index</h1>' > .svelte-kit/output/prerendered/pages/index.html
+printf '<h1>about</h1>' > .svelte-kit/output/prerendered/pages/about.html
+exit 0
+`)
+	c := NewCompiler(discardLogger())
+
+	res, err := c.Prepare(context.Background(), ports.PrepareRequest{
+		ProjectDir:      dir,
+		Strategy:        ports.StrategyStatic,
+		SourceDateEpoch: time.Unix(0, 0),
+	})
+	if err != nil {
+		t.Fatalf("Prepare() error = %v, want nil", err)
+	}
+
+	prerenderedDir := filepath.Join(res.OutputDir, "prerendered")
+	for _, want := range []string{"index.html", "about.html"} {
+		p := filepath.Join(prerenderedDir, want)
+		if _, statErr := os.Stat(p); statErr != nil {
+			t.Errorf("expected flattened prerendered file %s to exist after Prepare, stat err = %v", p, statErr)
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(prerenderedDir, "pages")); !os.IsNotExist(statErr) {
+		t.Errorf("expected prerendered/pages to no longer exist after Prepare flattened it, stat err = %v", statErr)
+	}
+	// The nested source shape must be gone, not merely shadowed — a stray
+	// prerendered/pages/index.html left behind would mean the packager could
+	// still ship the wrong path alongside the right one.
+	if _, statErr := os.Stat(filepath.Join(prerenderedDir, "pages", "index.html")); !os.IsNotExist(statErr) {
+		t.Errorf("expected prerendered/pages/index.html to no longer exist, stat err = %v", statErr)
+	}
+}
+
 // --- Prepare: opt-in SPA-fallback detection (StrategyStatic) ----------------
 //
 // These tests drive Prepare's static branch through real projects whose
@@ -275,11 +338,20 @@ export default {
 `
 
 // staticBuildScript returns a fake `bun run build` body that emits the
-// .svelte-kit/output staging tree Prepare expects for a static build. extra is
+// .svelte-kit/output staging tree Prepare expects for a static build. The
+// prerendered page is written nested under "pages/", matching real
+// @sveltejs/adapter-static output (see testdata/fixtures/sveltekit-static's
+// committed .svelte-kit/output/prerendered/pages/index.html) rather than
+// directly under "prerendered/" — Prepare's flatten step (
+// FlattenPrerenderedOutput) is what's responsible for turning this into the
+// flat shape the packager and pokkum-static expect, so the fixture must
+// start in the real, nested state for that step to mean anything. extra is
 // emitted verbatim after the prerendered dir is created (used to optionally
 // add client/<fallback>).
 func staticBuildScript(extra string) string {
-	return "set -e\nmkdir -p .svelte-kit/output/prerendered\n" + extra + "exit 0\n"
+	return "set -e\nmkdir -p .svelte-kit/output/prerendered/pages\n" +
+		"printf '<h1>index</h1>' > .svelte-kit/output/prerendered/pages/index.html\n" +
+		extra + "exit 0\n"
 }
 
 func TestPrepare_StaticFallback_Emitted(t *testing.T) {

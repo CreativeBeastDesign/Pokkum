@@ -49,7 +49,10 @@ func TestLiveFixture_PreflightAndCompile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	pf, err := c.Preflight(ctx, ports.PreflightRequest{ProjectDir: projectDir})
+	// Strategy is stated explicitly (StrategyExe, matching this fixture's
+	// @jesterkit/exe-sveltekit wiring per this test's doc comment) now that
+	// Preflight's adapter check is strategy-aware.
+	pf, err := c.Preflight(ctx, ports.PreflightRequest{ProjectDir: projectDir, Strategy: ports.StrategyExe})
 	if err != nil {
 		t.Fatalf("Preflight against live fixture failed: %v", err)
 	}

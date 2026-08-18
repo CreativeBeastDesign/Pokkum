@@ -178,14 +178,50 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 	}
 	cfgSource := string(cfgData)
 
-	if !sveltekitutils.AdapterConfigured(cfgSource, adapterPackage) && !pkg.HasDependency(adapterPackage) && !pkg.HasDependency("@sveltejs/adapter-node") {
+	// The adapter this build actually needs depends on which strategy is
+	// being built, exactly mirroring Prepare's own targetAdapter selection a
+	// few hundred lines below (checkEffectiveAdapter) — including its
+	// positive-switch shape (mem:self_review_checklist row 11): checking
+	// "!= static" instead of naming each strategy would silently treat any
+	// future/unlisted strategy as wanting adapter-node, the same failure
+	// shape row 11 already exists to catch. Before this, Preflight
+	// unconditionally required adapterPackage/@sveltejs/adapter-node
+	// regardless of req.Strategy, which rejected every real
+	// --strategy=static project before Prepare's own correct,
+	// strategy-aware check ever ran (see Lessons.md).
+	//
+	// An empty req.Strategy is treated the same as the layered default,
+	// matching core.BuildRequest.Normalize()'s own default-before-Preflight
+	// behavior — the real pipeline always normalizes before calling
+	// Preflight, so an empty value here only happens in a caller (typically
+	// a direct unit test) that builds the request itself.
+	targetAdapter := "@sveltejs/adapter-node"
+	if req.Strategy == ports.StrategyExe {
+		targetAdapter = adapterPackage
+	} else if req.Strategy.ApplyStatic() {
+		targetAdapter = "@sveltejs/adapter-static"
+	}
+
+	viteSource, viteName := readViteConfigSource(req.ProjectDir)
+	configured, _, _ := sveltekitutils.EffectiveAdapterConfigured(cfgSource, viteSource, viteName, targetAdapter)
+	if !configured && !pkg.HasDependency(targetAdapter) {
+		shownStrategy := req.Strategy
+		if shownStrategy == "" {
+			shownStrategy = ports.DefaultBuildStrategy
+		}
 		return ports.PreflightResult{}, fmt.Errorf(
-			"bunexec: preflight %s: %s or @sveltejs/adapter-node is not configured in svelte.config.js or listed in package.json; install it with `bun add -D %s`: %w",
-			req.ProjectDir, adapterPackage, adapterPackage, core.ErrAdapterMissing,
+			"bunexec: preflight %s: --strategy=%s requires %s, but it is not configured in svelte.config.js/vite.config.* or listed in package.json; install it with `bun add -D %s`: %w",
+			req.ProjectDir, shownStrategy, targetAdapter, targetAdapter, core.ErrAdapterMissing,
 		)
 	}
 
-	if !sveltekitutils.TargetsLinuxX64(cfgSource) {
+	// TargetsLinuxX64 is specific to @jesterkit/exe-sveltekit: it is the only
+	// adapter with a mandatory internal `bun build --compile` pass Pokkum
+	// can't skip (see TargetsLinuxX64's doc comment). adapter-node and
+	// adapter-static have no such pass, so warning about it for those
+	// strategies would be pure noise about an option that belongs to a
+	// different adapter entirely.
+	if req.Strategy == ports.StrategyExe && !sveltekitutils.TargetsLinuxX64(cfgSource) {
 		log.Warn(
 			"bunexec: svelte.config.js does not appear to set the adapter's target to \"linux-x64\"; the adapter's own mandatory internal `bun build --compile` pass (there is no opt-out) will emit a host-architecture binary that pokkum discards, wasting build time and disk space — set target: \"linux-x64\" in the adapter options",
 			"projectDir", req.ProjectDir,
@@ -222,9 +258,14 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 	}
 
 	result := ports.PreflightResult{
-		BunPath:          bunPath,
-		BunVersion:       bunVer.String(),
-		AdapterVersion:   sveltekitutils.ResolveVersion(req.ProjectDir, adapterPackage, pkg),
+		BunPath:    bunPath,
+		BunVersion: bunVer.String(),
+		// Resolved against targetAdapter, not the always-jesterkit
+		// adapterPackage constant, so a layered/static build reports the
+		// version of the adapter it actually requires (@sveltejs/adapter-node
+		// or @sveltejs/adapter-static) instead of an unrelated (and, for those
+		// strategies, un-installed) package's version.
+		AdapterVersion:   sveltekitutils.ResolveVersion(req.ProjectDir, targetAdapter, pkg),
 		SvelteKitVersion: sveltekitutils.ResolveVersion(req.ProjectDir, kitPackage, pkg),
 	}
 	log.Info("bunexec: preflight ok", "bunPath", result.BunPath, "bunVersion", result.BunVersion, "adapterVersion", result.AdapterVersion)
@@ -433,11 +474,27 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	if req.Strategy.ApplyStatic() {
 		// A static build has no server entrypoint; the artifact we contract on is
 		// SvelteKit's prerendered output staging, which the fan-out packages.
-		if _, err := os.Stat(filepath.Join(outputDir, "prerendered")); err != nil {
+		prerenderedDir := filepath.Join(outputDir, "prerendered")
+		if _, err := os.Stat(prerenderedDir); err != nil {
 			return ports.PrepareResult{}, fmt.Errorf(
 				"bunexec: prepare %s: expected prerendered output %s after build (was @sveltejs/adapter-static configured as the adapter, with all routes prerenderable?): %w: %w",
-				req.ProjectDir, filepath.Join(outputDir, "prerendered"), err, core.ErrPrepareFailed,
+				req.ProjectDir, prerenderedDir, err, core.ErrPrepareFailed,
 			)
+		}
+
+		// SvelteKit's own postbuild step stages prerendered output split
+		// across pages/dependencies/data subdirectories (real shape:
+		// testdata/fixtures/sveltekit-static's committed
+		// .svelte-kit/output/prerendered/pages/*.html). Every real adapter
+		// flattens these before shipping (see FlattenPrerenderedOutput's doc
+		// comment); Pokkum must too, since it packages this staging
+		// directory directly instead of running the adapter's own
+		// writePrerendered — otherwise the image ships
+		// /app/prerendered/pages/index.html, which pokkum-static (mounted at
+		// /app/prerendered, expecting index.html directly inside it) can
+		// never find.
+		if err := FlattenPrerenderedOutput(prerenderedDir); err != nil {
+			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w: %w", req.ProjectDir, err, core.ErrPrepareFailed)
 		}
 
 		// Opt-in SPA fallback: if the project's svelte.config.js configures an

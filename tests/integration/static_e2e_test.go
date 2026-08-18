@@ -12,6 +12,7 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunexec"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
@@ -45,6 +46,13 @@ var (
 	// adapter-static emits (e.g. client/200.html). It is large and repetitive
 	// so precompressutils genuinely produces .gz/.br/.zst sidecars for it.
 	fakeSPAFallbackHTML = bytes.Repeat([]byte("<!doctype html><html><body><div id=\"app\">SPA shell</div></body></html>\n"), 20)
+
+	// fakePrerenderedAboutHTML simulates a second prerendered route, mirroring
+	// the real committed fixture (testdata/fixtures/sveltekit-static's
+	// .svelte-kit/output/prerendered/pages/about.html) having more than one
+	// page — proving the flatten step (bunexec.FlattenPrerenderedOutput)
+	// handles more than a single file.
+	fakePrerenderedAboutHTML = bytes.Repeat([]byte("<!doctype html><html><body><h1>Pokkum fixture about page</h1></body></html>\n"), 20)
 )
 
 // staticFixtureCompiler is a StrategyStatic-only ports.Compiler double, local
@@ -78,6 +86,21 @@ func (m *staticFixtureCompiler) Prepare(_ context.Context, req ports.PrepareRequ
 	// SvelteKit static staging tree.
 	outputDir := filepath.Join(req.ProjectDir, ".svelte-kit", "output")
 
+	// req.ProjectDir is a real, on-disk fixture directory shared across every
+	// test in this file (and across repeated runs) — not a fresh t.TempDir()
+	// per call. A real SvelteKit build always starts from a clean output
+	// directory (adapter-static's own adapt() hook calls builder.rimraf
+	// before writing), so this fixture must too: without this reset, a
+	// second Prepare call on the same fixtureDir (e.g.
+	// TestFixtureDrivenE2E_Static_SPAFallback running after
+	// TestFixtureDrivenE2E_Static) would find the PRIOR run's already-
+	// flattened prerendered/index.html still on disk, then collide with it
+	// when writing this run's fresh prerendered/pages/index.html and
+	// flattening again.
+	if err := os.RemoveAll(outputDir); err != nil {
+		return ports.PrepareResult{}, fmt.Errorf("staticFixtureCompiler: prepare: reset output dir: %w", err)
+	}
+
 	clientDir := filepath.Join(outputDir, "client")
 	if err := os.MkdirAll(clientDir, 0o755); err != nil {
 		return ports.PrepareResult{}, fmt.Errorf("staticFixtureCompiler: prepare: mkdir client dir: %w", err)
@@ -100,12 +123,32 @@ func (m *staticFixtureCompiler) Prepare(_ context.Context, req ports.PrepareRequ
 		return ports.PrepareResult{}, fmt.Errorf("staticFixtureCompiler: prepare: write favicon fixture: %w", err)
 	}
 
+	// Real @sveltejs/adapter-static output nests prerendered pages one level
+	// deeper, under a "pages" subdirectory — confirmed against the real,
+	// committed fixture at
+	// testdata/fixtures/sveltekit-static/.svelte-kit/output/prerendered/pages/
+	// {index,about}.html, which has no top-level prerendered/index.html at
+	// all. This fixture used to write index.html directly under
+	// prerendered/, which encoded the same wrong "flat" assumption the
+	// production bug had (mem:self_review_checklist row 12: a mock that
+	// mirrors the code's assumption can't catch a mismatch with reality).
+	// bunexec.FlattenPrerenderedOutput — the exact function
+	// bunexec.Compiler.Prepare's own static branch calls — is reused here
+	// rather than reimplemented, so this fixture can never silently drift
+	// from what the real Prepare actually produces.
 	prerenderedDir := filepath.Join(outputDir, "prerendered")
-	if err := os.MkdirAll(prerenderedDir, 0o755); err != nil {
-		return ports.PrepareResult{}, fmt.Errorf("staticFixtureCompiler: prepare: mkdir prerendered dir: %w", err)
+	prerenderedPagesDir := filepath.Join(prerenderedDir, "pages")
+	if err := os.MkdirAll(prerenderedPagesDir, 0o755); err != nil {
+		return ports.PrepareResult{}, fmt.Errorf("staticFixtureCompiler: prepare: mkdir prerendered pages dir: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(prerenderedDir, "index.html"), fakePrerenderedHTML, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(prerenderedPagesDir, "index.html"), fakePrerenderedHTML, 0o644); err != nil {
 		return ports.PrepareResult{}, fmt.Errorf("staticFixtureCompiler: prepare: write prerendered fixture: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(prerenderedPagesDir, "about.html"), fakePrerenderedAboutHTML, 0o644); err != nil {
+		return ports.PrepareResult{}, fmt.Errorf("staticFixtureCompiler: prepare: write prerendered about fixture: %w", err)
+	}
+	if err := bunexec.FlattenPrerenderedOutput(prerenderedDir); err != nil {
+		return ports.PrepareResult{}, fmt.Errorf("staticFixtureCompiler: prepare: flatten prerendered output: %w", err)
 	}
 
 	// Optional SPA fallback: stage it in the client output root and report the
@@ -429,16 +472,32 @@ func TestFixtureDrivenE2E_Static(t *testing.T) {
 		assertMemberContains(t, clientMembers, want)
 	}
 
-	// 7. Prerendered layer contains index.html + sidecars.
+	// 7. Prerendered layer contains index.html + about.html + sidecars, at
+	// the exact flat in-image path pokkum-static actually serves from
+	// (/app/prerendered/index.html, not /app/prerendered/pages/index.html —
+	// see staticFixtureCompiler.Prepare's flattening step). This is the
+	// direct regression check for the bug where adapter-static's real,
+	// nested prerendered/pages/ output was packaged verbatim: the packaged
+	// path must be asserted exactly (mem:self_review_checklist row 20), not
+	// merely "some file with the right bytes exists under the layer".
 	prerenderedMembers := harness.FetchLayerMembers(t, prerenderedLayer)
 	wantPrerenderedFiles := []string{
 		"app/prerendered/index.html",
 		"app/prerendered/index.html.gz",
 		"app/prerendered/index.html.br",
 		"app/prerendered/index.html.zst",
+		"app/prerendered/about.html",
+		"app/prerendered/about.html.gz",
+		"app/prerendered/about.html.br",
+		"app/prerendered/about.html.zst",
 	}
 	for _, want := range wantPrerenderedFiles {
 		assertMemberContains(t, prerenderedMembers, want)
+	}
+	for _, mem := range prerenderedMembers {
+		if strings.HasPrefix(mem.Name, "app/prerendered/pages/") {
+			t.Errorf("found %q in the prerendered layer: adapter-static's real pages/ nesting must be flattened before packaging, never shipped verbatim", mem.Name)
+		}
 	}
 
 	// 8. Verify attached SBOM document in test registry.

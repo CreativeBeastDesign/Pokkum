@@ -253,6 +253,18 @@ type PreflightRequest struct {
 
 	// Hermetic enforces zero-network egress and requires all dependencies to be cached locally.
 	Hermetic bool
+
+	// Strategy is the build strategy this build will use (layered, exe, or
+	// static). Preflight's adapter-configured check depends on it: the
+	// required adapter differs per strategy (@sveltejs/adapter-node for
+	// layered, @jesterkit/exe-sveltekit for exe, @sveltejs/adapter-static for
+	// static), mirroring Prepare's own per-strategy targetAdapter selection
+	// exactly. Empty is treated the same as DefaultBuildStrategy, matching
+	// core.BuildRequest.Normalize()'s own default-before-Preflight behavior
+	// — Preflight always runs after normalization in the real pipeline, so a
+	// genuinely empty value here only happens in a caller (typically a unit
+	// test) that constructs a request directly.
+	Strategy BuildStrategy
 }
 
 // PreflightResult reports what the Compiler found. Every field is
@@ -265,9 +277,12 @@ type PreflightResult struct {
 	// BunVersion is the detected Bun version, without a leading "v".
 	BunVersion string
 
-	// AdapterVersion is the resolved version of @jesterkit/exe-sveltekit found
-	// in the project. Empty if it could not be determined (which is not by
-	// itself an error — the adapter may be linked or vendored).
+	// AdapterVersion is the resolved version of the SvelteKit adapter this
+	// build's PreflightRequest.Strategy actually requires (@jesterkit/exe-
+	// sveltekit for exe, @sveltejs/adapter-node for layered, @sveltejs/
+	// adapter-static for static) found in the project. Empty if it could not
+	// be determined (which is not by itself an error — the adapter may be
+	// linked or vendored).
 	AdapterVersion string
 
 	// SvelteKitVersion is the detected @sveltejs/kit version, or empty.

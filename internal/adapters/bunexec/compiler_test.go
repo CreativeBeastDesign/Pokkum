@@ -153,7 +153,12 @@ exit 1
 `)
 	c := NewCompiler(discardLogger())
 
-	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir})
+	// Strategy is stated explicitly (StrategyExe, matching validPackageJSON's
+	// @jesterkit/exe-sveltekit devDependency) now that Preflight's adapter
+	// check is strategy-aware: the zero value resolves to the layered
+	// default's @sveltejs/adapter-node requirement, which this fixture does
+	// not declare.
+	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir, Strategy: ports.StrategyExe})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -191,7 +196,13 @@ exit 1
 `)
 	c := NewCompiler(discardLogger())
 
-	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir})
+	// Strategy is stated explicitly (StrategyExe): the fixture's
+	// svelte.config.js re-exports the adapter from a local module (so
+	// AdapterConfigured's literal text match can't see it), and it is
+	// package.json's @jesterkit/exe-sveltekit devDependency the fallback
+	// must match against — which only happens for StrategyExe now that the
+	// check is strategy-aware.
+	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir, Strategy: ports.StrategyExe})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -202,7 +213,7 @@ func TestPreflight_BunNotFound(t *testing.T) {
 	putNoBunOnPath(t)
 	c := NewCompiler(discardLogger())
 
-	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir})
+	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir, Strategy: ports.StrategyExe})
 	if !errors.Is(err, core.ErrBunNotFound) {
 		t.Fatalf("err = %v, want wrapping core.ErrBunNotFound", err)
 	}
@@ -218,7 +229,7 @@ exit 1
 `)
 	c := NewCompiler(discardLogger())
 
-	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir})
+	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir, Strategy: ports.StrategyExe})
 	if !errors.Is(err, core.ErrBunTooOld) {
 		t.Fatalf("err = %v, want wrapping core.ErrBunTooOld", err)
 	}
@@ -234,7 +245,7 @@ exit 1
 `)
 	c := NewCompiler(discardLogger())
 
-	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir, MinBunVersion: "1.4.0"})
+	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir, MinBunVersion: "1.4.0", Strategy: ports.StrategyExe})
 	if !errors.Is(err, core.ErrBunTooOld) {
 		t.Fatalf("err = %v, want wrapping core.ErrBunTooOld", err)
 	}
@@ -250,7 +261,7 @@ exit 1
 `)
 	c := NewCompiler(discardLogger())
 
-	result, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir})
+	result, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir, Strategy: ports.StrategyExe})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -267,6 +278,104 @@ exit 1
 	}
 	if result.SvelteKitVersion != "^2.5.0" {
 		t.Errorf("SvelteKitVersion = %q, want fallback %q", result.SvelteKitVersion, "^2.5.0")
+	}
+}
+
+// --- Preflight: strategy-aware adapter requirement --------------------------
+//
+// Before this fix, Preflight unconditionally required @jesterkit/exe-
+// sveltekit or @sveltejs/adapter-node regardless of req.Strategy, so a real,
+// correctly-configured adapter-static-only project (what --strategy=static
+// actually needs) failed here before Prepare's own, already strategy-aware
+// checkEffectiveAdapter ever got a chance to run — see Lessons.md's
+// "Preflight is not strategy-aware" entry and
+// mem:self_review_checklist row 13 (a well-tested fix to one function in a
+// call chain does not prove the chain works if an earlier check in the same
+// chain makes its own, independent, untested assumption about the same
+// input).
+
+// staticOnlyPackageJSON declares only @sveltejs/adapter-static — no jesterkit,
+// no adapter-node — matching a real adapter-static project.
+const staticOnlyPackageJSON = `{
+	"name": "sveltekit-static",
+	"dependencies": {
+		"@sveltejs/kit": "^2.5.0"
+	},
+	"devDependencies": {
+		"@sveltejs/adapter-static": "^3.0.10"
+	}
+}`
+
+// staticSvelteConfig configures @sveltejs/adapter-static directly in
+// svelte.config.js.
+const staticSvelteConfig = `
+import adapter from "@sveltejs/adapter-static";
+export default { kit: { adapter: adapter() } };
+`
+
+// nodeOnlyPackageJSON declares only @sveltejs/adapter-node — no jesterkit, no
+// adapter-static.
+const nodeOnlyPackageJSON = `{
+	"name": "sveltekit-node",
+	"dependencies": {
+		"@sveltejs/kit": "^2.5.0"
+	},
+	"devDependencies": {
+		"@sveltejs/adapter-node": "^5.5.7"
+	}
+}`
+
+// TestPreflight_StrategyAware_StaticAcceptsAdapterStatic is the direct
+// regression test for bug 1: a real adapter-static-only project, built with
+// --strategy=static, must pass Preflight. Fails against the pre-fix code
+// (confirmed by temporarily reverting the strategy-aware check during
+// development of this fix): the pre-fix code required jesterkit or
+// adapter-node unconditionally, and this fixture has neither.
+func TestPreflight_StrategyAware_StaticAcceptsAdapterStatic(t *testing.T) {
+	dir := newProjectDir(t, staticOnlyPackageJSON, staticSvelteConfig)
+	putFakeBunOnPath(t, `
+case "$1" in
+  --version) echo "1.3.14"; exit 0;;
+esac
+exit 1
+`)
+	c := NewCompiler(discardLogger())
+
+	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir, Strategy: ports.StrategyStatic})
+	if err != nil {
+		t.Fatalf("Preflight() error = %v, want nil for a real adapter-static-only project built with --strategy=static", err)
+	}
+}
+
+// TestPreflight_StrategyAware_StaticRejectsAdapterNodeOnly proves the fix
+// actually discriminates by strategy rather than having been loosened into
+// accepting any known adapter: an adapter-node-only project (no
+// adapter-static anywhere) requested with --strategy=static must still fail,
+// the same way requesting --strategy=static against a real adapter-node
+// project would.
+func TestPreflight_StrategyAware_StaticRejectsAdapterNodeOnly(t *testing.T) {
+	dir := newProjectDir(t, nodeOnlyPackageJSON, fmt.Sprintf(svCreateSvelteConfigFmt, "@sveltejs/adapter-node"))
+	c := NewCompiler(discardLogger())
+
+	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir, Strategy: ports.StrategyStatic})
+	if !errors.Is(err, core.ErrAdapterMissing) {
+		t.Fatalf("err = %v, want wrapping core.ErrAdapterMissing (adapter-node does not satisfy --strategy=static)", err)
+	}
+}
+
+// TestPreflight_StrategyAware_EmptyStrategyDefaultsToLayered proves the zero
+// value behaves like DefaultBuildStrategy (layered), matching
+// core.BuildRequest.Normalize()'s own default-before-Preflight behavior —
+// an adapter-static-only project with no Strategy set must fail the same way
+// a real layered build against it would (adapter-static's output shape isn't
+// what the layered packaging path expects at all).
+func TestPreflight_StrategyAware_EmptyStrategyDefaultsToLayered(t *testing.T) {
+	dir := newProjectDir(t, staticOnlyPackageJSON, staticSvelteConfig)
+	c := NewCompiler(discardLogger())
+
+	_, err := c.Preflight(context.Background(), ports.PreflightRequest{ProjectDir: dir})
+	if !errors.Is(err, core.ErrAdapterMissing) {
+		t.Fatalf("err = %v, want wrapping core.ErrAdapterMissing (empty Strategy must behave like the layered default, which this fixture does not satisfy)", err)
 	}
 }
 
@@ -846,13 +955,16 @@ func TestPreflight_HermeticViolation(t *testing.T) {
 		t.Fatalf("expected ErrHermeticViolation when node_modules is missing, got %v", err)
 	}
 
-	// Create node_modules -> passes
+	// Create node_modules -> passes. Strategy is stated explicitly
+	// (StrategyExe, matching validSvelteConfig's @jesterkit/exe-sveltekit)
+	// now that the adapter check is strategy-aware.
 	if err := os.MkdirAll(filepath.Join(dir, "node_modules"), 0o755); err != nil {
 		t.Fatalf("mkdir node_modules: %v", err)
 	}
 	_, err = c.Preflight(context.Background(), ports.PreflightRequest{
 		ProjectDir: dir,
 		Hermetic:   true,
+		Strategy:   ports.StrategyExe,
 	})
 	if err != nil {
 		t.Fatalf("expected Preflight with node_modules present to pass, got %v", err)
