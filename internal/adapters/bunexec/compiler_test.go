@@ -379,6 +379,47 @@ func TestCompile_BunExitNonZero(t *testing.T) {
 	}
 }
 
+// TestCompile_HermeticStripsSocketBearingEnvVars mirrors
+// TestPrepare_HermeticStripsSocketBearingEnvVars for the Compile stage —
+// req.Hermetic strips socket-bearing env vars there too, matching Compile's
+// identical hermetic-sandbox treatment.
+func TestCompile_HermeticStripsSocketBearingEnvVars(t *testing.T) {
+	dir := newProjectDir(t, validPackageJSON, validSvelteConfig)
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/should-not-be-inherited.sock")
+	putFakeBunOnPath(t, `
+if [ -n "$SSH_AUTH_SOCK" ]; then
+	echo "SSH_AUTH_SOCK_PRESENT" 1>&2
+else
+	echo "SSH_AUTH_SOCK_ABSENT" 1>&2
+fi
+exit 1
+`)
+	c := NewCompiler(discardLogger())
+
+	req := ports.CompileRequest{
+		ProjectDir:      dir,
+		EntrypointPath:  filepath.Join(dir, ".svelte-kit", "jesterkit-sveltekit", "temp-server", "index.ts"),
+		Platform:        ports.LinuxAMD64,
+		OutputPath:      filepath.Join(t.TempDir(), "app-linux-amd64"),
+		SourceDateEpoch: time.Unix(0, 0),
+		Hermetic:        true,
+	}
+
+	_, err := c.Compile(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected Compile to fail — the fake bun script always exits 1")
+	}
+	if strings.Contains(err.Error(), "SSH_AUTH_SOCK_PRESENT") {
+		t.Fatalf("expected SSH_AUTH_SOCK to be stripped from a hermetic build's subprocess env, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "failed to start inside the hermetic network sandbox") {
+		t.Skipf("hermetic sandbox unavailable in this environment: %v", err)
+	}
+	if !strings.Contains(err.Error(), "SSH_AUTH_SOCK_ABSENT") {
+		t.Fatalf("expected the probe result in the error, got: %v", err)
+	}
+}
+
 func TestPrepare_BunExitNonZero(t *testing.T) {
 	dir := newProjectDir(t, validPackageJSON, validSvelteConfig)
 	putFakeBunOnPath(t, `echo "adapter crashed" 1>&2; exit 1`)
@@ -392,6 +433,70 @@ func TestPrepare_BunExitNonZero(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "adapter crashed") {
 		t.Errorf("err = %v, want captured stderr in message", err)
+	}
+}
+
+// TestPrepare_HermeticStripsSocketBearingEnvVars is PR-2's residual-gap
+// regression guard, platform-independent (unlike the netns sandbox tests in
+// hermetic_linux_test.go): a hermetic build's subprocess must not see
+// SSH_AUTH_SOCK even though the parent process has it set — see
+// hermeticStrippedEnvVars's doc comment (env.go) for exactly what this does
+// and doesn't close.
+func TestPrepare_HermeticStripsSocketBearingEnvVars(t *testing.T) {
+	dir := newProjectDir(t, validPackageJSON, validSvelteConfig)
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/should-not-be-inherited.sock")
+	putFakeBunOnPath(t, `
+if [ -n "$SSH_AUTH_SOCK" ]; then
+	echo "SSH_AUTH_SOCK_PRESENT" 1>&2
+else
+	echo "SSH_AUTH_SOCK_ABSENT" 1>&2
+fi
+exit 1
+`)
+	c := NewCompiler(discardLogger())
+
+	_, err := c.Prepare(context.Background(), ports.PrepareRequest{
+		ProjectDir: dir, Strategy: ports.StrategyExe, SourceDateEpoch: time.Unix(0, 0), Hermetic: true,
+	})
+	if err == nil {
+		t.Fatal("expected Prepare to fail — the fake bun script always exits 1")
+	}
+	if strings.Contains(err.Error(), "SSH_AUTH_SOCK_PRESENT") {
+		t.Fatalf("expected SSH_AUTH_SOCK to be stripped from a hermetic build's subprocess env, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "failed to start inside the hermetic network sandbox") {
+		t.Skipf("hermetic sandbox unavailable in this environment: %v", err)
+	}
+	if !strings.Contains(err.Error(), "SSH_AUTH_SOCK_ABSENT") {
+		t.Fatalf("expected the probe result in the error, got: %v", err)
+	}
+}
+
+// TestPrepare_NonHermeticKeepsSocketBearingEnvVars is the control for the
+// test above: a non-hermetic build has no reason to strip anything, and
+// this proves stripHermeticSensitiveEnv is only reached when req.Hermetic is
+// actually set, not unconditionally.
+func TestPrepare_NonHermeticKeepsSocketBearingEnvVars(t *testing.T) {
+	dir := newProjectDir(t, validPackageJSON, validSvelteConfig)
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/should-be-inherited.sock")
+	putFakeBunOnPath(t, `
+if [ -n "$SSH_AUTH_SOCK" ]; then
+	echo "SSH_AUTH_SOCK_PRESENT" 1>&2
+else
+	echo "SSH_AUTH_SOCK_ABSENT" 1>&2
+fi
+exit 1
+`)
+	c := NewCompiler(discardLogger())
+
+	_, err := c.Prepare(context.Background(), ports.PrepareRequest{
+		ProjectDir: dir, Strategy: ports.StrategyExe, SourceDateEpoch: time.Unix(0, 0), Hermetic: false,
+	})
+	if err == nil {
+		t.Fatal("expected Prepare to fail — the fake bun script always exits 1")
+	}
+	if !strings.Contains(err.Error(), "SSH_AUTH_SOCK_PRESENT") {
+		t.Fatalf("expected a non-hermetic build to keep inheriting SSH_AUTH_SOCK, got: %v", err)
 	}
 }
 

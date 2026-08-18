@@ -323,6 +323,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	}
 
 	if req.Hermetic {
+		baseEnv = stripHermeticSensitiveEnv(baseEnv)
 		baseEnv = append(baseEnv, "BUN_OFFLINE=1", "NODE_ENV=production", "NO_UPDATE_NOTIFIER=1")
 		log.Info("bunexec: hermetic environment active", "offline", true)
 	}
@@ -610,7 +611,11 @@ func (c *Compiler) Compile(ctx context.Context, req ports.CompileRequest) (ports
 	args := buildCompileArgs(req.EntrypointPath, req.OutputPath, target, req.Minify, req.Sourcemap)
 	cmd := exec.CommandContext(ctx, "bun", args...)
 	cmd.Dir = req.ProjectDir
-	cmd.Env = buildEnvWithEpoch(req.Env, req.SourceDateEpoch)
+	compileEnv := buildEnvWithEpoch(req.Env, req.SourceDateEpoch)
+	if req.Hermetic {
+		compileEnv = stripHermeticSensitiveEnv(compileEnv)
+	}
+	cmd.Env = compileEnv
 	setNewProcessGroup(cmd)
 
 	// `bun build --compile` bundles req.EntrypointPath — a file the
