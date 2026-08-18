@@ -160,6 +160,7 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 		base:          cfg.Base,
 		platforms:     cfg.Platforms,
 		dockerRepo:    cfg.Docker.Repo,
+		dockerTags:    cfg.Docker.Tags,
 		failOnCVE:     cfg.Security.FailOnCVE,
 		sbomFormat:    cfg.SBOM.Format,
 		vexExemptions: cfg.Security.VEXExemptions,
@@ -183,6 +184,7 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 			base:          profile.Base,
 			platforms:     profile.Platforms,
 			dockerRepo:    profile.Docker.Repo,
+			dockerTags:    profile.Docker.Tags,
 			failOnCVE:     profile.Security.FailOnCVE,
 			sbomFormat:    profile.SBOM.Format,
 			vexExemptions: profile.Security.VEXExemptions,
@@ -227,6 +229,7 @@ type configFieldsToValidate struct {
 	base          string
 	platforms     []string
 	dockerRepo    string
+	dockerTags    []string
 	failOnCVE     string
 	sbomFormat    string
 	vexExemptions []ports.VEXExemptionConfig
@@ -263,6 +266,12 @@ func validateConfigFields(f configFieldsToValidate) []string {
 	if f.dockerRepo != "" {
 		if err := core.ValidateDockerRepo(f.dockerRepo); err != nil {
 			errs = append(errs, fmt.Sprintf("%sinvalid docker repo %q: %v", prefix, f.dockerRepo, err))
+		}
+	}
+
+	if len(f.dockerTags) > 0 {
+		if err := core.ValidateDockerTags(f.dockerTags); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid docker tags %v: %v", prefix, f.dockerTags, err))
 		}
 	}
 

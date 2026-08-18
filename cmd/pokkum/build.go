@@ -92,6 +92,8 @@ type buildFlags struct {
 
 	imageLabels []string
 
+	tags []string
+
 	profile              string
 	platformExplicit     bool
 	baseExplicit         bool
@@ -99,6 +101,7 @@ type buildFlags struct {
 	sbomAttachExplicit   bool
 	sourcemapExplicit    bool
 	stubLauncherExplicit bool
+	tagsExplicit         bool
 
 	noVerifyBase           bool
 	baseVerifyMode         string
@@ -162,6 +165,7 @@ The project directory defaults to the current working directory.`,
 			flags.sbomAttachExplicit = cmd.Flags().Changed("sbom-attach")
 			flags.sourcemapExplicit = cmd.Flags().Changed("sourcemap")
 			flags.stubLauncherExplicit = cmd.Flags().Changed("stub-launcher")
+			flags.tagsExplicit = cmd.Flags().Changed("tag")
 			return runBuild(ctx, logger, flags, args)
 		},
 	}
@@ -171,6 +175,8 @@ The project directory defaults to the current working directory.`,
 		"Activate a named build profile defined in .pokkum.yaml (e.g. --profile local or --profile production)")
 	cmd.Flags().StringSliceVarP(&flags.platforms, "platform", "p", []string{"linux/amd64", "linux/arm64"},
 		"Target platform(s); repeatable, e.g. --platform linux/amd64 --platform linux/arm64. Use 'all' for all supported platforms")
+	cmd.Flags().StringSliceVarP(&flags.tags, "tag", "t", nil,
+		"Image tag(s) to apply, without the repository prefix; repeatable or comma-separated, e.g. --tag v1.2.3 --tag latest. Defaults to \"latest\" if unset here, in POKKUM_DOCKER_TAGS, and in docker.tags")
 	cmd.Flags().StringVar(&flags.base, "base", "",
 		"Base image preset (distroless [default], chainguard, or custom reference)")
 	cmd.Flags().BoolVar(&flags.hardened, "hardened", false,
@@ -514,6 +520,23 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 		repo = projCfg.Docker.Repo
 	}
 	req.Repo = repo
+
+	// Tags: explicit CLI flag > POKKUM_DOCKER_TAGS env > project config /
+	// profile > default (core.DefaultTag "latest", applied by
+	// BuildRequest.Normalize). projCfg has already had any active profile's
+	// docker.tags merged in above (cfg.ApplyProfile), so "profile" and
+	// "project config" collapse into the single projCfg.Docker.Tags read
+	// here, mirroring how Repo's own profile/project-config precedence works.
+	var tagArgs []string
+	switch {
+	case flags.tagsExplicit:
+		tagArgs = flags.tags
+	case strings.TrimSpace(os.Getenv("POKKUM_DOCKER_TAGS")) != "":
+		tagArgs = splitCommaSeparated(os.Getenv("POKKUM_DOCKER_TAGS"))
+	case projCfg != nil && len(projCfg.Docker.Tags) > 0:
+		tagArgs = projCfg.Docker.Tags
+	}
+	req.Tags = tagArgs
 
 	// Platforms: explicit CLI flag > project config / profile > default flags
 	platformArgs := flags.platforms
@@ -973,6 +996,23 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	}
 
 	return &req, nil
+}
+
+// splitCommaSeparated splits a comma-separated environment variable value
+// into trimmed, non-empty tokens, mirroring pflag's StringSlice
+// comma-splitting behavior for repeatable CLI flags (e.g. --tag, --platform)
+// so POKKUM_DOCKER_TAGS="v1.2.3, latest" behaves the same as
+// --tag v1.2.3 --tag latest.
+func splitCommaSeparated(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // resolveSigningKey resolves the private signing key: --signing-key wins,

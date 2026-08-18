@@ -11,6 +11,11 @@ const ConfigFilename = ".pokkum.yaml"
 // DockerConfig holds target repository and push configuration.
 type DockerConfig struct {
 	Repo string `yaml:"repo,omitempty" json:"repo,omitempty"`
+
+	// Tags are the image tags to apply, without the repository prefix. Empty
+	// means core.DefaultTag ("latest"). May be overridden per-profile, same
+	// as Repo.
+	Tags []string `yaml:"tags,omitempty" json:"tags,omitempty"`
 }
 
 // ImageConfig holds OCI image metadata and runtime parameters.

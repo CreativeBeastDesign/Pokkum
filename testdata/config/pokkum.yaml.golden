@@ -22,6 +22,11 @@ version: 1
 # different registries entirely.
 docker:
   repo: ghcr.io/example/my-sveltekit-app
+  # Image tags to apply, without the repository prefix. Empty/omitted means
+  # "latest". May also be overridden per-profile, or via --tag /
+  # POKKUM_DOCKER_TAGS (either of which takes precedence over this file).
+  tags:
+    - latest
 
 # "layered" (default) is an N-layer image with a pinned Bun runtime;
 # "static" is a zero-JS, zero-runtime image for fully prerendered sites,
@@ -121,6 +126,8 @@ profiles:
   production:
     docker:
       repo: ghcr.io/example/my-sveltekit-app-prod
+      tags:
+        - stable
     security:
       fail_on_cve: critical
     otel:

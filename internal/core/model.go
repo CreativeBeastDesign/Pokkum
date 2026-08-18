@@ -452,6 +452,50 @@ func ValidateDockerRepo(repo string) error {
 	return nil
 }
 
+// dockerTagValidationRepo is a syntactically valid, obviously-fake repository
+// used only to give name.NewTag a repository to anchor its tag-component
+// parsing to. ValidateDockerTag validates the tag in isolation, independent
+// of whatever real repository it will eventually be combined with.
+const dockerTagValidationRepo = "pokkum.invalid/tag-validation"
+
+// ValidateDockerTag checks that tag is a syntactically valid OCI/Docker image
+// tag on its own (without a repository), reusing go-containerregistry's own
+// tag-component parser (name.NewTag) instead of a hand-rolled regex — the
+// same parser internal/adapters/registry and internal/adapters/baseimage use
+// to build every tagged reference this tool actually pushes to or pulls
+// from, so a tag that fails here would also fail at push time, just later
+// and with a worse error.
+func ValidateDockerTag(tag string) error {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return fmt.Errorf("empty tag: %w", ErrInvalidRequest)
+	}
+	if _, err := name.NewTag(dockerTagValidationRepo+":"+tag, name.WeakValidation); err != nil {
+		return fmt.Errorf("tag %q: %w: %v", tag, ErrInvalidRequest, err)
+	}
+	return nil
+}
+
+// ValidateDockerTags validates every tag with ValidateDockerTag and rejects
+// duplicates — applying (or building) the same tag twice is always a
+// mistake, mirroring ParsePlatforms' duplicate-platform rejection. Shared by
+// BuildRequest.Validate and `pokkum config validate` so a docker.tags list in
+// .pokkum.yaml that would fail at build time is caught earlier, with
+// identical rules.
+func ValidateDockerTags(tags []string) error {
+	seen := make(map[string]struct{}, len(tags))
+	for _, t := range tags {
+		if err := ValidateDockerTag(t); err != nil {
+			return err
+		}
+		if _, dup := seen[t]; dup {
+			return fmt.Errorf("tag %q listed twice: %w", t, ErrInvalidRequest)
+		}
+		seen[t] = struct{}{}
+	}
+	return nil
+}
+
 // ParseSourceDateEpoch parses a SOURCE_DATE_EPOCH value: a decimal count of
 // seconds since the Unix epoch, as specified by the reproducible-builds
 // standard. An empty string yields the zero Time and a nil error, meaning
@@ -879,13 +923,8 @@ func (r BuildRequest) Validate() error {
 		seen[p] = struct{}{}
 	}
 
-	for _, t := range r.Tags {
-		if strings.TrimSpace(t) == "" {
-			return fmt.Errorf("empty tag: %w", ErrInvalidRequest)
-		}
-		if strings.ContainsAny(t, ":@/ ") {
-			return fmt.Errorf("tag %q must not contain ':', '@', '/' or spaces: %w", t, ErrInvalidRequest)
-		}
+	if err := ValidateDockerTags(r.Tags); err != nil {
+		return err
 	}
 
 	if !r.BaseImage.Preset.Valid() {

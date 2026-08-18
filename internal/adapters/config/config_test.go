@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -577,6 +578,83 @@ func TestApplyProfile_DockerRepoOverride(t *testing.T) {
 	}
 	if baseCfg.Docker.Repo != "ghcr.io/test/app-staging" {
 		t.Errorf("baseCfg.Docker.Repo was unexpectedly mutated: %q", baseCfg.Docker.Repo)
+	}
+}
+
+// TestApplyProfile_DockerTagsOverride mirrors
+// TestApplyProfile_DockerRepoOverride for the docker.tags field added
+// alongside docker.repo: a profile's tags must override the base config's,
+// the base config must be untouched by ApplyProfile (row 10's "merge, not
+// just validate" half), and mutating the merged slice must not alias the
+// base config's slice (deepCopyProjectConfig must actually clone it).
+func TestApplyProfile_DockerTagsOverride(t *testing.T) {
+	mgr, err := New(".", nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	baseCfg := &ports.ProjectConfig{
+		Version: 1,
+		Docker:  ports.DockerConfig{Repo: "ghcr.io/test/app", Tags: []string{"staging"}},
+		Profiles: map[string]ports.BuildProfile{
+			"production": {
+				Docker: ports.DockerConfig{Tags: []string{"stable", "v2.0.0"}},
+			},
+		},
+	}
+
+	merged, err := mgr.ApplyProfile(baseCfg, "production")
+	if err != nil {
+		t.Fatalf("ApplyProfile failed: %v", err)
+	}
+	if want := []string{"stable", "v2.0.0"}; !slices.Equal(merged.Docker.Tags, want) {
+		t.Errorf("expected Docker.Tags overridden to %v, got %v", want, merged.Docker.Tags)
+	}
+	if want := []string{"staging"}; !slices.Equal(baseCfg.Docker.Tags, want) {
+		t.Errorf("baseCfg.Docker.Tags was unexpectedly mutated: %v", baseCfg.Docker.Tags)
+	}
+
+	// Mutating the merged slice must not alias baseCfg's own slice.
+	merged.Docker.Tags[0] = "mutated"
+	if baseCfg.Docker.Tags[0] == "mutated" {
+		t.Error("merged.Docker.Tags aliases baseCfg.Docker.Tags — deepCopyProjectConfig did not clone it")
+	}
+}
+
+// TestApplyProfile_DockerTagsFallsThroughWhenProfileOmitsIt proves a profile
+// that doesn't set docker.tags at all leaves the base config's tags intact —
+// the same "only set what should differ" contract every other profile field
+// already honors.
+func TestApplyProfile_DockerTagsFallsThroughWhenProfileOmitsIt(t *testing.T) {
+	mgr, err := New(".", nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	baseCfg := &ports.ProjectConfig{
+		Version: 1,
+		Docker:  ports.DockerConfig{Repo: "ghcr.io/test/app", Tags: []string{"latest"}},
+		Profiles: map[string]ports.BuildProfile{
+			"local": {
+				Output: "local",
+			},
+		},
+	}
+
+	merged, err := mgr.ApplyProfile(baseCfg, "local")
+	if err != nil {
+		t.Fatalf("ApplyProfile failed: %v", err)
+	}
+	if want := []string{"latest"}; !slices.Equal(merged.Docker.Tags, want) {
+		t.Errorf("expected Docker.Tags to fall through to %v, got %v", want, merged.Docker.Tags)
+	}
+
+	// The fallen-through slice must be deepCopyProjectConfig's own clone, not
+	// an alias of baseCfg.Docker.Tags — otherwise mutating a merged config
+	// obtained via one profile could corrupt the base config used by another.
+	merged.Docker.Tags[0] = "mutated"
+	if baseCfg.Docker.Tags[0] == "mutated" {
+		t.Error("merged.Docker.Tags (fallen through from base) aliases baseCfg.Docker.Tags — deepCopyProjectConfig did not clone it")
 	}
 }
 

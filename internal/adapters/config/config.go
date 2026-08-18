@@ -5,11 +5,11 @@
 // There is no generic dotted-key -> POKKUM_* environment binding here: each
 // field that has an environment override reads it explicitly via os.Getenv
 // at its own call site (see cmd/pokkum/build.go). Only a fixed, documented
-// subset of fields has an override at all (docker.repo, security.fail_on_cve,
-// cache.verify_mode, cache.pubkey, cache.keyless_identity,
-// cache.keyless_issuer, plus the per-profile sourcemap setting) — see
-// Vocabulary.md for the authoritative list. Everything else is config-file
-// or flag only.
+// subset of fields has an override at all (docker.repo, docker.tags,
+// security.fail_on_cve, cache.verify_mode, cache.pubkey,
+// cache.keyless_identity, cache.keyless_issuer, plus the per-profile
+// sourcemap setting) — see Vocabulary.md for the authoritative list.
+// Everything else is config-file or flag only.
 package config
 
 import (
@@ -175,6 +175,9 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 	}
 	if profile.Docker.Repo != "" {
 		merged.Docker.Repo = profile.Docker.Repo
+	}
+	if len(profile.Docker.Tags) > 0 {
+		merged.Docker.Tags = append([]string{}, profile.Docker.Tags...)
 	}
 
 	// Image overrides
@@ -362,6 +365,9 @@ func deepCopyProjectConfig(src *ports.ProjectConfig) *ports.ProjectConfig {
 
 	if len(src.Platforms) > 0 {
 		dst.Platforms = append([]string{}, src.Platforms...)
+	}
+	if len(src.Docker.Tags) > 0 {
+		dst.Docker.Tags = append([]string{}, src.Docker.Tags...)
 	}
 
 	// Clone maps

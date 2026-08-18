@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -414,6 +415,126 @@ func TestWriteVEXDocument(t *testing.T) {
 		}
 		if _, err := os.Stat(outPath); !os.IsNotExist(err) {
 			t.Errorf("expected no file to be written when there are no exemptions, got err=%v", err)
+		}
+	})
+}
+
+// TestBuild_TagsPrecedence proves --tag / POKKUM_DOCKER_TAGS / docker.tags
+// (including its per-profile override) reach BuildRequest.Tags through the
+// real buildRequestFromConfigAndFlags call chain, in the documented
+// precedence order: explicit --tag flag > POKKUM_DOCKER_TAGS env >
+// project config / profile > default ("latest", applied by
+// BuildRequest.Normalize, not by this function).
+func TestBuild_TagsPrecedence(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	cfgContent := `version: 1
+docker:
+  repo: ghcr.io/example/app
+  tags:
+    - from-config
+profiles:
+  prod:
+    docker:
+      tags:
+        - from-profile
+`
+
+	newTmpDirWithConfig := func(t *testing.T) string {
+		tmpDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmpDir, ports.ConfigFilename), []byte(cfgContent), 0644); err != nil {
+			t.Fatalf("failed to write %s: %v", ports.ConfigFilename, err)
+		}
+		return tmpDir
+	}
+
+	t.Run("explicit --tag flag wins over env and config", func(t *testing.T) {
+		tmpDir := newTmpDirWithConfig(t)
+		t.Setenv("POKKUM_DOCKER_TAGS", "from-env")
+
+		flags := &buildFlags{
+			platforms:    []string{"linux/amd64"},
+			tags:         []string{"from-flag-1", "from-flag-2"},
+			tagsExplicit: true,
+		}
+		req, err := buildRequestFromConfigAndFlags(context.Background(), logger, flags, tmpDir)
+		if err != nil {
+			t.Fatalf("buildRequestFromConfigAndFlags failed: %v", err)
+		}
+		if want := []string{"from-flag-1", "from-flag-2"}; !slices.Equal(req.Tags, want) {
+			t.Errorf("expected Tags %v (flag wins), got %v", want, req.Tags)
+		}
+	})
+
+	t.Run("POKKUM_DOCKER_TAGS env wins over config when flag is not explicit", func(t *testing.T) {
+		tmpDir := newTmpDirWithConfig(t)
+		t.Setenv("POKKUM_DOCKER_TAGS", "from-env-1, from-env-2")
+
+		flags := &buildFlags{
+			platforms: []string{"linux/amd64"},
+		}
+		req, err := buildRequestFromConfigAndFlags(context.Background(), logger, flags, tmpDir)
+		if err != nil {
+			t.Fatalf("buildRequestFromConfigAndFlags failed: %v", err)
+		}
+		if want := []string{"from-env-1", "from-env-2"}; !slices.Equal(req.Tags, want) {
+			t.Errorf("expected Tags %v (env wins over config), got %v", want, req.Tags)
+		}
+	})
+
+	t.Run("docker.tags from project config is used when neither flag nor env is set", func(t *testing.T) {
+		tmpDir := newTmpDirWithConfig(t)
+		t.Setenv("POKKUM_DOCKER_TAGS", "")
+
+		flags := &buildFlags{
+			platforms: []string{"linux/amd64"},
+		}
+		req, err := buildRequestFromConfigAndFlags(context.Background(), logger, flags, tmpDir)
+		if err != nil {
+			t.Fatalf("buildRequestFromConfigAndFlags failed: %v", err)
+		}
+		if want := []string{"from-config"}; !slices.Equal(req.Tags, want) {
+			t.Errorf("expected Tags %v (from base config), got %v", want, req.Tags)
+		}
+	})
+
+	t.Run("a named profile's docker.tags overrides the base config's", func(t *testing.T) {
+		tmpDir := newTmpDirWithConfig(t)
+		t.Setenv("POKKUM_DOCKER_TAGS", "")
+
+		flags := &buildFlags{
+			platforms: []string{"linux/amd64"},
+			profile:   "prod",
+		}
+		req, err := buildRequestFromConfigAndFlags(context.Background(), logger, flags, tmpDir)
+		if err != nil {
+			t.Fatalf("buildRequestFromConfigAndFlags failed: %v", err)
+		}
+		if want := []string{"from-profile"}; !slices.Equal(req.Tags, want) {
+			t.Errorf("expected Tags %v (profile override), got %v", want, req.Tags)
+		}
+	})
+
+	t.Run("defaults to latest via Normalize when nothing sets a tag", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmpDir, ports.ConfigFilename), []byte("version: 1\ndocker:\n  repo: ghcr.io/example/app\n"), 0644); err != nil {
+			t.Fatalf("failed to write %s: %v", ports.ConfigFilename, err)
+		}
+		t.Setenv("POKKUM_DOCKER_TAGS", "")
+
+		flags := &buildFlags{
+			platforms: []string{"linux/amd64"},
+		}
+		req, err := buildRequestFromConfigAndFlags(context.Background(), logger, flags, tmpDir)
+		if err != nil {
+			t.Fatalf("buildRequestFromConfigAndFlags failed: %v", err)
+		}
+		if len(req.Tags) != 0 {
+			t.Errorf("expected buildRequestFromConfigAndFlags to leave Tags unset before Normalize, got %v", req.Tags)
+		}
+		req.Normalize()
+		if want := []string{core.DefaultTag}; !slices.Equal(req.Tags, want) {
+			t.Errorf("expected Normalize to default Tags to %v, got %v", want, req.Tags)
 		}
 	})
 }

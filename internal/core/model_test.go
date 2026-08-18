@@ -166,6 +166,64 @@ func TestPlatformList(t *testing.T) {
 	}
 }
 
+func TestValidateDockerTag(t *testing.T) {
+	tests := []struct {
+		name    string
+		tag     string
+		wantErr bool
+	}{
+		{"simple tag", "latest", false},
+		{"semver tag", "v1.2.3", false},
+		{"git-sha-style tag", "sha-abc1234", false},
+		{"underscores and dots", "release_2026.08.18", false},
+		{"empty tag", "", true},
+		{"whitespace-only tag", "   ", true},
+		{"tag with colon", "tag:with:colon", true},
+		{"tag with slash", "not/a/tag", true},
+		{"tag with at-sign", "tag@sha256digest", true},
+		{"tag with space", "bad tag", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := core.ValidateDockerTag(tc.tag)
+			if tc.wantErr && err == nil {
+				t.Errorf("ValidateDockerTag(%q) = nil, want error", tc.tag)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("ValidateDockerTag(%q) = %v, want nil", tc.tag, err)
+			}
+			if err != nil && !errors.Is(err, core.ErrInvalidRequest) {
+				t.Errorf("ValidateDockerTag(%q) error = %v, want wrapping core.ErrInvalidRequest", tc.tag, err)
+			}
+		})
+	}
+}
+
+func TestValidateDockerTags(t *testing.T) {
+	tests := []struct {
+		name    string
+		tags    []string
+		wantErr bool
+	}{
+		{"nil is valid (caller defaults elsewhere)", nil, false},
+		{"single valid tag", []string{"latest"}, false},
+		{"multiple distinct valid tags", []string{"latest", "v1.2.3", "sha-abc1234"}, false},
+		{"duplicate tags rejected", []string{"v1", "v1"}, true},
+		{"one invalid tag among valid ones", []string{"latest", "bad tag"}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := core.ValidateDockerTags(tc.tags)
+			if tc.wantErr && err == nil {
+				t.Errorf("ValidateDockerTags(%v) = nil, want error", tc.tags)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("ValidateDockerTags(%v) = %v, want nil", tc.tags, err)
+			}
+		})
+	}
+}
+
 func TestParseSBOMFormat(t *testing.T) {
 	tests := []struct {
 		input   string
@@ -564,6 +622,13 @@ func TestBuildRequestValidate(t *testing.T) {
 			name: "invalid tag characters",
 			mutate: func(r *core.BuildRequest) {
 				r.Tags = []string{"tag:with:colon"}
+			},
+			wantErr: core.ErrInvalidRequest,
+		},
+		{
+			name: "duplicate tag",
+			mutate: func(r *core.BuildRequest) {
+				r.Tags = []string{"v1", "v1"}
 			},
 			wantErr: core.ErrInvalidRequest,
 		},

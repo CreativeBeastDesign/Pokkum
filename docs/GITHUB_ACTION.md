@@ -3,7 +3,7 @@
 The official **Pokkum GitHub Action** (`CreativeBeastDesign/pokkum`) enables fast, reproducible, and hardened container builds for SvelteKit and Bun applications directly inside GitHub Actions CI/CD workflows.
 
 > [!IMPORTANT]
-> The action wraps the `pokkum build` CLI subcommand. Its inputs are translated into the *real* flags/environment variables `pokkum build` actually accepts (verified against `pokkum build --help`) — not the invocation this action used before this doc was corrected. In particular: `repo` becomes the `POKKUM_DOCKER_REPO` environment variable (there is no `--repo` flag), and `output` becomes `--local`/`--tarball` (the CLI's own `--output` flag is an unrelated text/json serialization setting, not a push/local/tarball switch). See "Known limitation: `tags`" below for the one input that currently has no CLI-side effect at all.
+> The action wraps the `pokkum build` CLI subcommand. Its inputs are translated into the *real* flags/environment variables `pokkum build` actually accepts (verified against `pokkum build --help`) — not the invocation this action used before this doc was corrected. In particular: `repo` becomes the `POKKUM_DOCKER_REPO` environment variable (there is no `--repo` flag), and `output` becomes `--local`/`--tarball` (the CLI's own `--output` flag is an unrelated text/json serialization setting, not a push/local/tarball switch). The `tags` input maps to the CLI's `--tag` flag, which is repeatable and comma-splitting.
 
 ---
 
@@ -50,7 +50,7 @@ jobs:
           echo "Image Digest:     ${{ steps.pokkum.outputs.digest }}"
 ```
 
-This pushes `ghcr.io/<owner>/<repo>:latest` and exposes the immutable, digest-pinned `ref` output — use that output (not a tag) for deployments, since custom tags aren't wired up yet (see below).
+This pushes `ghcr.io/<owner>/<repo>:latest` and exposes the immutable, digest-pinned `ref` output. Prefer that output over a tag for deployments: it cannot drift.
 
 ---
 
@@ -60,7 +60,7 @@ This pushes `ghcr.io/<owner>/<repo>:latest` and exposes the immutable, digest-pi
 | :--- | :--- | :--- | :--- |
 | `project-dir` | Path to the SvelteKit project directory. | `.` | No |
 | `repo` | Destination container repository (e.g. `ghcr.io/acme/app`). Passed to the CLI via the `POKKUM_DOCKER_REPO` environment variable (`pokkum build` has no `--repo` flag). Can also be left unset if `.pokkum.yaml`'s `docker.repo` already configures it. | `""` | No |
-| `tags` | **Not yet functional** — see "Known limitation" below. | `latest` | No |
+| `tags` | Comma-separated image tags to publish (e.g. `latest,v1.2.3,${{ github.sha }}`). Passed as `--tag`. | `latest` | No |
 | `platforms` | Comma-separated target platforms (e.g. `linux/amd64,linux/arm64`), passed to `--platform`. | `linux/amd64` | No |
 | `output` | Build mode: `push` (default, publish to `repo`), `local` (load into the runner's local Docker daemon via `--local`), or `tarball` (export an OCI archive via `--tarball`; see `tarball-path`). | `push` | No |
 | `tarball-path` | Archive path written when `output: tarball`. Ignored otherwise. | `image.tar` | No |
@@ -69,14 +69,15 @@ This pushes `ghcr.io/<owner>/<repo>:latest` and exposes the immutable, digest-pi
 | `log-level` | Logging level: `debug`, `info`, `warn`, `error`. | `info` | No |
 | `version` | Pokkum CLI version to install (e.g. `v1.0.1` or `latest`). | `v1.0.1` | No |
 
-### Known limitation: `tags`
+### Tagging
 
-`pokkum build` has **no `--tag`/`--tags` flag** and `.pokkum.yaml` has no tags field either — every publish is tagged `latest` (the CLI's own default tag), regardless of what `tags` is set to here. Setting `tags` to anything other than `latest` makes the action emit a `::warning::` annotation in the build log rather than silently doing nothing.
+`tags` is passed straight through to `pokkum build --tag`, which accepts a
+comma-separated list. `POKKUM_DOCKER_TAGS` is an equivalent environment-variable
+form if you prefer to set it alongside `POKKUM_DOCKER_REPO`.
 
-The `tags` input is kept for forward/backward compatibility and will start working once `pokkum build` gains a real tagging mechanism. Until then:
-
-- Rely on this action's `digest` and `ref` outputs (`repo@sha256:...`) for deployments — they're immutable and don't depend on tags at all.
-- If you need a human-readable tag today, apply it out-of-band after the push (e.g. `crane tag`/`docker buildx imagetools create`) using the `ref` output as the source.
+Tags are applied registry-side after the image is built and hashed, so the tag
+set never affects the image digest. For deployments prefer the `ref`/`digest`
+outputs (`repo@sha256:...`), which are immutable.
 
 ---
 
@@ -151,7 +152,7 @@ jobs:
 
 ### Example 2: Deploying to Kubernetes with Immutable Digest Reference
 
-Use `steps.pokkum.outputs.ref` directly in your deployment pipeline to update Kubernetes manifests with immutable digests — this is unaffected by the `tags` limitation above, since it's the digest-pinned reference, not a tag:
+Use `steps.pokkum.outputs.ref` directly in your deployment pipeline to update Kubernetes manifests with immutable digests — a digest-pinned reference cannot drift the way a tag can:
 
 ```yaml
       - name: Build & Push

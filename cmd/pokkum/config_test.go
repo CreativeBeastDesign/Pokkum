@@ -178,6 +178,46 @@ docker:
 	if err == nil {
 		t.Fatal("expected error on invalid top-level docker.repo, got nil")
 	}
+
+	// 8. Invalid docker.tags (top-level): an empty-after-trim tag.
+	badTagsCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+  tags:
+    - "bad tag"
+`
+	_ = os.WriteFile(cfgPath, []byte(badTagsCfg), 0644)
+	err = runConfigValidate(nil, opts)
+	if err == nil {
+		t.Fatal("expected error on invalid top-level docker.tags, got nil")
+	}
+
+	// 9. Duplicate docker.tags (top-level).
+	dupTagsCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+  tags:
+    - v1
+    - v1
+`
+	_ = os.WriteFile(cfgPath, []byte(dupTagsCfg), 0644)
+	err = runConfigValidate(nil, opts)
+	if err == nil {
+		t.Fatal("expected error on duplicate top-level docker.tags, got nil")
+	}
+
+	// 10. Valid docker.tags (top-level) must pass.
+	goodTagsCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+  tags:
+    - latest
+    - v1.2.3
+`
+	_ = os.WriteFile(cfgPath, []byte(goodTagsCfg), 0644)
+	if err := runConfigValidate(nil, opts); err != nil {
+		t.Errorf("expected valid docker.tags to pass validation, got: %v", err)
+	}
 }
 
 // TestConfigValidateCommand_ProfileValidation exercises the profile
@@ -259,6 +299,41 @@ profiles:
 		t.Fatal("expected error when a profile has an invalid docker.repo, got nil")
 	}
 
+	// 3b. A profile with an invalid docker.tags override (row 10: a profile
+	// field must be validated the same as the base config's, not just
+	// merged).
+	badProfileTagsCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+profiles:
+  production:
+    docker:
+      tags:
+        - "not a valid tag!"
+`
+	_ = os.WriteFile(cfgPath, []byte(badProfileTagsCfg), 0644)
+	err = runConfigValidate(nil, opts)
+	if err == nil {
+		t.Fatal("expected error when a profile has an invalid docker.tags entry, got nil")
+	}
+
+	// 3c. A profile with duplicate docker.tags.
+	dupProfileTagsCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+profiles:
+  production:
+    docker:
+      tags:
+        - stable
+        - stable
+`
+	_ = os.WriteFile(cfgPath, []byte(dupProfileTagsCfg), 0644)
+	err = runConfigValidate(nil, opts)
+	if err == nil {
+		t.Fatal("expected error when a profile has duplicate docker.tags, got nil")
+	}
+
 	// 4. All profiles valid: must pass.
 	validProfilesCfg := `version: 1
 docker:
@@ -271,6 +346,8 @@ profiles:
   production:
     docker:
       repo: ghcr.io/example/app-prod
+      tags:
+        - stable
     security:
       fail_on_cve: critical
 `
