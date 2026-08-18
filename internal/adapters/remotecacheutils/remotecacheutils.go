@@ -415,6 +415,18 @@ func (c *Cacher) Check(ctx context.Context, req ports.RemoteCacheRequest) (ports
 
 // verifyCandidate fetches and verifies Cosign static-key or Sigstore keyless signatures
 // on a remote cache candidate digest before tag promotion.
+//
+// The <alg>-<hex>.sig tag this requires is genuinely produced by pokkum's
+// own build pipeline: core.Build's signing stage (internal/core/pipeline.go,
+// signAndSelfVerify) attaches a Cosign signature under ports.SigTag for the
+// published digest of every signed push — and the cache-<hash> tag is
+// appended to that same push's tag list, so the digest it resolves to here
+// is exactly the digest the .sig was attached to. A builder configured with
+// a signing key (POKKUM_SIGNING_KEY / --signing-key) therefore gets verified
+// sub-100ms cache hits out of the box; a builder without one pushes unsigned
+// images whose cache entries can never pass this check (core.Build logs that
+// state explicitly at build time rather than letting the misses look like
+// mysterious cache churn).
 func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Hash, req ports.RemoteCacheRequest) (bool, string, error) {
 	nameOpts := []name.Option{name.WeakValidation}
 	if req.Insecure {
@@ -451,7 +463,7 @@ func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Has
 				return false, "", fmt.Errorf("remote cache candidate %s@%s has no signature (%s)", repo, digest, sigTagStr)
 			}
 			if c.log != nil {
-				c.log.InfoContext(ctx, "remote cache candidate has no signature; skipping cache hit", "repo", repo, "digest", digest.String())
+				c.log.InfoContext(ctx, "remote cache candidate has no signature; skipping cache hit (was the candidate pushed by a builder with a signing key? unsigned pushes create cache entries that can never verify)", "repo", repo, "digest", digest.String())
 			}
 			return false, "", nil
 		}

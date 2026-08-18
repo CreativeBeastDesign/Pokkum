@@ -23,6 +23,47 @@ func SBOMTag(h v1.Hash) string {
 	return h.Algorithm + "-" + h.Hex + SBOMTagSuffix
 }
 
+// SigTagSuffix is the tag suffix under which a Cosign signature is attached to
+// an image: the subject's digest with ':' replaced by '-', then this suffix.
+// This is the cosign tag convention — the default read path of `cosign
+// verify`, of `pokkum verify`'s provenance resolver, and of the remote build
+// cache's cache-hit verification — so it is the compatibility contract for
+// signatures, not a legacy fallback the way SBOMTagSuffix is for SBOMs.
+const SigTagSuffix = ".sig"
+
+// AttTagSuffix is the tag suffix under which a DSSE-enveloped in-toto
+// attestation (SLSA provenance) is attached to an image, following the same
+// cosign tag convention as SigTagSuffix. It is what `cosign
+// verify-attestation` and `pokkum verify`'s provenance resolver read.
+const AttTagSuffix = ".att"
+
+// SigTag returns the tag under which a Cosign signature for the image with
+// digest h is attached, e.g. "sha256-abc123….sig".
+func SigTag(h v1.Hash) string {
+	return h.Algorithm + "-" + h.Hex + SigTagSuffix
+}
+
+// AttTag returns the tag under which a DSSE attestation for the image with
+// digest h is attached, e.g. "sha256-abc123….att".
+func AttTag(h v1.Hash) string {
+	return h.Algorithm + "-" + h.Hex + AttTagSuffix
+}
+
+// CosignSignatureLayerAnnotation is the layer annotation carrying the base64
+// signature over a signature image's Simple Signing payload layer. Fixed by
+// cosign's wire format; internal/adapters/sigstore declares the same string
+// (CosignSignatureAnnotation) for its verification-side reading — the value is
+// spec-pinned, so the two cannot drift without breaking against real cosign.
+const CosignSignatureLayerAnnotation = "dev.cosignproject.cosign/signature"
+
+// MediaTypeSimpleSigning is the layer media type of a Cosign Simple Signing
+// payload inside a .sig signature image, per cosign's wire format.
+const MediaTypeSimpleSigning = "application/vnd.dev.cosign.simplesigning.v1+json"
+
+// MediaTypeDSSEEnvelope is the layer media type of a DSSE envelope inside a
+// .att attestation image, per cosign's wire format.
+const MediaTypeDSSEEnvelope = "application/vnd.dsse.envelope.v1+json"
+
 // Payload is the image content to publish: exactly one of Image or Index must
 // be non-nil. It is shared by every publishing port so that core can build the
 // payload once and hand it to whichever destination the output mode selected.
@@ -128,6 +169,81 @@ type AttachSBOMRequest struct {
 	RegistryConfigPath string
 }
 
+// AttachSignatureRequest publishes a Cosign signature alongside an
+// already-pushed image.
+//
+// Attachment is dual-published, deliberately differing from AttachSBOM's
+// three-mode design: the .sig tag convention (SigTag) is ALWAYS written,
+// because it is what `cosign verify` (by default), `pokkum verify`, and the
+// remote build cache's cache-hit verification all read — a referrer-only
+// signature would be invisible to every one of them. When the registry
+// supports the OCI 1.1 Referrers API, the same signature image is
+// additionally attached as a referrer of the subject (probed exactly like
+// AttachSBOM's auto mode, via the same referrers-unsupported detection); a
+// registry without referrers support gets the tag alone, silently, because
+// the tag is the load-bearing artifact and the referrer is additive
+// discoverability for OCI 1.1-aware policy engines.
+type AttachSignatureRequest struct {
+	// Repo is the repository holding the subject image. Required, and must be
+	// the same repository the subject was pushed to.
+	Repo string
+
+	// Subject is the digest of the image manifest or index the signature
+	// covers. Required.
+	Subject v1.Hash
+
+	// Bundle carries the Simple Signing payload and the signature over it.
+	// PayloadBytes and Base64Signature are required.
+	Bundle CosignSignatureBundle
+
+	// Insecure permits plain HTTP and skips TLS verification.
+	Insecure bool
+
+	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
+	RegistryConfigPath string
+}
+
+// AttachAttestationRequest publishes a DSSE-enveloped in-toto attestation
+// (SLSA provenance) alongside an already-pushed image, under the .att tag
+// convention (AttTag) plus an additive OCI 1.1 referrer — the same
+// dual-publication contract as AttachSignatureRequest.
+type AttachAttestationRequest struct {
+	// Repo is the repository holding the subject image. Required.
+	Repo string
+
+	// Subject is the digest of the image manifest or index the attestation
+	// describes. Required, and must match the statement's own subject digest —
+	// verifiers cross-check the two.
+	Subject v1.Hash
+
+	// Envelope is the signed DSSE envelope to attach. Required.
+	Envelope DSSEEnvelope
+
+	// Insecure permits plain HTTP and skips TLS verification.
+	Insecure bool
+
+	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
+	RegistryConfigPath string
+}
+
+// FetchAttachmentRequest reads back a signature or attestation previously
+// attached to Subject in Repo, for post-push self-verification: the pipeline
+// re-fetches what it just attached and verifies it before reporting a signed
+// build as successful, so a broken attach path cannot silently ship.
+type FetchAttachmentRequest struct {
+	// Repo is the repository holding the subject image. Required.
+	Repo string
+
+	// Subject is the digest whose SigTag/AttTag attachment to fetch. Required.
+	Subject v1.Hash
+
+	// Insecure permits plain HTTP and skips TLS verification.
+	Insecure bool
+
+	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
+	RegistryConfigPath string
+}
+
 // LoadRequest imports an image into the local Docker daemon, the `--local`
 // output mode.
 type LoadRequest struct {
@@ -195,6 +311,27 @@ type Registry interface {
 	// attachment for a digest the registry does not have produces a dangling
 	// reference that no tool will ever look at twice.
 	AttachSBOM(ctx context.Context, req AttachSBOMRequest) (PublishResult, error)
+
+	// AttachSignature uploads a Cosign signature as a separate image tagged
+	// per SigTag (plus an additive OCI 1.1 referrer where supported — see
+	// AttachSignatureRequest). Like AttachSBOM, it must be called only after
+	// the subject has been pushed.
+	AttachSignature(ctx context.Context, req AttachSignatureRequest) (PublishResult, error)
+
+	// AttachAttestation uploads a DSSE-enveloped attestation as a separate
+	// image tagged per AttTag, under the same contract as AttachSignature.
+	AttachAttestation(ctx context.Context, req AttachAttestationRequest) (PublishResult, error)
+
+	// FetchSignature reads back the signature attached under SigTag(Subject)
+	// and reconstructs the bundle (payload bytes plus base64 signature) for
+	// verification. It is the read half of the post-push self-verification
+	// stage; an absent or malformed attachment is an error, never an empty
+	// bundle.
+	FetchSignature(ctx context.Context, req FetchAttachmentRequest) (CosignSignatureBundle, error)
+
+	// FetchAttestation reads back the DSSE envelope attached under
+	// AttTag(Subject), under the same contract as FetchSignature.
+	FetchAttestation(ctx context.Context, req FetchAttachmentRequest) (DSSEEnvelope, error)
 }
 
 // LocalLoader imports an image into the local Docker daemon. It is a separate

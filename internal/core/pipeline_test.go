@@ -3,6 +3,7 @@ package core_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -161,10 +162,22 @@ func (m *mockPackager) Index(ctx context.Context, req ports.IndexRequest) (v1.Im
 	return empty.Index, nil
 }
 
-// Mock implementation of ports.Registry
+// Mock implementation of ports.Registry. The signature/attestation methods
+// record their calls and, by default, round-trip what was attached: a fetch
+// returns exactly the bundle/envelope the matching attach stored, keyed by
+// subject digest — so the pipeline's post-push self-verification stage
+// exercises its real fetch-back flow against the mock without a registry.
 type mockRegistry struct {
-	pushFn       func(ctx context.Context, req ports.PushRequest) (ports.PublishResult, error)
-	attachSBOMFn func(ctx context.Context, req ports.AttachSBOMRequest) (ports.PublishResult, error)
+	pushFn               func(ctx context.Context, req ports.PushRequest) (ports.PublishResult, error)
+	attachSBOMFn         func(ctx context.Context, req ports.AttachSBOMRequest) (ports.PublishResult, error)
+	attachSignatureFn    func(ctx context.Context, req ports.AttachSignatureRequest) (ports.PublishResult, error)
+	attachAttestationFn  func(ctx context.Context, req ports.AttachAttestationRequest) (ports.PublishResult, error)
+	fetchSignatureFn     func(ctx context.Context, req ports.FetchAttachmentRequest) (ports.CosignSignatureBundle, error)
+	fetchAttestationFn   func(ctx context.Context, req ports.FetchAttachmentRequest) (ports.DSSEEnvelope, error)
+	attachedSignatures   map[string]ports.CosignSignatureBundle
+	attachedAttestations map[string]ports.DSSEEnvelope
+	fetchSignatureCalls  int
+	fetchAttestCalls     int
 }
 
 func (m *mockRegistry) Push(ctx context.Context, req ports.PushRequest) (ports.PublishResult, error) {
@@ -188,6 +201,52 @@ func (m *mockRegistry) AttachSBOM(ctx context.Context, req ports.AttachSBOMReque
 		Ref:    req.Repo + ":" + strings.Replace(req.Subject.String(), ":", "-", 1) + ".sbom",
 		Digest: v1.Hash{Algorithm: "sha256", Hex: "aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222"},
 	}, nil
+}
+
+func (m *mockRegistry) AttachSignature(ctx context.Context, req ports.AttachSignatureRequest) (ports.PublishResult, error) {
+	if m.attachSignatureFn != nil {
+		return m.attachSignatureFn(ctx, req)
+	}
+	if m.attachedSignatures == nil {
+		m.attachedSignatures = make(map[string]ports.CosignSignatureBundle)
+	}
+	m.attachedSignatures[req.Subject.String()] = req.Bundle
+	return ports.PublishResult{Ref: req.Repo + ":" + ports.SigTag(req.Subject), Tags: []string{ports.SigTag(req.Subject)}}, nil
+}
+
+func (m *mockRegistry) AttachAttestation(ctx context.Context, req ports.AttachAttestationRequest) (ports.PublishResult, error) {
+	if m.attachAttestationFn != nil {
+		return m.attachAttestationFn(ctx, req)
+	}
+	if m.attachedAttestations == nil {
+		m.attachedAttestations = make(map[string]ports.DSSEEnvelope)
+	}
+	m.attachedAttestations[req.Subject.String()] = req.Envelope
+	return ports.PublishResult{Ref: req.Repo + ":" + ports.AttTag(req.Subject), Tags: []string{ports.AttTag(req.Subject)}}, nil
+}
+
+func (m *mockRegistry) FetchSignature(ctx context.Context, req ports.FetchAttachmentRequest) (ports.CosignSignatureBundle, error) {
+	m.fetchSignatureCalls++
+	if m.fetchSignatureFn != nil {
+		return m.fetchSignatureFn(ctx, req)
+	}
+	bundle, ok := m.attachedSignatures[req.Subject.String()]
+	if !ok {
+		return ports.CosignSignatureBundle{}, fmt.Errorf("mock registry: no signature attached for %s: %w", req.Subject, core.ErrSignatureMissing)
+	}
+	return bundle, nil
+}
+
+func (m *mockRegistry) FetchAttestation(ctx context.Context, req ports.FetchAttachmentRequest) (ports.DSSEEnvelope, error) {
+	m.fetchAttestCalls++
+	if m.fetchAttestationFn != nil {
+		return m.fetchAttestationFn(ctx, req)
+	}
+	env, ok := m.attachedAttestations[req.Subject.String()]
+	if !ok {
+		return ports.DSSEEnvelope{}, fmt.Errorf("mock registry: no attestation attached for %s: %w", req.Subject, core.ErrSignatureMissing)
+	}
+	return env, nil
 }
 
 // Mock implementation of ports.LocalLoader
@@ -276,35 +335,83 @@ func (m *mockSLSAGenerator) Generate(ctx context.Context, req ports.SLSAGenerato
 	if m.generateFn != nil {
 		return m.generateFn(ctx, req)
 	}
-	return ports.SLSAStatement{}, nil
+	// The default statement names the requested output digest as its
+	// subject, matching the real slsa generator's contract — the signing
+	// stage's self-verification cross-checks the fetched statement's
+	// subject against the digest it was attached under, so a subject-less
+	// default would fail every signing-enabled pipeline test for the wrong
+	// reason.
+	return ports.SLSAStatement{
+		Type:          ports.InTotoStatementType,
+		PredicateType: ports.SLSAProvenancePredicateType,
+		Subject: []ports.ResourceDescriptor{{
+			Name:   req.Repo,
+			Digest: map[string]string{req.OutputDigest.Algorithm: req.OutputDigest.Hex},
+		}},
+	}, nil
 }
 
-type mockCosignSigner struct{}
+type mockCosignSigner struct {
+	signFn    func(ctx context.Context, req ports.CosignSignRequest) (ports.CosignSignatureBundle, error)
+	verifyFn  func(ctx context.Context, bundle ports.CosignSignatureBundle, pubKeyPEM []byte, expectedRepo string, expectedDigest v1.Hash) error
+	signCalls []ports.CosignSignRequest
+}
 
 func (m *mockCosignSigner) CreatePayload(req ports.CosignSignRequest) ([]byte, error) {
-	return []byte{}, nil
+	return []byte(`{"critical":{}}`), nil
 }
 
 func (m *mockCosignSigner) Sign(ctx context.Context, req ports.CosignSignRequest) (ports.CosignSignatureBundle, error) {
-	return ports.CosignSignatureBundle{}, nil
+	m.signCalls = append(m.signCalls, req)
+	if m.signFn != nil {
+		return m.signFn(ctx, req)
+	}
+	return ports.CosignSignatureBundle{
+		PayloadBytes:    []byte(`{"critical":{"image":{"docker-manifest-digest":"` + req.Digest.String() + `"}}}`),
+		SignatureBytes:  []byte("mock-signature"),
+		Base64Signature: base64.StdEncoding.EncodeToString([]byte("mock-signature")),
+		Repo:            req.Repo,
+		Digest:          req.Digest,
+	}, nil
 }
 
 func (m *mockCosignSigner) Verify(ctx context.Context, bundle ports.CosignSignatureBundle, pubKeyPEM []byte, expectedRepo string, expectedDigest v1.Hash) error {
+	if m.verifyFn != nil {
+		return m.verifyFn(ctx, bundle, pubKeyPEM, expectedRepo, expectedDigest)
+	}
 	return nil
 }
 
-type mockDSSESigner struct{}
+type mockDSSESigner struct {
+	signFn    func(ctx context.Context, req ports.DSSESignRequest) (ports.DSSEEnvelope, error)
+	verifyFn  func(ctx context.Context, envelope ports.DSSEEnvelope, pubKeyPEM []byte) ([]byte, error)
+	signCalls []ports.DSSESignRequest
+}
 
 func (m *mockDSSESigner) CreatePAE(payloadType string, payload []byte) []byte {
 	return []byte{}
 }
 
 func (m *mockDSSESigner) Sign(ctx context.Context, req ports.DSSESignRequest) (ports.DSSEEnvelope, error) {
-	return ports.DSSEEnvelope{}, nil
+	m.signCalls = append(m.signCalls, req)
+	if m.signFn != nil {
+		return m.signFn(ctx, req)
+	}
+	// Round-trippable default: the payload is genuinely base64-encoded so
+	// the default Verify below can decode it back for the pipeline's
+	// self-verification subject cross-check.
+	return ports.DSSEEnvelope{
+		Payload:     base64.StdEncoding.EncodeToString(req.PayloadBytes),
+		PayloadType: req.PayloadType,
+		Signatures:  []ports.DSSESignature{{Sig: base64.StdEncoding.EncodeToString([]byte("mock-dsse-sig"))}},
+	}, nil
 }
 
 func (m *mockDSSESigner) Verify(ctx context.Context, envelope ports.DSSEEnvelope, pubKeyPEM []byte) ([]byte, error) {
-	return []byte{}, nil
+	if m.verifyFn != nil {
+		return m.verifyFn(ctx, envelope, pubKeyPEM)
+	}
+	return base64.StdEncoding.DecodeString(envelope.Payload)
 }
 
 type mockBunRuntimeResolver struct {
@@ -592,7 +699,14 @@ func TestBuildPushSuccess_SLSAAndSBOMCarryResolvedBunRuntime(t *testing.T) {
 	deps.SLSAGenerator = &mockSLSAGenerator{
 		generateFn: func(ctx context.Context, req ports.SLSAGeneratorRequest) (ports.SLSAStatement, error) {
 			slsaReq = req
-			return ports.SLSAStatement{}, nil
+			return ports.SLSAStatement{
+				Type:          ports.InTotoStatementType,
+				PredicateType: ports.SLSAProvenancePredicateType,
+				Subject: []ports.ResourceDescriptor{{
+					Name:   req.Repo,
+					Digest: map[string]string{req.OutputDigest.Algorithm: req.OutputDigest.Hex},
+				}},
+			}, nil
 		},
 	}
 
@@ -602,6 +716,7 @@ func TestBuildPushSuccess_SLSAAndSBOMCarryResolvedBunRuntime(t *testing.T) {
 		Platforms:  []core.Platform{core.LinuxAMD64},
 		Tags:       []string{"v1.0.0"},
 		Sign:       true,
+		Signing:    core.SigningOptions{KeyPEM: []byte("test-key"), PublicKeyPEM: []byte("test-pub")},
 	}
 
 	if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
@@ -651,7 +766,14 @@ func TestBuild_HermeticThreadsIntoBunResolverAndSLSAProvenance(t *testing.T) {
 	deps.SLSAGenerator = &mockSLSAGenerator{
 		generateFn: func(_ context.Context, req ports.SLSAGeneratorRequest) (ports.SLSAStatement, error) {
 			slsaReq = req
-			return ports.SLSAStatement{}, nil
+			return ports.SLSAStatement{
+				Type:          ports.InTotoStatementType,
+				PredicateType: ports.SLSAProvenancePredicateType,
+				Subject: []ports.ResourceDescriptor{{
+					Name:   req.Repo,
+					Digest: map[string]string{req.OutputDigest.Algorithm: req.OutputDigest.Hex},
+				}},
+			}, nil
 		},
 	}
 
@@ -661,6 +783,7 @@ func TestBuild_HermeticThreadsIntoBunResolverAndSLSAProvenance(t *testing.T) {
 		Platforms:  []core.Platform{core.LinuxAMD64},
 		Tags:       []string{"v1.0.0"},
 		Sign:       true,
+		Signing:    core.SigningOptions{KeyPEM: []byte("test-key"), PublicKeyPEM: []byte("test-pub")},
 		Hermetic:   true,
 	}
 
@@ -695,7 +818,14 @@ func TestBuildLocalSuccess_ExeStrategyKeepsHostBunVersionForSLSA(t *testing.T) {
 	deps.SLSAGenerator = &mockSLSAGenerator{
 		generateFn: func(ctx context.Context, req ports.SLSAGeneratorRequest) (ports.SLSAStatement, error) {
 			slsaReq = req
-			return ports.SLSAStatement{}, nil
+			return ports.SLSAStatement{
+				Type:          ports.InTotoStatementType,
+				PredicateType: ports.SLSAProvenancePredicateType,
+				Subject: []ports.ResourceDescriptor{{
+					Name:   req.Repo,
+					Digest: map[string]string{req.OutputDigest.Algorithm: req.OutputDigest.Hex},
+				}},
+			}, nil
 		},
 	}
 
@@ -705,6 +835,7 @@ func TestBuildLocalSuccess_ExeStrategyKeepsHostBunVersionForSLSA(t *testing.T) {
 		Platforms:  []core.Platform{core.LinuxAMD64},
 		Tags:       []string{"v1.0.0"},
 		Sign:       true,
+		Signing:    core.SigningOptions{KeyPEM: []byte("test-key"), PublicKeyPEM: []byte("test-pub")},
 	}
 	req.Compile.Strategy = core.StrategyExe
 
@@ -831,6 +962,7 @@ func TestBuildPushSuccess_SLSAStatementWithEmptySubjectDoesNotPanic(t *testing.T
 		Platforms:  []core.Platform{core.LinuxAMD64},
 		Tags:       []string{"v1.0.0"},
 		Sign:       true,
+		Signing:    core.SigningOptions{KeyPEM: []byte("test-key"), PublicKeyPEM: []byte("test-pub")},
 	}
 
 	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
@@ -2015,5 +2147,291 @@ func TestBuild_DryRun_StillInspectsNativeModules(t *testing.T) {
 	_, err := core.Build(context.Background(), deps, req, core.BuildOptions{DryRun: true})
 	if !errors.Is(err, core.ErrNativeModulesUnsupported) {
 		t.Fatalf("err = %v, want core.ErrNativeModulesUnsupported (dry run must still fail fast on an unsupported native module)", err)
+	}
+}
+
+// signedTestRequest returns a push-mode single-platform request with signing
+// enabled and a (fake, mock-consumed) key pair present — the state the real
+// signing stage requires to run.
+func signedTestRequest() core.BuildRequest {
+	return core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+		Sign:       true,
+		Signing:    core.SigningOptions{KeyPEM: []byte("test-key"), PublicKeyPEM: []byte("test-pub")},
+	}
+}
+
+// TestBuild_SignReachesSignersAndSelfVerifies is THE regression guard for
+// the original signing bug: a signing-enabled push used to generate a SLSA
+// statement, log it, and stop — CosignSigner.Sign and DSSESigner.Sign had
+// zero production call sites, nothing was ever attached, and `cosign verify`
+// failed on every image this tool built. This test proves, from one real
+// core.Build call, that the signers are actually invoked with the pushed
+// digest and their outputs actually attached AND fetched back for
+// self-verification.
+func TestBuild_SignReachesSignersAndSelfVerifies(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+	cosignMock := &mockCosignSigner{}
+	dsseMock := &mockDSSESigner{}
+	regMock := &mockRegistry{}
+	deps.CosignSigner = cosignMock
+	deps.DSSESigner = dsseMock
+	deps.Registry = regMock
+
+	res, err := core.Build(context.Background(), deps, signedTestRequest(), core.BuildOptions{})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	wantDigest := res.Image.Digest
+	if wantDigest.Hex == "" {
+		t.Fatalf("published digest is empty")
+	}
+
+	if len(cosignMock.signCalls) != 1 {
+		t.Fatalf("CosignSigner.Sign calls = %d, want 1 (single-platform push has one subject)", len(cosignMock.signCalls))
+	}
+	if cosignMock.signCalls[0].Digest != wantDigest {
+		t.Errorf("CosignSigner.Sign digest = %s, want the pushed digest %s", cosignMock.signCalls[0].Digest, wantDigest)
+	}
+	if len(cosignMock.signCalls[0].KeyPEM) == 0 {
+		t.Errorf("CosignSigner.Sign received no key material")
+	}
+	if len(dsseMock.signCalls) != 1 {
+		t.Fatalf("DSSESigner.Sign calls = %d, want 1", len(dsseMock.signCalls))
+	}
+	if dsseMock.signCalls[0].PayloadType != ports.InTotoPayloadType {
+		t.Errorf("DSSE payload type = %q, want %q", dsseMock.signCalls[0].PayloadType, ports.InTotoPayloadType)
+	}
+
+	if _, ok := regMock.attachedSignatures[wantDigest.String()]; !ok {
+		t.Errorf("no signature attached for pushed digest %s", wantDigest)
+	}
+	if _, ok := regMock.attachedAttestations[wantDigest.String()]; !ok {
+		t.Errorf("no attestation attached for pushed digest %s", wantDigest)
+	}
+	if regMock.fetchSignatureCalls != 1 || regMock.fetchAttestCalls != 1 {
+		t.Errorf("self-verification fetches = %d sig / %d att, want 1/1 — the post-push self-verify stage must actually read the attachments back", regMock.fetchSignatureCalls, regMock.fetchAttestCalls)
+	}
+
+	if res.Signing == nil || !res.Signing.Signed {
+		t.Fatalf("BuildResult.Signing = %+v, want Signed=true", res.Signing)
+	}
+	if len(res.Signing.SignatureRefs) != 1 || len(res.Signing.AttestationRefs) != 1 {
+		t.Errorf("Signing refs = %v / %v, want one of each", res.Signing.SignatureRefs, res.Signing.AttestationRefs)
+	}
+}
+
+// TestBuild_SignAttachFailureFailsBuild: a signing-enabled build whose
+// signature could not be attached must NOT report success, even though the
+// image itself already landed in the registry.
+func TestBuild_SignAttachFailureFailsBuild(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+	deps.Registry = &mockRegistry{
+		attachSignatureFn: func(_ context.Context, req ports.AttachSignatureRequest) (ports.PublishResult, error) {
+			return ports.PublishResult{}, fmt.Errorf("registry: attach signature %s: boom: %w", req.Repo, core.ErrSigningFailed)
+		},
+	}
+
+	_, err := core.Build(context.Background(), deps, signedTestRequest(), core.BuildOptions{})
+	if err == nil {
+		t.Fatalf("Build succeeded despite the signature attach failing")
+	}
+	if !errors.Is(err, core.ErrSigningFailed) {
+		t.Errorf("err = %v, want core.ErrSigningFailed", err)
+	}
+}
+
+// TestBuild_SignSelfVerifyFailureFailsBuild: an attach that "succeeded" but
+// whose artifact cannot be fetched back and verified from the registry must
+// fail the build — this is the stage that would have made the original
+// log-and-forget signing bug unshippable.
+func TestBuild_SignSelfVerifyFailureFailsBuild(t *testing.T) {
+	t.Run("fetch fails", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		deps.Registry = &mockRegistry{
+			fetchSignatureFn: func(_ context.Context, req ports.FetchAttachmentRequest) (ports.CosignSignatureBundle, error) {
+				return ports.CosignSignatureBundle{}, fmt.Errorf("mock: nothing at %s: %w", ports.SigTag(req.Subject), core.ErrSignatureMissing)
+			},
+		}
+		_, err := core.Build(context.Background(), deps, signedTestRequest(), core.BuildOptions{})
+		if !errors.Is(err, core.ErrSignatureSelfVerifyFailed) {
+			t.Fatalf("err = %v, want core.ErrSignatureSelfVerifyFailed", err)
+		}
+	})
+
+	t.Run("signature does not verify", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		deps.CosignSigner = &mockCosignSigner{
+			verifyFn: func(_ context.Context, _ ports.CosignSignatureBundle, _ []byte, _ string, _ v1.Hash) error {
+				return errors.New("cosign: signature verification failed")
+			},
+		}
+		_, err := core.Build(context.Background(), deps, signedTestRequest(), core.BuildOptions{})
+		if !errors.Is(err, core.ErrSignatureSelfVerifyFailed) {
+			t.Fatalf("err = %v, want core.ErrSignatureSelfVerifyFailed", err)
+		}
+	})
+
+	t.Run("attestation subject mismatch", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		deps.SLSAGenerator = &mockSLSAGenerator{
+			generateFn: func(_ context.Context, req ports.SLSAGeneratorRequest) (ports.SLSAStatement, error) {
+				// Subject names a DIFFERENT digest than the one it will be
+				// attached under — the self-verify cross-check must catch it.
+				return ports.SLSAStatement{
+					Type:          ports.InTotoStatementType,
+					PredicateType: ports.SLSAProvenancePredicateType,
+					Subject: []ports.ResourceDescriptor{{
+						Name:   req.Repo,
+						Digest: map[string]string{"sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+					}},
+				}, nil
+			},
+		}
+		_, err := core.Build(context.Background(), deps, signedTestRequest(), core.BuildOptions{})
+		if !errors.Is(err, core.ErrSignatureSelfVerifyFailed) {
+			t.Fatalf("err = %v, want core.ErrSignatureSelfVerifyFailed (fetched attestation names a different subject digest)", err)
+		}
+	})
+}
+
+// TestBuild_SignWithoutKeyPushesUnsignedWithHonestResult: with signing
+// enabled (the default) but no key available, the build must succeed
+// unsigned — but the result must say so, and no signer may have been
+// consulted (nothing to sign with).
+func TestBuild_SignWithoutKeyPushesUnsignedWithHonestResult(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+	cosignMock := &mockCosignSigner{}
+	deps.CosignSigner = cosignMock
+
+	req := signedTestRequest()
+	req.Signing = core.SigningOptions{}
+
+	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if res.Signing == nil {
+		t.Fatalf("BuildResult.Signing is nil — an unsigned signing-enabled push must record its state")
+	}
+	if res.Signing.Signed {
+		t.Errorf("Signing.Signed = true for a build with no key")
+	}
+	if res.Signing.Reason == "" {
+		t.Errorf("Signing.Reason is empty; want an explanation of why the image is unsigned")
+	}
+	if len(cosignMock.signCalls) != 0 {
+		t.Errorf("CosignSigner.Sign was called %d times with no key available", len(cosignMock.signCalls))
+	}
+}
+
+// TestBuild_RequireSignedGate: --require-signed must fail fast (at
+// validation, before any build work) when its preconditions cannot hold.
+func TestBuild_RequireSignedGate(t *testing.T) {
+	t.Run("no key", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		req := signedTestRequest()
+		req.Signing = core.SigningOptions{Require: true}
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+		if !errors.Is(err, core.ErrSigningKeyMissing) {
+			t.Fatalf("err = %v, want core.ErrSigningKeyMissing", err)
+		}
+	})
+
+	t.Run("no-sign conflict", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		req := signedTestRequest()
+		req.Sign = false
+		req.Signing.Require = true
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+		if !errors.Is(err, core.ErrInvalidRequest) {
+			t.Fatalf("err = %v, want core.ErrInvalidRequest", err)
+		}
+	})
+
+	t.Run("non-push output", func(t *testing.T) {
+		deps := newFullDeps(io.Discard)
+		req := signedTestRequest()
+		req.Signing.Require = true
+		req.Output = core.OutputOptions{Mode: core.OutputTarball, TarballPath: "/tmp/x.tar"}
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+		if !errors.Is(err, core.ErrInvalidRequest) {
+			t.Fatalf("err = %v, want core.ErrInvalidRequest", err)
+		}
+	})
+}
+
+// TestBuild_SignNonPushOutputRecordsSkip: --sign (default true) with
+// --tarball/--local used to silently no-op; now the result must record that
+// nothing was signed (the loud warning is asserted by inspection of the log
+// path; the machine-readable state is what this test pins).
+func TestBuild_SignNonPushOutputRecordsSkip(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+	cosignMock := &mockCosignSigner{}
+	deps.CosignSigner = cosignMock
+
+	req := signedTestRequest()
+	req.Output = core.OutputOptions{Mode: core.OutputTarball, TarballPath: "/tmp/x.tar"}
+
+	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if res.Signing == nil || res.Signing.Signed {
+		t.Fatalf("BuildResult.Signing = %+v, want non-nil with Signed=false", res.Signing)
+	}
+	if !strings.Contains(res.Signing.Reason, "tarball") {
+		t.Errorf("Signing.Reason = %q, want it to name the output mode", res.Signing.Reason)
+	}
+	if len(cosignMock.signCalls) != 0 {
+		t.Errorf("CosignSigner.Sign called %d times for a tarball build", len(cosignMock.signCalls))
+	}
+}
+
+// TestBuild_MultiPlatformSignsIndexAndPerPlatformManifests pins the
+// multi-arch attestation-subject answer (Roadmap 2d): .sig/.att attach to
+// BOTH the index digest and every per-platform manifest digest, each
+// attestation's statement naming exactly the digest it hangs off.
+func TestBuild_MultiPlatformSignsIndexAndPerPlatformManifests(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+	cosignMock := &mockCosignSigner{}
+	regMock := &mockRegistry{}
+	deps.CosignSigner = cosignMock
+	deps.Registry = regMock
+
+	req := signedTestRequest()
+	req.Platforms = []core.Platform{core.LinuxAMD64, core.LinuxARM64}
+
+	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// One subject for the index plus one per platform.
+	if len(cosignMock.signCalls) != 3 {
+		t.Fatalf("CosignSigner.Sign calls = %d, want 3 (index + 2 per-platform manifests)", len(cosignMock.signCalls))
+	}
+	if cosignMock.signCalls[0].Digest != res.Image.Digest {
+		t.Errorf("first signing subject = %s, want the published index digest %s", cosignMock.signCalls[0].Digest, res.Image.Digest)
+	}
+	seen := make(map[string]bool)
+	for _, c := range cosignMock.signCalls {
+		if seen[c.Digest.String()] {
+			t.Errorf("digest %s signed twice — per-platform subjects must be distinct", c.Digest)
+		}
+		seen[c.Digest.String()] = true
+	}
+	if len(regMock.attachedSignatures) != 3 || len(regMock.attachedAttestations) != 3 {
+		t.Errorf("attached %d signatures / %d attestations, want 3/3", len(regMock.attachedSignatures), len(regMock.attachedAttestations))
+	}
+	if regMock.fetchSignatureCalls != 3 || regMock.fetchAttestCalls != 3 {
+		t.Errorf("self-verification fetches = %d/%d, want 3/3 — every subject must be verified, not just the index", regMock.fetchSignatureCalls, regMock.fetchAttestCalls)
+	}
+	if res.Signing == nil || !res.Signing.Signed || len(res.Signing.SignatureRefs) != 3 {
+		t.Errorf("BuildResult.Signing = %+v, want Signed=true with 3 signature refs", res.Signing)
 	}
 }

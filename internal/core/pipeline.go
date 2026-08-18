@@ -276,6 +276,15 @@ func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 //  9. Publish through whichever of Registry / LocalLoader / TarballWriter the
 //     output mode selected.
 //  10. Registry.AttachSBOM, push mode only, after the subject exists.
+//     10.5 Signing, push mode only, when a signing key is available: the SLSA
+//     provenance statement is DSSE-signed and attached as .att, and the
+//     digest is Cosign-signed and attached as .sig — for the published
+//     digest AND every per-platform manifest digest — then every attachment
+//     is fetched back from the registry and cryptographically verified
+//     (post-push self-verification) before the build may report success.
+//     With signing enabled but no key, the image pushes unsigned with an
+//     unmistakable warning and BuildResult.Signing records the fact;
+//     Signing.Require turns that into a validation-time failure instead.
 //  11. Write the published reference to Deps.Stdout, alone.
 //
 // ctx is threaded into every port call and is checked between stages, so a
@@ -317,6 +326,20 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	// (bare HTTP, no forms, dev/staging) never hit this.
 	if req.Runtime.Origin == "" && req.Compile.Strategy != StrategyStatic {
 		log.Warn("ORIGIN not set — if this app is served behind a reverse proxy or ingress, form actions will likely fail with \"403 Cross-site POST form submissions are forbidden\"; set --origin to the public URL this app is served at (e.g. --origin=https://example.com)")
+	}
+
+	// Signing honesty, up front — before any expensive work, mirroring the
+	// --asset-overlay non-push warning below: --sign defaults to true, so
+	// both of these states are ones a user can reach without asking for
+	// them, and neither may pass silently.
+	if req.Sign && req.Output.Mode != OutputPush {
+		// Nothing to attach a .sig/.att to: signatures live in a registry,
+		// keyed to the pushed digest. A local/tarball build therefore cannot
+		// be signed by this pipeline, and saying nothing would let "--sign
+		// was on" read as "the image is signed".
+		log.Warn("--sign is enabled (the default) but this output mode writes no registry artifact to attach a signature to; this build will NOT be signed", "outputMode", req.Output.Mode)
+	} else if req.Sign && len(req.Signing.KeyPEM) == 0 {
+		log.Warn("--sign is enabled (the default) but no signing key is available — this build will push an UNSIGNED image; set POKKUM_SIGNING_KEY or --signing-key to sign, or pass --require-signed to make this an error")
 	}
 
 	// SvelteKit inlines $env/static/* as literal values at build time,
@@ -669,6 +692,19 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	if req.Sign && (req.CacheVerify.VerifyMode == CacheVerifyNone || !req.CacheVerify.VerifySignature) {
 		allowCache = false
 	}
+	// Cache-hit verification (default on) requires a <alg>-<hex>.sig on the
+	// digest the cache tag resolves to. That signature is genuinely created
+	// by this pipeline's own signing stage (after publish, below): the
+	// cache-<hash> tag is appended to req.Tags and so points at the exact
+	// digest the signing stage attaches .sig to — signing the pushed digest
+	// IS signing what a future build's cache check resolves. So a builder
+	// with a signing key gets the advertised sub-100ms verified cache-hit
+	// path for real; a builder without one produces unsigned pushes whose
+	// cache entries can never verify. Say so once, honestly, instead of
+	// letting every future cache check silently miss.
+	if allowCache && req.Sign && len(req.Signing.KeyPEM) == 0 {
+		log.Info("remote cache: cache-hit verification is active but this build has no signing key, so it will not create a signed (promotable) cache entry itself; only cache entries pushed by a builder with a signing key can ever be verified and reused")
+	}
 	if allowCache {
 		var pStrs []string
 		for _, p := range req.Platforms {
@@ -749,6 +785,18 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 					Toolchain:       toolchain,
 					SourceDateEpoch: req.SourceDateEpoch,
 					Duration:        time.Since(started),
+				}
+				// A signing-enabled cache hit only happens with cache-hit
+				// signature verification active (allowCache above), so the
+				// promoted digest's .sig was just cryptographically verified
+				// — record that instead of leaving Signing nil, which would
+				// read as "signing never happened" for an image that is in
+				// fact signed.
+				if req.Sign {
+					res.Signing = &SigningResult{Signed: cacheRes.Verified}
+					if !cacheRes.Verified {
+						res.Signing.Reason = "cache hit promoted without signature verification"
+					}
 				}
 				if _, err := fmt.Fprintln(deps.stdout(), cacheRes.Ref); err != nil {
 					return res, fmt.Errorf("writing output reference: %w", err)
@@ -1025,59 +1073,40 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		log.Info("sbom generated but not attached", "mode", req.Output.Mode, "noAttach", req.SBOM.NoAttach)
 	}
 
+	// Stage 10.5: signing. Runs only for push mode — a signature is a
+	// registry artifact keyed to the pushed digest, and the non-push case was
+	// already warned about loudly at build start. Signing happens strictly
+	// after publish and never touches the image payload itself: signatures
+	// are inherently non-deterministic (ECDSA randomness), so they must live
+	// in separate .sig/.att artifacts, keeping the image bytes and digest
+	// bit-for-bit reproducible.
 	if req.Sign && req.Output.Mode == OutputPush {
 		if err := checkCtx(ctx, "signing"); err != nil {
 			return result, err
 		}
-		log.Info("generating SLSA provenance attestation", "ref", pub.Ref)
-		slsaStmt, serr := deps.SLSAGenerator.Generate(ctx, ports.SLSAGeneratorRequest{
-			ProjectDir: req.ProjectDir,
-			Repo:       req.Repo,
-			Tags:       req.Tags,
-			Platforms:  req.Platforms,
-			OutputMode: req.Output.Mode.String(),
-			BaseImage: ports.SLSABaseImage{
-				Preset:    req.BaseImage.Preset,
-				Ref:       base.Ref,
-				PinnedRef: base.PinnedRef,
-				Digest:    base.Digest,
-			},
-			OutputDigest: pub.Digest,
-			Toolchain: ports.SLSAToolchain{
-				PokkumVersion: deps.Version,
-				GoVersion:     runtime.Version(),
-				BuilderOSArch: runtime.GOOS + "/" + runtime.GOARCH,
-				// bunToolchain is the resolved embedded-runtime artifact
-				// (StrategyLayered only) — the correct thing for a
-				// dependency descriptor to name, and previously the only
-				// half ever populated (BunVersion, via toolchain.BunVersion
-				// below); BunBinaryHash was always empty in production
-				// despite slsa/generator.go having supported it since
-				// inception. For strategies with no resolved runtime (exe,
-				// static), fall back to toolchain.BunVersion — the host
-				// compiler's bun — preserving prior behavior rather than
-				// leaving the field empty.
-				BunVersion:          firstNonEmpty(bunToolchain.Version, toolchain.BunVersion),
-				BunBinaryHash:       bunToolchain.SHA256,
-				SupervisorVersion:   toolchain.SupervisorVersion,
-				StaticServerVersion: toolchain.StaticServerVersion,
-			},
-			SourceDateEpoch:     req.SourceDateEpoch,
-			Hermetic:            req.Hermetic,
-			HermeticEnforcement: hermeticEnforcementMode(req.Hermetic),
-		})
-		switch {
-		case serr != nil:
-			log.Warn("failed to generate SLSA provenance statement", "err", serr)
-		case len(slsaStmt.Subject) == 0:
-			// A nil error with no subject is not a real success: the whole
-			// point of this statement is to name what was built, so log it
-			// as a warning rather than crashing on slsaStmt.Subject[0] (as a
-			// naive index would) or silently claiming success either way.
-			log.Warn("SLSA provenance statement generated with no subject", "ref", pub.Ref)
-		default:
-			log.Info("generated SLSA provenance statement", "subject", slsaStmt.Subject[0].Name)
+		if len(req.Signing.KeyPEM) == 0 {
+			// Absence must be impossible to mistake for success: warn in
+			// capitals, record the state in the result, and remind the
+			// caller of the CI gate. Signing.Require never reaches this
+			// branch — Validate already rejected a Require request with no
+			// key before anything was built.
+			log.Warn("IMAGE NOT SIGNED: signing is enabled but no signing key is available — the pushed image carries no signature or provenance attestation; set POKKUM_SIGNING_KEY or --signing-key, or pass --require-signed to make this an error", "ref", pub.Ref)
+			result.Signing = &SigningResult{Signed: false, Reason: "no signing key available"}
+		} else {
+			sigRes, err := signAndSelfVerify(ctx, deps, req, base, toolchain, bunToolchain, pub, built, multi)
+			if err != nil {
+				// The image itself was pushed; the build still fails —
+				// success would claim a signed image that isn't.
+				return result, err
+			}
+			result.Signing = sigRes
+			log.Info("image signed and self-verified",
+				"ref", pub.Ref,
+				"signatures", strings.Join(sigRes.SignatureRefs, ","),
+				"attestations", strings.Join(sigRes.AttestationRefs, ","))
 		}
+	} else if req.Sign {
+		result.Signing = &SigningResult{Signed: false, Reason: "output mode " + req.Output.Mode.String() + " has no registry to attach a signature to"}
 	}
 
 	result.Duration = time.Since(started)
@@ -1098,6 +1127,219 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// signingSubjects lists every digest the .sig/.att attachments cover: the
+// published digest first (the index for a multi-platform build, the sole
+// image manifest otherwise), then each per-platform manifest digest.
+//
+// Attaching to BOTH the index and the per-platform manifests is deliberate
+// (Roadmap Tier 2 item 2d): verifiers disagree about which digest a policy
+// check resolves — `cosign verify` and `pokkum verify` build the .sig/.att
+// tag from whatever digest the given ref resolves to (the index for a tag
+// ref, a manifest for a platform-pinned digest ref), while admission
+// controllers commonly resolve a tag down to the per-platform child before
+// checking. Signing both means either resolution path finds a valid
+// signature whose payload names the exact digest it was asked about.
+// `pokkum verify` therefore checks whichever digest its argument resolves
+// to; both are now covered.
+func signingSubjects(pub ports.PublishResult, built []platformBuild, multi bool) ([]v1.Hash, error) {
+	subjects := []v1.Hash{pub.Digest}
+	if multi {
+		for _, b := range built {
+			d, err := b.image.Digest()
+			if err != nil {
+				return nil, fmt.Errorf("core: read per-platform manifest digest for signing: %w: %w", err, ErrSigningFailed)
+			}
+			subjects = append(subjects, d)
+		}
+	}
+	return subjects, nil
+}
+
+// slsaGeneratorRequest builds the provenance request for one subject digest.
+// It is called once per signing subject so that each attached attestation's
+// statement names exactly the digest it is attached to — a statement whose
+// subject is only the index digest would fail subject cross-checks when
+// fetched via a per-platform manifest's .att tag.
+func slsaGeneratorRequest(deps Deps, req BuildRequest, base *ports.BaseImage, toolchain Toolchain, bunToolchain ports.BunResolverResult, subject v1.Hash) ports.SLSAGeneratorRequest {
+	return ports.SLSAGeneratorRequest{
+		ProjectDir: req.ProjectDir,
+		Repo:       req.Repo,
+		Tags:       req.Tags,
+		Platforms:  req.Platforms,
+		OutputMode: req.Output.Mode.String(),
+		BaseImage: ports.SLSABaseImage{
+			Preset:    req.BaseImage.Preset,
+			Ref:       base.Ref,
+			PinnedRef: base.PinnedRef,
+			Digest:    base.Digest,
+		},
+		OutputDigest: subject,
+		Toolchain: ports.SLSAToolchain{
+			PokkumVersion: deps.Version,
+			GoVersion:     runtime.Version(),
+			BuilderOSArch: runtime.GOOS + "/" + runtime.GOARCH,
+			// bunToolchain is the resolved embedded-runtime artifact
+			// (StrategyLayered only) — the correct thing for a dependency
+			// descriptor to name. For strategies with no resolved runtime
+			// (exe, static), fall back to toolchain.BunVersion — the host
+			// compiler's bun.
+			BunVersion:          firstNonEmpty(bunToolchain.Version, toolchain.BunVersion),
+			BunBinaryHash:       bunToolchain.SHA256,
+			SupervisorVersion:   toolchain.SupervisorVersion,
+			StaticServerVersion: toolchain.StaticServerVersion,
+		},
+		SourceDateEpoch:     req.SourceDateEpoch,
+		Hermetic:            req.Hermetic,
+		HermeticEnforcement: hermeticEnforcementMode(req.Hermetic),
+	}
+}
+
+// signAndSelfVerify is the real signing stage: for every subject digest it
+// generates the SLSA statement, DSSE-signs it, attaches it as .att, builds
+// and signs the Simple Signing payload, attaches it as .sig — and then
+// SELF-VERIFIES: it fetches each attachment back from the registry and
+// cryptographically verifies it against the signing key's public half before
+// the build may report success. The read-back is what makes a broken attach
+// path unshippable — a signature that was "attached" but cannot be fetched
+// and verified from the registry fails the build here, not in a user's
+// `cosign verify` weeks later.
+//
+// Any error fails the build even though the image itself is already pushed:
+// the caller's error message says so, and an unsigned-but-pushed image with a
+// failed build is a recoverable state, while a "successful" build with a
+// silently missing signature is the exact defect this stage exists to
+// prevent.
+func signAndSelfVerify(
+	ctx context.Context,
+	deps Deps,
+	req BuildRequest,
+	base *ports.BaseImage,
+	toolchain Toolchain,
+	bunToolchain ports.BunResolverResult,
+	pub ports.PublishResult,
+	built []platformBuild,
+	multi bool,
+) (*SigningResult, error) {
+	log := deps.logger()
+
+	subjects, err := signingSubjects(pub, built, multi)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &SigningResult{}
+	for _, subject := range subjects {
+		stmt, err := deps.SLSAGenerator.Generate(ctx, slsaGeneratorRequest(deps, req, base, toolchain, bunToolchain, subject))
+		if err != nil {
+			return nil, fmt.Errorf("core: generate SLSA provenance for %s: %w: %w", subject, err, ErrSigningFailed)
+		}
+		if len(stmt.Subject) == 0 {
+			// A statement with no subject names nothing — attaching it would
+			// be attaching noise that verifiers reject later.
+			return nil, fmt.Errorf("core: SLSA provenance statement for %s has no subject: %w", subject, ErrSigningFailed)
+		}
+		stmtJSON, err := json.Marshal(stmt)
+		if err != nil {
+			return nil, fmt.Errorf("core: marshal SLSA statement for %s: %w: %w", subject, err, ErrSigningFailed)
+		}
+
+		env, err := deps.DSSESigner.Sign(ctx, ports.DSSESignRequest{
+			PayloadBytes: stmtJSON,
+			PayloadType:  ports.InTotoPayloadType,
+			KeyPEM:       req.Signing.KeyPEM,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("core: DSSE-sign SLSA statement for %s: %w: %w", subject, err, ErrSigningFailed)
+		}
+		attRes, err := deps.Registry.AttachAttestation(ctx, ports.AttachAttestationRequest{
+			Repo:               req.Repo,
+			Subject:            subject,
+			Envelope:           env,
+			Insecure:           req.Insecure,
+			RegistryConfigPath: req.RegistryConfigPath,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("core: attach attestation for %s (the image itself was pushed but is NOT fully signed): %w", subject, err)
+		}
+
+		bundle, err := deps.CosignSigner.Sign(ctx, ports.CosignSignRequest{
+			Repo:            req.Repo,
+			Digest:          subject,
+			KeyPEM:          req.Signing.KeyPEM,
+			Creator:         strings.TrimSpace("pokkum " + deps.Version),
+			SourceDateEpoch: req.SourceDateEpoch,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("core: sign image digest %s: %w: %w", subject, err, ErrSigningFailed)
+		}
+		sigRes, err := deps.Registry.AttachSignature(ctx, ports.AttachSignatureRequest{
+			Repo:               req.Repo,
+			Subject:            subject,
+			Bundle:             bundle,
+			Insecure:           req.Insecure,
+			RegistryConfigPath: req.RegistryConfigPath,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("core: attach signature for %s (the image itself was pushed but is NOT signed): %w", subject, err)
+		}
+
+		res.AttestationRefs = append(res.AttestationRefs, attRes.Ref)
+		res.SignatureRefs = append(res.SignatureRefs, sigRes.Ref)
+		log.Info("signed subject", "subject", subject.String(), "sig", sigRes.Ref, "att", attRes.Ref)
+	}
+
+	// Post-push self-verification: prove the registry serves back what a
+	// verifier will actually fetch, and that it verifies against this
+	// build's own public key. This is a real pipeline stage, not a test.
+	for _, subject := range subjects {
+		fetchReq := ports.FetchAttachmentRequest{
+			Repo:               req.Repo,
+			Subject:            subject,
+			Insecure:           req.Insecure,
+			RegistryConfigPath: req.RegistryConfigPath,
+		}
+
+		fetched, err := deps.Registry.FetchSignature(ctx, fetchReq)
+		if err != nil {
+			return nil, fmt.Errorf("core: self-verify: fetch signature for %s back from registry: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
+		}
+		if err := deps.CosignSigner.Verify(ctx, fetched, req.Signing.PublicKeyPEM, req.Repo, subject); err != nil {
+			return nil, fmt.Errorf("core: self-verify: fetched signature for %s does not verify: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
+		}
+
+		envFetched, err := deps.Registry.FetchAttestation(ctx, fetchReq)
+		if err != nil {
+			return nil, fmt.Errorf("core: self-verify: fetch attestation for %s back from registry: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
+		}
+		payload, err := deps.DSSESigner.Verify(ctx, envFetched, req.Signing.PublicKeyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("core: self-verify: fetched attestation for %s does not verify: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
+		}
+		var fetchedStmt ports.SLSAStatement
+		if err := json.Unmarshal(payload, &fetchedStmt); err != nil {
+			return nil, fmt.Errorf("core: self-verify: fetched attestation payload for %s is not a SLSA statement: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
+		}
+		if !statementNamesDigest(fetchedStmt, subject) {
+			return nil, fmt.Errorf("core: self-verify: fetched attestation for %s names a different subject digest: %w", subject, ErrSignatureSelfVerifyFailed)
+		}
+	}
+
+	res.Signed = true
+	return res, nil
+}
+
+// statementNamesDigest reports whether stmt's subject list names d — the
+// cross-check the self-verification stage runs on a fetched attestation, so
+// a statement attached under the wrong digest's tag cannot pass.
+func statementNamesDigest(stmt ports.SLSAStatement, d v1.Hash) bool {
+	for _, s := range stmt.Subject {
+		if s.Digest != nil && s.Digest[d.Algorithm] == d.Hex {
+			return true
+		}
+	}
+	return false
 }
 
 // hermeticEnforcementMode reports how a hermetic build was actually enforced

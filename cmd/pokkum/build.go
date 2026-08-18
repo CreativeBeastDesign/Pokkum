@@ -2,7 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -61,8 +67,10 @@ type buildFlags struct {
 	withOtelSidecar bool
 
 	// Signing flags
-	sign   bool
-	noSign bool
+	sign          bool
+	noSign        bool
+	signingKey    string
+	requireSigned bool
 
 	// Injection flags
 	inject   bool
@@ -205,6 +213,10 @@ The project directory defaults to the current working directory.`,
 		"Enable SLSA, Cosign, and DSSE signing (default true)")
 	cmd.Flags().BoolVar(&flags.noSign, "no-sign", false,
 		"Explicitly disable signing")
+	cmd.Flags().StringVar(&flags.signingKey, "signing-key", "",
+		"Private signing key (ECDSA P-256 or Ed25519): a path to a PEM file, or the PEM text itself. Defaults to POKKUM_SIGNING_KEY. Without a key, a signing-enabled build pushes UNSIGNED with a loud warning")
+	cmd.Flags().BoolVar(&flags.requireSigned, "require-signed", false,
+		"Fail the build unless the pushed image is signed, attested, and self-verified against the registry (CI gate; requires a signing key and push output)")
 
 	cmd.Flags().BoolVar(&flags.updateBase, "update-base", false,
 		"Force re-resolving base image tags against remote registry and update pokkum.lock")
@@ -678,8 +690,26 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 		WithSidecar:     withSidecar,
 	}
 
-	// Signing options
+	// Signing options. The key is resolved here, at the composition root,
+	// and never logged: --signing-key wins over POKKUM_SIGNING_KEY; either
+	// may hold a file path or the PEM text itself (matching
+	// --cache-verify-key's convention). The public half is derived from the
+	// private key so the pipeline's post-push self-verification always
+	// checks against exactly the key that signed.
 	req.Sign = flags.sign && !flags.noSign
+	keyPEM, err := resolveSigningKey(flags.signingKey)
+	if err != nil {
+		return nil, err
+	}
+	if len(keyPEM) > 0 {
+		pubPEM, err := deriveSigningPublicKey(keyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("signing key: %w", err)
+		}
+		req.Signing.KeyPEM = keyPEM
+		req.Signing.PublicKeyPEM = pubPEM
+	}
+	req.Signing.Require = flags.requireSigned
 
 	// Bun runtime options
 	stubLauncherSetting := flags.stubLauncher
@@ -943,6 +973,65 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	}
 
 	return &req, nil
+}
+
+// resolveSigningKey resolves the private signing key: --signing-key wins,
+// then POKKUM_SIGNING_KEY. The value may be a filesystem path or the PEM
+// text itself. Returns nil (no error) when no key is configured — that is a
+// legal state the pipeline warns about, not a CLI error. Error messages
+// never echo the value, since it may be key material.
+func resolveSigningKey(flagValue string) ([]byte, error) {
+	v := strings.TrimSpace(flagValue)
+	if v == "" {
+		v = strings.TrimSpace(os.Getenv("POKKUM_SIGNING_KEY"))
+	}
+	if v == "" {
+		return nil, nil
+	}
+	if strings.Contains(v, "-----BEGIN") {
+		return []byte(v), nil
+	}
+	data, err := os.ReadFile(v)
+	if err != nil {
+		return nil, fmt.Errorf("signing key (--signing-key/POKKUM_SIGNING_KEY) is neither PEM text nor a readable file: %w", err)
+	}
+	return data, nil
+}
+
+// deriveSigningPublicKey derives the PEM-encoded public half of a private
+// signing key. Only the key types the cosign/dsse signers can actually sign
+// with are accepted (ECDSA and Ed25519) — rejecting anything else here means
+// an unusable key fails at flag time, not after a two-minute build.
+func deriveSigningPublicKey(privPEM []byte) ([]byte, error) {
+	block, _ := pem.Decode(privPEM)
+	if block == nil {
+		return nil, errors.New("no PEM block found in signing key")
+	}
+
+	var priv any
+	if k, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		priv = k
+	} else if k, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		priv = k
+	} else {
+		return nil, errors.New("unsupported signing key format (PKCS#8 or SEC1; ECDSA P-256 or Ed25519)")
+	}
+
+	var pub crypto.PublicKey
+	switch k := priv.(type) {
+	case *ecdsa.PrivateKey:
+		pub = k.Public()
+	case ed25519.PrivateKey:
+		pub = k.Public()
+	default:
+		return nil, fmt.Errorf("unsupported signing key type %T (ECDSA P-256 or Ed25519 required)", priv)
+	}
+
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return nil, fmt.Errorf("marshal signing public key: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), nil
 }
 
 // buildRequestForPath constructs a push-mode BuildRequest for a SvelteKit

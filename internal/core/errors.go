@@ -232,4 +232,30 @@ var (
 	// returned merely because a build has no predecessor yet (a first push
 	// to a target resolves to zero generations, not an error).
 	ErrAssetOverlayResolutionFailed = errors.New("asset overlay: failed to resolve or pull a prior generation")
+
+	// ErrSigningKeyMissing reports that signing was required (--require-signed)
+	// but no signing key is available: neither --signing-key nor
+	// POKKUM_SIGNING_KEY supplied one. Without the gate, a missing key
+	// downgrades to a loud warning and an unsigned push — never a silent
+	// success claim.
+	ErrSigningKeyMissing = errors.New("signing required but no signing key is available (set POKKUM_SIGNING_KEY or --signing-key)")
+
+	// ErrSigningFailed reports that generating or attaching a Cosign signature
+	// or DSSE attestation for a pushed image failed. The image itself may
+	// already be in the registry; the build still fails, because reporting
+	// success for a signing-enabled build whose signature never landed is
+	// exactly the failure mode the signing pipeline exists to prevent.
+	ErrSigningFailed = errors.New("image signing failed")
+
+	// ErrSignatureMissing reports that an expected .sig/.att attachment is
+	// absent or unreadable at its tag-convention location.
+	ErrSignatureMissing = errors.New("no signature or attestation attached under the expected tag")
+
+	// ErrSignatureSelfVerifyFailed reports that the post-push
+	// self-verification stage — fetching the just-attached signature and
+	// attestation back from the registry and cryptographically verifying them
+	// against the signing key — failed. This stage is what makes a broken
+	// attach path unshippable: a build only reports "signed" after the
+	// registry has proven it can serve back a verifiable signature.
+	ErrSignatureSelfVerifyFailed = errors.New("post-push signature self-verification failed")
 )

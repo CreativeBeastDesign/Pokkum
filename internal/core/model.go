@@ -688,6 +688,12 @@ type BuildRequest struct {
 	// Sign enables SLSA, Cosign, and DSSE signing.
 	Sign bool
 
+	// Signing carries the key material and strictness gate for Sign. With
+	// Sign true but no key available, the build pushes unsigned with a loud
+	// warning and a BuildResult.Signing that says so — unless
+	// Signing.Require demands a hard failure instead.
+	Signing SigningOptions
+
 	// Labels are merged into the image config labels, overriding Pokkum's own.
 	// Nil means none.
 	Labels map[string]string
@@ -939,6 +945,24 @@ func (r BuildRequest) Validate() error {
 	if r.BunRuntime.StubLauncher && r.Compile.Strategy != StrategyLayered {
 		return fmt.Errorf("stub launcher is only meaningful for --strategy=layered (embeds a Bun runtime); %q does not: %w", r.Compile.Strategy, ErrInvalidRequest)
 	}
+
+	// --require-signed is a CI gate: every precondition that would make the
+	// signing stage impossible must fail here, in microseconds, not after a
+	// two-minute compile pushed an image that can no longer satisfy the gate.
+	if r.Signing.Require {
+		if !r.Sign {
+			return fmt.Errorf("--require-signed conflicts with --no-sign: %w", ErrInvalidRequest)
+		}
+		if r.Output.Mode != OutputPush {
+			return fmt.Errorf("--require-signed needs --output=push (a %s build writes no registry artifact to attach a signature to): %w", r.Output.Mode, ErrInvalidRequest)
+		}
+		if len(r.Signing.KeyPEM) == 0 {
+			return fmt.Errorf("--require-signed: %w", ErrSigningKeyMissing)
+		}
+	}
+	if len(r.Signing.KeyPEM) > 0 && len(r.Signing.PublicKeyPEM) == 0 {
+		return fmt.Errorf("signing key set without its derived public key (composition root bug — self-verification would be impossible): %w", ErrInvalidRequest)
+	}
 	return nil
 }
 
@@ -974,6 +998,50 @@ func validateRuntime(rc RuntimeConfig) error {
 		}
 	}
 	return nil
+}
+
+// SigningOptions carries the key material and policy for BuildRequest.Sign.
+type SigningOptions struct {
+	// KeyPEM is the PEM-encoded private signing key (ECDSA P-256 or
+	// Ed25519), resolved by the composition root from --signing-key or
+	// POKKUM_SIGNING_KEY. Empty means no key is available: a signing-enabled
+	// build then pushes unsigned, warns unmistakably, and records the fact
+	// in BuildResult.Signing — it never silently claims to have signed.
+	// Key material must never be logged.
+	KeyPEM []byte
+
+	// PublicKeyPEM is the PEM-encoded public half of KeyPEM, derived by the
+	// composition root. It is what the post-push self-verification stage
+	// verifies the fetched-back signature and attestation against; required
+	// whenever KeyPEM is set.
+	PublicKeyPEM []byte
+
+	// Require hard-fails the build (--require-signed) unless signing fully
+	// completes: key present, signature and attestation attached, and
+	// post-push self-verification passed. This is the CI gate that turns
+	// "warn loudly on unsigned" into "refuse to succeed unsigned".
+	Require bool
+}
+
+// SigningResult reports what the signing stage actually did, so an unsigned
+// push can never be mistaken for a signed one by reading the result.
+type SigningResult struct {
+	// Signed reports whether a signature AND attestation were attached and
+	// self-verified for every subject digest.
+	Signed bool
+
+	// Reason explains why Signed is false ("no signing key available",
+	// output-mode skip). Empty when Signed is true.
+	Reason string
+
+	// SignatureRefs are the .sig attachment references written, one per
+	// subject digest (index first, then per-platform manifests for a
+	// multi-platform build).
+	SignatureRefs []string
+
+	// AttestationRefs are the .att attachment references written, in the
+	// same order as SignatureRefs.
+	AttestationRefs []string
 }
 
 // ImageResult describes where the finished image ended up. It is the
@@ -1122,6 +1190,13 @@ type BuildResult struct {
 	// SBOM describes the bill of materials, or is nil when SBOM generation was
 	// disabled.
 	SBOM *SBOMResult
+
+	// Signing reports what the signing stage did. Nil when signing was
+	// disabled (--no-sign); non-nil with Signed false when signing was
+	// requested but could not happen (no key, or a non-push output mode) —
+	// the distinction exists so absence is impossible to mistake for
+	// success.
+	Signing *SigningResult
 
 	// Toolchain records the versions involved.
 	Toolchain Toolchain
