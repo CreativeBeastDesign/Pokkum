@@ -245,9 +245,11 @@ var allowedAdapterAdapterEdges = map[string]map[string]string{
 	},
 	"provenance": {
 		"cosign": "provenance.Resolver defaults its CosignSigner dependency to " +
-			"cosign.NewSigner(log) (resolver.go ~L130) and reads " +
-			"cosign.DefaultPublicKeyPEM directly. Same default-wiring pattern " +
-			"as baseimage's edge to cosign.",
+			"cosign.NewSigner(log) (resolver.go ~L144). Same default-wiring " +
+			"pattern as baseimage's edge to cosign. (It formerly also read " +
+			"cosign.DefaultPublicKeyPEM as a fallback trust anchor; that " +
+			"placeholder key was deleted and static-key verification now fails " +
+			"closed when no key is configured.)",
 		"dsse": "provenance.Resolver defaults its DSSESigner dependency to " +
 			"dsse.NewSigner(log) (resolver.go ~L132) to envelope the generated " +
 			"SLSA provenance statement.",

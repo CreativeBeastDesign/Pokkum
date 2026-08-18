@@ -27,12 +27,6 @@ var (
 	_ ports.ReleaseVerifier = (*Signer)(nil)
 )
 
-// DefaultPublicKeyPEM is the fallback Cosign public key for verifying signatures.
-const DefaultPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbCr5pcxh+/q57RngLq9ycZmUDjZd
-3KhRlVmB3LMAG1HtAwVdDIsKATtrP020TSVXeBVvOy1TntoxpA3ijNvHcA==
------END PUBLIC KEY-----`
-
 // Signer implements ports.CosignSigner.
 type Signer struct {
 	log *slog.Logger

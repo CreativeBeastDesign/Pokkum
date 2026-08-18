@@ -273,18 +273,43 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 				if entry.Ref != "" {
 					upstreamRef = entry.Ref
 				}
+				mirrorUsed := false
 				if entry.MirrorRef != "" {
-					// Attempt to resolve from mirrored escrow registry first
+					// Attempt to resolve from mirrored escrow registry first.
+					// entry.MirrorRef is a mutable "<mirror>:sha256-<hex>" tag
+					// (see the escrow-mirroring block below, ~line 353), not an
+					// immutable digest reference — anyone with push access to
+					// the mirror can retarget that tag to a different image.
+					// That different image can carry its own entirely genuine
+					// upstream signature (e.g. an older, real, validly-signed
+					// build with known CVEs), so signature verification alone
+					// cannot catch the swap: it would verify correctly against
+					// whatever the mirror actually served, checked against the
+					// same upstream repo name. entry.Digest — the digest this
+					// preset was actually locked to — is the one thing that
+					// still names the specific content this build is supposed
+					// to use, so it must be checked explicitly before the
+					// mirror's content is trusted for anything else.
+					// entry.Digest is only empty the first time this preset's
+					// base is ever escrow-mirrored (nothing to compare against
+					// yet, so nothing is enforced); once populated, it must
+					// always match what the mirror actually serves.
 					if mParsed, mErr := name.ParseReference(entry.MirrorRef, nameOpts...); mErr == nil {
-						if _, mPullErr := r.pull(ctx, mParsed, entry.MirrorRef, req.Insecure, req.RegistryConfigPath); mPullErr == nil {
+						if mPull, mPullErr := r.pull(ctx, mParsed, entry.MirrorRef, req.Insecure, req.RegistryConfigPath); mPullErr == nil {
+							if entry.Digest != "" && mPull.digest.String() != entry.Digest {
+								return nil, fmt.Errorf(
+									"baseimage: escrow mirror %s served digest %s but %s locks %q at %s: refusing to use a substituted image, even though it may carry a valid signature of its own: %w",
+									entry.MirrorRef, mPull.digest, req.LockfilePath, lockKey, entry.Digest, core.ErrBaseSignatureInvalid)
+							}
 							ref = entry.MirrorRef
+							mirrorUsed = true
 							r.logger().Info("using mirrored base image from escrow registry", "mirror_ref", ref)
 						} else {
 							r.logger().Warn("failed to pull base image from escrow mirror, falling back to locked pinned ref", "mirror_ref", entry.MirrorRef, "err", mPullErr)
 						}
 					}
 				}
-				if ref != entry.MirrorRef && entry.PinnedRef != "" {
+				if !mirrorUsed && entry.PinnedRef != "" {
 					ref = entry.PinnedRef
 					r.logger().Info("using locked base image from lockfile", "lockfile", req.LockfilePath, "key", lockKey, "ref", ref)
 				}
@@ -709,16 +734,6 @@ func (r *Resolver) logger() *slog.Logger {
 	return r.log
 }
 
-// DefaultBaseImagePublicKeyPEM is the fallback Cosign public key for
-// verifying base images when POKKUM_BASE_IMAGE_PUBKEY is not set. It is a
-// real, valid P-256 PKIX public key so parsePublicKeyPEM always succeeds,
-// but it does not correspond to any key that actually signs upstream
-// distroless or Chainguard images — see the scope note below.
-const DefaultBaseImagePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbCr5pcxh+/q57RngLq9ycZmUDjZd
-3KhRlVmB3LMAG1HtAwVdDIsKATtrP020TSVXeBVvOy1TntoxpA3ijNvHcA==
------END PUBLIC KEY-----`
-
 // verifyBaseImage verifies the base image's Cosign signature. It is the entry
 // point for BaseImageRequest.VerifySignature and the single place where the
 // choice of verification path is made.
@@ -726,10 +741,13 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbCr5pcxh+/q57RngLq9ycZmUDjZd
 // # Two verification paths
 //
 //   - static key: a Cosign "Simple Signing" signature verified against a
-//     static ECDSA/Ed25519 public key (POKKUM_BASE_IMAGE_PUBKEY, falling back
-//     to DefaultBaseImagePublicKeyPEM). This is how Pokkum itself signs a
-//     custom or self-hosted base, and it is the default for
-//     ports.BaseImageCustom.
+//     static ECDSA/Ed25519 public key configured via POKKUM_BASE_IMAGE_PUBKEY.
+//     There is deliberately no fallback default key: a shared, unattributed
+//     placeholder key used to live here, but nothing signs with its (nonexistent)
+//     private half, so resolving with no key configured now fails closed with an
+//     actionable error instead of silently "verifying" against a key nobody
+//     owns (Roadmap.md item 2h). This is how Pokkum itself signs a custom or
+//     self-hosted base, and it is the default for ports.BaseImageCustom.
 //
 //   - keyless: a Sigstore keyless signature — a short-lived Fulcio
 //     certificate plus its Rekor transparency-log entry — verified by
@@ -772,7 +790,17 @@ func (r *Resolver) verifyBaseImage(ctx context.Context, ref, upstreamRef string,
 		}
 		pubKeyPEM = []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
 		if len(pubKeyPEM) == 0 {
-			pubKeyPEM = []byte(DefaultBaseImagePublicKeyPEM)
+			// There is no fallback key. A shared, unattributed placeholder
+			// public key used to live here (DefaultBaseImagePublicKeyPEM) —
+			// its own doc comment admitted no real signer held the private
+			// half, so it "verified" nothing and only failed closed by
+			// accident. A trust anchor nobody owns is worse than no default
+			// (Roadmap.md item 2h), so this is now a named, actionable
+			// error — distinct from a signature that was checked and found
+			// invalid — rather than a silent, unverifiable default.
+			return fmt.Errorf(
+				"baseimage: %s: static-key verification requested but no key is configured; set POKKUM_BASE_IMAGE_PUBKEY to the Cosign public key that signed this base image: %w",
+				ref, core.ErrBaseSignatureInvalid)
 		}
 
 	case ports.BaseImageVerifyKeyless:

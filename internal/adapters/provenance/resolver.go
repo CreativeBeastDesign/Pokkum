@@ -45,6 +45,20 @@ var (
 	// certainly intended, so it is refused up front with an actionable message
 	// rather than surfacing later as a generic library error.
 	ErrKeylessIdentityIncomplete = errors.New("provenance resolver: incomplete expected keyless identity")
+
+	// ErrStaticKeyRequired means the image carries a Cosign static-key
+	// signature (a base64 signature annotation, no Fulcio certificate/Rekor
+	// bundle) but no static verification key is configured anywhere
+	// (ProvenanceResolverRequest.PublicKeyPEM, POKKUM_SIGNING_PUBKEY, or
+	// POKKUM_BASE_IMAGE_PUBKEY). Deliberately a hard failure rather than a
+	// silent SignatureValid: false, for the same reason as
+	// ErrKeylessIdentityRequired: "checked and failed" and "nothing to check
+	// against" are different operator problems. A shared, unattributed
+	// placeholder public key (cosign.DefaultPublicKeyPEM) used to paper over
+	// this distinction — no real signer ever held its private half, so it
+	// could never actually verify anything — and has been deleted
+	// (Roadmap.md item 2h).
+	ErrStaticKeyRequired = errors.New("provenance resolver: image carries a Cosign static-key signature but no verification key was configured")
 )
 
 // maxSignatureBlobBytes caps how much of any single registry-supplied blob or
@@ -206,9 +220,15 @@ func (r *Resolver) ResolveProvenance(ctx context.Context, req ports.ProvenanceRe
 	if len(pubKeyPEM) == 0 {
 		pubKeyPEM = []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
 	}
-	if len(pubKeyPEM) == 0 {
-		pubKeyPEM = []byte(cosign.DefaultPublicKeyPEM)
-	}
+	// No fallback key beyond this. A shared, unattributed placeholder public
+	// key used to live here (cosign.DefaultPublicKeyPEM) — no real signer
+	// ever held its private half, so it could never actually verify
+	// anything; it has been deleted (Roadmap.md item 2h). verifyCosignSignature
+	// below tracks whether a static signature was present with nothing
+	// configured to check it against (sigVerifyOutcome.staticSigSeenNoKey),
+	// so that case fails closed with ErrStaticKeyRequired instead of quietly
+	// resolving to SignatureValid: false — indistinguishable, to a caller,
+	// from a signature that was checked and found invalid.
 
 	// 1. Check for Cosign signature tag: <repo>:<alg>-<hex>.sig
 	sigTagStr := fmt.Sprintf("%s:%s-%s.sig", repo, desc.Digest.Algorithm, desc.Digest.Hex)
@@ -238,6 +258,22 @@ func (r *Resolver) ResolveProvenance(ctx context.Context, req ports.ProvenanceRe
 					"expected_issuer", req.KeylessIdentity.Issuer,
 					"expected_san", req.KeylessIdentity.SAN,
 					"err", outcome.keylessErr)
+			}
+
+			// Same fail-closed discipline for the static-key path: a Cosign
+			// static-signature annotation is present, but no key was
+			// configured anywhere (req.PublicKeyPEM, POKKUM_SIGNING_PUBKEY,
+			// POKKUM_BASE_IMAGE_PUBKEY all empty) to check it against. This
+			// used to silently resolve to SignatureValid: false via a shared,
+			// unattributed placeholder key that could never actually verify
+			// anything — indistinguishable from a signature that was checked
+			// and found invalid. Skipped when keyless material was also
+			// present: that path already reports its own, more specific
+			// fail-closed error above when it applies.
+			if !outcome.valid && !outcome.keylessMaterialSeen && outcome.staticSigSeenNoKey {
+				return summary, fmt.Errorf(
+					"%w: %s carries a signature on %s; pass --public-key, or set POKKUM_SIGNING_PUBKEY or POKKUM_BASE_IMAGE_PUBKEY: %w",
+					ErrStaticKeyRequired, req.ImageRef, sigTagStr, core.ErrInvalidRequest)
 			}
 		}
 	}
@@ -339,6 +375,13 @@ type sigVerifyOutcome struct {
 	// keylessErr is the last keyless verification failure, for logging. Nil
 	// when no keyless attempt was made or the attempt succeeded.
 	keylessErr error
+
+	// staticSigSeenNoKey reports whether any layer carried a static-key
+	// Cosign signature annotation while no static public key was configured
+	// to check it against — the static-key analogue of keylessMaterialSeen,
+	// so the caller can distinguish "there was something to verify and
+	// nothing to verify it against" from an ordinary verification failure.
+	staticSigSeenNoKey bool
 }
 
 func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, digest v1.Hash, sigImg v1.Image, pubKeyPEM []byte, req ports.ProvenanceResolverRequest) sigVerifyOutcome {
@@ -403,36 +446,46 @@ func (r *Resolver) verifyCosignSignature(ctx context.Context, repo string, diges
 		}
 
 		// 1. Try static-key verification if signature string is present
-		if sigStr != "" && len(pubKeyPEM) > 0 && r.signer != nil {
-			sigBytes, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(sigStr))
-			bundle := ports.CosignSignatureBundle{
-				PayloadBytes:    payloadBytes,
-				Base64Signature: sigStr,
-				SignatureBytes:  sigBytes,
-			}
-			if err := r.signer.Verify(ctx, bundle, pubKeyPEM, repo, digest); err == nil {
-				out.valid = true
-				out.identity = "static-key"
-				return out
-			}
-			// If payloadBytes was a tarball, try extracting inner payload
-			tr := tar.NewReader(bytes.NewReader(payloadBytes))
-			for {
-				hdr, err := tr.Next()
-				if err != nil {
-					break
+		if sigStr != "" {
+			switch {
+			case len(pubKeyPEM) == 0:
+				// There is something to verify (a static signature
+				// annotation) and nothing configured to verify it against.
+				// Recorded distinctly from a failed verification attempt —
+				// see ErrStaticKeyRequired — rather than silently skipped,
+				// which would be indistinguishable from "checked, invalid".
+				out.staticSigSeenNoKey = true
+			case r.signer != nil:
+				sigBytes, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(sigStr))
+				bundle := ports.CosignSignatureBundle{
+					PayloadBytes:    payloadBytes,
+					Base64Signature: sigStr,
+					SignatureBytes:  sigBytes,
 				}
-				if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == 0 {
-					innerBytes, rerr := readCapped(tr, "cosign signature payload tar entry")
-					if rerr != nil {
-						r.log.WarnContext(ctx, "skipping oversized signature tar entry", "repo", repo, "err", rerr)
+				if err := r.signer.Verify(ctx, bundle, pubKeyPEM, repo, digest); err == nil {
+					out.valid = true
+					out.identity = "static-key"
+					return out
+				}
+				// If payloadBytes was a tarball, try extracting inner payload
+				tr := tar.NewReader(bytes.NewReader(payloadBytes))
+				for {
+					hdr, err := tr.Next()
+					if err != nil {
 						break
 					}
-					bundle.PayloadBytes = innerBytes
-					if err := r.signer.Verify(ctx, bundle, pubKeyPEM, repo, digest); err == nil {
-						out.valid = true
-						out.identity = "static-key"
-						return out
+					if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == 0 {
+						innerBytes, rerr := readCapped(tr, "cosign signature payload tar entry")
+						if rerr != nil {
+							r.log.WarnContext(ctx, "skipping oversized signature tar entry", "repo", repo, "err", rerr)
+							break
+						}
+						bundle.PayloadBytes = innerBytes
+						if err := r.signer.Verify(ctx, bundle, pubKeyPEM, repo, digest); err == nil {
+							out.valid = true
+							out.identity = "static-key"
+							return out
+						}
 					}
 				}
 			}

@@ -745,6 +745,70 @@ func TestResolve_BaseImageCosignSignatureVerification_RealSignature(t *testing.T
 	})
 }
 
+// TestResolve_BaseImageStaticKey_NoKeyConfigured_FailsClosed proves that a
+// genuinely, validly signed static-key base image is refused — not silently
+// accepted, and not silently reported as unverified — when
+// POKKUM_BASE_IMAGE_PUBKEY is unset. This is the regression guard for the
+// deleted DefaultBaseImagePublicKeyPEM fallback (Roadmap.md item 2h): a
+// shared, unattributed placeholder public key used to stand in here, but
+// nothing ever signed with its (nonexistent) private half. The setup is
+// otherwise identical to the "genuinely signed image passes verification"
+// case in TestResolve_BaseImageCosignSignatureVerification_RealSignature —
+// a real key pair, a real signature pushed to a real in-process registry —
+// so the only variable under test is whether a key was configured.
+func TestResolve_BaseImageStaticKey_NoKeyConfigured_FailsClosed(t *testing.T) {
+	s, _ := newTestRegistry(t)
+	ref := pushImage(t, s, "app/signed-nokey:v1", ports.LinuxAMD64)
+	privPEM, _ := genECKeyPairPEM(t)
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	pre, err := r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:    ports.BaseImageCustom,
+		Ref:       ref,
+		Platforms: []ports.Platform{ports.LinuxAMD64},
+		Insecure:  true,
+	})
+	if err != nil {
+		t.Fatalf("pre-resolve: %v", err)
+	}
+	parsedRef, err := name.ParseReference(ref, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	repo := parsedRef.Context().Name()
+
+	pushCosignSignature(t, s, repo, pre.Digest, privPEM, false)
+
+	// Deliberately NOT setting POKKUM_BASE_IMAGE_PUBKEY — the "no key
+	// configured" case under test. Explicitly cleared (rather than merely
+	// relying on it never having been set) so this test is isolated
+	// regardless of run order relative to sibling tests in this file that do
+	// set it.
+	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", "")
+
+	_, err = r.Resolve(ctx, ports.BaseImageRequest{
+		Preset:          ports.BaseImageCustom,
+		Ref:             ref,
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		Insecure:        true,
+		VerifySignature: true,
+	})
+	if err == nil {
+		t.Fatal("expected Resolve to refuse a genuinely-signed base image when POKKUM_BASE_IMAGE_PUBKEY is not configured")
+	}
+	if !errors.Is(err, core.ErrBaseSignatureInvalid) {
+		t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "no key is configured") {
+		t.Errorf("error should distinguish 'no key configured' from a signature that was checked and found invalid, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "POKKUM_BASE_IMAGE_PUBKEY") {
+		t.Errorf("error should name the env var to set, got: %v", err)
+	}
+}
+
 // --- VerifyBaseImage tests -------------------------------------------------
 //
 // These exercise the split verification call path introduced so signature
@@ -1753,11 +1817,23 @@ func TestResolve_EscrowMirror_VerifySignature_SucceedsAgainstUpstreamRepo(t *tes
 // signature (digest DA), then has the mirror serve *different* content
 // (digest DB) while replaying the genuine, unmodified upstream signature
 // payload — which still claims DA — under the .sig tag name the resolver
-// will look for once it discovers the pulled digest is DB. This makes the
-// repo-name claim match (proving the fix works and isn't accidentally what
-// fails here), isolating digest integrity as the only thing left that can
-// fail: it must, since nothing about this fix touches the independent
-// DockerManifestDigest comparison in cosign.Signer.Verify.
+// will look for once it discovers the pulled digest is DB.
+//
+// Originally (before the escrow-mirror digest-pin enforcement fix,
+// Roadmap.md item 2h) this was caught by cosign.Signer.Verify's own
+// independent DockerManifestDigest comparison, deep inside signature
+// verification — proving the repo-name claim matched (so the fix under test
+// at the time wasn't accidentally what failed here) while digest integrity
+// still held. That check is still there and would still catch this. But
+// Resolve now compares entry.Digest against what the escrow mirror actually
+// served immediately after the mirror pull, before ever attempting
+// signature verification — a strictly earlier and more direct check for
+// exactly this class of attack (see
+// TestResolve_EscrowMirror_DigestSubstitution_DifferentLegitimatelySignedImageFailsClosed,
+// which covers the case this fix specifically closed: a mirror substituting
+// a *different, independently and genuinely signed* image, which the old
+// per-signature DockerManifestDigest check alone could not catch). This test
+// now asserts on that earlier failure.
 func TestResolve_EscrowMirror_VerifySignature_TamperedMirrorDigestFailsClosed(t *testing.T) {
 	sUpstream, _ := newTestRegistry(t)
 	sMirror, _ := newTestRegistry(t)
@@ -1851,21 +1927,176 @@ func TestResolve_EscrowMirror_VerifySignature_TamperedMirrorDigestFailsClosed(t 
 		VerifySignature: true,
 	})
 
-	// The repo-name claim now matches (upstreamRepo, from entry.Ref — the fix
-	// under test), so if digest integrity were NOT independently enforced,
-	// this would incorrectly succeed against tampered mirror content. It must
-	// fail closed on the digest claim specifically.
+	// If digest integrity were NOT independently enforced, and if the
+	// repo-name claim match introduced by the earlier fix were what silently
+	// permitted this, Resolve would incorrectly succeed against tampered
+	// mirror content. It must fail closed on digest integrity specifically —
+	// now caught even earlier than signature verification, by the
+	// escrow-mirror digest-pin check comparing the mirror's served digest
+	// (DB) against pokkum.lock's locked digest (DA) immediately after the
+	// mirror pull.
 	if resolveErr == nil {
 		t.Fatal("expected Resolve to fail closed: the mirror served different bytes than what was actually signed upstream")
 	}
 	if !errors.Is(resolveErr, core.ErrBaseSignatureInvalid) {
 		t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", resolveErr)
 	}
-	if !strings.Contains(resolveErr.Error(), "docker-manifest-digest") {
-		t.Fatalf("expected failure to name the digest-claim mismatch specifically (proving digest integrity, not repo-name, is what fails here), got: %v", resolveErr)
+	if !strings.Contains(resolveErr.Error(), "escrow mirror") || !strings.Contains(resolveErr.Error(), "substituted") {
+		t.Fatalf("expected failure to name the escrow-mirror digest substitution specifically, got: %v", resolveErr)
 	}
-	if strings.Contains(resolveErr.Error(), "docker-reference") {
-		t.Fatalf("did not expect a docker-reference (repo-name) mismatch — that claim should now pass since it's checked against the upstream repo: %v", resolveErr)
+	if !strings.Contains(resolveErr.Error(), upstreamDesc.Digest.String()) || !strings.Contains(resolveErr.Error(), mirrorDesc.Digest.String()) {
+		t.Fatalf("expected failure to name both the locked digest (%s) and the digest actually served (%s), got: %v", upstreamDesc.Digest, mirrorDesc.Digest, resolveErr)
+	}
+}
+
+// TestResolve_EscrowMirror_DigestSubstitution_DifferentLegitimatelySignedImageFailsClosed
+// proves the escrow-mirror digest-substitution attack described in
+// Roadmap.md item 2h/Lessons.md: an attacker with push access to the
+// project's own escrow mirror retargets the mutable "sha256-<hex>" tag a
+// locked entry.MirrorRef names to a DIFFERENT image — one that is itself
+// entirely genuine and validly signed by the real upstream signer, e.g. an
+// older release still carrying known CVEs — under the SAME upstream
+// repository name. Unlike TestResolve_EscrowMirror_VerifySignature_TamperedMirrorDigestFailsClosed
+// (which replays digest A's genuine signature against different bytes B, so
+// the docker-manifest-digest claims check alone is what fails), this test's
+// signature is completely genuine for whatever the mirror actually serves:
+// real cert-free static-key signature, correct docker-reference, correct
+// docker-manifest-digest for the SERVED digest. Every signature-verification
+// check passes. The only thing that can catch this is comparing the served
+// digest against the digest pokkum.lock actually locked this preset to
+// (entry.Digest) — which, before the fix under test, was written but never
+// read back for comparison anywhere in this file.
+func TestResolve_EscrowMirror_DigestSubstitution_DifferentLegitimatelySignedImageFailsClosed(t *testing.T) {
+	sUpstream, _ := newTestRegistry(t)
+	sMirror, _ := newTestRegistry(t)
+
+	// Two distinct, real upstream releases under the SAME repository name —
+	// exactly the shape of two different tags/digests of e.g.
+	// gcr.io/distroless/cc-debian12 over time. Both are genuinely signed by
+	// the same real upstream signer.
+	privPEM, pubPEM := genECKeyPairPEM(t)
+
+	upstreamRefA := pushImage(t, sUpstream, "upstream/substitution:v1", ports.LinuxAMD64)
+	parsedA, err := name.ParseReference(upstreamRefA, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference(A): %v", err)
+	}
+	descA, err := remote.Get(parsedA)
+	if err != nil {
+		t.Fatalf("remote.Get(A): %v", err)
+	}
+	upstreamRepo := parsedA.Context().Name()
+	pushCosignSignature(t, sUpstream, upstreamRepo, descA.Digest, privPEM, false)
+
+	upstreamRefB := pushImage(t, sUpstream, "upstream/substitution:v2", ports.LinuxAMD64)
+	parsedB, err := name.ParseReference(upstreamRefB, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference(B): %v", err)
+	}
+	descB, err := remote.Get(parsedB)
+	if err != nil {
+		t.Fatalf("remote.Get(B): %v", err)
+	}
+	if descB.Digest == descA.Digest {
+		t.Fatalf("test setup bug: A and B accidentally share a digest")
+	}
+	pushCosignSignature(t, sUpstream, upstreamRepo, descB.Digest, privPEM, false)
+
+	// Legitimate escrow mirroring of A: image + its real .sig tag, unmodified
+	// — exactly what Resolve's own MirrorRegistry block does.
+	mirrorRepo := registryRef(t, sMirror, "mirror/substitution")
+	mirrorTagStr := fmt.Sprintf("%s:sha256-%s", mirrorRepo, descA.Digest.Hex)
+	mirrorTag, err := name.NewTag(mirrorTagStr, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(mirror A): %v", err)
+	}
+	imgA, err := descA.Image()
+	if err != nil {
+		t.Fatalf("descA.Image: %v", err)
+	}
+	if err := remote.Write(mirrorTag, imgA); err != nil {
+		t.Fatalf("mirror write A: %v", err)
+	}
+
+	// ATTACK: retarget the SAME mirror tag to serve image B instead — the
+	// mutable-tag substitution the fix must catch.
+	imgB, err := descB.Image()
+	if err != nil {
+		t.Fatalf("descB.Image: %v", err)
+	}
+	if err := remote.Write(mirrorTag, imgB); err != nil {
+		t.Fatalf("mirror retarget to B: %v", err)
+	}
+
+	// Mirror B's genuine signature under the tag name the resolver will
+	// actually look for once it discovers the served digest is B's — an
+	// attacker with push access to the mirror can trivially also mirror B's
+	// real, already-public signature from upstream.
+	sigTagB := descB.Digest.Algorithm + "-" + descB.Digest.Hex + ".sig"
+	upstreamSigRefB, err := name.ParseReference(upstreamRepo+":"+sigTagB, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("ParseReference(sig B): %v", err)
+	}
+	sigDescB, err := remote.Get(upstreamSigRefB)
+	if err != nil {
+		t.Fatalf("remote.Get(sig B): %v", err)
+	}
+	sigImgB, err := sigDescB.Image()
+	if err != nil {
+		t.Fatalf("sigDescB.Image: %v", err)
+	}
+	mirrorSigTagB, err := name.NewTag(mirrorRepo+":"+sigTagB, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(mirror sig B): %v", err)
+	}
+	if err := remote.Write(mirrorSigTagB, sigImgB); err != nil {
+		t.Fatalf("mirror write sig B: %v", err)
+	}
+
+	// Lockfile as it would look after a real `pokkum base update
+	// --mirror-registry=...` for image A: entry.Digest is locked to A,
+	// exactly what the fix must enforce.
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+	lf := &ports.PokkumLockfile{
+		Version:   lockfileutils.LockfileSchemaVersion,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Bases: map[string]ports.BaseLockEntry{
+			string(ports.BaseImageCustom): {
+				Ref:       upstreamRefA,
+				Digest:    descA.Digest.String(),
+				PinnedRef: upstreamRepo + "@" + descA.Digest.String(),
+				MirrorRef: mirrorTagStr,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	}
+	if err := lockfileutils.SaveLockfile(lockPath, lf); err != nil {
+		t.Fatalf("SaveLockfile: %v", err)
+	}
+
+	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", string(pubPEM))
+
+	r := NewResolver(nil)
+	res, resolveErr := r.Resolve(context.Background(), ports.BaseImageRequest{
+		Preset:          ports.BaseImageCustom,
+		Ref:             upstreamRefA,
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+		LockfilePath:    lockPath,
+		VerifySignature: true,
+	})
+
+	// Every signature check would pass here — B's signature is completely
+	// genuine for B. Only the digest-vs-lockfile check can catch this.
+	if resolveErr == nil {
+		t.Fatalf("expected Resolve to fail closed: the escrow mirror served a different, legitimately-signed image (digest %s) than what pokkum.lock locked this preset to (digest %s), but Resolve returned success with digest %s",
+			descB.Digest, descA.Digest, res.Digest)
+	}
+	if !errors.Is(resolveErr, core.ErrBaseSignatureInvalid) {
+		t.Fatalf("err = %v, want core.ErrBaseSignatureInvalid", resolveErr)
+	}
+	if !strings.Contains(resolveErr.Error(), descA.Digest.String()) || !strings.Contains(resolveErr.Error(), descB.Digest.String()) {
+		t.Errorf("error should name both the locked digest (%s) and the digest actually served (%s) so an operator can diagnose the substitution, got: %v", descA.Digest, descB.Digest, resolveErr)
 	}
 }
 

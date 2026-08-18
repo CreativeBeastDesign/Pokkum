@@ -472,6 +472,95 @@ func TestResolveProvenance_WithCosignSignature(t *testing.T) {
 	}
 }
 
+// TestResolveProvenance_NoKeyConfigured_FailsClosed proves that a genuinely,
+// validly signed static-key Cosign signature is refused — not silently
+// reported as SignatureValid: false, and never accepted — when no
+// verification key is configured anywhere (ProvenanceResolverRequest.PublicKeyPEM,
+// POKKUM_SIGNING_PUBKEY, POKKUM_BASE_IMAGE_PUBKEY all unset).
+//
+// This is the regression guard for the deleted cosign.DefaultPublicKeyPEM
+// fallback (Roadmap.md item 2h): a shared, unattributed placeholder public
+// key used to stand in here so parsePublicKeyPEM always succeeded, but
+// nothing ever signed with its (nonexistent) private half. The setup below
+// is otherwise identical to TestResolveProvenance_WithCosignSignature (a
+// real key pair, a real cosign.Signer, a real signature pushed to a real
+// in-process registry) specifically so the only variable under test is
+// whether a key was configured — proving this isn't rejected for some
+// unrelated reason (bad signature, wrong repo, etc).
+func TestResolveProvenance_NoKeyConfigured_FailsClosed(t *testing.T) {
+	_, host := startTestRegistry(t)
+	targetRepo := fmt.Sprintf("%s/app-cosign-nokey", host)
+
+	img := createTestImage(t, nil)
+	tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+	if err := remote.Write(tagRef, img); err != nil {
+		t.Fatalf("push test image: %v", err)
+	}
+	imgDigest, _ := img.Digest()
+
+	privKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	privDer, _ := x509.MarshalPKCS8PrivateKey(privKey)
+	privPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDer})
+
+	// Deliberately NOT setting POKKUM_SIGNING_PUBKEY or
+	// POKKUM_BASE_IMAGE_PUBKEY, and NOT passing PublicKeyPEM below — this is
+	// the "no key configured anywhere" case under test. t.Setenv("", "")
+	// clears any value a previous test in this package may have left behind
+	// and registers cleanup, keeping this test isolated regardless of run
+	// order.
+	t.Setenv("POKKUM_SIGNING_PUBKEY", "")
+	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", "")
+
+	cosignSigner := cosign.NewSigner(nil)
+	bundle, err := cosignSigner.Sign(context.Background(), ports.CosignSignRequest{
+		Repo:   targetRepo,
+		Digest: imgDigest,
+		KeyPEM: privPEM,
+	})
+	if err != nil {
+		t.Fatalf("cosign sign: %v", err)
+	}
+
+	sigLayer := static.NewLayer(bundle.PayloadBytes, types.MediaType("application/vnd.dev.cosign.simplesigning.v1+json"))
+	sigImg, err := mutate.Append(empty.Image, mutate.Addendum{
+		Layer: sigLayer,
+		Annotations: map[string]string{
+			"dev.cosignproject.cosign/signature": bundle.Base64Signature,
+		},
+		MediaType: types.MediaType("application/vnd.dev.cosign.simplesigning.v1+json"),
+	})
+	if err != nil {
+		t.Fatalf("mutate.Append: %v", err)
+	}
+	sigImg = mutate.MediaType(sigImg, types.OCIManifestSchema1)
+
+	sigTagStr := fmt.Sprintf("%s:%s-%s.sig", targetRepo, imgDigest.Algorithm, imgDigest.Hex)
+	sigRef, _ := name.ParseReference(sigTagStr, name.WeakValidation)
+	if err := remote.Write(sigRef, sigImg); err != nil {
+		t.Fatalf("push signature image: %v", err)
+	}
+
+	r := provenance.NewResolver(nil)
+	ctx := context.Background()
+
+	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+		ImageRef: targetRepo + ":v1.0.0",
+	})
+
+	if err == nil {
+		t.Fatalf("expected ResolveProvenance to refuse a genuinely-signed image when no verification key is configured, got summary: %+v", summary)
+	}
+	if !errors.Is(err, provenance.ErrStaticKeyRequired) {
+		t.Fatalf("err = %v, want wrapping provenance.ErrStaticKeyRequired", err)
+	}
+	if !errors.Is(err, core.ErrInvalidRequest) {
+		t.Fatalf("err = %v, want wrapping core.ErrInvalidRequest", err)
+	}
+	if summary.SignatureValid {
+		t.Fatal("BUG: SignatureValid was true with no verification key configured — an unowned trust anchor accepted a signature nothing configured it to check")
+	}
+}
+
 func TestResolveProvenance_Adversarial_FakeKeylessCert_IsRejected(t *testing.T) {
 	_, host := startTestRegistry(t)
 	targetRepo := fmt.Sprintf("%s/app-forged-keyless", host)

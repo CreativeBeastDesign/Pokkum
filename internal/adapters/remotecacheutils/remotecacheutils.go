@@ -592,7 +592,18 @@ func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Has
 				pubKey = []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
 			}
 			if len(pubKey) == 0 {
-				pubKey = []byte(cosign.DefaultPublicKeyPEM)
+				// No fallback key. A shared, unattributed placeholder public
+				// key used to live here (cosign.DefaultPublicKeyPEM) — no
+				// real signer ever held its private half, so it could never
+				// actually verify anything; it has been deleted (Roadmap.md
+				// item 2h). Recorded as its own distinct failure — "nothing
+				// configured to check against" — rather than falling through
+				// to signer.Verify, which would report a generic "signature
+				// verification failed" indistinguishable from a genuinely
+				// wrong key or a tampered signature.
+				errs = append(errs, fmt.Errorf(
+					"layer %d: static-key verification requested but no key is configured; set --cache-verify-key, POKKUM_CACHE_PUBKEY, POKKUM_SIGNING_PUBKEY, or POKKUM_BASE_IMAGE_PUBKEY", i))
+				continue
 			}
 
 			bundle := ports.CosignSignatureBundle{

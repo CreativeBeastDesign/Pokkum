@@ -556,6 +556,104 @@ func TestCacher_Check_VerifiedCacheHit_StaticKey(t *testing.T) {
 	}
 }
 
+// TestCacher_Check_NoKeyConfigured_FailsClosed proves that a genuinely,
+// validly signed cache candidate is refused — not silently promoted as an
+// unverified hit — when static-key verification is explicitly requested but
+// no public key is configured anywhere (Verify.PublicKeyPEM,
+// POKKUM_CACHE_PUBKEY, POKKUM_SIGNING_PUBKEY, POKKUM_BASE_IMAGE_PUBKEY all
+// unset).
+//
+// This is the regression guard for the deleted cosign.DefaultPublicKeyPEM
+// fallback (Roadmap.md item 2h): a shared, unattributed placeholder public
+// key used to stand in here so verification always had *something* to check
+// against, but nothing ever signed with its (nonexistent) private half. The
+// setup is otherwise identical to TestCacher_Check_VerifiedCacheHit_StaticKey
+// (a real key pair, a real signature pushed to a real in-process registry)
+// so the only variable under test is whether a key was configured.
+func TestCacher_Check_NoKeyConfigured_FailsClosed(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/app-nokey"
+
+	privPEM, _ := generateTestKey(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("img.Digest: %v", err)
+	}
+
+	inputHash := strings.Repeat("d", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	// Push a genuine Cosign signature over the real candidate.
+	pushTestCosignSignature(t, repo, digest, privPEM, false)
+
+	// Deliberately NOT setting Verify.PublicKeyPEM and clearing every env
+	// var this path checks — the "no key configured anywhere" case under
+	// test, isolated from whatever sibling tests in this file may have set.
+	t.Setenv("POKKUM_CACHE_PUBKEY", "")
+	t.Setenv("POKKUM_SIGNING_PUBKEY", "")
+	t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", "")
+
+	c := remotecacheutils.New(remotecacheutils.WithCosignSigner(cosign.NewSigner(nil)))
+	res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyStaticKey,
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on default non-strict check (fail closed via cache-miss, not a hard error), got: %v", err)
+	}
+	if res.Hit {
+		t.Fatal("BUG: Check reported Hit: true for a candidate verified against no configured key — an unowned trust anchor accepted a signature nothing configured it to check")
+	}
+
+	relTag, err := name.NewTag(repo+":v1.0.0", name.WeakValidation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remote.Get(relTag); err == nil {
+		t.Fatal("BUG: release tag was promoted despite no verification key being configured")
+	}
+
+	// Strict mode must surface this as an explicit, actionable error naming
+	// the missing configuration, distinct from a signature that was checked
+	// and found invalid.
+	_, strictErr := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyStaticKey,
+			Strict:          true,
+		},
+	})
+	if strictErr == nil {
+		t.Fatal("expected a non-nil error in strict mode when no verification key is configured")
+	}
+	if !strings.Contains(strictErr.Error(), "no key is configured") {
+		t.Errorf("error should distinguish 'no key configured' from a signature that was checked and found invalid, got: %v", strictErr)
+	}
+}
+
 // TestCacher_Check_PoisonedCacheEntry_UnsignedRejected verifies that an unsigned cache candidate
 // is rejected when verification is active, and release tags are NOT promoted.
 func TestCacher_Check_PoisonedCacheEntry_UnsignedRejected(t *testing.T) {
