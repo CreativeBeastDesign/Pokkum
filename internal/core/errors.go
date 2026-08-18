@@ -205,6 +205,15 @@ var (
 	// ErrSecretInlined reports hardcoded secret or sensitive token leak detected in build sources.
 	ErrSecretInlined = errors.New("hardcoded secret or sensitive pattern detected in build sources")
 
+	// ErrSecretScanIncomplete reports that the secret scanner could not
+	// actually inspect one or more files it walked (e.g. a file exceeded
+	// its text-scan size ceiling) — distinct from ErrSecretInlined (a
+	// concrete match found): this is "we don't actually know", and, like
+	// ErrScanIncomplete's CVE-scan analogue, fails the build closed rather
+	// than letting "zero matches found" be read as "scanned clean" for a
+	// file that was never actually read past its size check.
+	ErrSecretScanIncomplete = errors.New("secret scan incomplete: one or more files could not be inspected")
+
 	// ErrBaseSignatureInvalid reports base image Cosign signature verification failure.
 	ErrBaseSignatureInvalid = errors.New("base image Cosign signature verification failed")
 

@@ -229,6 +229,13 @@ func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 		if d.Tarballs == nil {
 			return missing("tarball writer")
 		}
+	default:
+		// An unrecognized output mode reached here would otherwise pass
+		// wiring validation silently (none of the three cases' dependency
+		// checks apply to it) and only fail much later, inside publish(),
+		// with a far less obvious error. Fail fast, at the same point
+		// every other missing-dependency case fails.
+		return fmt.Errorf("core: unrecognized output mode %q: %w", req.Output.Mode, ErrInvalidOutputMode)
 	}
 	return nil
 }
@@ -564,18 +571,15 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		}
 	}
 
-	if deps.SecretGuard != nil {
-		secretRes, err := deps.SecretGuard.ScanDirectory(ctx, ports.SecretScanRequest{
-			ProjectDir:    req.ProjectDir,
-			AllowPatterns: req.AllowSecretPatterns,
-		})
-		if err != nil {
-			return BuildResult{}, fmt.Errorf("secret guard: %w", err)
-		}
-		if !secretRes.Passed {
-			return BuildResult{}, fmt.Errorf("secret guard: detected %d hardcoded secret(s): %w", len(secretRes.Matches), ErrSecretInlined)
-		}
-		log.Info("secret guard ok", "checked", req.ProjectDir)
+	// Pre-build source scan: earliest possible, best-located feedback for a
+	// secret already sitting in the repo. This does NOT cover the shipped
+	// artifact — see the post-build scan after Stage 5 (Prepare) below,
+	// which is what actually gates what ships. Kept as an addition, not a
+	// replacement: a source-level hit points a developer straight at the
+	// offending source line, which the post-build scan (against
+	// minified/bundled output) generally cannot do as precisely.
+	if err := runSecretScan(ctx, deps, log, "pre-build source", req.ProjectDir, req.AllowSecretPatterns, false); err != nil {
+		return BuildResult{}, err
 	}
 
 	// Stage 4: --dry-run stops here, having touched nothing.
@@ -906,6 +910,61 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	log.Info("native inspector ok")
 	if !req.BaseImage.NoVerifyBase {
 		log.Info("base image signature verified", "ref", baseInfo.Ref, "pinned", baseInfo.PinnedRef)
+	}
+
+	// Stage 5.5: post-build secret scan of the compiler's OUTPUT tree —
+	// the bytes that actually get packaged into the image — not just the
+	// pre-build source tree scanned above. $env/static/* baking, a Vite
+	// `define` replacement, and anything a compromised build-time
+	// dependency writes into build/server/chunks/*.js only produce their
+	// final, shipped bytes here, after Prepare; none of it exists yet at
+	// the pre-build scan point above.
+	//
+	// prep.OutputDir is the SAME shared build output every strategy starts
+	// from (see the per-strategy pkgReq wiring inside fanOut, a few dozen
+	// lines below, which postBuildScanDirs deliberately mirrors):
+	//   - StrategyLayered ships prep.OutputDir in full (the server
+	//     entrypoint and its sibling files, plus client/vendor/native/
+	//     prerendered) — scanning the whole tree matches exactly what
+	//     ships.
+	//   - StrategyStatic ships only OutputDir/client and
+	//     OutputDir/prerendered (no server component at all) — scanning
+	//     just those two avoids false "coverage" of files this strategy
+	//     never packages.
+	//   - StrategyExe's ACTUAL shipped artifact is the single native
+	//     executable Compile produces below, by bundling prep.OutputDir
+	//     via `bun build --compile`. Scanning prep.OutputDir here is a
+	//     deliberate best-effort PROXY, not exact coverage of the final
+	//     compiled binary: it catches everything already baked into the
+	//     JS by Prepare — which is every example in this feature's bug
+	//     report (env baking, Vite define, a malicious dependency's
+	//     chunk) — but NOT anything a bunfig.toml preload plugin or a
+	//     `with { type: "macro" }` import could inject only during the
+	//     Compile step itself. There is no practical way to text-scan the
+	//     final compiled executable with acceptable false-positive/
+	//     negative behavior (it is a single, non-line-oriented,
+	//     size-unbounded binary blob, and secret text inside it is not
+	//     guaranteed to survive byte-for-byte). That residual gap for
+	//     StrategyExe is accepted and reported honestly, not silently
+	//     implied covered.
+	//
+	// --asset-overlay's merged prior-generation content (assetOverlayDir,
+	// StrategyLayered only today) is pulled from a registry — either this
+	// build's own predecessor chain, or, via --asset-overlay-from,
+	// arbitrary caller-named images — and gets packaged into this build's
+	// own image as its own layer. It is scanned here too: re-shipping
+	// unscanned third-party registry content defeats the point of this
+	// gate exactly as much as skipping the local build output would.
+	if err := checkCtx(ctx, "post-build secret scan"); err != nil {
+		return BuildResult{}, err
+	}
+	for _, dir := range postBuildScanDirs(req.Compile.Strategy, prep.OutputDir) {
+		if err := runSecretScan(ctx, deps, log, "post-build output", dir, req.AllowSecretPatterns, req.Compile.Sourcemap); err != nil {
+			return BuildResult{}, err
+		}
+	}
+	if err := runSecretScan(ctx, deps, log, "post-build asset-overlay", assetOverlayDir, req.AllowSecretPatterns, req.Compile.Sourcemap); err != nil {
+		return BuildResult{}, err
 	}
 
 	if err := checkCtx(ctx, "compile"); err != nil {
@@ -1590,6 +1649,26 @@ func fanOut(
 				if rel := prep.StaticFallbackRelPath; rel != "" {
 					pkgReq.StaticFallback = ports.AppClientDirPrefix + "/" + rel
 				}
+			case StrategyExe:
+				// No extra packaging directories to set: the exe
+				// strategy's shipped artifact is `art`, the single
+				// compiled executable already assigned to pkgReq.App
+				// above (from the Compile call earlier in this
+				// goroutine) — prep.OutputDir was Compile's INPUT, not
+				// something the packager mounts directly for this
+				// strategy. An explicit no-op case, not a silent
+				// fallthrough, so this is a deliberate choice rather
+				// than an oversight — see the default case below.
+			default:
+				// A future BuildStrategy value that reaches this switch
+				// without an explicit case would otherwise silently skip
+				// every strategy-specific field above and package
+				// whatever pkgReq already happened to hold — exactly the
+				// "unrecognized enum value silently no-ops" failure mode
+				// internal/architecture_test.go's exhaustiveness check
+				// exists to catch. Fail the build for this platform
+				// instead of guessing.
+				return fmt.Errorf("core: unhandled build strategy %q in packaging fan-out: %w", req.Compile.Strategy, ErrInvalidStrategy)
 			}
 
 			img, err := deps.Packager.Build(gctx, pkgReq)
@@ -1750,6 +1829,86 @@ func checkCtx(ctx context.Context, stage string) error {
 	return nil
 }
 
+// runSecretScan invokes deps.SecretGuard.ScanDirectory against dir and turns
+// a non-clean result into an error. A no-op (nil error) when deps.SecretGuard
+// is nil (the port is optional) or dir is empty (nothing to scan — e.g. a
+// strategy/stage combination with no applicable directory).
+//
+// Two failure sentinels are used deliberately, not one: ErrSecretInlined
+// means the scanner found something and is confident about it;
+// ErrSecretScanIncomplete means the scanner could not actually inspect one
+// or more files (see ports.SecretSkip) and is refusing to guess. Collapsing
+// both into one error would make "we found a secret" indistinguishable from
+// "we don't know, ask a human" — the two call for different remediation.
+//
+// stage names the log/error context (e.g. "pre-build source", "post-build
+// output") purely for operator-facing messages; it is not interpreted.
+func runSecretScan(ctx context.Context, deps Deps, log *slog.Logger, stage, dir string, allowPatterns []string, scanSourcemaps bool) error {
+	if deps.SecretGuard == nil || dir == "" {
+		return nil
+	}
+	res, err := deps.SecretGuard.ScanDirectory(ctx, ports.SecretScanRequest{
+		ProjectDir:     dir,
+		AllowPatterns:  allowPatterns,
+		ScanSourcemaps: scanSourcemaps,
+	})
+	if err != nil {
+		return fmt.Errorf("secret guard (%s, %s): %w", stage, dir, err)
+	}
+	if len(res.Skipped) > 0 {
+		names := make([]string, 0, len(res.Skipped))
+		for _, s := range res.Skipped {
+			names = append(names, s.FilePath)
+		}
+		return fmt.Errorf("secret guard (%s): %d file(s) in %s could not be inspected (%s): %w",
+			stage, len(res.Skipped), dir, strings.Join(names, ", "), ErrSecretScanIncomplete)
+	}
+	if !res.Passed {
+		return fmt.Errorf("secret guard (%s): detected %d hardcoded secret(s) in %s: %w", stage, len(res.Matches), dir, ErrSecretInlined)
+	}
+	log.Info("secret guard ok", "stage", stage, "checked", dir)
+	return nil
+}
+
+// postBuildScanDirs returns the on-disk directories, rooted at Prepare's
+// OutputDir, that mirror what actually gets packaged for strategy. This
+// deliberately mirrors the per-strategy pkgReq.App*Dir wiring inside
+// fanOut below — a change to one without the other would make the secret
+// scan either miss shipped content or waste time scanning trees that never
+// ship, so if fanOut's wiring changes, this should be revisited alongside
+// it. Returns nil when outputDir is empty (nothing Prepare produced yet, or
+// a test double that never sets it).
+func postBuildScanDirs(strategy BuildStrategy, outputDir string) []string {
+	if outputDir == "" {
+		return nil
+	}
+	switch strategy {
+	case StrategyStatic:
+		// No server component ships for static — only the client and
+		// prerendered trees pokkum-static serves.
+		return []string{
+			filepath.Join(outputDir, "client"),
+			filepath.Join(outputDir, "prerendered"),
+		}
+	case StrategyLayered:
+		// The whole tree ships (server entrypoint + its siblings, client,
+		// vendor, native, prerendered) — see the pipeline.go comment at
+		// pkgReq.AppServerDir's assignment for why it's the whole
+		// directory rather than a subdirectory.
+		return []string{outputDir}
+	case StrategyExe:
+		// Best-effort proxy only — see the Stage 5.5 comment at the call
+		// site for the honest limitation (Compile's own bundling step is
+		// not covered).
+		return []string{outputDir}
+	default:
+		// An unrecognized strategy: scan the whole tree rather than skip
+		// silently, matching this file's other strategy switches' new
+		// fail-into-safety default arms.
+		return []string{outputDir}
+	}
+}
+
 // payloadDigest returns the digest of whichever of the payload's two members
 // is set.
 func payloadDigest(p ports.Payload) (v1.Hash, error) {
@@ -1800,6 +1959,15 @@ func writePlan(w io.Writer, req BuildRequest, res BuildResult) error {
 		row("would load", "docker daemon, as "+req.Repo)
 	case OutputTarball:
 		row("would write", req.Output.TarballPath+", as "+req.Repo)
+	default:
+		// Should be unreachable by construction: Deps.validate (Stage 1,
+		// run before dry-run ever reaches this point) now rejects an
+		// unrecognized Output.Mode outright. Kept as an explicit, visible
+		// row rather than silently rendering nothing for it, in case that
+		// invariant is ever broken by a future change to validate — a
+		// dry-run report is exactly the wrong place to hide a bug behind
+		// silence.
+		row("would output", fmt.Sprintf("(unrecognized output mode %q)", req.Output.Mode))
 	}
 	for _, t := range req.Tags {
 		row("  tagged", req.Repo+":"+t)

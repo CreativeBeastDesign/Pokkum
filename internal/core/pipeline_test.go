@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/secretguard"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -2433,5 +2436,376 @@ func TestBuild_MultiPlatformSignsIndexAndPerPlatformManifests(t *testing.T) {
 	}
 	if res.Signing == nil || !res.Signing.Signed || len(res.Signing.SignatureRefs) != 3 {
 		t.Errorf("BuildResult.Signing = %+v, want Signed=true with 3 signature refs", res.Signing)
+	}
+}
+
+// fakeSecretGuard is a controllable ports.SecretGuard test double that
+// records every directory it was asked to scan (in call order) — used to
+// pin down exactly WHICH trees the pipeline's post-build scan targets per
+// strategy, independent of the real secretguard adapter's own detection
+// logic (covered separately in internal/adapters/secretguard).
+type fakeSecretGuard struct {
+	// resultFor maps a scanned ProjectDir to the result to return for it.
+	// A directory with no entry gets a clean ports.SecretScanResult{Passed:
+	// true}.
+	resultFor map[string]ports.SecretScanResult
+	err       error
+
+	scannedDirs []string
+}
+
+func (f *fakeSecretGuard) ScanDirectory(_ context.Context, req ports.SecretScanRequest) (ports.SecretScanResult, error) {
+	f.scannedDirs = append(f.scannedDirs, req.ProjectDir)
+	if f.err != nil {
+		return ports.SecretScanResult{}, f.err
+	}
+	if res, ok := f.resultFor[req.ProjectDir]; ok {
+		return res, nil
+	}
+	return ports.SecretScanResult{Passed: true}, nil
+}
+
+// postBuildScanTestRequest returns a minimal layered-strategy push request
+// with real, empty temp directories so the real filesystem walk in
+// internal/adapters/secretguard has somewhere real to look — unlike most of
+// this file's requests, which point ProjectDir at a path
+// ("/abs/project") that deliberately never exists on disk (fine for tests
+// with SecretGuard left nil, but not for these).
+func postBuildScanTestRequest(t *testing.T, projectDir string) core.BuildRequest {
+	t.Helper()
+	return core.BuildRequest{
+		ProjectDir: projectDir,
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+	}
+}
+
+// TestBuild_PostBuildSecretScan_TargetsExactStrategyDirs pins down exactly
+// which directories the pipeline hands to SecretGuard.ScanDirectory for
+// each strategy, using fakeSecretGuard's call recording rather than the
+// real adapter's own detection — this is specifically testing the WIRING
+// (postBuildScanDirs / the fanOut pkgReq switch it mirrors), not secret
+// detection itself.
+func TestBuild_PostBuildSecretScan_TargetsExactStrategyDirs(t *testing.T) {
+	t.Run("layered scans the whole output tree once", func(t *testing.T) {
+		projectDir := t.TempDir()
+		outputDir := t.TempDir()
+		guard := &fakeSecretGuard{}
+		deps := newFullDeps(io.Discard)
+		deps.SecretGuard = guard
+		deps.Compiler = &mockCompiler{
+			prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+				return ports.PrepareResult{EntrypointPath: filepath.Join(outputDir, "index.js"), OutputDir: outputDir}, nil
+			},
+		}
+
+		req := postBuildScanTestRequest(t, projectDir)
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+
+		wantSecondCall := outputDir // pre-build source scan is call 1, post-build is call 2
+		if len(guard.scannedDirs) < 2 || guard.scannedDirs[1] != wantSecondCall {
+			t.Fatalf("scannedDirs = %v, want [%q, %q, ...] (source scan, then the WHOLE layered output tree)", guard.scannedDirs, projectDir, wantSecondCall)
+		}
+	})
+
+	t.Run("static scans only client and prerendered, not the whole tree", func(t *testing.T) {
+		projectDir := t.TempDir()
+		outputDir := t.TempDir()
+		guard := &fakeSecretGuard{}
+		deps := newFullDeps(io.Discard)
+		deps.SecretGuard = guard
+		deps.StaticServer = &mockStaticServerProvider{}
+		deps.Compiler = &mockCompiler{
+			prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+				return ports.PrepareResult{EntrypointPath: filepath.Join(outputDir, "index.js"), OutputDir: outputDir}, nil
+			},
+		}
+
+		req := postBuildScanTestRequest(t, projectDir)
+		req.Compile.Strategy = core.StrategyStatic
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+
+		wantClient := filepath.Join(outputDir, "client")
+		wantPrerendered := filepath.Join(outputDir, "prerendered")
+		got := guard.scannedDirs[1:] // drop the pre-build source scan
+		if len(got) != 2 || got[0] != wantClient || got[1] != wantPrerendered {
+			t.Fatalf("post-build scannedDirs = %v, want exactly [%q, %q] — static must not scan the whole output tree (it never ships %s itself, only client/prerendered)",
+				got, wantClient, wantPrerendered, outputDir)
+		}
+	})
+
+	t.Run("exe scans the output tree as a best-effort proxy for the compiled binary", func(t *testing.T) {
+		projectDir := t.TempDir()
+		outputDir := t.TempDir()
+		guard := &fakeSecretGuard{}
+		deps := newFullDeps(io.Discard)
+		deps.SecretGuard = guard
+		deps.Compiler = &mockCompiler{
+			prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+				return ports.PrepareResult{EntrypointPath: filepath.Join(outputDir, "index.ts"), OutputDir: outputDir}, nil
+			},
+		}
+
+		req := postBuildScanTestRequest(t, projectDir)
+		req.Compile.Strategy = core.StrategyExe
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+
+		if len(guard.scannedDirs) < 2 || guard.scannedDirs[1] != outputDir {
+			t.Fatalf("post-build scannedDirs = %v, want the compile input tree %q scanned as a proxy (see the honest limitation documented at the Stage 5.5 call site: the final compiled binary itself is not scanned)", guard.scannedDirs, outputDir)
+		}
+	})
+}
+
+// TestBuild_PostBuildSecretScan_CatchesSecretAbsentFromSource is this
+// feature's row-14 regression fixture (mem:self_review_checklist): a
+// secret-scanning feature's test must start in the state the feature exists
+// to catch. Source (ProjectDir) is genuinely clean; the secret exists ONLY
+// in the compiler's OUTPUT — modeling $env/static/* baking, a Vite `define`
+// replacement, or a compromised build-time dependency writing into a
+// server chunk, none of which exist yet at the pre-build scan point. This
+// exercises the REAL internal/adapters/secretguard adapter (not a fake)
+// through the real core.Build call chain, so it proves the wiring AND the
+// detection logic together — not just one or the other.
+func TestBuild_PostBuildSecretScan_CatchesSecretAbsentFromSource(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "src_app.ts"), []byte(`console.log("clean source, nothing here");`), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	outputDir := t.TempDir()
+	serverDir := filepath.Join(outputDir, "server")
+	if err := os.MkdirAll(serverDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A real hardcoded secret pattern, present ONLY in the built chunk —
+	// exactly the shape a $env/static/private misuse or a compromised
+	// build-time dependency would produce.
+	const bakedSecret = `export const cfg={apiKey:"AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY"};`
+	if err := os.WriteFile(filepath.Join(serverDir, "chunk-abc123.js"), []byte(bakedSecret), 0o644); err != nil {
+		t.Fatalf("write output file: %v", err)
+	}
+
+	deps := newFullDeps(io.Discard)
+	deps.SecretGuard = secretguard.NewAdapter()
+	deps.Compiler = &mockCompiler{
+		prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+			return ports.PrepareResult{EntrypointPath: filepath.Join(outputDir, "index.js"), OutputDir: outputDir}, nil
+		},
+	}
+
+	req := postBuildScanTestRequest(t, projectDir)
+	_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err == nil {
+		t.Fatalf("expected the build to fail on a secret present only in the compiled output")
+	}
+	if !errors.Is(err, core.ErrSecretInlined) {
+		t.Errorf("err = %v, want it to wrap core.ErrSecretInlined", err)
+	}
+	if !strings.Contains(err.Error(), "post-build") {
+		t.Errorf("err = %v, want it to identify the post-build stage (so an operator isn't left thinking their SOURCE is the problem)", err)
+	}
+}
+
+// TestBuild_PostBuildSecretScan_CleanOutputStillPublishes is the mirror of
+// the above: a genuinely clean compiled output must not be flagged, so this
+// feature does not turn every green build red.
+func TestBuild_PostBuildSecretScan_CleanOutputStillPublishes(t *testing.T) {
+	projectDir := t.TempDir()
+	outputDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outputDir, "index.js"), []byte(`console.log("nothing sensitive here");`), 0o644); err != nil {
+		t.Fatalf("write output file: %v", err)
+	}
+
+	deps := newFullDeps(io.Discard)
+	deps.SecretGuard = secretguard.NewAdapter()
+	deps.Compiler = &mockCompiler{
+		prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+			return ports.PrepareResult{EntrypointPath: filepath.Join(outputDir, "index.js"), OutputDir: outputDir}, nil
+		},
+	}
+
+	req := postBuildScanTestRequest(t, projectDir)
+	if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+		t.Fatalf("expected a clean build to publish successfully, got: %v", err)
+	}
+}
+
+// TestBuild_PostBuildSecretScan_StaticIgnoresSecretOutsideShippedTrees
+// proves postBuildScanDirs' static-strategy precision end-to-end with the
+// real adapter: a secret sitting in a part of the static output that is
+// NEVER packaged (there is no server component for --strategy=static) must
+// not fail the build, while the same secret inside client/ (which IS
+// shipped) must.
+func TestBuild_PostBuildSecretScan_StaticIgnoresSecretOutsideShippedTrees(t *testing.T) {
+	const bakedSecret = `export const cfg={apiKey:"AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY"};`
+
+	buildStatic := func(t *testing.T, secretRelPath string) error {
+		t.Helper()
+		projectDir := t.TempDir()
+		outputDir := t.TempDir()
+		for _, d := range []string{"client", "prerendered", "not-shipped"} {
+			if err := os.MkdirAll(filepath.Join(outputDir, d), 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+		}
+		full := filepath.Join(outputDir, secretRelPath)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(full, []byte(bakedSecret), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		deps := newFullDeps(io.Discard)
+		deps.SecretGuard = secretguard.NewAdapter()
+		deps.StaticServer = &mockStaticServerProvider{}
+		deps.Compiler = &mockCompiler{
+			prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+				return ports.PrepareResult{EntrypointPath: filepath.Join(outputDir, "index.js"), OutputDir: outputDir}, nil
+			},
+		}
+		req := postBuildScanTestRequest(t, projectDir)
+		req.Compile.Strategy = core.StrategyStatic
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+		return err
+	}
+
+	t.Run("secret outside client/prerendered does not fail the build", func(t *testing.T) {
+		if err := buildStatic(t, "not-shipped/leftover.js"); err != nil {
+			t.Errorf("expected static build to ignore a secret outside client/prerendered, got: %v", err)
+		}
+	})
+
+	t.Run("secret inside client fails the build", func(t *testing.T) {
+		err := buildStatic(t, "client/_app/immutable/chunks/abc.js")
+		if err == nil || !errors.Is(err, core.ErrSecretInlined) {
+			t.Errorf("expected a secret inside client/ to fail with ErrSecretInlined, got: %v", err)
+		}
+	})
+
+	// postBuildScanDirs scans [client, prerendered] in that order — this
+	// case exercises the SECOND directory specifically (self_review_checklist
+	// row 4: a failure on a non-first item in a loop can pass a test that
+	// only ever injects the failure on the first one).
+	t.Run("secret inside prerendered (second scanned dir) fails the build", func(t *testing.T) {
+		err := buildStatic(t, "prerendered/about.html.js")
+		if err == nil || !errors.Is(err, core.ErrSecretInlined) {
+			t.Errorf("expected a secret inside prerendered/ to fail with ErrSecretInlined, got: %v", err)
+		}
+	})
+}
+
+// TestBuild_PostBuildSecretScan_SkippedFileFailsClosed proves the pipeline
+// turns an unscannable file (ports.SecretSkip — e.g. one that exceeded
+// secretguard's size ceiling) into a build failure wrapping
+// core.ErrSecretScanIncomplete, distinct from core.ErrSecretInlined: "we
+// don't know" must never be silently treated the same as "scanned clean".
+func TestBuild_PostBuildSecretScan_SkippedFileFailsClosed(t *testing.T) {
+	projectDir := t.TempDir()
+	outputDir := t.TempDir()
+	guard := &fakeSecretGuard{
+		resultFor: map[string]ports.SecretScanResult{
+			outputDir: {
+				Skipped: []ports.SecretSkip{{FilePath: "huge-bundle.js", Reason: "too large"}},
+				Passed:  false,
+			},
+		},
+	}
+	deps := newFullDeps(io.Discard)
+	deps.SecretGuard = guard
+	deps.Compiler = &mockCompiler{
+		prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+			return ports.PrepareResult{EntrypointPath: filepath.Join(outputDir, "index.js"), OutputDir: outputDir}, nil
+		},
+	}
+
+	req := postBuildScanTestRequest(t, projectDir)
+	_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err == nil {
+		t.Fatalf("expected a skipped/unscannable file to fail the build")
+	}
+	if !errors.Is(err, core.ErrSecretScanIncomplete) {
+		t.Errorf("err = %v, want it to wrap core.ErrSecretScanIncomplete (not ErrSecretInlined — nothing was actually found, coverage was just incomplete)", err)
+	}
+	if errors.Is(err, core.ErrSecretInlined) {
+		t.Errorf("err = %v must NOT also wrap ErrSecretInlined — an unscanned file is not the same claim as a found secret", err)
+	}
+}
+
+// mockAssetOverlayForSecretScan is a minimal ports.AssetOverlayResolver test
+// double: only BuildOverlayDir's return value matters here (it is what
+// hands the pipeline a directory to scan); the other two methods just need
+// to satisfy the interface for the --asset-overlay-from code path, which
+// works regardless of output mode.
+type mockAssetOverlayForSecretScan struct {
+	overlayDir string
+}
+
+func (m *mockAssetOverlayForSecretScan) ResolvePredecessorChain(context.Context, string, string, string, bool, int) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockAssetOverlayForSecretScan) BuildOverlayDir(context.Context, string, []string, string, bool) (string, error) {
+	return m.overlayDir, nil
+}
+
+func (m *mockAssetOverlayForSecretScan) ResolveDigest(_ context.Context, ref, _ string, _ bool) (string, error) {
+	return ref, nil
+}
+
+// TestBuild_PostBuildSecretScan_CoversAssetOverlayContent proves the
+// pipeline also scans --asset-overlay's merged prior-generation content
+// before packaging it into this build's own image: that content is pulled
+// from a registry (this build's own predecessor chain, or, via
+// --asset-overlay-from, an arbitrary caller-named image) and re-shipped —
+// skipping it would defeat the point of this gate exactly as much as
+// skipping the local build output would.
+func TestBuild_PostBuildSecretScan_CoversAssetOverlayContent(t *testing.T) {
+	const bakedSecret = `export const cfg={apiKey:"AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY"};`
+
+	projectDir := t.TempDir()
+	outputDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outputDir, "index.js"), []byte(`console.log("clean");`), 0o644); err != nil {
+		t.Fatalf("write output file: %v", err)
+	}
+
+	overlayDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(overlayDir, "chunk-old-gen.js"), []byte(bakedSecret), 0o644); err != nil {
+		t.Fatalf("write overlay file: %v", err)
+	}
+
+	deps := newFullDeps(io.Discard)
+	deps.SecretGuard = secretguard.NewAdapter()
+	deps.AssetOverlay = &mockAssetOverlayForSecretScan{overlayDir: overlayDir}
+	deps.Compiler = &mockCompiler{
+		prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+			return ports.PrepareResult{EntrypointPath: filepath.Join(outputDir, "index.js"), OutputDir: outputDir}, nil
+		},
+	}
+
+	req := postBuildScanTestRequest(t, projectDir)
+	// --asset-overlay-from's explicit-ref path works regardless of output
+	// mode (see the Stage 4.4 comment in pipeline.go), which keeps this
+	// test from needing to also stand up a real push+registry round trip
+	// just to reach BuildOverlayDir.
+	req.Compile.AssetOverlayGenerations = 1
+	req.Compile.AssetOverlayFrom = []string{"ghcr.io/example/other@sha256:1111222233334444555566667777888811112222333344445555666677778888"}
+
+	_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err == nil {
+		t.Fatalf("expected a secret in the resolved asset-overlay content to fail the build")
+	}
+	if !errors.Is(err, core.ErrSecretInlined) {
+		t.Errorf("err = %v, want it to wrap core.ErrSecretInlined", err)
+	}
+	if !strings.Contains(err.Error(), "asset-overlay") {
+		t.Errorf("err = %v, want it to identify the asset-overlay stage", err)
 	}
 }
