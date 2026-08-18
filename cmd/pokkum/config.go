@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"time"
 
@@ -154,16 +155,27 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 		validationErrors = append(validationErrors, fmt.Sprintf("unsupported schema version %d (expected %d)", cfg.Version, ports.ConfigSchemaVersion))
 	}
 
-	// Base (top-level) config fields.
+	// Base (top-level) config fields. Note: BuildProfile.Output has no
+	// top-level ProjectConfig equivalent (it's a profile-only override
+	// consumed directly from cfg.Profiles[name] by cmd/pokkum/build.go,
+	// never merged by ApplyProfile), so the base call below leaves
+	// `output` at its zero value and no check fires for it here — only
+	// the per-profile call further down populates it.
 	validationErrors = append(validationErrors, validateConfigFields(configFieldsToValidate{
-		strategy:      cfg.Strategy,
-		base:          cfg.Base,
-		platforms:     cfg.Platforms,
-		dockerRepo:    cfg.Docker.Repo,
-		dockerTags:    cfg.Docker.Tags,
-		failOnCVE:     cfg.Security.FailOnCVE,
-		sbomFormat:    cfg.SBOM.Format,
-		vexExemptions: cfg.Security.VEXExemptions,
+		strategy:            cfg.Strategy,
+		base:                cfg.Base,
+		platforms:           cfg.Platforms,
+		dockerRepo:          cfg.Docker.Repo,
+		dockerTags:          cfg.Docker.Tags,
+		failOnCVE:           cfg.Security.FailOnCVE,
+		sbomFormat:          cfg.SBOM.Format,
+		vexExemptions:       cfg.Security.VEXExemptions,
+		sbomAttach:          cfg.SBOM.Attach,
+		cacheVerifyMode:     cfg.Cache.VerifyMode,
+		imagePort:           cfg.Image.Port,
+		imageProbePort:      cfg.Image.ProbePort,
+		shutdownTimeout:     cfg.Image.ShutdownTimeout,
+		allowSecretPatterns: cfg.Security.AllowSecretPatterns,
 	})...)
 
 	// Every named profile, using the exact same field validation logic as the
@@ -179,15 +191,22 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 	for _, name := range profileNames {
 		profile := cfg.Profiles[name]
 		validationErrors = append(validationErrors, validateConfigFields(configFieldsToValidate{
-			profileName:   name,
-			strategy:      profile.Strategy,
-			base:          profile.Base,
-			platforms:     profile.Platforms,
-			dockerRepo:    profile.Docker.Repo,
-			dockerTags:    profile.Docker.Tags,
-			failOnCVE:     profile.Security.FailOnCVE,
-			sbomFormat:    profile.SBOM.Format,
-			vexExemptions: profile.Security.VEXExemptions,
+			profileName:         name,
+			strategy:            profile.Strategy,
+			base:                profile.Base,
+			platforms:           profile.Platforms,
+			dockerRepo:          profile.Docker.Repo,
+			dockerTags:          profile.Docker.Tags,
+			failOnCVE:           profile.Security.FailOnCVE,
+			sbomFormat:          profile.SBOM.Format,
+			vexExemptions:       profile.Security.VEXExemptions,
+			sbomAttach:          profile.SBOM.Attach,
+			cacheVerifyMode:     profile.Cache.VerifyMode,
+			imagePort:           profile.Image.Port,
+			imageProbePort:      profile.Image.ProbePort,
+			shutdownTimeout:     profile.Image.ShutdownTimeout,
+			allowSecretPatterns: profile.Security.AllowSecretPatterns,
+			output:              profile.Output,
 		})...)
 	}
 
@@ -233,6 +252,27 @@ type configFieldsToValidate struct {
 	failOnCVE     string
 	sbomFormat    string
 	vexExemptions []ports.VEXExemptionConfig
+
+	// sbomAttach, cacheVerifyMode, imagePort, imageProbePort,
+	// shutdownTimeout, and allowSecretPatterns close the gap where these
+	// fields were merged by ApplyProfile but only ever checked deep in the
+	// build pipeline (core.ParseSBOMAttachMode, core.ParseCacheVerifyMode,
+	// the port-range check in internal/core/model.go's validateRuntime,
+	// time.ParseDuration, and secretguard's regexp.Compile, respectively) —
+	// so a malformed value passed `config validate` silently and only
+	// failed much later, without the profile-name context this helper
+	// exists to provide.
+	sbomAttach          string
+	cacheVerifyMode     string
+	imagePort           int
+	imageProbePort      int
+	shutdownTimeout     string
+	allowSecretPatterns []string
+
+	// output is BuildProfile-only (ProjectConfig has no equivalent field —
+	// see the comment at the base-config call site in runConfigValidate),
+	// so it is only ever populated for the per-profile call.
+	output string
 }
 
 // validateConfigFields runs the schema/value checks shared by the base
@@ -290,6 +330,58 @@ func validateConfigFields(f configFieldsToValidate) []string {
 	if len(f.vexExemptions) > 0 {
 		if _, err := core.ParseVEXExemptions(f.vexExemptions, time.Now()); err != nil {
 			errs = append(errs, fmt.Sprintf("%sinvalid vex_exemptions: %v", prefix, err))
+		}
+	}
+
+	if f.sbomAttach != "" {
+		if _, err := core.ParseSBOMAttachMode(f.sbomAttach); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid sbom attach mode %q: %v", prefix, f.sbomAttach, err))
+		}
+	}
+
+	if f.cacheVerifyMode != "" {
+		if _, err := core.ParseCacheVerifyMode(f.cacheVerifyMode); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid cache verify mode %q: %v", prefix, f.cacheVerifyMode, err))
+		}
+	}
+
+	// Same 1-65535 bound internal/core/model.go's validateRuntime enforces
+	// on RuntimeConfig.Port/ProbePort at build time (rc.Port/rc.ProbePort
+	// range checks). Only checked when explicitly set — zero means "use the
+	// built-in default" and is not itself invalid.
+	if f.imagePort != 0 && (f.imagePort < 1 || f.imagePort > 65535) {
+		errs = append(errs, fmt.Sprintf("%sinvalid image.port %d: must be between 1 and 65535", prefix, f.imagePort))
+	}
+	if f.imageProbePort != 0 && (f.imageProbePort < 1 || f.imageProbePort > 65535) {
+		errs = append(errs, fmt.Sprintf("%sinvalid image.probe_port %d: must be between 1 and 65535", prefix, f.imageProbePort))
+	}
+
+	if f.shutdownTimeout != "" {
+		d, err := time.ParseDuration(f.shutdownTimeout)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid image.shutdown_timeout %q: %v", prefix, f.shutdownTimeout, err))
+		} else if d < 0 {
+			// Same non-negative rule as internal/core/model.go's
+			// validateRuntime (rc.ShutdownTimeout < 0).
+			errs = append(errs, fmt.Sprintf("%sinvalid image.shutdown_timeout %q: must not be negative", prefix, f.shutdownTimeout))
+		}
+	}
+
+	// Compiled the same way, with the same stdlib call, as
+	// internal/adapters/secretguard/guard.go's own regexp.Compile(pat) —
+	// checked here so a config-level typo is caught before it's silently
+	// carried all the way into the build's secret scan. Indexed rather than
+	// short-circuited so a bad pattern anywhere in the list (not just the
+	// first) is reported.
+	for i, pat := range f.allowSecretPatterns {
+		if _, err := regexp.Compile(pat); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid security.allow_secret_patterns[%d] %q: %v", prefix, i, pat, err))
+		}
+	}
+
+	if f.output != "" {
+		if _, err := core.ParseOutputMode(f.output); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid output %q: %v", prefix, f.output, err))
 		}
 	}
 

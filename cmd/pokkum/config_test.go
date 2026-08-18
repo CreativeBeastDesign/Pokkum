@@ -357,6 +357,235 @@ profiles:
 	}
 }
 
+// TestConfigValidateCommand_NewFieldValidation covers the fields
+// validateConfigFields gained to close the gap where they were merged by
+// ApplyProfile but only ever checked deep in the build pipeline
+// (sbom.attach, cache.verify_mode, image.port/probe_port,
+// image.shutdown_timeout, security.allow_secret_patterns, and profile-only
+// output) — see cmd/pokkum/config.go's configFieldsToValidate doc comment.
+func TestConfigValidateCommand_NewFieldValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, ports.ConfigFilename)
+	opts := &configValidateOptions{dir: tmpDir, output: "json"}
+
+	// 1. Invalid sbom.attach (top-level).
+	badSBOMAttachCfg := `version: 1
+sbom:
+  attach: carrier-pigeon
+`
+	_ = os.WriteFile(cfgPath, []byte(badSBOMAttachCfg), 0644)
+	if err := runConfigValidate(nil, opts); err == nil {
+		t.Fatal("expected error on invalid top-level sbom.attach, got nil")
+	}
+
+	// 2. Invalid cache.verify_mode (top-level).
+	badCacheVerifyModeCfg := `version: 1
+cache:
+  verify_mode: trust-me-bro
+`
+	_ = os.WriteFile(cfgPath, []byte(badCacheVerifyModeCfg), 0644)
+	if err := runConfigValidate(nil, opts); err == nil {
+		t.Fatal("expected error on invalid top-level cache.verify_mode, got nil")
+	}
+
+	// 3. Invalid image.port (out of range).
+	badPortCfg := `version: 1
+image:
+  port: 99999
+`
+	_ = os.WriteFile(cfgPath, []byte(badPortCfg), 0644)
+	if err := runConfigValidate(nil, opts); err == nil {
+		t.Fatal("expected error on out-of-range top-level image.port, got nil")
+	}
+
+	// 3b. Invalid image.probe_port (out of range, negative).
+	badProbePortCfg := `version: 1
+image:
+  probe_port: -1
+`
+	_ = os.WriteFile(cfgPath, []byte(badProbePortCfg), 0644)
+	if err := runConfigValidate(nil, opts); err == nil {
+		t.Fatal("expected error on out-of-range top-level image.probe_port, got nil")
+	}
+
+	// 4. Invalid image.shutdown_timeout (unparseable duration).
+	badShutdownTimeoutCfg := `version: 1
+image:
+  shutdown_timeout: "not-a-duration"
+`
+	_ = os.WriteFile(cfgPath, []byte(badShutdownTimeoutCfg), 0644)
+	if err := runConfigValidate(nil, opts); err == nil {
+		t.Fatal("expected error on unparseable top-level image.shutdown_timeout, got nil")
+	}
+
+	// 4b. Invalid image.shutdown_timeout (negative duration — parses fine
+	// but is semantically invalid, same rule as internal/core/model.go's
+	// validateRuntime).
+	negativeShutdownTimeoutCfg := `version: 1
+image:
+  shutdown_timeout: "-5s"
+`
+	_ = os.WriteFile(cfgPath, []byte(negativeShutdownTimeoutCfg), 0644)
+	if err := runConfigValidate(nil, opts); err == nil {
+		t.Fatal("expected error on negative top-level image.shutdown_timeout, got nil")
+	}
+
+	// 5. Invalid security.allow_secret_patterns: a bad regex as the
+	// non-first entry must still be caught (row 4 of the self-review
+	// checklist: non-first-item failure injection).
+	badSecretPatternCfg := `version: 1
+security:
+  allow_secret_patterns:
+    - "vendor/.*\\.js"
+    - "["
+`
+	_ = os.WriteFile(cfgPath, []byte(badSecretPatternCfg), 0644)
+	if err := runConfigValidate(nil, opts); err == nil {
+		t.Fatal("expected error on invalid (non-first) top-level security.allow_secret_patterns entry, got nil")
+	}
+
+	// 5b. Valid security.allow_secret_patterns must pass.
+	goodSecretPatternCfg := `version: 1
+security:
+  allow_secret_patterns:
+    - "vendor/.*\\.js"
+    - "^AKIA[0-9A-Z]{16}$"
+`
+	_ = os.WriteFile(cfgPath, []byte(goodSecretPatternCfg), 0644)
+	if err := runConfigValidate(nil, opts); err != nil {
+		t.Errorf("expected valid security.allow_secret_patterns to pass validation, got: %v", err)
+	}
+
+	// 6. Valid values for all of the above must pass together.
+	goodCfg := `version: 1
+sbom:
+  attach: tag
+cache:
+  verify_mode: static-key
+image:
+  port: 8080
+  probe_port: 8081
+  shutdown_timeout: 30s
+`
+	_ = os.WriteFile(cfgPath, []byte(goodCfg), 0644)
+	if err := runConfigValidate(nil, opts); err != nil {
+		t.Errorf("expected valid new-field values to pass validation, got: %v", err)
+	}
+}
+
+// TestConfigValidateCommand_NewFieldValidation_Profiles is the per-profile
+// counterpart of TestConfigValidateCommand_NewFieldValidation: it proves a
+// bad value hidden inside a named profile is caught the same way a bad
+// top-level value is (self-review checklist row 10), that the error names
+// the offending profile, and that BuildProfile's profile-only `output`
+// field (which has no ProjectConfig equivalent and is therefore never
+// covered by the base-config validation call) is validated too.
+func TestConfigValidateCommand_NewFieldValidation_Profiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, ports.ConfigFilename)
+	opts := &configValidateOptions{dir: tmpDir, output: "json"}
+
+	// A bad sbom.attach buried in a named profile: must fail and name the
+	// profile.
+	badProfileCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+profiles:
+  staging:
+    sbom:
+      attach: carrier-pigeon
+`
+	_ = os.WriteFile(cfgPath, []byte(badProfileCfg), 0644)
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runConfigValidate(nil, opts)
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	if err == nil {
+		t.Fatal("expected error when a profile has an invalid sbom.attach, got nil")
+	}
+
+	var outBuf bytes.Buffer
+	_, _ = io.Copy(&outBuf, r)
+	var env ports.JSONEnvelope
+	if jsonErr := json.Unmarshal(outBuf.Bytes(), &env); jsonErr != nil {
+		t.Fatalf("expected valid JSON error envelope, got: %v", jsonErr)
+	}
+	if env.Error == nil || !strings.Contains(env.Error.Message, `profile "staging"`) {
+		t.Errorf(`expected error to name profile "staging", got: %v`, env.Error)
+	}
+
+	// A profile-only `output` value that is invalid must be caught, even
+	// though there is no top-level ProjectConfig.Output field for it to
+	// mirror.
+	badProfileOutputCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+profiles:
+  local:
+    output: teleport
+`
+	_ = os.WriteFile(cfgPath, []byte(badProfileOutputCfg), 0644)
+	err = runConfigValidate(nil, opts)
+	if err == nil {
+		t.Fatal("expected error when a profile has an invalid output mode, got nil")
+	}
+
+	// A valid profile-only `output` value must pass.
+	goodProfileOutputCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+profiles:
+  local:
+    output: local
+`
+	_ = os.WriteFile(cfgPath, []byte(goodProfileOutputCfg), 0644)
+	if err := runConfigValidate(nil, opts); err != nil {
+		t.Errorf("expected valid profile output mode to pass validation, got: %v", err)
+	}
+
+	// Multiple profiles: only the second (non-first, alphabetically last)
+	// one has a bad image.port — must still be caught and named, mirroring
+	// TestConfigValidateCommand_ProfileValidation's existing coverage of
+	// this same multi-item pitfall for the newly-added fields.
+	multiProfileBadPortCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+profiles:
+  local:
+    base: chainguard
+  zzz-production:
+    image:
+      port: 0
+      probe_port: 100000
+`
+	_ = os.WriteFile(cfgPath, []byte(multiProfileBadPortCfg), 0644)
+
+	r2, w2, _ := os.Pipe()
+	os.Stdout = w2
+	err = runConfigValidate(nil, opts)
+	w2.Close()
+	os.Stdout = oldStdout
+
+	if err == nil {
+		t.Fatal("expected error when a non-first profile has an out-of-range image.probe_port, got nil")
+	}
+	var outBuf2 bytes.Buffer
+	_, _ = io.Copy(&outBuf2, r2)
+	var env2 ports.JSONEnvelope
+	if jsonErr := json.Unmarshal(outBuf2.Bytes(), &env2); jsonErr != nil {
+		t.Fatalf("expected valid JSON error envelope, got: %v", jsonErr)
+	}
+	if env2.Error == nil || !strings.Contains(env2.Error.Message, `profile "zzz-production"`) {
+		t.Errorf(`expected error to name profile "zzz-production", got: %v`, env2.Error)
+	}
+}
+
 // TestConfigValidateCommand_ExampleGoldenFixture proves `pokkum config
 // validate` actually accepts the documented canonical example
 // (testdata/config/pokkum.yaml.golden), including its "local" and
