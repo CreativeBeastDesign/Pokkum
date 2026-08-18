@@ -6,7 +6,7 @@
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**Pokkum** is a zero-dependency OCI container image compiler for SvelteKit applications. In a single command, Pokkum compiles your SvelteKit app into a zero-daemon, multi-layer cached OCI container image (the exact layer set and count depend on the strategy and what a given build actually produces — run `pokkum explain` for the real breakdown) complete with SBOMs, OpenTelemetry auto-instrumentation, signed SLSA provenance, and hardened Kubernetes deployment manifests.
+**Pokkum** is a zero-dependency OCI container image compiler for SvelteKit applications. In a single command, Pokkum compiles your SvelteKit app into a zero-daemon, multi-layer cached OCI container image (the exact layer set and count depend on the strategy and what a given build actually produces — run `pokkum explain` for the real breakdown) complete with SBOMs, an opt-in OpenTelemetry SDK bootstrap, signed SLSA provenance, and hardened Kubernetes deployment manifests.
 
 Think of it as `ko` for SvelteKit: zero Dockerfile, zero Docker daemon required, and bit-for-bit reproducible builds out of the box.
 
@@ -71,17 +71,22 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum resolve -f deployment.yaml \
 ## Key Features
 
 - **Zero-Mutation Build Sandbox**: No manual SvelteKit adapter configuration needed. Auto-injects virtual build sandbox configuration in `.pokkum/` workspace without mutating user source files.
-- **5-Layer Architecture-Independent Caching**:
-  1. Base Image Layer (`distroless` or `chainguard`)
-  2. Bun Runtime Layer (`/pokkum/bun`)
-  3. Closured Native Addon Layer (`/app/native` for `.node` binaries)
-  4. Vendor `node_modules` Layer
-  5. SvelteKit App & Asset Layer
+- **Architecture-Independent Layer Caching**: the default `--strategy=layered` splits a build into independently-cached layers — a pinned Bun runtime layer (`/usr/local/bin/bun`), the PID-1 supervisor, the SvelteKit server/asset output, and, when a given build produces them, separate layers for the vendor `node_modules` tree, native `.node` addons, and prerendered pages. The exact layer set and count vary per build (a purely static site or a native-addon-free app produces fewer layers than one with both) — run `pokkum explain <image>` against a built image for its real, per-build breakdown rather than assuming a fixed number.
 - **Bit-for-Bit OCI Reproducibility**: All timestamps and tar headers derive deterministically from `SOURCE_DATE_EPOCH` / git commit metadata.
 - **Security Scanning & Guardrails**: Integrated `pokkum scan` vulnerability auditing with Syft OS package enumeration and OSV.dev batch queries (Debian, Ubuntu, Alpine, Wolfi, Chainguard), build-time secret leak prevention, and base image CVE reactivity.
 - **Base Image Signature Verification & Escrow Mirroring**: Real keyless Sigstore verification (Fulcio certificate chain + Rekor transparency log) runs automatically against live `distroless`/`chainguard` base image signatures. Base image escrow mirroring (`pokkum base update --mirror-registry`) copies base images and Cosign `.sig` tags to project-controlled registries with automated lockfile fallback.
-- **Built-In Observability**: Zero-config OpenTelemetry tracing and Prometheus metrics auto-instrumentation.
+- **Optional OpenTelemetry Bootstrap**: `--telemetry` compiles a real OTel NodeSDK + OTLP trace exporter directly into the image, started at container boot. Automatic HTTP/framework instrumentation isn't possible under Bun's runtime today (a Bun limitation, not Pokkum's) — real, route-templated spans need one documented line added to your own `hooks.server.ts`; see [Vocabulary.md](Vocabulary.md) §3a. OTLP metrics export is not currently functional (a Bun bundler bug); `--metrics-only` warns rather than silently doing nothing.
 - **Day-2 Lifecycle Management**: Annotation-based manifest rollbacks (`pokkum rollback`, no `--to` needed for the last change) and signed CLI self-upgrades (`pokkum upgrade`).
+
+---
+
+## Scope, Philosophy & Telemetry
+
+**What Pokkum optimizes for.** Pokkum is designed for maximum security and bit-for-bit reproducibility, not the fastest possible path to a running deployment. Hermetic builds, signed SLSA provenance, keyless base-image verification, and reproducibility checks (`pokkum verify --rebuild`) are all either on by default or one flag away — and there is no "just build it, verify later" fast path that skips them. If your priority is the shortest possible time-to-first-deploy over a verifiable supply chain, that trade-off is a deliberate design choice here, not an oversight; expect the defaults to feel stricter than a typical `docker build`.
+
+**What Pokkum does not do.** Pokkum compiles SvelteKit applications into OCI container images — it does not target edge/isolate runtimes (Cloudflare Workers, Deno Deploy, Vercel Edge Functions). Those aren't OCI images; they're a fundamentally different deployment model, and SvelteKit's own `adapter-cloudflare`/`adapter-vercel`/`adapter-deno` already serve that use case directly. This is an explicit non-goal, not an unaddressed gap — if edge deployment is what you need, Pokkum isn't the tool for that half of your stack.
+
+**Telemetry.** The `pokkum` CLI itself sends no telemetry, analytics, or usage data anywhere, ever — no phone-home, no update-check pings beyond an explicit `pokkum upgrade --check`. (This is unrelated to the `--telemetry` *build* flag, which configures OpenTelemetry instrumentation inside the SvelteKit application you're compiling — see [Vocabulary.md](Vocabulary.md) §3a. That feature is entirely opt-in, off by default, and exports only to the OTLP endpoint you configure.)
 
 ---
 
@@ -142,7 +147,7 @@ curl -fsSL https://raw.githubusercontent.com/CreativeBeastDesign/pokkum/main/ins
 Every container image produced by Pokkum is supervised by an ultra-lightweight PID-1 init process:
 
 ```
-/pokkum/init -- /pokkum/bun /app/index.js
+/pokkum/init -- /usr/local/bin/bun /app/server/index.js
 ```
 
 ### Health Probes & Signals
@@ -176,7 +181,7 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)**: Architectural invariants, Hexagonal layer boundaries, and image layer layout.
 - **[Vocabulary.md](Vocabulary.md)**: Complete CLI flag reference and configuration options.
-- **[Roadmap.md](Roadmap.md)**: Implementation progress and future feature backlog.
+- **[Roadmap.md](Roadmap.md)**: What's next — SvelteKit-specific DX, supply-chain completions, and ergonomics. See [Roadmap-v1-Archive.md](Roadmap-v1-Archive.md) for the full v1.0 build history.
 - **[fixes-to-v1.md](fixes-to-v1.md)**: Post-v1.0 audit findings and the fixes applied for each.
 - **[for-users.md](for-users.md)**: User-visible behavior changes from that fix round and what they require of you.
 - **[paranoid-testing-guide.md](paranoid-testing-guide.md)**: Step-by-step "believe nothing" verification guide for testing Pokkum against a real project — cross-checks every claim (build, signature, provenance, reproducibility) with an independent tool.
