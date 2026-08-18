@@ -37,13 +37,15 @@ func NewAffectedDetector(baseDir string) ports.AffectedDetector {
 			return false, fmt.Errorf("gitutils: stat target directory %q: %w: %w", targetDir, err, core.ErrInvalidRequest)
 		}
 
-		// 1. Verify sinceRef is a valid commit object in the repository.
-		if err := verifyGitRef(ctx, targetDir, sinceRef); err != nil {
+		// 1. Verify sinceRef is a valid commit object in the repository and
+		// resolve it to a canonical SHA that cannot be interpreted as a git option.
+		resolvedSHA, err := verifyGitRef(ctx, targetDir, sinceRef)
+		if err != nil {
 			return false, err
 		}
 
-		// 2. Check tracked diffs against sinceRef, scoped to this project dir.
-		diffOut, err := runGit(ctx, targetDir, "diff", "--name-only", sinceRef, "--", ".")
+		// 2. Check tracked diffs against resolvedSHA, scoped to this project dir.
+		diffOut, err := runGit(ctx, targetDir, "diff", "--name-only", resolvedSHA, "--", ".")
 		if err != nil {
 			return false, fmt.Errorf("gitutils: diff against %q in %q: %w", sinceRef, targetDir, err)
 		}
@@ -66,17 +68,22 @@ func NewAffectedDetector(baseDir string) ports.AffectedDetector {
 }
 
 // verifyGitRef confirms ref resolves to a commit in the repository anchored at
-// dir. A ref that does not resolve is an operator error, surfaced as
-// ErrInvalidRequest so it fails fast rather than silently changing behavior.
-func verifyGitRef(ctx context.Context, dir, ref string) error {
+// dir and returns the resolved canonical SHA. A ref that does not resolve is an
+// operator error, surfaced as ErrInvalidRequest so it fails fast rather than
+// silently changing behavior. The returned SHA is guaranteed to be a valid git
+// object ID (40 or 64 hex characters) and safe to pass to git commands without
+// injection risk. The ^{commit} suffix ensures we resolve to a commit object,
+// not a tag or other object type.
+func verifyGitRef(ctx context.Context, dir, ref string) (string, error) {
 	out, err := runGit(ctx, dir, "rev-parse", "--verify", ref+"^{commit}")
 	if err != nil {
-		return fmt.Errorf("gitutils: unknown or invalid git ref %q: %w: %w", ref, err, core.ErrInvalidRequest)
+		return "", fmt.Errorf("gitutils: unknown or invalid git ref %q: %w: %w", ref, err, core.ErrInvalidRequest)
 	}
-	if strings.TrimSpace(out) == "" {
-		return fmt.Errorf("gitutils: invalid git ref %q: %w", ref, core.ErrInvalidRequest)
+	sha := strings.TrimSpace(out)
+	if sha == "" {
+		return "", fmt.Errorf("gitutils: invalid git ref %q: %w", ref, core.ErrInvalidRequest)
 	}
-	return nil
+	return sha, nil
 }
 
 // runGit runs git with args in dir, returning stdout. Stderr is folded into

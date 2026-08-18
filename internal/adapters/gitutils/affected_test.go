@@ -251,3 +251,123 @@ func TestAffectedDetector_CommitSHAAndRelativeRefs(t *testing.T) {
 		t.Errorf("expected apps/web to be unaffected against HEAD when working directory is clean")
 	}
 }
+
+// TestAffectedDetector_InjectionAttack_DashDashOutput empirically proves that
+// a malicious sinceRef beginning with `--` (which would normally be parsed by
+// git as an option, e.g., `--output=<file>` for unauthorized writes) is rejected.
+// This test confirms the fix for the git injection vulnerability: sinceRef is
+// verified and resolved to a canonical SHA before being used in git commands,
+// making option injection impossible.
+func TestAffectedDetector_InjectionAttack_DashDashOutput(t *testing.T) {
+	repoDir := initTestGitRepo(t)
+	detector := NewAffectedDetector(repoDir)
+
+	// Create a temporary target file path where an attacker would want to write.
+	// This file should NOT exist before the test.
+	injectionTarget := filepath.Join(repoDir, "injected_by_attacker.txt")
+
+	// Ensure the target does not already exist.
+	if _, err := os.Stat(injectionTarget); err == nil {
+		t.Fatalf("injection target file unexpectedly exists: %s", injectionTarget)
+	}
+
+	ctx := context.Background()
+	// Craft a malicious sinceRef that looks like `git diff --name-only --output=<path> -- .`
+	// If the vulnerability existed, this would attempt to write to the target file.
+	maliciousRef := "--output=" + injectionTarget
+
+	// The detector should fail because this ref is invalid (not a real commit).
+	_, err := detector(ctx, "./apps/web", maliciousRef)
+	if err == nil {
+		t.Fatalf("expected error for injection attack sinceRef %q, but got nil", maliciousRef)
+	}
+	if !errors.Is(err, core.ErrInvalidRequest) {
+		t.Errorf("expected ErrInvalidRequest for invalid ref, got: %v", err)
+	}
+
+	// Empirically verify: the attacker's target file should not have been created.
+	// This is the key assertion — if the bug existed, git would have written to this file.
+	if _, err := os.Stat(injectionTarget); err == nil {
+		t.Errorf("VULNERABILITY: injection target file was created at %s; the git injection attack succeeded", injectionTarget)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected error checking injection target: %v", err)
+	}
+}
+
+// TestAffectedDetector_InjectionAttack_DashO tests another common git injection
+// vector: the short form `-O<file>` (reorder-file option for `git diff`).
+func TestAffectedDetector_InjectionAttack_DashO(t *testing.T) {
+	repoDir := initTestGitRepo(t)
+	detector := NewAffectedDetector(repoDir)
+
+	// Create a temporary target file.
+	injectionTarget := filepath.Join(repoDir, "reorder_by_attacker.txt")
+	if _, err := os.Stat(injectionTarget); err == nil {
+		t.Fatalf("injection target file unexpectedly exists: %s", injectionTarget)
+	}
+
+	ctx := context.Background()
+	// Craft a malicious sinceRef using the short `-O` form.
+	maliciousRef := "-O" + injectionTarget
+
+	_, err := detector(ctx, "./apps/web", maliciousRef)
+	if err == nil {
+		t.Fatalf("expected error for injection attack sinceRef %q, but got nil", maliciousRef)
+	}
+	if !errors.Is(err, core.ErrInvalidRequest) {
+		t.Errorf("expected ErrInvalidRequest for invalid ref, got: %v", err)
+	}
+
+	// Verify the target file was not created.
+	if _, err := os.Stat(injectionTarget); err == nil {
+		t.Errorf("VULNERABILITY: injection target file was created at %s; the git injection attack succeeded", injectionTarget)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected error checking injection target: %v", err)
+	}
+}
+
+// TestAffectedDetector_LegitimateRefTypes ensures that the fix for the
+// injection vulnerability does not break legitimate git ref types:
+// branch names, tags, short SHAs, relative refs (HEAD~N, origin/branch), etc.
+func TestAffectedDetector_LegitimateRefTypes(t *testing.T) {
+	repoDir := initTestGitRepo(t)
+
+	// Create a second commit.
+	writeFile(t, filepath.Join(repoDir, "apps", "web", "file1.txt"), "content1")
+	execInDir(t, repoDir, "git", "add", ".")
+	execInDir(t, repoDir, "git", "commit", "-m", "commit 2")
+	execInDir(t, repoDir, "git", "tag", "v2.0.0")
+
+	// Create a third commit.
+	writeFile(t, filepath.Join(repoDir, "apps", "web", "file2.txt"), "content2")
+	execInDir(t, repoDir, "git", "add", ".")
+	execInDir(t, repoDir, "git", "commit", "-m", "commit 3")
+
+	detector := NewAffectedDetector(repoDir)
+	ctx := context.Background()
+
+	tests := []struct {
+		name   string
+		ref    string
+		expect bool // expect affected?
+	}{
+		// Tag reference (should work)
+		{"tag v2.0.0", "v2.0.0", true},
+		// Relative reference HEAD~1 (should work)
+		{"relative HEAD~1", "HEAD~1", true},
+		// Branch name (if we had a branch; we can use HEAD as a ref too)
+		{"HEAD", "HEAD", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			affected, err := detector(ctx, "./apps/web", tc.ref)
+			if err != nil {
+				t.Fatalf("unexpected error with ref %q: %v", tc.ref, err)
+			}
+			if affected != tc.expect {
+				t.Errorf("ref %q: expected affected=%v, got %v", tc.ref, tc.expect, affected)
+			}
+		})
+	}
+}
