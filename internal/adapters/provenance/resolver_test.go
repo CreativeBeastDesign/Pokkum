@@ -245,6 +245,108 @@ func TestResolveProvenance_WithSLSAAttestation(t *testing.T) {
 	}
 }
 
+func TestResolveProvenance_SLSAWithoutSourceDep_RepoStaysEmpty(t *testing.T) {
+	// This test verifies that when a SLSA statement has no "source-code"
+	// resolved dependency, the Repo field is NOT populated from the
+	// externalParameters["repository"] fallback. The repository field in
+	// externalParameters refers to the target image repository (where the
+	// image was pushed), not the source repository, so it should never be
+	// used to populate the semantically-source-repo Repo field.
+	_, host := startTestRegistry(t)
+	targetRepo := fmt.Sprintf("%s/app-slsa-no-source-dep", host)
+
+	img := createTestImage(t, nil)
+	tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+	if err := remote.Write(tagRef, img); err != nil {
+		t.Fatalf("push test image: %v", err)
+	}
+	imgDigest, _ := img.Digest()
+
+	// Generate SLSA statement WITHOUT a source-code dependency.
+	// This mimics a build that had no git source, or where the source
+	// wasn't recorded.
+	slsaStmt := ports.SLSAStatement{
+		Type:          "https://in-toto.io/Statement/v1",
+		Subject:       []ports.ResourceDescriptor{{Digest: map[string]string{"sha256": imgDigest.Hex}}},
+		PredicateType: "https://slsa.dev/provenance/v1",
+		Predicate: ports.SLSAPredicate{
+			BuildDefinition: ports.SLSABuildDefinition{
+				BuildType:          "https://slsa.dev/v1/compile",
+				ExternalParameters: map[string]any{"repository": targetRepo}, // Not source repo!
+				ResolvedDependencies: []ports.ResourceDescriptor{
+					{
+						Name:   "base-image",
+						URI:    "gcr.io/distroless/base:nonroot",
+						Digest: map[string]string{"sha256": "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"},
+					},
+					// NOTE: No "source-code" dependency here.
+				},
+			},
+		},
+	}
+
+	stmtJSON, _ := json.Marshal(slsaStmt)
+
+	// Wrap in DSSE envelope and sign
+	privKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	privDer, _ := x509.MarshalPKCS8PrivateKey(privKey)
+	privPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDer})
+
+	pubDer, _ := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDer})
+	t.Setenv("POKKUM_SIGNING_PUBKEY", string(pubPEM))
+
+	dsseSigner := dsse.NewSigner(nil)
+	env, err := dsseSigner.Sign(context.Background(), ports.DSSESignRequest{
+		PayloadBytes: stmtJSON,
+		PayloadType:  ports.InTotoPayloadType,
+		KeyPEM:       privPEM,
+	})
+	if err != nil {
+		t.Fatalf("sign DSSE: %v", err)
+	}
+
+	envJSON, _ := json.Marshal(env)
+
+	// Build .att image layer
+	attLayer := static.NewLayer(envJSON, types.MediaType("application/vnd.dsse.envelope.v1+json"))
+	attImg, _ := mutate.Append(empty.Image, mutate.Addendum{Layer: attLayer})
+	attImg = mutate.MediaType(attImg, types.OCIManifestSchema1)
+
+	attTagStr := fmt.Sprintf("%s:%s-%s.att", targetRepo, imgDigest.Algorithm, imgDigest.Hex)
+	attRef, _ := name.ParseReference(attTagStr, name.WeakValidation)
+	if err := remote.Write(attRef, attImg); err != nil {
+		t.Fatalf("push attestation image: %v", err)
+	}
+
+	// Resolve provenance
+	r := provenance.NewResolver(nil)
+	ctx := context.Background()
+
+	summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+		ImageRef: targetRepo + ":v1.0.0",
+	})
+	if err != nil {
+		t.Fatalf("resolve provenance: %v", err)
+	}
+
+	if !summary.HasProvenance {
+		t.Fatal("expected HasProvenance to be true")
+	}
+
+	// The key assertion: Repo should be empty, NOT populated from
+	// externalParameters["repository"] (which is the target image repo).
+	if summary.PinnedInputs.Repo != "" {
+		t.Errorf("expected Repo to be empty (no source-code dep), got %q", summary.PinnedInputs.Repo)
+	}
+
+	// SourceProvenance should also be at the default (none), since there
+	// was no source-code dependency to upgrade it to verified.
+	if summary.PinnedInputs.SourceProvenance != ports.SourceProvenanceNone {
+		t.Errorf("expected SourceProvenance to be %q (none), got %q", ports.SourceProvenanceNone, summary.PinnedInputs.SourceProvenance)
+	}
+}
+
 func TestResolveProvenance_Adversarial_BogusDSSESignature_IsRejected(t *testing.T) {
 	_, host := startTestRegistry(t)
 	targetRepo := fmt.Sprintf("%s/app-forged-slsa", host)

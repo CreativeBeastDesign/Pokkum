@@ -825,16 +825,6 @@ func (r *Resolver) populateInputsFromSLSA(inputs *ports.PinnedBuildInputs, stmt 
 	}
 
 	if ep := stmt.Predicate.BuildDefinition.ExternalParameters; ep != nil {
-		// NOTE: ep["repository"] is the *target* image repository
-		// (slsa.Generator's req.Repo, e.g. "ghcr.io/acme/app"), not a git
-		// source location — this fallback predates SourceProvenance and is
-		// left as-is (out of scope for this change), but it deliberately
-		// does NOT set sawSourceCode: only a genuine "source-code" resolved
-		// dependency may upgrade PinnedInputs.SourceProvenance to
-		// SourceProvenanceVerified.
-		if r, ok := ep["repository"].(string); ok && inputs.Repo == "" {
-			inputs.Repo = r
-		}
 		if ps, ok := ep["platforms"].([]any); ok {
 			for _, p := range ps {
 				if s, ok := p.(string); ok {
