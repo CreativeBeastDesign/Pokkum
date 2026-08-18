@@ -59,6 +59,24 @@ var (
 	// could never actually verify anything — and has been deleted
 	// (Roadmap.md item 2h).
 	ErrStaticKeyRequired = errors.New("provenance resolver: image carries a Cosign static-key signature but no verification key was configured")
+
+	// ErrUnverifiedSourceProvenance means req.ExpectSource was set but the
+	// only source repo/commit information ResolveProvenance could find is
+	// unverified: either nothing at all, or values read off the image's own
+	// unsigned OCI annotations (org.opencontainers.image.source/.revision)
+	// rather than a cryptographically verified SLSA "source-code" resolved
+	// dependency. Comparing --expect-source against those annotations reads
+	// as a real security check while verifying nothing — the image's
+	// publisher (anyone with push access to the repository) controls their
+	// content, so a hostile image can simply set them to whatever
+	// --expect-source will be asked for. Deliberately a hard failure rather
+	// than a silent comparison, for the same reason as
+	// ErrKeylessIdentityRequired/ErrStaticKeyRequired: "verified and matched"
+	// and "nothing verified, but the strings happened to be equal" are
+	// different operator-facing claims and must never share one result
+	// shape. req.AllowUnverifiedSource (--allow-unverified-source) is the
+	// explicit, visibly-marked escape hatch.
+	ErrUnverifiedSourceProvenance = errors.New("provenance resolver: --expect-source requires a cryptographically verified SLSA source-code attestation")
 )
 
 // maxSignatureBlobBytes caps how much of any single registry-supplied blob or
@@ -210,6 +228,15 @@ func (r *Resolver) ResolveProvenance(ctx context.Context, req ports.ProvenanceRe
 			Commit: annotations["org.opencontainers.image.revision"],
 		},
 	}
+	// These are seeded from the image's own unsigned annotations — anyone
+	// with push access to the repository controls them. Marked unverified
+	// now; overwritten below to SourceProvenanceVerified only if a
+	// cryptographically verified SLSA statement actually carries a
+	// "source-code" resolved dependency (populateInputsFromSLSA overwrites
+	// Repo/Commit in that case too, so the two stay in lockstep).
+	if summary.PinnedInputs.Repo != "" || summary.PinnedInputs.Commit != "" {
+		summary.PinnedInputs.SourceProvenance = ports.SourceProvenanceUnverified
+	}
 
 	repo := parsedRef.Context().Name()
 
@@ -284,13 +311,49 @@ func (r *Resolver) ResolveProvenance(ctx context.Context, req ports.ProvenanceRe
 		if attImg, iErr := remote.Image(attRef, opts...); iErr == nil {
 			if stmt, serr := r.extractSLSAStatement(ctx, attImg, desc.Digest, pubKeyPEM); serr == nil {
 				summary.HasProvenance = true
-				r.populateInputsFromSLSA(&summary.PinnedInputs, stmt)
+				if r.populateInputsFromSLSA(&summary.PinnedInputs, stmt) {
+					// A verified statement actually carried a
+					// "source-code" resolved dependency: Repo/Commit above
+					// were just overwritten with its values, so the
+					// provenance marker must move with them rather than
+					// staying at whatever the unsigned-annotation seeding
+					// seeded above.
+					summary.PinnedInputs.SourceProvenance = ports.SourceProvenanceVerified
+				}
 			}
 		}
 	}
 
-	// 3. Validate ExpectSource assertion if provided
+	// 3. Validate ExpectSource assertion if provided.
+	//
+	// Fails closed unless the source values being compared came from a
+	// cryptographically verified SLSA statement: comparing --expect-source
+	// against the image's own unsigned annotations (or against nothing at
+	// all) would look like a real check to an operator reading CI logs
+	// while actually verifying nothing, because whoever can push a tag to
+	// the repository controls those annotations outright. See
+	// ErrUnverifiedSourceProvenance and req.AllowUnverifiedSource.
 	if req.ExpectSource != "" {
+		verified := summary.PinnedInputs.SourceProvenance == ports.SourceProvenanceVerified
+		if !verified && !req.AllowUnverifiedSource {
+			reason := fmt.Sprintf("only unsigned OCI annotations were found (repo=%q, commit=%q)", summary.PinnedInputs.Repo, summary.PinnedInputs.Commit)
+			if summary.PinnedInputs.Repo == "" && summary.PinnedInputs.Commit == "" {
+				reason = "no source repository or commit information was found at all"
+			}
+			return summary, fmt.Errorf(
+				"%w: %s — %s, which any party able to push a tag to %s controls. Sign builds with SLSA "+
+					"provenance (`pokkum build --sign`) so --expect-source can verify cryptographically, "+
+					"or re-run with --allow-unverified-source to compare anyway (the result will be "+
+					"explicitly marked unverified): %w",
+				ErrUnverifiedSourceProvenance, req.ImageRef, reason, repo, core.ErrInvalidRequest)
+		}
+		if !verified {
+			r.log.WarnContext(ctx, "--expect-source is comparing against unverified source information (--allow-unverified-source was set); this does not prove supply-chain integrity, it only checks the image's own annotations, which the image's publisher controls",
+				"ref", req.ImageRef,
+				"expect_source", req.ExpectSource,
+				"resolved_repo", summary.PinnedInputs.Repo,
+				"resolved_commit", summary.PinnedInputs.Commit)
+		}
 		if err := validateSourceMatch(summary.PinnedInputs.Repo, summary.PinnedInputs.Commit, req.ExpectSource); err != nil {
 			return summary, fmt.Errorf("provenance resolver: %w", err)
 		}
@@ -712,7 +775,18 @@ func checkSimpleSigningClaims(payloadBytes []byte, repo string, digest v1.Hash) 
 	return nil
 }
 
-func (r *Resolver) populateInputsFromSLSA(inputs *ports.PinnedBuildInputs, stmt ports.SLSAStatement) {
+// populateInputsFromSLSA copies resolved dependencies from a
+// cryptographically verified SLSA statement into inputs. It reports whether
+// the statement carried a "source-code" resolved dependency at all — the
+// caller uses that, not just whether inputs.Commit ended up non-empty, to
+// decide whether PinnedInputs.SourceProvenance may be upgraded to
+// SourceProvenanceVerified: slsa.Generator never emits a "source-code"
+// dependency without a non-empty gitCommit digest (see
+// internal/adapters/slsa/generator.go), so "dependency present" and "commit
+// present" are the same condition in practice, but checking the dependency's
+// presence directly keeps this function correct even if that generator-side
+// invariant ever changes.
+func (r *Resolver) populateInputsFromSLSA(inputs *ports.PinnedBuildInputs, stmt ports.SLSAStatement) (sawSourceCode bool) {
 	for _, dep := range stmt.Predicate.BuildDefinition.ResolvedDependencies {
 		switch dep.Name {
 		case "base-image":
@@ -721,6 +795,7 @@ func (r *Resolver) populateInputsFromSLSA(inputs *ports.PinnedBuildInputs, stmt 
 				inputs.BaseImageHash = "sha256:" + h
 			}
 		case "source-code":
+			sawSourceCode = true
 			inputs.Repo = dep.URI
 			if c, ok := dep.Digest["gitCommit"]; ok {
 				inputs.Commit = c
@@ -750,6 +825,13 @@ func (r *Resolver) populateInputsFromSLSA(inputs *ports.PinnedBuildInputs, stmt 
 	}
 
 	if ep := stmt.Predicate.BuildDefinition.ExternalParameters; ep != nil {
+		// NOTE: ep["repository"] is the *target* image repository
+		// (slsa.Generator's req.Repo, e.g. "ghcr.io/acme/app"), not a git
+		// source location — this fallback predates SourceProvenance and is
+		// left as-is (out of scope for this change), but it deliberately
+		// does NOT set sawSourceCode: only a genuine "source-code" resolved
+		// dependency may upgrade PinnedInputs.SourceProvenance to
+		// SourceProvenanceVerified.
 		if r, ok := ep["repository"].(string); ok && inputs.Repo == "" {
 			inputs.Repo = r
 		}
@@ -761,6 +843,7 @@ func (r *Resolver) populateInputsFromSLSA(inputs *ports.PinnedBuildInputs, stmt 
 			}
 		}
 	}
+	return sawSourceCode
 }
 
 // normalizeRepoURI reduces a source-repository identifier to a comparable

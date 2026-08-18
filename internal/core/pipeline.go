@@ -1222,6 +1222,17 @@ func signingSubjects(pub ports.PublishResult, built []platformBuild, multi bool)
 // subject is only the index digest would fail subject cross-checks when
 // fetched via a per-platform manifest's .att tag.
 func slsaGeneratorRequest(deps Deps, req BuildRequest, base *ports.BaseImage, toolchain Toolchain, bunToolchain ports.BunResolverResult, subject v1.Hash) ports.SLSAGeneratorRequest {
+	// GitRepo/GitCommit are deliberately left unset here rather than sourced
+	// from req.Labels: BuildRequest has no dedicated field for them, and
+	// req.Labels (org.opencontainers.image.source/.revision) is
+	// user-overridable via --image-label, which would let a CLI flag inject
+	// arbitrary "measured" source data into a cryptographically signed
+	// statement. ProjectDir is passed through unchanged, and
+	// slsa.Generator's own gitdiscovery.go resolves the real commit/repo by
+	// shelling to git against it directly — a genuine measurement of the
+	// actual working tree at build time, not an assertion accepted from a
+	// flag. See ports.SLSAGeneratorRequest.GitRepo/.GitCommit's "optional/
+	// discovered" doc comment.
 	return ports.SLSAGeneratorRequest{
 		ProjectDir: req.ProjectDir,
 		Repo:       req.Repo,

@@ -5,6 +5,14 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-18 — `--expect-source` verified against the artifact's own unsigned annotations
+
+**Category:** fail-open / self-referential-check
+**Root cause:** `PinnedInputs.Repo`/`Commit` were seeded from the image's own `org.opencontainers.image.source`/`.revision` OCI annotations and only *overwritten* when a verified SLSA statement happened to carry a `source-code` dependency. `validateSourceMatch` then ran against whichever source had won, with no record of which one that was. So on any image without verified provenance, `--expect-source` compared two attacker-controlled strings and reported match/mismatch as though it had verified something. Same family as the keyless-identity bug logged above: the expected value came from the material under inspection.
+**Where:** `internal/adapters/provenance/resolver.go` (annotation seeding, `populateInputsFromSLSA`, `validateSourceMatch`); `internal/core/pipeline.go`'s SLSA request construction.
+**Fix:** Values now carry their origin (`ports.SourceProvenance`: none / unverified / verified). `--expect-source` refuses to run unless the source is verified, with `--allow-unverified-source` as an opt-in hatch that still compares but stamps the result unverified in both text and JSON output. Required a prerequisite fix: `slsa.Generate` supported `GitRepo`/`GitCommit` and the resolver read `source-code`, but `pipeline.go` never passed them, so no production statement carried source info — gating alone would have made the flag fail for every image forever. Git discovery was added in the generator rather than reusing the existing OCI-label path, because labels are user-overridable via `--image-label` and cannot be the source of truth for a signed statement.
+**Preventative rule:** Before gating a check on "verified" data, confirm something in production actually *produces* that data — a supported request field plus a reader for it is not a working pipeline (checklist row 16). And when a security control tightens, check whether the tightening makes it unusable rather than merely stricter: a control that always fails gets disabled by its users, which is worse than the gap it closed.
+
 ## 2026-08-18 — Image signing was wired end-to-end for the first time; every image Pokkum ever pushed before this was unsigned, despite `--sign` defaulting to true and README advertising an SLSA-3 badge
 
 **Category:** overclaiming / fake-implementation — a direct recurrence of the class already logged at this file's 2026-08-17 "Four shipped, `[x]`-marked, documented features were stubs" entry, not a new failure mode

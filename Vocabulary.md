@@ -327,7 +327,8 @@ Without `--check`, `pokkum upgrade` refuses to install anything if it cannot ver
 | `pokkum verify <ref>` | — | Performs attestation summary and signature validation. |
 | `--no-rebuild` | `false` | Skip full image rebuild during verification. |
 | `--against <path>` | (none) | Local image tarball or ref to compare against. |
-| `--expect-source <repo>@<ref>` | (none) | Expected git repository and ref source attestation. **Known gap** — this compares against `PinnedInputs.Repo`/`Commit`, which is seeded from the image's *unsigned* `org.opencontainers.image.source`/`.revision` annotations unless a verified SLSA statement overwrites them; on an image with no verified attestation, this compares against attacker-controlled strings. Exact matching (fixed 2026-08-18, see below) made this tighter, not sound. See `Roadmap.md`. |
+| `--expect-source <repo>@<ref>` | (none) | Assert the expected git repository and commit. **Requires a cryptographically verified SLSA `source-code` attestation** — it refuses to run (exit 2) rather than comparing against the image's own unsigned `org.opencontainers.image.source`/`.revision` annotations, which anyone able to push to the repo controls. Sign builds (`pokkum build --sign`) so there is something real to check, or pass `--allow-unverified-source` to compare anyway. |
+| `--allow-unverified-source` | `false` | Permit `--expect-source` to compare against unsigned image annotations when no verified SLSA source attestation exists. The comparison still runs and a mismatch still fails, but the result is explicitly marked unverified — `Source Verify: UNVERIFIED (unsigned image annotations only)` in text output, `pinned_inputs.source_provenance` in JSON — and a `Warn` is logged. Escape hatch for pre-signing images; not a substitute for verification. |
 | `--keyless-identity` | (none) | Expected Fulcio certificate Subject Alternative Name for keyless signature verification. **Required** to verify a keyless-signed image — without it, verification of keyless material is refused outright rather than accepting any Fulcio signer on earth (fixed 2026-08-18; see below). |
 | `--keyless-issuer` | (none) | Expected OIDC issuer URL for keyless signature verification (e.g. `https://token.actions.githubusercontent.com`). Required alongside `--keyless-identity`; a half-configured pair fails before any network I/O. |
 | `--public-key` | (none) | Path or PEM string for the static Cosign public key to verify a static-key-signed image's signature against. Falls back to `POKKUM_SIGNING_PUBKEY` → `POKKUM_BASE_IMAGE_PUBKEY`, **no fallback beyond that as of 2026-08-18** (commit `a149b28`) — see §1's convention note. If the image carries a static-key signature and none of these resolve to a key, `pokkum verify` now hard-fails with `ErrStaticKeyRequired` naming this flag/the two env vars, **in every mode including the default rebuild-and-compare path**. This closes a real fail-open: before this fix, the same situation silently produced `SignatureValid: false` with a `nil` error, so the rebuild/comparison logic never actually gated on signature validity at all for a static-key-signed image with no key configured — a breaking change, but one that closes a real gap rather than merely tightening an already-enforced check. |
@@ -377,7 +378,8 @@ Inspects build provenance timeline and CI metadata for an image reference, verif
 
 | Flag | Default | Description |
 |---|---|---|
-| `--expect-source` | (none) | Expected git repository and ref source attestation (e.g. `github.com/org/repo@main`). |
+| `--expect-source` | (none) | Expected git repository and commit (e.g. `github.com/org/repo@<sha>`). Requires verified SLSA source provenance; see the `pokkum verify` section. |
+| `--allow-unverified-source` | `false` | Let `--expect-source` fall back to unsigned image annotations, marking the result unverified. |
 | `--output` | `text` | Output format (`text` or `json`). |
 
 ---

@@ -55,6 +55,9 @@ func TestVerifyCommand_SignatureVerificationFlagsRegistered(t *testing.T) {
 		"expect-source",
 		"against",
 		"registry-config",
+		// The --expect-source escape hatch: see
+		// TestVerifyCommand_ExpectSourceWithoutVerifiedProvenance_Exits2.
+		"allow-unverified-source",
 	} {
 		if flag := cmd.Flags().Lookup(name); flag == nil {
 			t.Errorf("expected --%s flag to be registered on `pokkum verify`", name)
@@ -180,5 +183,71 @@ func TestVerifyCommand_KeylessWithoutIdentity_Exits2(t *testing.T) {
 	}
 	if env.Error == nil || !strings.Contains(env.Error.Message, "--keyless-identity") {
 		t.Errorf("the error must tell the operator which flag to supply, got %+v", env.Error)
+	}
+}
+
+// TestVerifyCommand_ExpectSourceWithoutVerifiedProvenance_Exits2 is the
+// caller-chain test (self-review checklist row 13) for the --expect-source
+// fail-closed gate: the refusal is implemented and unit-tested at the
+// resolver layer (internal/adapters/provenance), but what actually matters
+// to a CI pipeline invoking `pokkum verify --expect-source ...` is the
+// process's own exit code and the message printed to stdout/stderr — this
+// proves the gate actually reaches runVerify's error path rather than being
+// silently absorbed or bypassed by a check elsewhere in the same call chain
+// (e.g. ResolveProvenance's error being swallowed before exitFunc is called).
+func TestVerifyCommand_ExpectSourceWithoutVerifiedProvenance_Exits2(t *testing.T) {
+	server := httptest.NewServer(registry.New())
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	targetRepo := fmt.Sprintf("%s/app-expect-source-cli", host)
+
+	// Annotation-only image: exactly the shape the original fail-open bug
+	// exploited (unsigned org.opencontainers.image.source/.revision, no
+	// SLSA attestation). Its values deliberately MATCH the --expect-source
+	// assertion below — proving the refusal fires because nothing verified
+	// them, not because they happen to disagree.
+	img := mutate.Annotations(empty.Image, map[string]string{
+		"org.opencontainers.image.source":   "github.com/example/my-app",
+		"org.opencontainers.image.revision": "a1b2c3d4e5f678901234567890abcdef12345678",
+	}).(v1.Image)
+	tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+	if err := remote.Write(tagRef, img); err != nil {
+		t.Fatalf("push test image: %v", err)
+	}
+
+	var exitCode int
+	oldExit := exitFunc
+	exitFunc = func(code int) { exitCode = code }
+	defer func() { exitFunc = oldExit }()
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	_ = runVerify(context.Background(), nil, &verifyOptions{
+		noRebuild:    true,
+		expectSource: "github.com/example/my-app@a1b2c3d4",
+		output:       "json",
+	}, targetRepo+":v1.0.0")
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	if exitCode != 2 {
+		t.Fatalf("expected exit code 2 for --expect-source against unverified source information, got %d", exitCode)
+	}
+
+	var outBuf bytes.Buffer
+	_, _ = io.Copy(&outBuf, r)
+
+	var env ports.JSONEnvelope
+	if err := json.Unmarshal(outBuf.Bytes(), &env); err != nil {
+		t.Fatalf("verify --output=json emitted invalid JSON: %v, raw: %s", err, outBuf.String())
+	}
+	if env.Status != "error" {
+		t.Errorf("expected status error, got %s", env.Status)
+	}
+	if env.Error == nil || !strings.Contains(env.Error.Message, "--allow-unverified-source") {
+		t.Errorf("the error must tell the operator about the escape hatch, got %+v", env.Error)
 	}
 }

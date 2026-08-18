@@ -4,6 +4,36 @@ Most of [fixes-to-v1.md](fixes-to-v1.md) is invisible unless you were
 relying on the specific broken behavior. This page covers what you might
 actually notice, and what — if anything — you need to do.
 
+## `pokkum verify --expect-source` now requires signed provenance
+
+**What changed.** `--expect-source` used to compare the repo and commit you asserted
+against the image's own `org.opencontainers.image.source` / `.revision` OCI
+annotations whenever no verified SLSA attestation was present. Those annotations are
+plain metadata — anyone able to push to the repository can set them to anything — so
+on an unsigned image the check compared two attacker-controlled strings and reported
+a match. It looked like verification and wasn't.
+
+It now refuses to run (exit 2) unless the repo and commit come from a
+cryptographically verified SLSA `source-code` attestation.
+
+**What to do.** Sign your builds so there is something real to check:
+
+    pokkum build --sign ...          # with POKKUM_SIGNING_KEY or --signing-key set
+
+Or, if you need the old comparison while you get signing in place, opt in explicitly:
+
+    pokkum verify --expect-source github.com/acme/app@<sha> --allow-unverified-source
+
+With the hatch, the comparison still runs and a mismatch still fails — but the result
+is marked unverified (`Source Verify: UNVERIFIED (unsigned image annotations only)` in
+text output, `pinned_inputs.source_provenance` in JSON) and a warning is logged, so it
+cannot be mistaken for a real verification in a CI log.
+
+**Note.** Builds now record the git repo and commit in the SLSA statement itself
+(previously the generator supported those fields but nothing populated them). A dirty
+working tree appends `-dirty` to the recorded commit, matching the existing
+`git describe --dirty` convention.
+
 ## 2026-08-18: static-key signature verification now requires a real key — no more silent placeholder
 
 **Before:** if you never set a `POKKUM_*_PUBKEY` env var, base-image

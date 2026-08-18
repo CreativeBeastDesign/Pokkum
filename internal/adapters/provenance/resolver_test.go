@@ -649,53 +649,238 @@ func TestResolveProvenance_Adversarial_FakeKeylessCert_IsRejected(t *testing.T) 
 	}
 }
 
-func TestResolveProvenance_ExpectSource_MatchAndMismatch(t *testing.T) {
-	_, host := startTestRegistry(t)
-	targetRepo := fmt.Sprintf("%s/app-expect-source", host)
+// pushVerifiedSLSAAttestedImage pushes an image tagged targetRepo:v1.0.0
+// carrying a genuine, DSSE-signed SLSA statement (via the real slsa.Generator
+// and dsse.Signer, exactly like TestResolveProvenance_WithSLSAAttestation)
+// naming gitRepo/gitCommit as its verified "source-code" resolved
+// dependency. It also stamps the image's own unsigned annotations with a
+// DIFFERENT repo/commit than the verified statement — so any test relying on
+// this helper that accidentally fell back to reading annotations instead of
+// the verified statement would observe the wrong (annotation) values and
+// fail, rather than the two coincidentally agreeing. It sets
+// POKKUM_SIGNING_PUBKEY via t.Setenv so the resolver can verify the DSSE
+// envelope. Returns the pushed image's digest.
+func pushVerifiedSLSAAttestedImage(t *testing.T, targetRepo, gitRepo, gitCommit string) v1.Hash {
+	t.Helper()
 
 	annotations := map[string]string{
-		"org.opencontainers.image.source":   "github.com/my-org/my-sveltekit-app",
-		"org.opencontainers.image.revision": "c0ffee1234567890abcdef1234567890abcdef12",
+		"org.opencontainers.image.source":   "github.com/attacker-controlled/decoy",
+		"org.opencontainers.image.revision": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
 	}
 	img := createTestImage(t, annotations)
-	tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
-	_ = remote.Write(tagRef, img)
+	tagRef, err := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+	if err != nil {
+		t.Fatalf("parse tag ref: %v", err)
+	}
+	if err := remote.Write(tagRef, img); err != nil {
+		t.Fatalf("push test image: %v", err)
+	}
+	imgDigest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("img digest: %v", err)
+	}
 
-	r := provenance.NewResolver(nil)
-	ctx := context.Background()
-
-	// Matching source
-	_, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
-		ImageRef:     targetRepo + ":v1.0.0",
-		ExpectSource: "github.com/my-org/my-sveltekit-app@c0ffee12",
+	slsaGen := slsa.NewGenerator(nil)
+	slsaStmt, err := slsaGen.Generate(context.Background(), ports.SLSAGeneratorRequest{
+		BaseImage: ports.SLSABaseImage{
+			Ref:    "gcr.io/distroless/base:nonroot",
+			Digest: v1.Hash{Algorithm: "sha256", Hex: "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"},
+		},
+		GitRepo:         gitRepo,
+		GitCommit:       gitCommit,
+		OutputDigest:    imgDigest,
+		SourceDateEpoch: time.Unix(1700000000, 0),
 	})
 	if err != nil {
-		t.Fatalf("expected matching source to succeed: %v", err)
+		t.Fatalf("generate SLSA statement: %v", err)
+	}
+	stmtJSON, err := json.Marshal(slsaStmt)
+	if err != nil {
+		t.Fatalf("marshal SLSA statement: %v", err)
 	}
 
-	// Mismatched repo
-	_, err = r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
-		ImageRef:     targetRepo + ":v1.0.0",
-		ExpectSource: "github.com/wrong-org/my-sveltekit-app@c0ffee12",
-	})
-	if err == nil {
-		t.Fatal("expected error on repo mismatch, got nil")
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate signing key: %v", err)
 	}
-	if !errors.Is(err, core.ErrInvalidRequest) {
-		t.Errorf("expected ErrInvalidRequest, got %v", err)
+	privDer, err := x509.MarshalPKCS8PrivateKey(privKey)
+	if err != nil {
+		t.Fatalf("marshal private key: %v", err)
+	}
+	privPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDer})
+	pubDer, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDer})
+	t.Setenv("POKKUM_SIGNING_PUBKEY", string(pubPEM))
+
+	dsseSigner := dsse.NewSigner(nil)
+	env, err := dsseSigner.Sign(context.Background(), ports.DSSESignRequest{
+		PayloadBytes: stmtJSON,
+		PayloadType:  ports.InTotoPayloadType,
+		KeyPEM:       privPEM,
+	})
+	if err != nil {
+		t.Fatalf("sign DSSE: %v", err)
+	}
+	envJSON, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal DSSE envelope: %v", err)
 	}
 
-	// Mismatched commit
-	_, err = r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
-		ImageRef:     targetRepo + ":v1.0.0",
-		ExpectSource: "github.com/my-org/my-sveltekit-app@deadbeef",
+	attLayer := static.NewLayer(envJSON, types.MediaType("application/vnd.dsse.envelope.v1+json"))
+	attImg, err := mutate.Append(empty.Image, mutate.Addendum{Layer: attLayer})
+	if err != nil {
+		t.Fatalf("build attestation image: %v", err)
+	}
+	attImg = mutate.MediaType(attImg, types.OCIManifestSchema1)
+
+	attTagStr := fmt.Sprintf("%s:%s-%s.att", targetRepo, imgDigest.Algorithm, imgDigest.Hex)
+	attRef, err := name.ParseReference(attTagStr, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("parse att ref: %v", err)
+	}
+	if err := remote.Write(attRef, attImg); err != nil {
+		t.Fatalf("push attestation image: %v", err)
+	}
+
+	return imgDigest
+}
+
+// TestResolveProvenance_ExpectSource_GatedOnVerifiedProvenance is the
+// regression guard for the --expect-source fail-open closed by this change:
+// the flag used to compare against whatever Repo/Commit the resolver had
+// resolved regardless of whether a cryptographic signature ever verified
+// them, so it read as a real security check on every image that merely
+// carried unsigned org.opencontainers.image.source/.revision annotations —
+// which is to say, on any image at all, since anyone able to push a tag
+// controls those annotations. The three cases below are the three states
+// ResolveProvenance's ExpectSource gate must distinguish: a genuinely
+// verified statement (allowed unconditionally), an unverified source with no
+// escape hatch (refused closed), and an unverified source with
+// --allow-unverified-source (allowed, but the result is stamped
+// SourceProvenanceUnverified so it can never be mistaken for the first
+// case).
+func TestResolveProvenance_ExpectSource_GatedOnVerifiedProvenance(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("verified SLSA statement is compared unconditionally", func(t *testing.T) {
+		_, host := startTestRegistry(t)
+		targetRepo := fmt.Sprintf("%s/app-expect-source-verified", host)
+		pushVerifiedSLSAAttestedImage(t, targetRepo, "github.com/my-org/my-sveltekit-app", "c0ffee1234567890abcdef1234567890abcdef12")
+
+		r := provenance.NewResolver(nil)
+
+		summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+			ImageRef:     targetRepo + ":v1.0.0",
+			ExpectSource: "github.com/my-org/my-sveltekit-app@c0ffee12",
+		})
+		if err != nil {
+			t.Fatalf("expected matching, verified source to succeed: %v", err)
+		}
+		if summary.PinnedInputs.SourceProvenance != ports.SourceProvenanceVerified {
+			t.Errorf("SourceProvenance = %q, want %q", summary.PinnedInputs.SourceProvenance, ports.SourceProvenanceVerified)
+		}
+
+		// A verified statement still enforces the assertion itself: a
+		// mismatched commit against the SAME verified statement must still
+		// be rejected. Gating on verification must not become a way to skip
+		// the actual comparison.
+		_, err = r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+			ImageRef:     targetRepo + ":v1.0.0",
+			ExpectSource: "github.com/my-org/my-sveltekit-app@deadbeef",
+		})
+		if err == nil {
+			t.Fatal("expected error on commit mismatch against a verified statement, got nil")
+		}
+		if !errors.Is(err, core.ErrInvalidRequest) {
+			t.Errorf("expected ErrInvalidRequest, got %v", err)
+		}
 	})
-	if err == nil {
-		t.Fatal("expected error on commit mismatch, got nil")
-	}
-	if !errors.Is(err, core.ErrInvalidRequest) {
-		t.Errorf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	t.Run("unverified source refuses closed without the escape hatch", func(t *testing.T) {
+		_, host := startTestRegistry(t)
+		targetRepo := fmt.Sprintf("%s/app-expect-source-unverified", host)
+
+		annotations := map[string]string{
+			"org.opencontainers.image.source":   "github.com/my-org/my-sveltekit-app",
+			"org.opencontainers.image.revision": "c0ffee1234567890abcdef1234567890abcdef12",
+		}
+		img := createTestImage(t, annotations)
+		tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+		if err := remote.Write(tagRef, img); err != nil {
+			t.Fatalf("push test image: %v", err)
+		}
+
+		r := provenance.NewResolver(nil)
+
+		// This annotation-only image's repo/commit are exactly what the
+		// pre-fix bug would have compared and accepted. Proving the fix
+		// fails closed here — even though the assertion would MATCH the
+		// (unverified) values — is the whole point: matching an
+		// attacker-controlled annotation is not a security property.
+		_, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+			ImageRef:     targetRepo + ":v1.0.0",
+			ExpectSource: "github.com/my-org/my-sveltekit-app@c0ffee12",
+		})
+		if err == nil {
+			t.Fatal("expected --expect-source against unverified source to be refused, got nil")
+		}
+		if !errors.Is(err, provenance.ErrUnverifiedSourceProvenance) {
+			t.Errorf("expected ErrUnverifiedSourceProvenance, got %v", err)
+		}
+		if !errors.Is(err, core.ErrInvalidRequest) {
+			t.Errorf("expected ErrInvalidRequest, got %v", err)
+		}
+	})
+
+	t.Run("unverified source with the escape hatch compares but is marked unverified", func(t *testing.T) {
+		_, host := startTestRegistry(t)
+		targetRepo := fmt.Sprintf("%s/app-expect-source-allow-unverified", host)
+
+		annotations := map[string]string{
+			"org.opencontainers.image.source":   "github.com/my-org/my-sveltekit-app",
+			"org.opencontainers.image.revision": "c0ffee1234567890abcdef1234567890abcdef12",
+		}
+		img := createTestImage(t, annotations)
+		tagRef, _ := name.ParseReference(targetRepo+":v1.0.0", name.WeakValidation)
+		if err := remote.Write(tagRef, img); err != nil {
+			t.Fatalf("push test image: %v", err)
+		}
+
+		r := provenance.NewResolver(nil)
+
+		// Matching, with the hatch: proceeds, but must come back stamped
+		// unverified so a caller (or a human reading the JSON/text report)
+		// cannot mistake this for a real cryptographic verification.
+		summary, err := r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+			ImageRef:              targetRepo + ":v1.0.0",
+			ExpectSource:          "github.com/my-org/my-sveltekit-app@c0ffee12",
+			AllowUnverifiedSource: true,
+		})
+		if err != nil {
+			t.Fatalf("expected matching unverified source with the escape hatch to succeed: %v", err)
+		}
+		if summary.PinnedInputs.SourceProvenance != ports.SourceProvenanceUnverified {
+			t.Errorf("SourceProvenance = %q, want %q", summary.PinnedInputs.SourceProvenance, ports.SourceProvenanceUnverified)
+		}
+
+		// The hatch permits the comparison to run, not to always succeed: a
+		// genuine mismatch against the (still-unverified) annotation values
+		// must still be reported as a mismatch.
+		_, err = r.ResolveProvenance(ctx, ports.ProvenanceResolverRequest{
+			ImageRef:              targetRepo + ":v1.0.0",
+			ExpectSource:          "github.com/wrong-org/my-sveltekit-app@c0ffee12",
+			AllowUnverifiedSource: true,
+		})
+		if err == nil {
+			t.Fatal("expected error on repo mismatch, got nil")
+		}
+		if !errors.Is(err, core.ErrInvalidRequest) {
+			t.Errorf("expected ErrInvalidRequest, got %v", err)
+		}
+	})
 }
 
 func writeTempTar(t *testing.T, filename string, content []byte) string {

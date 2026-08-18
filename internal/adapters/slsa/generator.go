@@ -62,9 +62,43 @@ func (g *Generator) Generate(ctx context.Context, req ports.SLSAGeneratorRequest
 		})
 	}
 
-	// 2b. Source Repository dependency
-	if req.GitCommit != "" {
-		gitURI := req.GitRepo
+	// 2b. Source Repository dependency.
+	//
+	// GitRepo/GitCommit are documented as "optional/discovered"
+	// (ports.SLSAGeneratorRequest) — a caller may supply them explicitly
+	// (tests, or a future non-git source), and pipeline.go's real build path
+	// currently never does, leaving discovery here as the only thing that
+	// actually populates them for a real build. This is a genuine
+	// measurement of req.ProjectDir's actual working tree at build time via
+	// git, not an assertion accepted from a flag — the same principle
+	// already applied a few lines below to the lockfile dependencies (hashed
+	// from the real file, never taken on trust). Only attempted when the
+	// caller left the corresponding field empty; an explicit value always
+	// wins.
+	gitRepo, gitCommit := req.GitRepo, req.GitCommit
+	if gitCommit == "" {
+		if commit, dirty := discoverGitCommit(ctx, req.ProjectDir); commit != "" {
+			gitCommit = commit
+			if dirty {
+				// A bare commit hash asserts the tree matched that commit
+				// exactly, which is false with uncommitted changes present.
+				// "-dirty" mirrors the established convention already used
+				// elsewhere in this codebase for the same signal (see
+				// cmd/pokkum/git_metadata.go's getGitVersion, which uses
+				// `git describe --dirty`) rather than silently recording a
+				// misleadingly-precise commit hash.
+				gitCommit += "-dirty"
+			}
+			g.log.DebugContext(ctx, "slsa: discovered git commit for source-code provenance", "dir", req.ProjectDir, "dirty", dirty)
+		}
+	}
+	if gitRepo == "" {
+		if src := discoverGitSource(ctx, req.ProjectDir); src != "" {
+			gitRepo = src
+		}
+	}
+	if gitCommit != "" {
+		gitURI := gitRepo
 		if gitURI == "" {
 			gitURI = "git+source"
 		}
@@ -72,7 +106,7 @@ func (g *Generator) Generate(ctx context.Context, req ports.SLSAGeneratorRequest
 			Name: "source-code",
 			URI:  gitURI,
 			Digest: map[string]string{
-				"gitCommit": req.GitCommit,
+				"gitCommit": gitCommit,
 			},
 		})
 	}

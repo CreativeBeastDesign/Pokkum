@@ -4,11 +4,51 @@ import (
 	"context"
 )
 
+// SourceProvenance describes how PinnedBuildInputs.Repo/Commit were
+// obtained, not merely what value they hold. Repo/Commit strings look
+// identical to a caller regardless of their origin, but their trust
+// properties are not: a value read off the image's own unsigned OCI
+// annotations is fully attacker/operator-controlled (anyone able to push a
+// tag to the repository can set it), while a value read out of a
+// cryptographically verified SLSA statement is bound to the exact image
+// digest by a signature ResolveProvenance checked. Callers that assert
+// something about the source (--expect-source) MUST consult this field
+// rather than assuming Repo/Commit being non-empty means anything was
+// verified — see ErrUnverifiedSourceProvenance.
+type SourceProvenance string
+
+const (
+	// SourceProvenanceNone means no source repo/commit was resolved from any
+	// source: neither the image's own annotations nor a verified SLSA
+	// statement carried one.
+	SourceProvenanceNone SourceProvenance = ""
+
+	// SourceProvenanceUnverified means Repo/Commit came from the image's own
+	// unsigned OCI annotations (org.opencontainers.image.source/.revision).
+	// These are not cryptographically bound to the image in any way; whoever
+	// can push a tag to the repository controls them.
+	SourceProvenanceUnverified SourceProvenance = "unverified"
+
+	// SourceProvenanceVerified means Repo/Commit came from a
+	// cryptographically verified SLSA provenance statement: a DSSE envelope
+	// whose signature ResolveProvenance checked against a configured key,
+	// carrying a "source-code" resolved dependency, whose statement subject
+	// was itself checked against the image digest under verification.
+	SourceProvenanceVerified SourceProvenance = "verified"
+)
+
 // PinnedBuildInputs captures all deterministic inputs recorded in SLSA provenance
 // required to perform a bit-for-bit rebuild verification.
 type PinnedBuildInputs struct {
-	Repo           string            `json:"repo"`
-	Commit         string            `json:"commit"`
+	Repo   string `json:"repo"`
+	Commit string `json:"commit"`
+
+	// SourceProvenance reports how Repo/Commit above were obtained. See
+	// SourceProvenance's doc comment — this is the field a caller comparing
+	// Repo/Commit against an expectation (--expect-source) must check before
+	// trusting the comparison at all.
+	SourceProvenance SourceProvenance `json:"source_provenance,omitempty"`
+
 	BaseImageRef   string            `json:"base_image_ref"`
 	BaseImageHash  string            `json:"base_image_hash"`
 	BunVersion     string            `json:"bun_version"`
@@ -69,6 +109,22 @@ type ProvenanceResolverRequest struct {
 	// material against. Empty means the KeylessVerifier's own embedded
 	// public-good snapshot.
 	TrustedRootJSON []byte
+
+	// AllowUnverifiedSource is the escape hatch for ExpectSource. By default,
+	// ResolveProvenance refuses (ErrUnverifiedSourceProvenance) to compare
+	// ExpectSource against source information that isn't backed by a
+	// cryptographically verified SLSA statement (see SourceProvenance) —
+	// comparing an assertion against the image's own unsigned annotations
+	// looks like a real check while proving nothing, since anyone able to
+	// push a tag to the repository controls those annotations. Setting this
+	// true (--allow-unverified-source) permits the comparison to proceed
+	// anyway; the result is still reported with
+	// PinnedInputs.SourceProvenance == SourceProvenanceUnverified so it can
+	// never be mistaken for a real verification, and ResolveProvenance logs
+	// a Warn when this path is taken. Mirrors the shape of
+	// BuildRequest.AllowIncompleteScan/--allow-incomplete: an explicit,
+	// visible downgrade rather than a silent one.
+	AllowUnverifiedSource bool
 }
 
 // ProvenanceResolver defines the port for fetching and verifying image attestations and provenance.

@@ -14,15 +14,16 @@ import (
 )
 
 type verifyOptions struct {
-	noRebuild       bool
-	expectSource    string
-	against         string
-	registryConfig  string
-	output          string
-	keylessIdentity string
-	keylessIssuer   string
-	publicKey       string
-	trustedRoot     string
+	noRebuild             bool
+	expectSource          string
+	allowUnverifiedSource bool
+	against               string
+	registryConfig        string
+	output                string
+	keylessIdentity       string
+	keylessIssuer         string
+	publicKey             string
+	trustedRoot           string
 }
 
 var exitFunc = os.Exit
@@ -47,6 +48,8 @@ func newVerifyCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
 
 	cmd.Flags().BoolVar(&opts.noRebuild, "no-rebuild", false, "Validate attestations and toolchain metadata without running a rebuild")
 	cmd.Flags().StringVar(&opts.expectSource, "expect-source", "", "Assert expected source repository and commit (repo@commit)")
+	cmd.Flags().BoolVar(&opts.allowUnverifiedSource, "allow-unverified-source", false,
+		"Allow --expect-source to compare against source information that is not backed by a cryptographically verified SLSA attestation (e.g. only the image's own unsigned annotations). Without this, --expect-source refuses to run against unverified source information. The result is always marked unverified when this is used")
 	cmd.Flags().StringVar(&opts.against, "against", "", "Explicit local tarball path to compare against instead of remote registry")
 	cmd.Flags().StringVar(&opts.registryConfig, "registry-config", "", "Path to docker config.json-style auth file for private registries")
 
@@ -71,9 +74,10 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 	outputFormat := ports.OutputFormat(opts.output)
 
 	provReq := ports.ProvenanceResolverRequest{
-		ImageRef:           imageRef,
-		ExpectSource:       opts.expectSource,
-		RegistryConfigPath: opts.registryConfig,
+		ImageRef:              imageRef,
+		ExpectSource:          opts.expectSource,
+		AllowUnverifiedSource: opts.allowUnverifiedSource,
+		RegistryConfigPath:    opts.registryConfig,
 		KeylessIdentity: ports.KeylessIdentity{
 			SAN:    opts.keylessIdentity,
 			Issuer: opts.keylessIssuer,
@@ -130,6 +134,18 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 	if commitDisplay == "" {
 		commitDisplay = "(unrecorded)"
 	}
+	// Visible marker so a reader of the text report — not just the JSON
+	// payload's pinned_inputs.source_provenance field — cannot mistake an
+	// unverified (or --allow-unverified-source) comparison for a real
+	// cryptographic one. See ports.SourceProvenance's doc comment.
+	sourceProvenanceDisplay := "none recorded"
+	switch provSummary.PinnedInputs.SourceProvenance {
+	case ports.SourceProvenanceVerified:
+		sourceProvenanceDisplay = "verified (SLSA attestation)"
+	case ports.SourceProvenanceUnverified:
+		sourceProvenanceDisplay = "UNVERIFIED (unsigned image annotations only)"
+	}
+
 	repoDisplay := provSummary.PinnedInputs.Repo
 	if repoDisplay == "" {
 		repoDisplay = "(unrecorded)"
@@ -168,6 +184,7 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 		fmt.Printf("Image:       %s\n", provSummary.ImageRef)
 		fmt.Printf("Digest:      %s\n", provSummary.ImageDigest)
 		fmt.Printf("Source Repo: %s @ %s\n", repoDisplay, commitDisplay)
+		fmt.Printf("Source Verify: %s\n", sourceProvenanceDisplay)
 		fmt.Printf("Attestation: %t\n", provSummary.HasProvenance)
 		fmt.Printf("Signature:   %t (%s)\n", provSummary.SignatureValid, provSummary.SignerIdentity)
 		if provSummary.PinnedInputs.BunVersion != "" {
@@ -238,6 +255,7 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 	fmt.Printf("Image:       %s\n", provSummary.ImageRef)
 	fmt.Printf("Digest:      %s\n", provSummary.ImageDigest)
 	fmt.Printf("Source Repo: %s @ %s\n", repoDisplay, commitDisplay)
+	fmt.Printf("Source Verify: %s\n", sourceProvenanceDisplay)
 	fmt.Printf("Level:       %s\n", compResult.Level)
 	fmt.Printf("Summary:     %s\n", compResult.Summary)
 	fmt.Printf("Verdict:     %s\n", verdict)
