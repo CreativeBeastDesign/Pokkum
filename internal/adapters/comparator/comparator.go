@@ -148,7 +148,13 @@ func (c *Comparator) CompareImages(ctx context.Context, req ports.ImageComparato
 		rR, rErr := remoteLayers[i].Uncompressed()
 		lR, lErr := localLayers[i].Uncompressed()
 		if rErr != nil || lErr != nil {
-			diffDetails = append(diffDetails, fmt.Sprintf("layer %d: failed to read uncompressed layer streams (diffID %s vs %s)", i, remoteDiffIDs[i], localDiffIDs[i]))
+			var msg string
+			if i < len(remoteDiffIDs) && i < len(localDiffIDs) {
+				msg = fmt.Sprintf("layer %d: failed to read uncompressed layer streams (diffID %s vs %s)", i, remoteDiffIDs[i], localDiffIDs[i])
+			} else {
+				msg = fmt.Sprintf("layer %d: failed to read uncompressed layer streams (diffIDs unavailable)", i)
+			}
+			diffDetails = append(diffDetails, msg)
 			continue
 		}
 
