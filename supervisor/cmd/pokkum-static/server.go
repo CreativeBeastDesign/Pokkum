@@ -191,7 +191,18 @@ func (s *staticServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	s.warnFallbackUnconfiguredOnce()
+	// Only suggest the SPA fallback when it is actually a plausible remedy:
+	// an extensionless path looks like a client-side route that might need
+	// one, but a path with a file extension (.js, .css, .png, ...) looks
+	// like a missing static asset, which no SPA fallback fixes. Before the
+	// ".html" candidate existed, this hint fired for a prerendered page that
+	// was simply never looked for (see tryServe) — that specific case no
+	// longer reaches here at all now that the candidate exists, but the
+	// extension check still guards against suggesting the wrong remedy for
+	// a genuinely-missing asset.
+	if filepath.Ext(rel) == "" {
+		s.warnFallbackUnconfiguredOnce()
+	}
 	http.NotFound(w, r)
 }
 
@@ -234,6 +245,13 @@ func (s *staticServer) fallbackFileOK() (resolved string, ok bool) {
 // developer who hits an unexpected route on an SPA site is told the opt-in
 // mode exists without spamming every 404; the 404 response body itself stays
 // clean — no dev-marker HTML is ever injected into production responses.
+//
+// Callers must only invoke this for a miss that an SPA fallback could
+// plausibly fix — an extensionless path that looks like a client-side
+// route, not a path with a file extension that looks like a missing static
+// asset (see serveHTTP's filepath.Ext(rel) == "" gate). Suggesting an SPA
+// fallback for a missing .js/.css/.png is the wrong remedy and was the
+// original motivation for gating this at all.
 func (s *staticServer) warnFallbackUnconfiguredOnce() {
 	s.fallbackWarnOnce.Do(func() {
 		s.log.Warn("unmatched route returned 404; SPA fallback is available via " +
@@ -264,48 +282,104 @@ func (s *staticServer) warnFallbackBrokenOnce() {
 	})
 }
 
-// tryServe attempts to serve rel from root (canonicalRoot is root with
-// symlinks pre-resolved, see canonicalizeRoot). It reports whether it
-// produced a response. Any move that is not a successful stream (file
-// absent, broken symlink, symlink escaping the root, directory with no
-// index) returns false so the caller can fall through to the next root; the
-// final 404 happens only after every root has been tried.
-func (s *staticServer) tryServe(w http.ResponseWriter, r *http.Request, root, canonicalRoot, rel string) bool {
-	full := filepath.Join(root, rel)
-	resolved, err := filepath.EvalSymlinks(full)
+// resolveInRoot resolves candidate's symlinks and verifies the result is
+// contained within canonicalRoot (root with symlinks pre-resolved once at
+// construction — see canonicalizeRoot). It returns ("", false) for anything
+// that doesn't exist, can't be resolved, or escapes the root.
+//
+// Every path candidate tryServe considers — the exact request path, the
+// "<rel>.html" sibling, and a directory's index.html — MUST go through this
+// exact same EvalSymlinks + withinRoot pair. A candidate that skipped it
+// would be a path-traversal regression (Serena mem:self_review_checklist
+// row 22): a raw request path can be clean (cleanRelPath already rejects
+// "." / ".." segments) while still resolving, via a symlink planted in a
+// served root, to a target outside every root — only re-resolving and
+// re-checking at each candidate catches that.
+func (s *staticServer) resolveInRoot(root, canonicalRoot, candidate, what string) (string, bool) {
+	resolved, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
-		return false // absent (or broken symlink) in this root
+		return "", false // absent, or a broken symlink, in this root
 	}
 	if !withinRoot(canonicalRoot, resolved) {
-		s.log.Warn("refusing to serve path outside root", "root", root, "path", rel)
-		return false
+		s.log.Warn("refusing to serve "+what+" outside root", "root", root, "path", candidate)
+		return "", false
+	}
+	return resolved, true
+}
+
+// tryServe attempts to serve rel from root (canonicalRoot is root with
+// symlinks pre-resolved, see canonicalizeRoot). It reports whether it
+// produced a response. Any move that is not a successful stream returns
+// false so the caller can fall through to the next root; the final 404 (or
+// SPA fallback) happens only after every root has been tried.
+//
+// Three candidates are considered, in this precedence order:
+//
+//  1. An exact regular file at the request path. Highest precedence: if a
+//     real file is literally sitting at this exact path, it wins over
+//     whatever else exists alongside it.
+//  2. "<rel>.html" — @sveltejs/adapter-static's default (trailingSlash:
+//     'never') convention: route /about is emitted as a flat about.html
+//     file, not a directory. Tried BEFORE candidate 3 deliberately: a real
+//     multi-page adapter-static site can legitimately have both an
+//     about.html file and an about/ directory at once (e.g. a child route
+//     "/about/team" needs the directory to hold team.html, but that
+//     directory has no index.html of its own) — candidate 2 must win that
+//     case, not fail through to a doomed candidate-3 lookup first.
+//  3. A directory at the request path containing index.html —
+//     adapter-static's trailingSlash: 'always' convention, and how the site
+//     root ("/") is served. Lowest precedence: it depends on an extra,
+//     implicit filename, and is only reached once a more specific exact
+//     match and the adapter's default flat-file convention have both been
+//     ruled out.
+//
+// Every candidate is resolved and containment-checked via the same
+// resolveInRoot call (see its doc comment) — none of them get a weaker
+// check than the others.
+func (s *staticServer) tryServe(w http.ResponseWriter, r *http.Request, root, canonicalRoot, rel string) bool {
+	full := filepath.Join(root, rel)
+	resolved, resolvedOK := s.resolveInRoot(root, canonicalRoot, full, "path")
+
+	// Candidate 1: exact regular file.
+	if resolvedOK {
+		if fi, err := os.Stat(resolved); err == nil && !fi.IsDir() {
+			s.serveFile(w, r, resolved, false)
+			return true
+		}
 	}
 
+	// Candidate 2: "<rel>.html" sibling file. Skipped for the root path
+	// itself (rel == "") — "" + ".html" is meaningless, and "/" is already
+	// covered by candidate 3 below.
+	if rel != "" {
+		if htmlResolved, ok := s.resolveInRoot(root, canonicalRoot, full+".html", "html path"); ok {
+			if fi, err := os.Stat(htmlResolved); err == nil && !fi.IsDir() {
+				s.serveFile(w, r, htmlResolved, false)
+				return true
+			}
+		}
+	}
+
+	// Candidate 3: directory + index.html.
+	if !resolvedOK {
+		return false // request path doesn't exist in this root at all
+	}
 	fi, err := os.Stat(resolved)
-	if err != nil {
+	if err != nil || !fi.IsDir() {
+		return false // exists, but is neither a servable file nor a directory
+	}
+	// Re-run the same containment check on index.html specifically: it can
+	// itself be a symlink, and os.Stat alone would follow it without
+	// verifying it stays within root.
+	idx, idxOK := s.resolveInRoot(root, canonicalRoot, filepath.Join(resolved, indexFile), "index path")
+	if !idxOK {
 		return false
 	}
-	if fi.IsDir() {
-		// Serve index.html when present; otherwise fall through (no directory
-		// listing is ever generated). Re-run the same symlink-escape check used
-		// for the top-level path above: index.html can itself be a symlink, and
-		// os.Stat alone would follow it without verifying it stays within root.
-		idx, ierr := filepath.EvalSymlinks(filepath.Join(resolved, indexFile))
-		if ierr != nil {
-			return false
-		}
-		if !withinRoot(canonicalRoot, idx) {
-			s.log.Warn("refusing to serve index path outside root", "root", root, "path", rel)
-			return false
-		}
-		ifi, ierr := os.Stat(idx)
-		if ierr != nil || ifi.IsDir() {
-			return false
-		}
-		resolved = idx
+	ifi, err := os.Stat(idx)
+	if err != nil || ifi.IsDir() {
+		return false
 	}
-
-	s.serveFile(w, r, resolved, false)
+	s.serveFile(w, r, idx, false)
 	return true
 }
 

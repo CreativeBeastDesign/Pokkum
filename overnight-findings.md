@@ -58,13 +58,20 @@ Sigstore TUF root refresh.
 **Status:** logged, not fixed — outside F1's stated scope, and it needs a deliberate decision (merge the probe handlers into the content mux vs. reject the collapsed configuration vs. document it) rather than a reflex patch. Tracked for the roadmap.
 **Decision by André:** Reject the collapsed configuration.
 
-### 6. Embedded PID-1 binaries are checked-in build artifacts, so a source fix does not reach images
+### 6. Embedded PID-1 binaries are gitignored local artifacts, absent from CI and (for pokkum-static) from releases
 
-**Found by:** the static smoke test still failing *after* the bind fix (finding 2) was committed.
-**What:** `internal/adapters/staticserver/bin/pokkum-static-linux-{amd64,arm64}.zst` and the `pokkum-init` equivalents are prebuilt, zstd-compressed, checked-in blobs consumed via `go:embed`. Fixing `supervisor/cmd/pokkum-static/*.go` therefore changes nothing about produced images until `make static-server` regenerates the blob. The blobs on disk were dated Aug 16, predating the fix.
-**How it was spotted:** the container log read `msg="probe server failed" addr=:8081 error="listen tcp :80: bind: address already in use"` — an impossible pair for the fixed code, since it sets `Addr` before logging it. The old code logged the *intended* port while binding the default, which is also why the original bug never showed up in logs.
-**Severity:** Medium, process rather than code. Nothing enforces regeneration: no test compares the embedded blob against a fresh build of its source, and `make verify` does not rebuild it. Any future supervisor fix can be committed, reviewed, and merged while every produced image keeps the old behaviour.
-**Status:** blobs regenerated. Worth a guard — a test or CI step asserting the embedded blob matches a fresh build of its source — tracked for the roadmap rather than bolted on here.
+**Correction.** This entry originally said the blobs were *checked-in* artifacts, and commit `1c33509`'s message claimed it had committed the regenerated ones. Both were wrong: `internal/adapters/{staticserver,supervisor}/bin/pokkum-*` are **gitignored** (`.gitignore:15,18`), only `.gitkeep` is tracked, and `git add` on an ignored path silently did nothing. The real situation is worse than the one first described, so the corrected version follows.
+
+**What:** `pokkum-init` and `pokkum-static` are zstd blobs consumed via `go:embed all:bin`, produced only by `make supervisor` / `make static-server`. A fresh checkout (verified with `git archive HEAD`) contains neither — just `.gitkeep`. `go build ./cmd/pokkum` still succeeds, because embedding an almost-empty directory is legal; the failure surfaces only at runtime, when the provider looks for a blob that isn't there.
+
+**Three consequences, all verified:**
+1. **No CI job built them.** Nothing in `ci.yml`, `release.yml` or `slsa-builder.yml` ran either target, so CI's CLI could not produce a working image and the new real-build e2e job would have failed on a clean runner.
+2. **`.goreleaser.yaml`'s before-hook ran `make supervisor` but not `make static-server`.** So released binaries embedded no static server at all: `--strategy=static` was non-functional in every published release, independent of findings 2/3/4/7.
+3. **The PID 1 in every produced image was built on a developer laptop**, outside the attested pipeline — while the CLI's own SLSA provenance describes a hermetic CI build. For a supply-chain tool, the binary that runs as PID 1 and enforces the startup attestation being the one component not covered by the build attestation is the sharpest edge found tonight.
+
+**How it was caught:** the smoke test kept failing after the bind fix was committed, with the container logging `addr=:8081` beside `listen tcp :80` — a pair the fixed code cannot emit. The old code logged the intended port while binding the default, which is also why the original bug never showed in logs.
+
+**Fixed:** `make static-server` added to the goreleaser before-hooks, and a `Build Embedded PID-1 Binaries` step (`make supervisor static-server`) added to all three CI jobs. Still worth adding: an assertion that the embedded blob matches a fresh build of its source, so a stale local blob cannot silently ship. Tracked for the roadmap.
 
 ### 7. `pokkum-static` never tries `<path>.html`, so every non-root prerendered route 404s
 

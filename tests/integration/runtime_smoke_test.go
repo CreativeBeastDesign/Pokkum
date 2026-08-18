@@ -22,6 +22,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/staticserver"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -499,4 +500,416 @@ func pollHTTP200Body(url string, timeout time.Duration) (bool, string) {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+}
+
+// TestRuntimeSmoke_StaticStrategy_BootsAndServes is
+// TestRuntimeSmoke_LayeredStrategy_BootsAndServes's --strategy=static
+// counterpart. It exists for the identical reason: every other
+// static-strategy test in this package (see
+// tests/integration/static_e2e_test.go's TestFixtureDrivenE2E_Static) drives
+// a synthetic staticFixtureCompiler that fabricates
+// .svelte-kit/output/{client,prerendered} directly in the exact shape
+// internal/adapters/bunexec.Compiler's StrategyStatic branch and
+// internal/core/pipeline.go's AppPrerenderedDir assignment already assume,
+// and never exercises internal/adapters/bunexec.Compiler.Preflight at all
+// (the mock ports.Compiler doubles used everywhere else implement Preflight
+// as a stub that always succeeds); and supervisor/cmd/pokkum-static's own
+// tests (main_test.go, integration_test.go) only ever exercise its HTTP
+// handlers in-process via httptest — nothing in this repo, before this
+// test, ever ran the real pokkum-static main()/ListenAndServe path or a
+// real Compiler.Preflight against a real adapter-static project. All three
+// real, pre-existing production bugs below were undetectable by any other
+// test in this repo for exactly that reason.
+//
+// This test drives the real pipeline end to end against
+// testdata/fixtures/sveltekit-static (a genuine `sv create ... --add
+// sveltekit-adapter=adapter:static` project, built with the real
+// @sveltejs/adapter-static, not a hand-fabricated fixture), loads the
+// resulting image into a real container runtime, and polls the real
+// pokkum-static PID-1 process's probe endpoints and served content — the
+// same shape as the layered test. It is deliberately written to assert the
+// CORRECT contract throughout (Preflight accepts a real, correctly
+// configured adapter-static project; pokkum-static listens on its
+// configured PORT/POKKUM_PROBE_PORT; the prerendered homepage answers 200
+// with its real content, same as the layered test's own homepage
+// assertion) rather than to assert whatever the pipeline currently happens
+// to do. As of this writing it fails, and it fails for three real,
+// independent, pre-existing production bugs, not a bug in this test —
+// listed here in the order a caller would actually hit them:
+//
+//  1. internal/adapters/bunexec.Compiler.Preflight (compiler.go) hard-codes
+//     its adapter check to `@jesterkit/exe-sveltekit` or
+//     `@sveltejs/adapter-node` (the package-level `adapterPackage` const)
+//     regardless of strategy — it never even sees the strategy in the first
+//     place: ports.PreflightRequest (ports/compiler.go) has no Strategy
+//     field at all, and internal/core/pipeline.go's Preflight call site
+//     (the `deps.Compiler.Preflight(ctx, ports.PreflightRequest{...})`
+//     block) does not pass req.Compile.Strategy through. Prepare's own
+//     adapter check (checkEffectiveAdapter, a few hundred lines later in
+//     the same file) IS correctly strategy-aware — it computes
+//     `targetAdapter = "@sveltejs/adapter-static"` for
+//     req.Strategy.ApplyStatic() — but Preflight runs first and rejects the
+//     build before Prepare's correct logic ever gets a chance to run. Net
+//     effect: --strategy=static fails on EVERY real project whose
+//     package.json does not also happen to list adapter-node or
+//     exe-sveltekit, which is to say every real, correctly-configured
+//     adapter-static-only project, i.e. the entire intended use case of
+//     this strategy. Confirmed empirically: `core.Build` against this
+//     fixture fails immediately with "bunexec: preflight ...:
+//     @jesterkit/exe-sveltekit or @sveltejs/adapter-node is not configured
+//     in svelte.config.js or listed in package.json ...: sveltekit adapter
+//     missing" — before a single subprocess for the actual build ever
+//     runs. This is the failure this test currently stops at (see the
+//     errors.Is(err, core.ErrAdapterMissing) branch below).
+//  2. Even past that (confirmed by temporarily working around bug #1 in a
+//     throwaway scratch copy so a real image could actually be built and
+//     run — never in the committed fixture or any production code):
+//     supervisor/cmd/pokkum-static/main.go constructs both http.Server
+//     values (the content server `svc` and the probe server `probe`)
+//     without ever setting their Addr field. The local `addr :=
+//     net.JoinHostPort("", strconv.Itoa(cfg.Port))` (and the ProbePort
+//     equivalent) is computed and logged but never assigned to
+//     svc.Addr/probe.Addr, so `svc.ListenAndServe()` and
+//     `probe.ListenAndServe()` both fall back to net/http's documented
+//     default address, ":http" (port 80) — completely ignoring
+//     cfg.Port/cfg.ProbePort (3000/8081) and the PORT/POKKUM_PROBE_PORT env
+//     vars the image config sets. Confirmed directly (no container
+//     involved): running the real built pokkum-static binary locally with
+//     PORT=3000 POKKUM_PROBE_PORT=8081 set, `lsof -p <pid>` shows it bound
+//     to `*:80`, not 3000 or 8081; curl to 3000 and 8081 both fail to
+//     connect, curl to 80 answers 200. Whichever server wins the race for
+//     port 80 "succeeds" (its "listening" log line claims the configured
+//     port, which is simply false); the other permanently fails to bind
+//     with "address already in use" and never serves anything at all —
+//     in practice this means /healthz and /readyz are frequently the ones
+//     that never come up, not just content. No test in this repo (see this
+//     doc comment's opening paragraph) ever called the real
+//     ListenAndServe path to catch this. This bug alone makes every
+//     --strategy=static image built by this codebase non-functional
+//     through any documented port, independent of bugs #1 and #3.
+//  3. Even past bugs #1 and #2 (verified two ways: driving `bun run build`
+//     directly against this fixture outside core.Build, matching exactly
+//     what Prepare would invoke; and, once bug #2's local Addr fix was
+//     applied only in a throwaway local binary copy for verification,
+//     confirmed again through a real container): internal/adapters/bunexec.Compiler's
+//     StrategyStatic branch reads SvelteKit's pre-adapter internal build
+//     staging directory (<ProjectDir>/.svelte-kit/output), not
+//     @sveltejs/adapter-static's own final adapt() output
+//     (<ProjectDir>/build). That staging directory nests EVERY prerendered
+//     route, including the site root, under prerendered/pages/<route>.html
+//     — a real build of this fixture with @sveltejs/kit 2.70.3 produces
+//     .svelte-kit/output/prerendered/pages/index.html and .../pages/about.html;
+//     there is no top-level .svelte-kit/output/prerendered/index.html at
+//     all. internal/core/pipeline.go packages that directory verbatim as
+//     /app/prerendered, preserving the pages/ nesting, but
+//     supervisor/cmd/pokkum-static's server (server.go's tryServe) does a
+//     flat, literal URL-path-to-file lookup with no knowledge of that
+//     nesting: a request for "/" looks for /app/prerendered/index.html
+//     directly and never tries /app/prerendered/pages/index.html.
+//     @sveltejs/adapter-static's OWN adapt() step — precisely the step
+//     Pokkum bypasses — is what flattens prerendered/pages/*.html into a
+//     flat build/*.html tree matching pokkum-static's flat lookup contract;
+//     confirmed by inspecting this fixture's real `build/` output, which
+//     has build/index.html and build/about.html at the top level, no
+//     pages/ subdirectory at all. Net effect, once bugs #1 and #2 above are
+//     both fixed: pokkum-static would serve /healthz, /readyz and any
+//     flatly-staged client asset (e.g. /robots.txt) correctly, but 404 on
+//     every prerendered page, including the site root. This is the
+//     static-strategy analogue of Lessons.md's 2026-08-17 "every
+//     --strategy=layered image was missing its own entrypoint" entry.
+//
+// All three bugs are exactly the class mem:self_review_checklist rows 12
+// and 17 exist to catch, undetected until now because the only
+// static-strategy test fixture in this repo (staticFixtureCompiler in
+// static_e2e_test.go) is a mock ports.Compiler that implements Preflight as
+// an unconditional success and fabricates .svelte-kit/output/{client,prerendered}
+// already flattened, and because nothing anywhere in this repo ever called
+// pokkum-static's real main() end to end. This test is deliberately left
+// asserting the correct, fully-working contract rather than any bug's
+// current (broken) behavior — a smoke test that quietly encodes a known
+// bug as "expected output" would defeat its own purpose the next time a
+// similar bug is introduced elsewhere in the packaging path. As written, it
+// currently fails at core.Build on bug #1 and therefore never reaches the
+// container-boot assertions below through its own execution; those
+// assertions remain here, written against the correct contract, for the
+// day bugs #1 and #2 are fixed elsewhere and bug #3 becomes the next (and,
+// as far as this investigation found, the last) thing blocking a real
+// --strategy=static image from actually serving its site.
+//
+// Gating mirrors TestRuntimeSmoke_LayeredStrategy_BootsAndServes exactly,
+// with two differences: the fixture is testdata/fixtures/sveltekit-static,
+// and the network reachability check targets cgr.dev (the static
+// strategy's default base, cgr.dev/chainguard/static) instead of gcr.io.
+func TestRuntimeSmoke_StaticStrategy_BootsAndServes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real bun+docker runtime smoke test in short mode")
+	}
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun not found on PATH; skipping runtime smoke test")
+	}
+
+	fixtureDir, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fixtures", "sveltekit-static"))
+	if err != nil {
+		t.Fatalf("Abs fixture path: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(fixtureDir, "node_modules")); statErr != nil {
+		t.Skipf("fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, statErr)
+	}
+
+	runtimeBin, ok := requireContainerRuntime(t)
+	if !ok {
+		return // requireContainerRuntime already called t.Skip.
+	}
+
+	requireNetworkPathTo(t, "cgr.dev:443")
+
+	projectDir := copyFixtureProject(t, fixtureDir)
+
+	tarballPath := filepath.Join(t.TempDir(), "runtime-smoke-static.tar")
+	repo := "pokkum.local/runtime-smoke-static"
+	tag := uniqueName("smoke")
+	imageRef := repo + ":" + tag
+
+	logger := testLogger()
+	deps := core.Deps{
+		Compiler:   bunexec.NewCompiler(logger),
+		BaseImages: baseimage.NewResolver(logger),
+		// Deps.validate requires Supervisor unconditionally, even though a
+		// static build never calls Supervisor.Binary/Version — see
+		// static_e2e_test.go's TestFixtureDrivenE2E_Static's identical note.
+		Supervisor:      supervisor.New(logger),
+		StaticServer:    staticserver.New(logger),
+		Packager:        packager.NewPackager(logger),
+		Tarballs:        registry.NewAdapter(logger),
+		NativeInspector: nativeinspect.NewClosuredAdapter(),
+		Logger:          logger,
+		Version:         "0.1.0-runtime-smoke-test",
+		// BunRuntime is intentionally left nil: internal/core/pipeline.go's
+		// fan-out only dereferences it for StrategyLayered.
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: projectDir,
+		Repo:       repo,
+		Tags:       []string{tag},
+		Platforms:  []ports.Platform{ports.LocalPlatform()},
+		Compile:    core.CompileOptions{Strategy: core.StrategyStatic},
+		Output: core.OutputOptions{
+			Mode:        core.OutputTarball,
+			TarballPath: tarballPath,
+		},
+		SBOM: core.SBOMOptions{Format: ports.SBOMFormatNone},
+		BaseImage: core.BaseImageOptions{
+			// Mirrors what cmd/pokkum's --static flag reconciliation computes
+			// (core.Build itself does no strategy-specific preset defaulting).
+			Preset: core.BaseImageChainguard,
+			Ref:    core.StaticBaseRef,
+			// See TestRuntimeSmoke_LayeredStrategy_BootsAndServes's identical
+			// field: verifying the base's keyless Sigstore signature is not
+			// what this test exists to guard and would add unrelated
+			// Fulcio/Rekor network calls.
+			NoVerifyBase: true,
+		},
+		SourceDateEpoch: testEpoch,
+	}
+
+	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+	if err != nil {
+		if strings.Contains(err.Error(), "no such file or directory") && strings.Contains(err.Error(), "node_modules") {
+			t.Skipf("fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, err)
+		}
+		if isNetworkError(err) {
+			t.Skipf("base image resolution could not reach the network: %v", err)
+		}
+		if errors.Is(err, core.ErrAdapterMissing) {
+			// Bug #1 from this test's own doc comment: bunexec.Compiler.Preflight
+			// hard-codes its adapter check to exe-sveltekit/adapter-node and never
+			// sees req.Compile.Strategy at all, so a real, correctly-configured
+			// adapter-static project (exactly what this fixture is) always fails
+			// here. This is a genuine production bug, not an environment/skip
+			// condition, so it must fail loudly (t.Fatalf), not skip.
+			t.Fatalf("core.Build failed for a real --strategy=static build at the Preflight stage: %v\n"+
+				"this is bug #1 from this test's own doc comment: bunexec.Compiler.Preflight is not "+
+				"strategy-aware (ports.PreflightRequest has no Strategy field) and unconditionally "+
+				"requires @jesterkit/exe-sveltekit or @sveltejs/adapter-node, rejecting every real, "+
+				"correctly-configured @sveltejs/adapter-static project — see internal/adapters/bunexec/compiler.go's "+
+				"Preflight and internal/core/pipeline.go's ports.PreflightRequest{...} call site", err)
+		}
+		t.Fatalf("core.Build failed for a real --strategy=static build: %v", err)
+	}
+	if res.Image.IsIndex {
+		t.Fatalf("single-platform request produced an index; want a single manifest")
+	}
+
+	loadImageIntoRuntime(t, runtimeBin, tarballPath, imageRef)
+	runContainerAndAssertServesStatic(t, runtimeBin, imageRef, projectDir)
+}
+
+// runContainerAndAssertServesStatic is runContainerAndAssertServes's
+// --strategy=static counterpart. It differs in three ways beyond the obvious
+// repo/name bookkeeping:
+//
+//  1. It additionally asserts /robots.txt (a static/ asset copied verbatim
+//     into the client root, unaffected by the prerendered/pages/ nesting bug
+//     documented on TestRuntimeSmoke_StaticStrategy_BootsAndServes) to prove
+//     pokkum-static's flat file lookup genuinely works for content that
+//     really is staged flat — isolating "the server can serve a file at
+//     all" from "the packager staged this particular file at the path the
+//     server looks for", which is exactly where the known bug lives.
+//  2. It discovers one real immutable client chunk's URL by globbing
+//     projectDir's real build output rather than hard-coding a
+//     content-hashed filename, then asserts pokkum-static negotiates a real
+//     Brotli precompression sidecar for it (Accept-Encoding: br =>
+//     Content-Encoding: br) — static-server-specific behavior the layered
+//     strategy has no equivalent of.
+//  3. Root ("/") and "/about" are asserted with the same rigor as the
+//     layered test's homepage check — deliberately not softened into a skip
+//     or a "known failure" tolerance, per this test's own doc comment.
+func runContainerAndAssertServesStatic(t *testing.T, runtimeBin, imageRef, projectDir string) string {
+	t.Helper()
+	name := uniqueName("pokkum-runtime-smoke-static")
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer runCancel()
+	runArgs := []string{"run", "-d", "--name", name, "-P", imageRef}
+	runOut, runErr := exec.CommandContext(runCtx, runtimeBin, runArgs...).CombinedOutput()
+
+	// See runContainerAndAssertServes's identical comment: cleanup is
+	// registered unconditionally, before the error check, because
+	// `docker run -d --name X` allocates and registers the named container
+	// before it ever attempts to start it.
+	t.Cleanup(func() {
+		rmCtx, rmCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer rmCancel()
+		if out, err := exec.CommandContext(rmCtx, runtimeBin, "logs", name).CombinedOutput(); err == nil {
+			t.Logf("container %s logs:\n%s", name, out)
+		}
+		if out, err := exec.CommandContext(rmCtx, runtimeBin, "rm", "-f", name).CombinedOutput(); err != nil {
+			t.Logf("cleanup: %s rm -f %s: %v\n%s", runtimeBin, name, err, out)
+		}
+	})
+
+	if runErr != nil {
+		t.Fatalf("%s %s: %v\n%s", runtimeBin, strings.Join(runArgs, " "), runErr, runOut)
+	}
+
+	probePort := hostPortFor(t, runtimeBin, name, ports.DefaultProbePort)
+	appPort := hostPortFor(t, runtimeBin, name, ports.DefaultPort)
+
+	const grace = 30 * time.Second
+	healthzOK := pollHTTP200(fmt.Sprintf("http://127.0.0.1:%d/healthz", probePort), grace)
+	readyzOK := pollHTTP200(fmt.Sprintf("http://127.0.0.1:%d/readyz", probePort), grace)
+	// robots.txt is staged flat at the client root (client/robots.txt =>
+	// /app/client/robots.txt) and requested at a flat URL, so it is
+	// unaffected by the prerendered/pages/ nesting bug documented above —
+	// this poll also doubles as "wait until the content server itself is
+	// actually accepting connections" before the one-shot checks below.
+	robotsOK, robotsBody := pollHTTP200Body(fmt.Sprintf("http://127.0.0.1:%d/robots.txt", appPort), grace)
+
+	if !healthzOK {
+		t.Errorf("pokkum-static /healthz never returned 200 within %s (probe host port %d)", grace, probePort)
+	}
+	if !readyzOK {
+		t.Errorf("pokkum-static /readyz never returned 200 within %s (probe host port %d)", grace, probePort)
+	}
+	if !robotsOK {
+		t.Errorf("pokkum-static never served /robots.txt (a flat static/ asset, unaffected by the known prerendered/pages/ nesting bug) within %s (app host port %d) — this would mean the static content server itself is not working at all, a more basic failure than the known prerendered-routing bug", grace, appPort)
+	} else if !strings.Contains(robotsBody, "User-agent") {
+		t.Errorf("/robots.txt responded 200 but body did not contain the fixture's known content; got %d bytes: %.200q", len(robotsBody), robotsBody)
+	}
+
+	appOK, appBody := pollHTTP200Body(fmt.Sprintf("http://127.0.0.1:%d/", appPort), grace)
+	if !appOK {
+		t.Errorf("the packaged SvelteKit static site never answered 200 at / within %s (app host port %d) — see TestRuntimeSmoke_StaticStrategy_BootsAndServes's own doc comment: this is a real, pre-existing production bug (bunexec.Compiler's StrategyStatic branch stages prerendered pages under prerendered/pages/<route>.html, but pokkum-static's server does a flat URL-to-file lookup that never looks there), not a defect in this test", grace, appPort)
+	} else if !strings.Contains(appBody, "Welcome to SvelteKit") {
+		t.Errorf("/ responded 200 but body did not contain the fixture's known homepage text; got %d bytes: %.200q", len(appBody), appBody)
+	}
+
+	aboutOK, aboutBody := pollHTTP200Body(fmt.Sprintf("http://127.0.0.1:%d/about", appPort), grace)
+	if !aboutOK {
+		t.Errorf("the packaged SvelteKit static site never answered 200 at /about within %s (app host port %d) — same known root cause as the / failure above", grace, appPort)
+	} else if !strings.Contains(aboutBody, "This page is prerendered") {
+		t.Errorf("/about responded 200 but body did not contain the fixture's known content; got %d bytes: %.200q", len(aboutBody), aboutBody)
+	}
+
+	// Precompression negotiation: discover a real immutable client chunk by
+	// globbing the real build output (never a hard-coded content hash, which
+	// changes on every SvelteKit/Vite version bump) and confirm pokkum-static
+	// negotiates the real .br sidecar precompressutils generated for it. This
+	// path is a flat, non-prerendered client asset, so it is unaffected by
+	// the known routing bug above.
+	if chunkRel, ok := findImmutableChunk(projectDir); ok {
+		chunkURL := fmt.Sprintf("http://127.0.0.1:%d/%s", appPort, chunkRel)
+		resp, err := getWithHeader(chunkURL, "Accept-Encoding", "br")
+		if err != nil {
+			t.Errorf("GET %s with Accept-Encoding: br: %v", chunkURL, err)
+		} else {
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("GET %s with Accept-Encoding: br: status = %d, want 200", chunkURL, resp.StatusCode)
+			}
+			if got := resp.Header.Get("Content-Encoding"); got != "br" {
+				t.Errorf("GET %s with Accept-Encoding: br: Content-Encoding = %q, want %q (a real precompressed Brotli sidecar should have been negotiated)", chunkURL, got, "br")
+			}
+			resp.Body.Close()
+		}
+	} else {
+		t.Logf("no immutable client chunk found under %s to test precompression negotiation against; skipping that assertion", projectDir)
+	}
+
+	if t.Failed() {
+		t.Fatalf("static runtime smoke test failed: see individual assertion failures above")
+	}
+	return name
+}
+
+// findImmutableChunk globs projectDir's real build output for one
+// content-hashed client chunk under _app/immutable/chunks/ (SvelteKit's own
+// hashed-asset convention) and returns its URL path relative to the served
+// client root (e.g. "_app/immutable/chunks/abcd1234.js"), so the
+// precompression negotiation check above never has to hard-code a
+// version-specific hash.
+func findImmutableChunk(projectDir string) (string, bool) {
+	clientDir := filepath.Join(projectDir, ".svelte-kit", "output", "client")
+	matches, err := filepath.Glob(filepath.Join(clientDir, "_app", "immutable", "chunks", "*.js"))
+	if err != nil || len(matches) == 0 {
+		return "", false
+	}
+	// Prefer the largest chunk: precompressutils only produces sidecars for
+	// files >= 64 bytes with genuine compressible repetition (see
+	// internal/adapters/precompressutils.PrecompressFile) — the largest
+	// bundled chunk is the safest bet to actually clear that bar.
+	var best string
+	var bestSize int64
+	for _, m := range matches {
+		fi, statErr := os.Stat(m)
+		if statErr != nil {
+			continue
+		}
+		if fi.Size() > bestSize {
+			best = m
+			bestSize = fi.Size()
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	rel, err := filepath.Rel(clientDir, best)
+	if err != nil {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+// getWithHeader issues a single GET request to url with one extra header
+// set, without following redirects or polling — used only after the
+// server's liveness has already been confirmed by an earlier poll in this
+// file.
+func getWithHeader(url, headerKey, headerValue string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(headerKey, headerValue)
+	client := &http.Client{Timeout: 5 * time.Second}
+	return client.Do(req) //nolint:bodyclose // caller closes resp.Body explicitly.
 }

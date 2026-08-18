@@ -23,6 +23,14 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      - name: Build Embedded PID-1 Binaries
+        # pokkum-init and pokkum-static are gitignored, locally-built artifacts
+        # consumed via go:embed. A fresh checkout has only .gitkeep, so without
+        # this step the CLI builds fine but cannot produce a working image: the
+        # provider errors at runtime when it looks for the missing blob. Every
+        # job that builds or exercises the CLI needs them.
+        run: make supervisor static-server
+
       - name: Check Code Formatting
         run: test -z "$(gofmt -s -l .)"
 
@@ -126,6 +134,14 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      - name: Build Embedded PID-1 Binaries
+        # pokkum-init and pokkum-static are gitignored, locally-built artifacts
+        # consumed via go:embed. A fresh checkout has only .gitkeep, so without
+        # this step the CLI builds fine but cannot produce a working image: the
+        # provider errors at runtime when it looks for the missing blob. Every
+        # job that builds or exercises the CLI needs them.
+        run: make supervisor static-server
+
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -169,6 +185,14 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
+
+      - name: Build Embedded PID-1 Binaries
+        # pokkum-init and pokkum-static are gitignored, locally-built artifacts
+        # consumed via go:embed. A fresh checkout has only .gitkeep, so without
+        # this step the CLI builds fine but cannot produce a working image: the
+        # provider errors at runtime when it looks for the missing blob. Every
+        # job that builds or exercises the CLI needs them.
+        run: make supervisor static-server
 
       - name: Verify CLI Builds Natively on macOS
         run: go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test

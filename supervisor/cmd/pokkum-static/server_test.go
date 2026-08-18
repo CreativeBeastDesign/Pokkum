@@ -483,9 +483,13 @@ func TestStaticServer_Fallback_WarnOnceOn404WhenUnset(t *testing.T) {
 	// fresh instance warns exactly once regardless of prior servers/tests.
 	srv := newStaticServer([]string{root}, "", logger)
 
+	// Extensionless: looks like a client-side route, so the SPA-fallback
+	// hint is the relevant remedy here (see
+	// TestStaticServer_404Hint_SkippedForAssetLikePath for the asset-like
+	// case, which must NOT get this hint).
 	for i := 0; i < 5; i++ {
 		rec := httptest.NewRecorder()
-		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/missing.txt", nil))
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/missing-route", nil))
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("iteration %d = %d, want 404", i, rec.Code)
 		}
@@ -603,5 +607,241 @@ func TestCachePolicy_FallbackForcesNoCacheEvenWhenHashLooking(t *testing.T) {
 	}
 	if got := cachePolicy(path, false); got == "no-cache" {
 		t.Errorf("cachePolicy(%q, isFallback=false) = %q, expected the hash-looking heuristic to apply here (otherwise this test no longer proves the override matters)", path, got)
+	}
+}
+
+// TestStaticServer_ExtensionlessHTMLFallback_BugRepro is the direct
+// regression test for the reported bug: @sveltejs/adapter-static with its
+// default trailingSlash: 'never' prerenders route /about to a flat file
+// named about.html. A request for the extensionless route /about must find
+// it via the new "<rel>.html" candidate. Before the fix, tryServe only knew
+// about an exact-file match and a directory+index.html match, so this
+// request 404'd despite the file being present on disk.
+func TestStaticServer_ExtensionlessHTMLFallback_BugRepro(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"index.html": "<h1>home</h1>",
+		"about.html": "<h1>about</h1>",
+	})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/about", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /about = %d, want 200 (about.html should be found via the .html fallback)", rec.Code)
+	}
+	if got := rec.Body.String(); got != "<h1>about</h1>" {
+		t.Errorf("GET /about body = %q, want %q", got, "<h1>about</h1>")
+	}
+	// A prerendered page is not content-hashed: it must revalidate, never be
+	// cached as immutable.
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("GET /about Cache-Control = %q, want no-cache", cc)
+	}
+	if rec.Header().Get("ETag") == "" {
+		t.Error("GET /about: expected an ETag header, same as any other served file")
+	}
+}
+
+// TestStaticServer_HTMLFallback_ExactFileTakesPrecedence verifies candidate
+// precedence: when a literal, extensionless file happens to exist at the
+// exact request path, it wins over an "<rel>.html" sibling with different
+// content — the most specific, literal match always wins.
+func TestStaticServer_HTMLFallback_ExactFileTakesPrecedence(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"about":      "exact-file-content",
+		"about.html": "<h1>about</h1>",
+	})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/about", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /about = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "exact-file-content" {
+		t.Errorf("GET /about body = %q, want the exact file's content, not the .html sibling", got)
+	}
+}
+
+// TestStaticServer_HTMLFallback_BeatsEmptyNestedRouteDirectory covers the
+// realistic multi-page adapter-static shape: routes /about and /about/team
+// both exist, so the build emits about.html AND an about/ directory (which
+// exists only to hold team.html, with no index.html of its own). A request
+// for /about must still serve about.html rather than 404 from a failed
+// directory-index lookup — the ".html" candidate must be tried before, and
+// win over, an existing-but-empty directory-index candidate.
+func TestStaticServer_HTMLFallback_BeatsEmptyNestedRouteDirectory(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"about.html":      "<h1>about</h1>",
+		"about/team.html": "<h1>team</h1>",
+	})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/about", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /about = %d, want 200 (about.html should win over the empty about/ directory)", rec.Code)
+	}
+	if got := rec.Body.String(); got != "<h1>about</h1>" {
+		t.Errorf("GET /about body = %q, want %q", got, "<h1>about</h1>")
+	}
+
+	// Sanity: the nested route itself still resolves normally.
+	rec2 := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/about/team", nil))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("GET /about/team = %d, want 200", rec2.Code)
+	}
+	if got := rec2.Body.String(); got != "<h1>team</h1>" {
+		t.Errorf("GET /about/team body = %q, want %q", got, "<h1>team</h1>")
+	}
+}
+
+// TestStaticServer_HTMLFallback_DirectoryIndexStillLowestPrecedence is a
+// regression test for adapter-static's OTHER config, trailingSlash:
+// 'always', which emits only "<route>/index.html" (no flat "<route>.html"
+// sibling at all). The directory+index.html candidate must still work when
+// it is the only candidate that exists.
+func TestStaticServer_HTMLFallback_DirectoryIndexStillLowestPrecedence(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"about/index.html": "<h1>about (trailing slash)</h1>",
+	})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/about", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /about = %d, want 200 (directory index should still be found)", rec.Code)
+	}
+	if got := rec.Body.String(); got != "<h1>about (trailing slash)</h1>" {
+		t.Errorf("GET /about body = %q, want %q", got, "<h1>about (trailing slash)</h1>")
+	}
+}
+
+// TestStaticServer_HTMLFallback_MultiRootOrdering verifies the multi-root
+// precedence decision: an earlier root wins in its entirety over a later
+// root, regardless of which candidate type matched within it. Root A only
+// has an "about.html" (.html candidate); root B has a literal "about" exact
+// file. Because root A is listed first in POKKUM_STATIC_ROOTS order, its
+// .html-resolved hit must win over root B's exact-file hit.
+func TestStaticServer_HTMLFallback_MultiRootOrdering(t *testing.T) {
+	rootA := writeTree(t, map[string]string{"about.html": "<h1>from root A</h1>"})
+	rootB := writeTree(t, map[string]string{"about": "from root B (exact file)"})
+	srv := newTestServer(t, rootA, rootB)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/about", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /about = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "<h1>from root A</h1>" {
+		t.Errorf("GET /about body = %q, want root A's .html hit to win over root B's exact-file hit", got)
+	}
+}
+
+// TestStaticServer_HTMLFallback_TraversalRejected is an empirical
+// containment proof (Serena mem:self_review_checklist row 22: prove nothing
+// was written/served outside the root, don't just assert an error came
+// back) that the new ".html" candidate goes through the exact same
+// EvalSymlinks + withinRoot checks as the pre-existing candidates. A
+// symlink named "escape.html" pointing outside the served root must never
+// be served through the new candidate.
+func TestStaticServer_HTMLFallback_TraversalRejected(t *testing.T) {
+	outside := writeTree(t, map[string]string{"secret.html": "<h1>top secret</h1>"})
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<h1>home</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.html"), filepath.Join(root, "escape.html")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/escape", nil))
+	if rec.Code == http.StatusOK {
+		t.Fatalf("GET /escape = 200, want the symlink escape to be refused")
+	}
+	if strings.Contains(rec.Body.String(), "top secret") {
+		t.Fatalf("the .html candidate served content from outside the root via a symlink escape: %q", rec.Body.String())
+	}
+
+	// Also prove plain traversal segments through the new candidate's
+	// construction (rel + ".html") can't escape either, e.g. a request
+	// whose path, if naively suffixed, could reach outside the root.
+	for _, p := range []string{"/../secret", "/..%2Fsecret", "/a/../../secret"} {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code == http.StatusOK {
+			t.Errorf("traversal path %q was served (200) via the .html candidate", p)
+		}
+		if strings.Contains(rec.Body.String(), "top secret") {
+			t.Errorf("traversal path %q leaked outside-root content: %q", p, rec.Body.String())
+		}
+	}
+}
+
+// TestStaticServer_HTMLFallback_RangeAndETagSupported verifies a page
+// resolved through the new ".html" candidate gets exactly the same
+// negotiation as a directly-requested file (Range/ETag), not a
+// stripped-down code path.
+func TestStaticServer_HTMLFallback_RangeAndETagSupported(t *testing.T) {
+	root := writeTree(t, map[string]string{"about.html": "0123456789"})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/about", nil)
+	req.Header.Set("Range", "bytes=2-5")
+	srv.handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("GET /about with Range = %d, want 206", rec.Code)
+	}
+	if got := rec.Body.String(); got != "2345" {
+		t.Errorf("range body = %q, want 2345", got)
+	}
+	if rec.Header().Get("ETag") == "" {
+		t.Error("expected an ETag header on a .html-fallback-resolved response")
+	}
+}
+
+// TestStaticServer_404Hint_SkippedForAssetLikePath is a regression test for
+// the misleading-hint bug: the SPA-fallback discovery hint must not fire for
+// a request path that looks like a missing static asset (has a file
+// extension) — an SPA fallback is never the relevant remedy for a missing
+// .js/.css/.png etc, only for an unmatched extensionless client route.
+func TestStaticServer_404Hint_SkippedForAssetLikePath(t *testing.T) {
+	root := writeTree(t, map[string]string{"a.txt": "x"})
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	srv := newStaticServer([]string{root}, "", logger)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/missing-asset.js", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("missing asset = %d, want 404", rec.Code)
+	}
+	if strings.Contains(buf.String(), "SPA fallback is available") {
+		t.Errorf("the SPA-fallback discovery hint fired for an asset-like path (has a file extension); it should only fire for an extensionless route-like miss, got log: %s", buf.String())
+	}
+}
+
+// TestStaticServer_404Hint_ShownForRouteLikePath complements the above: an
+// extensionless path (plausible client-side route) still gets the
+// discovery hint exactly once.
+func TestStaticServer_404Hint_ShownForRouteLikePath(t *testing.T) {
+	root := writeTree(t, map[string]string{"a.txt": "x"})
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	srv := newStaticServer([]string{root}, "", logger)
+
+	for i := 0; i < 3; i++ {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/some/client/route", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("iteration %d: missing route = %d, want 404", i, rec.Code)
+		}
+	}
+	if got := strings.Count(buf.String(), "SPA fallback is available"); got != 1 {
+		t.Errorf("route-like miss: hint logged %d time(s), want exactly 1", got)
 	}
 }
