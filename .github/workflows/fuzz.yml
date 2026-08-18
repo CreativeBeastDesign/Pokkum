@@ -1,0 +1,55 @@
+name: Nightly Fuzz
+
+# Runs every FuzzXxx target in the module briefly, on a schedule rather than
+# on every push/PR — even a short -fuzztime per target adds up across the
+# whole set and would slow down every PR for no proportional benefit.
+#
+# Targets are discovered dynamically via `go test -list '^Fuzz'`
+# (scripts/run-fuzz.sh) rather than hardcoded here, so this workflow keeps
+# working as FuzzXxx funcs are added, renamed, or removed over time.
+
+on:
+  schedule:
+    # Every night at 02:00 UTC.
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: 'Per-target fuzz duration (Go duration, e.g. 30s, 2m)'
+        required: false
+        default: '30s'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz All Discovered Targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Run Discovered Fuzz Targets
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '30s' }}
+        run: bash scripts/run-fuzz.sh
+
+      # Failing inputs are written by `go test -fuzz` under each package's
+      # testdata/fuzz/<Target>/ directory. Upload them so a nightly failure
+      # is actionable without needing to reproduce the crash from scratch.
+      - name: Upload Fuzz Failure Corpus
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failing-corpus
+          path: '**/testdata/fuzz/**'
+          if-no-files-found: ignore
+          retention-days: 30

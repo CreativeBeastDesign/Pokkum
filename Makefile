@@ -1,4 +1,4 @@
-.PHONY: help build supervisor static-server test test-short test-integration check-arch lint fmt verify clean
+.PHONY: help build supervisor static-server test test-short test-integration test-race coverage check-coverage fuzz-smoke check-arch lint fmt verify clean
 
 check-arch:  ##  Run hexagonal architecture purity test suite
 	@echo "Checking hexagonal architecture purity..."
@@ -82,6 +82,32 @@ test:  ##  Run all tests (go test ./...)
 test-short:  ##  Run tests with -short flag (skips network-gated tests)
 	@echo "Running short tests..."
 	@go test -short ./...
+
+# Packages where concurrency actually lives: the registry mount observer
+# (internal/adapters/registry/mount_test.go's mountStats concurrency test
+# specifically documents itself as needing -race to exercise its guarantees),
+# domain pipeline orchestration (internal/core), the layer packager, and the
+# supervisor PID-1 binaries (pokkum-init/pokkum-static) which do their own
+# process reaping/signal handling. Running the FULL suite under -race is
+# 2-3x slower for comparatively little payoff outside these packages, so CI
+# scopes -race to just this set rather than ./....
+RACE_PACKAGES := ./internal/adapters/registry/... ./internal/core/... ./internal/adapters/packager/... ./supervisor/...
+
+test-race:  ##  Run go test -race, scoped to packages with real concurrency
+	@echo "Running race detector on concurrency-bearing packages..."
+	@go test -race $(RACE_PACKAGES)
+
+COVERAGE_OUT := coverage.out
+
+coverage:  ##  Generate a coverage profile (coverage.out) across the whole module
+	@echo "Generating coverage profile..."
+	@go test -covermode=atomic -coverpkg=./... -coverprofile=$(COVERAGE_OUT) ./...
+
+check-coverage:  ##  Enforce the coverage floor against an existing coverage.out
+	@bash scripts/check-coverage.sh $(COVERAGE_OUT)
+
+fuzz-smoke:  ##  Run every FuzzXxx target briefly (30s each); see scripts/run-fuzz.sh
+	@bash scripts/run-fuzz.sh
 
 lint:  ##  Run golangci-lint
 	@echo "Running linters..."

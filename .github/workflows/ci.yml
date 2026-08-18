@@ -26,6 +26,14 @@ jobs:
       - name: Check Code Formatting
         run: test -z "$(gofmt -s -l .)"
 
+      # Release-flag regression guard (Roadmap #132): asserts -trimpath,
+      # -ldflags="-s -w", and -X main.version/commit/buildDate stay present
+      # across Makefile, .goreleaser.yaml, and slsa-builder.yml. This is step
+      # 0 of `make verify` but wasn't previously enforced on PRs because CI
+      # runs its own steps rather than `make verify`.
+      - name: Compiler Build Flags Regression Guard
+        run: bash scripts/check-build-flags.sh
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
@@ -37,8 +45,125 @@ jobs:
       - name: Check Hexagonal Architecture Purity
         run: go test -v ./internal/architecture_test.go
 
-      - name: Run Full Test Suite
-        run: go test ./...
+      # Scoped race detector: internal/adapters/registry/mount_test.go's
+      # mountStats concurrency test documents itself as existing specifically
+      # to be run under -race. Scoped to the packages with real concurrency
+      # (registry mount observer, core pipeline orchestration, layer
+      # packager, supervisor PID-1 binaries) rather than the full module,
+      # since -race roughly doubles-to-triples test time for little payoff
+      # elsewhere. See Makefile's RACE_PACKAGES for the exact set.
+      - name: Run Race Detector (scoped)
+        run: make test-race
+
+      # Full suite + coverage profile in one pass (short mode: no network /
+      # Bun dependency here — the real-build Bun e2e tests run in the
+      # separate `e2e-real-build` job below so this gate stays fast and
+      # hermetic). -coverpkg=./... so the profile reflects true whole-module
+      # statement coverage, not just same-package self-coverage.
+      - name: Run Full Test Suite (with coverage)
+        run: go test -short -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+
+      # Coverage floor: a "must not regress much below today" ratchet, not
+      # an aspirational number. Floor was set from the real measured
+      # baseline (75.5% short-mode total statements, measured 2026-08-18)
+      # minus ~2.5 points of slack — see scripts/check-coverage.sh for the
+      # full rationale and how to move the floor as coverage improves.
+      - name: Enforce Coverage Floor
+        run: bash scripts/check-coverage.sh coverage.out
+
+      - name: Upload Coverage Profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-profile
+          path: coverage.out
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Verify CLI Build
         run: go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test
+
+  # Real-build e2e tests: tests/integration/reproducibility_e2e_test.go,
+  # tests/integration/layered_prerendered_e2e_test.go, and the analogous
+  # real-Bun tests in internal/adapters/bunexec and
+  # internal/adapters/sveltekitutils all gate on `testing.Short()` +
+  # `exec.LookPath("bun")`. Without Bun on PATH they silently skip, so CI's
+  # "e2e" coverage was previously 100% mock-compiler. This job installs Bun
+  # and Bun-installs the two fixture directories' dependencies (gitignored,
+  # so they aren't present from checkout) so those tests actually execute.
+  #
+  # Kept as its own job rather than folded into the main one: these do real
+  # network installs and multiple full SvelteKit builds, so they're slower
+  # and less deterministic than the rest of CI, and isolating them keeps the
+  # fast/hermetic main job fast and hermetic. An explicit timeout is set
+  # because the real builds + `bun install` network calls can exceed `go
+  # test`'s default 10m per-package timeout.
+  e2e-real-build:
+    name: Real Bun Build E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Fixture Dependencies
+        run: |
+          set -eu
+          for dir in testdata/fixtures/*/; do
+            if [ -f "${dir}package.json" ]; then
+              echo "== bun install in ${dir} =="
+              (cd "$dir" && bun install --frozen-lockfile)
+            fi
+          done
+
+      - name: Run Real-Build E2E Tests
+        run: |
+          go test -timeout=15m -v \
+            ./tests/integration/... \
+            ./internal/adapters/bunexec/... \
+            ./internal/adapters/sveltekitutils/...
+
+  # Scoped macOS platform job: the release ships darwin amd64/arm64 binaries
+  # (see .goreleaser.yaml / slsa-builder.yml) and internal/adapters/bunexec/
+  # hermetic_other_test.go exists specifically to cover the non-Linux code
+  # path, but CI otherwise only ever runs on ubuntu-latest. Running the FULL
+  # suite on macOS runners is expensive and most packages have no
+  # platform-dependent behavior, so this is scoped to only the packages that
+  # actually contain a `//go:build` OS switch or `runtime.GOOS` check:
+  # cmd/pokkum, internal/core, internal/adapters/provenance,
+  # internal/adapters/bunexec, and supervisor/cmd/pokkum-init.
+  macos-platform-tests:
+    name: macOS Platform-Specific Tests
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Verify CLI Builds Natively on macOS
+        run: go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test
+
+      - name: Run Platform-Sensitive Package Tests (-short)
+        run: |
+          go test -short -v \
+            ./cmd/pokkum/... \
+            ./internal/core/... \
+            ./internal/adapters/provenance/... \
+            ./internal/adapters/bunexec/... \
+            ./supervisor/cmd/pokkum-init/...
