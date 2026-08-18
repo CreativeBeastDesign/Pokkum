@@ -178,6 +178,18 @@ var (
 	// couldn't be established, not when a checksum comparison failed.
 	ErrBunSignatureVerificationFailed = errors.New("bun release signature verification failed")
 
+	// ErrBunChecksumPinViolation reports that a Bun (version, target)'s
+	// freshly-GPG-verified checksum disagrees with the checksum this same
+	// resolver pinned the first time it verified that exact (version,
+	// target) — a trust-on-first-use downgrade/substitution detector.
+	// Distinct from ErrBunChecksumMismatch (a downloaded archive not
+	// matching the checksum it was just verified against) and
+	// ErrBunSignatureVerificationFailed (the signature itself invalid):
+	// this fires when two independently-signature-verified checksums for
+	// the same (version, target) disagree with each other over time, which
+	// individually-valid signature checks alone cannot catch.
+	ErrBunChecksumPinViolation = errors.New("bun release checksum disagrees with a previously pinned value")
+
 	// ErrInvalidStrategy reports an unrecognized packaging strategy (must be layered or exe).
 	ErrInvalidStrategy = errors.New("invalid build strategy")
 

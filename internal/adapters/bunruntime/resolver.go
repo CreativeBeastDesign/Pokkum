@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -266,6 +267,20 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 		if err != nil {
 			return ports.BunResolverResult{}, fmt.Errorf("bunruntime: could not establish a trusted checksum for %s: %w", key, err)
 		}
+		// pinnedReleaseChecksums entries are compiled into the Pokkum binary
+		// itself and already maximally trusted — TOFU only adds value for
+		// the dynamically-fetched path, where fetchVerifiedChecksum's own
+		// doc comment explains the real gap this closes: a valid GPG
+		// signature alone doesn't bind SHASUMS256.txt's content to the
+		// release it claims to be for, so a party able to substitute the
+		// HTTP response could serve an older, genuinely-signed release under
+		// this version's name. Pinning what gets verified the first time and
+		// hard-failing on later disagreement doesn't protect the very first
+		// resolve, but does catch a downgrade attempted against a project
+		// whose cache already has a trusted baseline.
+		if pinErr := r.checkAndPinChecksum(key, expectedSHA); pinErr != nil {
+			return ports.BunResolverResult{}, pinErr
+		}
 	}
 	actualSHABytes := sha256.Sum256(bodyBytes)
 	actualSHA := hex.EncodeToString(actualSHABytes[:])
@@ -371,22 +386,36 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 // the verified content) returns an error rather than a usable checksum —
 // there is no fallback to an unverified value.
 //
-// Known limitation (not fixed here — flagged during adversarial security
-// review so it isn't mistaken for an oversight): SHASUMS256.txt's entries
-// are keyed only by filename ("bun-linux-x64.zip"), identical across every
-// Bun release, and the signed content contains nothing binding it to the
-// release it was published under. A party in a position to substitute what
-// this fetch receives (compromised CDN/distribution channel, malicious
+// Known limitation, partially mitigated (flagged during an adversarial
+// security review so it isn't mistaken for an oversight): SHASUMS256.txt's
+// entries are keyed only by filename ("bun-linux-x64.zip"), identical across
+// every Bun release, and the signed content contains nothing binding it to
+// the release it was published under. A party in a position to substitute
+// what this fetch receives (compromised CDN/distribution channel, malicious
 // registry proxy, a trusted-root MITM) could serve the genuine,
 // genuinely-Bun-signed SHASUMS256.txt.asc and matching zip from an OLDER
-// release while this function believes it's verifying `version`. Every
-// check here would pass — signature valid, checksum matches — while
-// silently downgrading to a known-vulnerable but authentically-signed
-// build, and the SBOM/SLSA provenance would then incorrectly claim the
-// newer version. Mitigation would require either TOFU-pinning the verified
-// checksum per (version, target) across runs, or cross-checking against
-// release-tag-scoped metadata; tracked as a roadmap follow-up rather than
-// fixed as part of this change.
+// release while this function believes it's verifying `version`. Every check
+// here would pass — signature valid, checksum matches — while silently
+// downgrading to a known-vulnerable but authentically-signed build, and the
+// SBOM/SLSA provenance would then incorrectly claim the newer version.
+//
+// checkAndPinChecksum (called by this function's caller in Resolve, not
+// here) adds trust-on-first-use pinning: the first checksum this resolver
+// verifies for a given (version, target) is persisted, and a later
+// disagreement hard-fails the build. This closes the realistic, repeated
+// threat model — a developer machine or CI runner with a persistent cache
+// (e.g. `actions/cache`) resolving the same pinned dependency across many
+// builds over time — but it does NOT, and structurally cannot, protect the
+// very first resolve of a given (version, target) on a fresh cache: an
+// attacker positioned to tamper with that first fetch establishes the
+// "trusted" baseline the pin mechanism then faithfully protects. On an
+// ephemeral CI runner with a fresh cache every run, TOFU provides no
+// protection at all. Full protection against a first-contact MITM would
+// still require either cross-checking against release-tag-scoped metadata
+// from an independent trust anchor, or a genuinely out-of-band pin (shipped
+// in the Pokkum binary itself, like pinnedReleaseChecksums above, but for
+// every version rather than a curated few) — both meaningfully larger
+// changes, tracked as a further roadmap follow-up.
 func (r *Resolver) fetchVerifiedChecksum(ctx context.Context, version, targetName string) (string, error) {
 	ascURL := fmt.Sprintf("https://github.com/oven-sh/bun/releases/download/bun-v%s/SHASUMS256.txt.asc", version)
 
@@ -423,6 +452,76 @@ func (r *Resolver) fetchVerifiedChecksum(ctx context.Context, version, targetNam
 		return "", fmt.Errorf("bunruntime: %s: %w: %w", ascURL, err, core.ErrBunSignatureVerificationFailed)
 	}
 	return sha, nil
+}
+
+// tofuPinStorePath returns the path to this resolver's trust-on-first-use
+// checksum pin store, alongside the cached binaries themselves.
+func (r *Resolver) tofuPinStorePath() string {
+	return filepath.Join(r.CacheDir, "checksums-pinned.json")
+}
+
+// checkAndPinChecksum implements trust-on-first-use for a (version, target)
+// key whose checksum came from the dynamic fetchVerifiedChecksum path (not
+// pinnedReleaseChecksums, which is compiled into the binary and already
+// maximally trusted — TOFU adds nothing there). The first time a given key
+// is verified, its checksum is persisted to disk; on every later resolve of
+// the same key, a disagreement is treated as a possible downgrade or
+// substitution attack (see fetchVerifiedChecksum's doc comment for the real
+// gap this closes — a valid GPG signature over SHASUMS256.txt does not bind
+// its content to the release it claims to be for) and rejected.
+//
+// This is real, useful hardening with an honest, stated limit: it does
+// nothing for the very first resolve of a given (version, target) on a
+// given cache — an attacker positioned to tamper with that first fetch
+// establishes the "trusted" baseline. It is most valuable for a repeat-build
+// dev machine or CI with a persistent cache (e.g. actions/cache), where a
+// later, different fetch for a key already resolved once is the actual
+// attack this defends against; it provides no protection on an ephemeral
+// CI runner with a fresh cache every run.
+//
+// Persisting the new pin is best-effort: a failure to write it (permission
+// issue, full disk) does not fail the build, since the pin store is
+// hardening infrastructure, not itself a security-critical check — the real
+// GPG signature verification in fetchVerifiedChecksum already happened
+// before this is ever called. A write failure just means this exact key
+// keeps behaving as "first use" until a write eventually succeeds.
+func (r *Resolver) checkAndPinChecksum(key, checksum string) error {
+	path := r.tofuPinStorePath()
+
+	r.mu.Lock()
+	data, readErr := os.ReadFile(path)
+	r.mu.Unlock()
+
+	pins := map[string]string{}
+	if readErr == nil {
+		// A corrupt or foreign pin store is treated as no prior pin, not an
+		// error — this is best-effort hardening, not itself the security
+		// boundary (that's the GPG signature check that already ran).
+		_ = json.Unmarshal(data, &pins)
+	}
+
+	if existing, ok := pins[key]; ok {
+		if existing != checksum {
+			return fmt.Errorf(
+				"bunruntime: checksum for %s changed since it was first verified here (pinned %s, now %s) — this could mean a compromised distribution channel served an older, genuinely-signed release under this version's name (see fetchVerifiedChecksum's doc comment); if this is a deliberate, trusted change, remove this key from %s: %w",
+				key, existing, checksum, path, core.ErrBunChecksumPinViolation,
+			)
+		}
+		return nil
+	}
+
+	pins[key] = checksum
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil //nolint:nilerr // best-effort persistence, see doc comment
+	}
+	marshaled, err := json.MarshalIndent(pins, "", "  ")
+	if err != nil {
+		return nil //nolint:nilerr // best-effort persistence, see doc comment
+	}
+	_ = os.WriteFile(path, marshaled, 0o600)
+	return nil
 }
 
 // releaseKeyring returns the keyring trusted to verify Bun release

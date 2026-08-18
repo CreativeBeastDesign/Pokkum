@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -217,6 +218,208 @@ func TestResolver_DownloadAndCache(t *testing.T) {
 	}
 	if res2.BinaryPath != res.BinaryPath {
 		t.Errorf("expected same cached binary path %s, got %s", res.BinaryPath, res2.BinaryPath)
+	}
+}
+
+// --- Checksum trust-on-first-use (TOFU) pinning -----------------------------
+//
+// Follow-up to PB-2: fetchVerifiedChecksum's own doc comment documents that a
+// valid GPG signature over SHASUMS256.txt doesn't bind its content to the
+// release it claims to be for — a party able to substitute the HTTP response
+// could serve an older, genuinely-signed release under a newer version's
+// name. checkAndPinChecksum persists the first verified checksum per
+// (version, target) and hard-fails on later disagreement.
+
+// TestChecksum_TOFU_PinsOnFirstUse is a direct unit test of the persistence
+// mechanism (not routed through Resolve, which would need a real archive
+// download+GPG cycle just to reach it): the first checksum seen for a key is
+// written to the pin store file.
+func TestChecksum_TOFU_PinsOnFirstUse(t *testing.T) {
+	cacheDir := t.TempDir()
+	r := NewResolver(cacheDir, nil)
+
+	if err := r.checkAndPinChecksum("9.9.9/bun-linux-x64", "aaaa"); err != nil {
+		t.Fatalf("unexpected error pinning a fresh key: %v", err)
+	}
+
+	data, err := os.ReadFile(r.tofuPinStorePath())
+	if err != nil {
+		t.Fatalf("expected the pin store to be written, got: %v", err)
+	}
+	var pins map[string]string
+	if err := json.Unmarshal(data, &pins); err != nil {
+		t.Fatalf("pin store is not valid JSON: %v", err)
+	}
+	if pins["9.9.9/bun-linux-x64"] != "aaaa" {
+		t.Errorf("expected pinned checksum aaaa, got %+v", pins)
+	}
+}
+
+// TestChecksum_TOFU_MatchingRepeatSucceeds proves a repeat verification of
+// the identical checksum for an already-pinned key is a silent no-op.
+func TestChecksum_TOFU_MatchingRepeatSucceeds(t *testing.T) {
+	cacheDir := t.TempDir()
+	r := NewResolver(cacheDir, nil)
+
+	if err := r.checkAndPinChecksum("9.9.9/bun-linux-x64", "aaaa"); err != nil {
+		t.Fatalf("first pin failed: %v", err)
+	}
+	if err := r.checkAndPinChecksum("9.9.9/bun-linux-x64", "aaaa"); err != nil {
+		t.Errorf("expected a matching repeat to succeed silently, got: %v", err)
+	}
+}
+
+// TestChecksum_TOFU_DisagreementHardFails is the core regression guard: a
+// checksum for an already-pinned key that disagrees with the pinned value is
+// exactly the downgrade/substitution scenario this mechanism exists to
+// catch, and must hard-fail with the dedicated sentinel.
+func TestChecksum_TOFU_DisagreementHardFails(t *testing.T) {
+	cacheDir := t.TempDir()
+	r := NewResolver(cacheDir, nil)
+
+	if err := r.checkAndPinChecksum("9.9.9/bun-linux-x64", "aaaa"); err != nil {
+		t.Fatalf("first pin failed: %v", err)
+	}
+
+	err := r.checkAndPinChecksum("9.9.9/bun-linux-x64", "bbbb")
+	if !errors.Is(err, core.ErrBunChecksumPinViolation) {
+		t.Fatalf("expected core.ErrBunChecksumPinViolation for a disagreeing checksum, got: %v", err)
+	}
+}
+
+// TestChecksum_TOFU_WriteFailureIsBestEffort proves a pin store that can't be
+// written to (e.g. the cache root is unwritable) does not fail the caller —
+// persistence is hardening infrastructure, not itself the security boundary
+// (the GPG signature check already ran before this is ever called).
+func TestChecksum_TOFU_WriteFailureIsBestEffort(t *testing.T) {
+	root := t.TempDir()
+	blockerFile := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blockerFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// r.CacheDir is a path *through* the regular file above, so
+	// os.MkdirAll(r.CacheDir, ...) inside checkAndPinChecksum's write path
+	// deterministically fails ("not a directory") without relying on
+	// platform-specific permission semantics.
+	r := NewResolver(filepath.Join(blockerFile, "cache"), nil)
+
+	if err := r.checkAndPinChecksum("9.9.9/bun-linux-x64", "aaaa"); err != nil {
+		t.Errorf("expected a pin-store write failure to be swallowed (best-effort), got: %v", err)
+	}
+}
+
+// TestResolver_ChecksumTOFU_EndToEnd_MatchingRepeatDownloadSucceeds drives
+// the TOFU check through the real Resolve() call path (not just the
+// standalone method): resolving the same unpinned (version, target) twice —
+// forcing two real downloads by removing the cached binary between them,
+// since a cache hit would never re-enter the download+verify path at all —
+// succeeds both times because the mock server serves the same genuine
+// checksum both times.
+func TestResolver_ChecksumTOFU_EndToEnd_MatchingRepeatDownloadSucceeds(t *testing.T) {
+	bunBinaryContent := []byte("#!/bin/sh\necho 'fake bun'")
+	zipBytes := buildBunZip(t, bunBinaryContent)
+
+	zipSHA := sha256.Sum256(zipBytes)
+	entity, pubKey := newTestReleaseKeypair(t)
+	shasums := hex.EncodeToString(zipSHA[:]) + "  bun-linux-x64.zip\n"
+	ascBytes := signSHASUMS(t, entity, shasums)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "SHASUMS256.txt.asc"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(ascBytes)
+		case strings.HasSuffix(r.URL.Path, ".zip"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(zipBytes)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cacheDir := t.TempDir()
+	resolver := NewResolver(cacheDir, pathRoutedClient(server))
+	resolver.ReleaseKeyArmored = pubKey
+
+	req := ports.BunResolverRequest{
+		Platform:        ports.LinuxAMD64,
+		Version:         "9.9.9",
+		Variant:         ports.BunVariantStandard,
+		SourceDateEpoch: time.Unix(1700000000, 0),
+	}
+
+	if _, err := resolver.Resolve(context.Background(), req); err != nil {
+		t.Fatalf("first resolve failed: %v", err)
+	}
+
+	// Remove only the cached binary (and its digest sidecar), not the pin
+	// store, so the next Resolve genuinely re-downloads and re-verifies
+	// rather than short-circuiting on a cache hit.
+	targetDir := filepath.Join(cacheDir, "9.9.9", "standard", "linux_amd64")
+	if err := os.RemoveAll(targetDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := resolver.Resolve(context.Background(), req); err != nil {
+		t.Fatalf("expected the second (re-downloaded) resolve to match the pinned checksum and succeed, got: %v", err)
+	}
+}
+
+// TestResolver_ChecksumTOFU_EndToEnd_DowngradeHardFails proves Resolve()
+// itself — not just the standalone method — rejects a real download whose
+// verified checksum disagrees with a pin already established for that key,
+// simulating an attacker substituting an older, genuinely-signed release
+// under the same version's name on a later build.
+func TestResolver_ChecksumTOFU_EndToEnd_DowngradeHardFails(t *testing.T) {
+	bunBinaryContent := []byte("#!/bin/sh\necho 'fake bun'")
+	zipBytes := buildBunZip(t, bunBinaryContent)
+
+	zipSHA := sha256.Sum256(zipBytes)
+	entity, pubKey := newTestReleaseKeypair(t)
+	shasums := hex.EncodeToString(zipSHA[:]) + "  bun-linux-x64.zip\n"
+	ascBytes := signSHASUMS(t, entity, shasums)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "SHASUMS256.txt.asc"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(ascBytes)
+		case strings.HasSuffix(r.URL.Path, ".zip"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(zipBytes)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cacheDir := t.TempDir()
+	resolver := NewResolver(cacheDir, pathRoutedClient(server))
+	resolver.ReleaseKeyArmored = pubKey
+
+	// Pre-seed the pin store with a DIFFERENT (legitimately-established,
+	// simulated) checksum for the exact key the mock server will serve —
+	// modeling a build that trusted a real release earlier, before an
+	// attacker later substituted an older one under the same version tag.
+	pinPath := resolver.tofuPinStorePath()
+	if err := os.MkdirAll(filepath.Dir(pinPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pinPath, []byte(`{"9.9.9/bun-linux-x64":"0000000000000000000000000000000000000000000000000000000000000000"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	req := ports.BunResolverRequest{
+		Platform:        ports.LinuxAMD64,
+		Version:         "9.9.9",
+		Variant:         ports.BunVariantStandard,
+		SourceDateEpoch: time.Unix(1700000000, 0),
+	}
+
+	_, err := resolver.Resolve(context.Background(), req)
+	if !errors.Is(err, core.ErrBunChecksumPinViolation) {
+		t.Fatalf("expected core.ErrBunChecksumPinViolation for a checksum disagreeing with the pinned baseline, got: %v", err)
 	}
 }
 
