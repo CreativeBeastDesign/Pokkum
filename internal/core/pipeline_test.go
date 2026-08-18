@@ -24,6 +24,28 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+// Port interface conformance assertions for mock implementations.
+var (
+	_ ports.Compiler             = (*mockCompiler)(nil)
+	_ ports.BaseImageResolver    = (*mockBaseImageResolver)(nil)
+	_ ports.Scanner              = (*mockScanner)(nil)
+	_ ports.SupervisorProvider   = (*mockSupervisorProvider)(nil)
+	_ ports.Packager             = (*mockPackager)(nil)
+	_ ports.Registry             = (*mockRegistry)(nil)
+	_ ports.LocalLoader          = (*mockLocalLoader)(nil)
+	_ ports.TarballWriter        = (*mockTarballWriter)(nil)
+	_ ports.SBOMGenerator        = (*mockSBOMGenerator)(nil)
+	_ ports.StaticServerProvider = (*mockStaticServerProvider)(nil)
+	_ ports.NativeInspector      = (*mockNativeInspector)(nil)
+	_ ports.SLSAGenerator        = (*mockSLSAGenerator)(nil)
+	_ ports.CosignSigner         = (*mockCosignSigner)(nil)
+	_ ports.DSSESigner           = (*mockDSSESigner)(nil)
+	_ ports.BunRuntimeResolver   = (*mockBunRuntimeResolver)(nil)
+	_ ports.RemoteCacher         = (*mockRemoteCacher)(nil)
+	_ ports.EnvBakeDetector      = (*mockEnvBakeDetector)(nil)
+	_ ports.AssetOverlayResolver = (*mockAssetOverlayForSecretScan)(nil)
+)
+
 // Mock implementation of ports.Compiler
 type mockCompiler struct {
 	preflightFn func(ctx context.Context, req ports.PreflightRequest) (ports.PreflightResult, error)
