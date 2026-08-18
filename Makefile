@@ -1,4 +1,4 @@
-.PHONY: help build supervisor static-server test test-short test-integration test-race coverage check-coverage fuzz-smoke check-arch lint fmt verify clean
+.PHONY: help build supervisor static-server test test-short test-integration test-race coverage check-coverage fuzz-smoke check-arch lint fmt verify clean e2e-runtime-smoke
 
 check-arch:  ##  Run hexagonal architecture purity test suite
 	@echo "Checking hexagonal architecture purity..."
@@ -7,6 +7,20 @@ check-arch:  ##  Run hexagonal architecture purity test suite
 test-integration:  ##  Run integration tests (go test ./tests/integration)
 	@echo "Running integration tests..."
 	@go test -v ./tests/integration
+
+# TestRuntimeSmoke_LayeredStrategy_BootsAndServes (tests/integration/
+# runtime_smoke_test.go) is the one test in this repo that actually boots a
+# produced image rather than only asserting layer structure/digests — see
+# mem:self_review_checklist row 17 and Lessons.md's missing-entrypoint
+# incident for why that gap mattered. It needs a real `bun` on PATH, a
+# reachable docker/podman daemon, and network access to pull the real
+# default base image; it skips cleanly (not a failure) when any of those
+# are unavailable. -timeout is explicit and generous: a real SvelteKit
+# build, a real base image pull, and a real container boot together are
+# slower than go test's 10m default budgets for comfortably.
+e2e-runtime-smoke:  ##  Run the real bun+docker runtime smoke test (boots a produced image, polls /healthz+/readyz)
+	@echo "Running runtime smoke test (needs bun on PATH + a reachable docker/podman daemon)..."
+	@go test -timeout=8m -v -run TestRuntimeSmoke_LayeredStrategy_BootsAndServes ./tests/integration
 
 help:  ##  Show this help message
 	@echo "Pokkum build targets:"

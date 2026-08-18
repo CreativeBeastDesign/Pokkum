@@ -92,16 +92,30 @@ jobs:
   # and Bun-installs the two fixture directories' dependencies (gitignored,
   # so they aren't present from checkout) so those tests actually execute.
   #
+  # tests/integration/runtime_smoke_test.go's
+  # TestRuntimeSmoke_LayeredStrategy_BootsAndServes additionally needs a
+  # reachable container runtime and network access to pull a real base
+  # image — ubuntu-latest ships Docker pre-installed and running by default,
+  # so no extra setup step is added here for it; the test's own
+  # exec.LookPath("docker")+daemon-reachability gate skips cleanly (not a
+  # failure) if that ever stops being true. It is the only test in this repo
+  # that actually boots a produced image and polls its probe endpoints
+  # rather than only asserting layer structure/digests — see
+  # mem:self_review_checklist row 17 and Lessons.md's missing-entrypoint
+  # incident for why that gap mattered enough to close.
+  #
   # Kept as its own job rather than folded into the main one: these do real
-  # network installs and multiple full SvelteKit builds, so they're slower
-  # and less deterministic than the rest of CI, and isolating them keeps the
+  # network installs, multiple full SvelteKit builds, and (as of the runtime
+  # smoke test) a real container boot, so they're slower and less
+  # deterministic than the rest of CI, and isolating them keeps the
   # fast/hermetic main job fast and hermetic. An explicit timeout is set
-  # because the real builds + `bun install` network calls can exceed `go
+  # because the real builds + `bun install` network calls + the runtime
+  # smoke test's base-image pull and container startup can exceed `go
   # test`'s default 10m per-package timeout.
   e2e-real-build:
     name: Real Bun Build E2E Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -129,7 +143,7 @@ jobs:
 
       - name: Run Real-Build E2E Tests
         run: |
-          go test -timeout=15m -v \
+          go test -timeout=20m -v \
             ./tests/integration/... \
             ./internal/adapters/bunexec/... \
             ./internal/adapters/sveltekitutils/...
