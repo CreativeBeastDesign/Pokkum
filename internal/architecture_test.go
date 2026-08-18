@@ -652,47 +652,23 @@ func findEnumSwitchViolations(t *testing.T, repoRoot string, searchRoots []strin
 // Semantics: at most N occurrences of that exact key are tolerated. Fixing
 // one (adding a `default`) just leaves headroom — it does not require
 // editing this map. A NEW violation (a different key, or one more
-// occurrence of an existing key) fails the test. This is not a blanket
-// exemption: every entry below is a real, unfixed gap, reported prominently
-// in this task's final report — not fixed directly, since none of these
-// files (internal/core/pipeline.go, internal/adapters/bunexec/compiler.go,
-// internal/adapters/remotecacheutils/remotecacheutils.go) are inside this
-// task's file-ownership scope (internal/architecture_test.go only).
-var enumSwitchAllowlist = map[string]int{
-	// Two independent switches on req.Output.Mode (core.OutputMode) —
-	// validateWiring's dependency check and the dry-run plan renderer — omit
-	// `default`. (A third, in publish(), already has one.) A hypothetical
-	// fourth OutputMode value would silently no-op in both instead of
-	// erroring: the exact "silently-skipped enum value" bug class described
-	// above, just for OutputMode instead of BuildStrategy.
-	"internal/core/pipeline.go|req.Output.Mode": 2,
-
-	// The per-strategy packaging-field switch inside Build's errgroup fan-out
-	// handles StrategyLayered/StrategyStatic explicitly and relies on
-	// StrategyExe falling through with no case at all (its fields are
-	// populated earlier, elsewhere in the pipeline) — correct today by
-	// construction, but a new BuildStrategy value added later would silently
-	// no-op here exactly like the two cases above.
-	"internal/core/pipeline.go|req.Compile.Strategy": 1,
-
-	// bunexec.Compiler.Prepare's telemetry-wiring switch — already fixed once
-	// from a negative `!ApplyStatic()` check to this positive form (see
-	// mem:self_review_checklist row 11 and Lessons.md's 2026-08-18 entry) —
-	// still has no `default`. StrategyStatic correctly has nothing to
-	// preload, but that is true by silent omission rather than an explicit
-	// `case ports.StrategyStatic: // no telemetry hook for static sites`.
-	"internal/adapters/bunexec/compiler.go|req.Strategy": 1,
-
-	// remotecacheutils.Cacher's cache-hit verification switch handles
-	// CacheVerifyStaticKey/CacheVerifyKeyless (the only two values `mode` is
-	// normalized to just above the switch) but has no `default` — if `mode`
-	// ever arrived as CacheVerifyNone or an unrecognized value through this
-	// path, the switch would match nothing, `errs` would stay empty, and the
-	// function would fall through to `errors.Join(errs...)` (nil) and return
-	// `false, "", nil` — "not verified, no error" — silently, rather than
-	// erroring on an unexpected mode.
-	"internal/adapters/remotecacheutils/remotecacheutils.go|mode": 1,
-}
+// occurrence of an existing key) fails the test.
+//
+// As of 2026-08-18 this map is intentionally EMPTY: all four originally
+// documented gaps here have been fixed —
+// internal/core/pipeline.go's three switches (2x req.Output.Mode, 1x
+// req.Compile.Strategy) already gained erroring `default` arms in a separate
+// change (confirmed empirically: temporarily zeroing these two entries and
+// re-running TestEnumSwitchExhaustiveness still passes, i.e. the real
+// violation count for both keys is 0, not just "under the allowed 2/1"), and
+// bunexec.Compiler.Prepare's and remotecacheutils.Cacher's switches gained
+// theirs in this same change. The map is kept (rather than deleted) as the
+// explicit, empty extension point the exhaustiveness check's own error
+// message points readers at ("add it to enumSwitchAllowlist ... with a
+// comment explaining why") — every entry that lands here from now on must be
+// a real, individually-justified, newly-discovered gap, not a stale pin left
+// over from a fix that already landed elsewhere.
+var enumSwitchAllowlist = map[string]int{}
 
 // TestEnumSwitchExhaustiveness enforces that every `switch` over one of
 // enumFamilyTypeNames' string-enum types in production code has a `default`

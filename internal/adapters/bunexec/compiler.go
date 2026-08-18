@@ -560,6 +560,30 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 				log.Info("bunexec: telemetry SDK bootstrap packaged for layered runtime preload", "bootstrap", layeredRes.PreloadRelPath)
 				telemetryPreloadRelPath = layeredRes.PreloadRelPath
 			}
+		case ports.StrategyStatic:
+			// Deliberate no-op, not a fallthrough to default: a static site
+			// (StrategyStatic) has no server-side runtime for a telemetry SDK
+			// to hook into — there is nothing here to wrap or preload. Written
+			// as its own case (mem:self_review_checklist row 11) so this is
+			// legible as "verified nothing to do for this strategy" rather
+			// than "nobody has looked at this strategy yet", which is exactly
+			// the ambiguity that let StrategyLayered silently fall through the
+			// negative-check predecessor of this switch (Lessons.md,
+			// 2026-08-18).
+		default:
+			// req.Strategy is validated by BuildRequest.Validate
+			// (internal/core/model.go, BuildStrategy.Valid()) before
+			// core.Build ever reaches bunexec.Compiler.Prepare, so every value
+			// that can arrive here today is one of the three cases above —
+			// this branch should be unreachable in the current codebase.
+			// Erroring explicitly (rather than silently skipping telemetry
+			// wiring) means a future BuildStrategy value added without
+			// updating this switch fails loudly at the exact call site that
+			// forgot it, instead of quietly shipping images whose telemetry
+			// was never wired — the same failure mode row 11 exists to catch,
+			// just guarded against for a strategy that doesn't exist yet
+			// instead of one that already shipped broken.
+			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: telemetry enabled for unrecognized build strategy %q: %w", req.ProjectDir, req.Strategy, core.ErrPrepareFailed)
 		}
 	}
 

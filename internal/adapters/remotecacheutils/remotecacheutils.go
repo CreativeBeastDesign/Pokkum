@@ -642,6 +642,28 @@ func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Has
 				return true, fmt.Sprintf("keyless:%s", kres.SAN), nil
 			}
 			errs = append(errs, fmt.Errorf("layer %d keyless verify: %w", i, kerr))
+
+		default:
+			// mode is normalized to CacheVerifyKeyless/CacheVerifyStaticKey
+			// just above this switch whenever it starts out empty or
+			// ports.CacheVerifyAuto — so this default is NOT dead code: it is
+			// reached whenever req.Verify.VerifyMode explicitly carries
+			// ports.CacheVerifyNone (or any future/unrecognized value)
+			// alongside req.Verify.VerifySignature == true, e.g.
+			// "--cache-verify-mode=none" set without the paired
+			// "--no-cache-verify" flag that's the only path keeping those two
+			// fields consistent (cmd/pokkum/build.go). Check() only calls
+			// verifyCandidate at all because it already decided this
+			// candidate must be cryptographically verified before promoting
+			// release tags — silently treating an unhandled mode here as
+			// "skip, no error" would resolve that contradiction in the
+			// fail-open direction: an unverified (possibly poisoned) image
+			// gets promoted anyway. This is a security control, so it fails
+			// closed instead, exactly like every other rejection path in this
+			// loop: record it as a verification failure for this layer, which
+			// errors under --strict and otherwise safely bypasses the cache
+			// (falls through to a real build) rather than accepting the hit.
+			errs = append(errs, fmt.Errorf("layer %d: cache verify mode %q is not a recognized signature verification mode", i, mode))
 		}
 	}
 

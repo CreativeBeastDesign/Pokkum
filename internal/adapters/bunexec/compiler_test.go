@@ -586,6 +586,66 @@ func TestPrepare_Telemetry_StrategyLayeredDoesNotWireWrapper(t *testing.T) {
 	}
 }
 
+// TestPrepare_Telemetry_StrategyStaticIsExplicitNoOp is the third leg of the
+// telemetry-wiring switch's case coverage (see the two tests above for
+// StrategyExe/StrategyLayered). A static site has no server-side runtime to
+// instrument, so StrategyStatic must stay a documented no-op — this pins that
+// behavior with its own case (added alongside the switch's new `default`, see
+// mem:self_review_checklist row 11) rather than leaving it to fall through
+// silently, and proves enabling telemetry for a static build is neither an
+// error nor a silently-generated-but-unread wrapper file.
+func TestPrepare_Telemetry_StrategyStaticIsExplicitNoOp(t *testing.T) {
+	dir := newProjectDir(t, validPackageJSON, fmt.Sprintf(svCreateSvelteConfigFmt, "@sveltejs/adapter-static"))
+	putFakeBunOnPath(t, staticBuildScript(""))
+	c := NewCompiler(discardLogger())
+
+	res, err := c.Prepare(context.Background(), ports.PrepareRequest{
+		ProjectDir: dir, Strategy: ports.StrategyStatic, SourceDateEpoch: time.Unix(0, 0),
+		Telemetry: ports.TelemetryOptions{Enabled: true},
+	})
+	if err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+	if res.TelemetryPreloadRelPath != "" {
+		t.Errorf("TelemetryPreloadRelPath = %q, want empty for StrategyStatic (nothing packages or reads a preload for a static site)", res.TelemetryPreloadRelPath)
+	}
+	wrapperPath := filepath.Join(dir, ".pokkum", "telemetry-entry.ts")
+	if _, err := os.Stat(wrapperPath); err == nil {
+		t.Errorf("expected no telemetry wrapper to be written for StrategyStatic, but found one at %s", wrapperPath)
+	}
+}
+
+// TestPrepare_Telemetry_UnrecognizedStrategyErrors proves the telemetry-wiring
+// switch's new `default` arm actually fires and fails closed, rather than
+// silently skipping telemetry wiring the way the pre-fix code (and the
+// negative-check predecessor this same switch already shipped once, per
+// Lessons.md's 2026-08-18 entry) would have. req.Strategy is normally
+// validated by core.BuildRequest.Validate (BuildStrategy.Valid()) before
+// core.Build ever calls Prepare, so this exact input cannot occur via the
+// pokkum CLI today — this test exercises bunexec.Compiler.Prepare directly
+// with a value that check does not run for, to prove the switch's own
+// defense-in-depth actually works rather than assuming it from reading the
+// code.
+func TestPrepare_Telemetry_UnrecognizedStrategyErrors(t *testing.T) {
+	dir := newProjectDir(t, validPackageJSON, fmt.Sprintf(svCreateSvelteConfigFmt, "@sveltejs/adapter-node"))
+	putFakeBunOnPath(t, "set -e\nmkdir -p build\nprintf 'export default {};\\n' > build/index.js\nexit 0\n")
+	c := NewCompiler(discardLogger())
+
+	_, err := c.Prepare(context.Background(), ports.PrepareRequest{
+		ProjectDir: dir, Strategy: ports.BuildStrategy("bogus-strategy"), SourceDateEpoch: time.Unix(0, 0),
+		Telemetry: ports.TelemetryOptions{Enabled: true},
+	})
+	if err == nil {
+		t.Fatal("Prepare succeeded, want an error for an unrecognized build strategy reaching the telemetry-wiring switch")
+	}
+	if !strings.Contains(err.Error(), "unrecognized build strategy") {
+		t.Errorf("error = %v, want it to name the unrecognized build strategy", err)
+	}
+	if !errors.Is(err, core.ErrPrepareFailed) {
+		t.Errorf("error = %v, want it to wrap core.ErrPrepareFailed", err)
+	}
+}
+
 func TestPrepare_MissingEntrypointAfterSuccessfulBuild(t *testing.T) {
 	dir := newProjectDir(t, validPackageJSON, validSvelteConfig)
 	// bun exits 0 but never actually wrote .svelte-kit/jesterkit-sveltekit/...

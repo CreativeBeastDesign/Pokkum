@@ -782,6 +782,105 @@ func TestCacher_Check_OptOutNoVerifyStillHits(t *testing.T) {
 	}
 }
 
+// TestCacher_Check_UnrecognizedVerifyModeFailsClosed proves the mode switch's
+// new `default` arm inside verifyCandidate. The switch just above it
+// normalizes an empty/"auto" VerifyMode to CacheVerifyKeyless/StaticKey, so
+// the only way to reach default is an explicit, unhandled mode value
+// surviving alongside VerifySignature: true — e.g. ports.CacheVerifyNone set
+// without also disabling VerifySignature, the exact inconsistent combination
+// "--cache-verify-mode=none" set without the paired "--no-cache-verify" flag
+// produces (cmd/pokkum/build.go only keeps those two fields consistent when
+// --no-cache-verify itself is used). Before this fix, that combination hit no
+// case, appended no error, and Check silently reported "not verified, no
+// error" for a genuinely signed image — i.e. it happened to look identical to
+// a correctly-verified hit purely by accident, not because anything actually
+// verified it. This test pushes a REAL, validly-signed cache candidate (same
+// fixture shape as TestCacher_Check_VerifiedCacheHit_StaticKey) specifically
+// so a pre-fix run of this test would have reported Hit: true — proving the
+// fix changed real behavior, not just satisfied a narrower assertion.
+func TestCacher_Check_UnrecognizedVerifyModeFailsClosed(t *testing.T) {
+	s := httptest.NewServer(registry.New())
+	t.Cleanup(s.Close)
+
+	host := strings.TrimPrefix(s.URL, "http://")
+	repo := host + "/acme/app"
+
+	privPEM, pubPEM := generateTestKey(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("img.Digest: %v", err)
+	}
+
+	inputHash := strings.Repeat("6", 64)
+	cacheTag := remotecacheutils.CacheTag(inputHash)
+	cacheRef, err := name.NewTag(repo+":"+cacheTag, name.WeakValidation)
+	if err != nil {
+		t.Fatalf("NewTag(cache tag): %v", err)
+	}
+	if err := remote.Write(cacheRef, img); err != nil {
+		t.Fatalf("push cache entry: %v", err)
+	}
+
+	// A genuine, validly-signed candidate — the signature itself is not what's
+	// under test, the unrecognized mode is.
+	pushTestCosignSignature(t, repo, digest, privPEM, false)
+
+	c := remotecacheutils.New(remotecacheutils.WithCosignSigner(cosign.NewSigner(nil)))
+
+	// VerifySignature: true (this build wants its cache hits verified) but
+	// VerifyMode explicitly carries CacheVerifyNone instead of a real mode —
+	// the inconsistent-config shape described above.
+	res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyNone,
+			PublicKeyPEM:    pubPEM,
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on default non-strict check, got: %v", err)
+	}
+	if res.Hit {
+		t.Fatalf("BUG: Check reported Hit: true for VerifyMode=CacheVerifyNone alongside VerifySignature=true — an unrecognized/unhandled verify mode must fail closed (reject the candidate), not silently accept it as if verification had actually run")
+	}
+
+	relTag, err := name.NewTag(repo+":v1.0.0", name.WeakValidation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remote.Get(relTag); err == nil {
+		t.Fatalf("BUG: release tag was promoted despite the verify mode never actually being checked")
+	}
+
+	// Strict mode must surface this as an explicit, actionable error rather
+	// than the same silent-reject shape.
+	_, strictErr := c.Check(context.Background(), ports.RemoteCacheRequest{
+		Repo:      repo,
+		InputHash: inputHash,
+		Tags:      []string{"v1.0.0"},
+		Verify: ports.RemoteCacheVerifyOptions{
+			VerifySignature: true,
+			VerifyMode:      ports.CacheVerifyNone,
+			PublicKeyPEM:    pubPEM,
+			Strict:          true,
+		},
+	})
+	if strictErr == nil {
+		t.Fatal("expected a non-nil error in strict mode for an unrecognized verify mode")
+	}
+	if !strings.Contains(strictErr.Error(), "not a recognized") {
+		t.Errorf("expected the strict-mode error to name the unrecognized verify mode, got: %v", strictErr)
+	}
+}
+
 type mockKeylessVerifier struct {
 	verifyFn func(ctx context.Context, req ports.KeylessVerifyRequest) (ports.KeylessVerifyResult, error)
 }
