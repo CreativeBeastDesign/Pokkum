@@ -31,6 +31,12 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | --- | --- | --- | --- | --- |
 | [pokkum verify doesn't reproduce the asset-overlay layer](items/asset-overlay-verify-gap.md) | Verifying an image built with --asset-overlay reports a false-positive digest mismatch, because verify's rebuild path has no way to re-resolve the same predecessor chain. | fix | shipped |  |
 
+### Developer Experience
+
+| Title | Summary | Kind | Status | Commits |
+| --- | --- | --- | --- | --- |
+| [pokkum init wrote a config pokkum build refused](items/init-generates-invalid-config.md) | Every generated .pokkum.yaml carried an invalid sbom.attach value, so the first two commands a new user runs did not work together. | fix | shipped |  |
+
 ### Supply Chain & Attestation
 
 | Title | Summary | Kind | Status | Commits |

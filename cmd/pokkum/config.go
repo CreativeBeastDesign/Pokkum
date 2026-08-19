@@ -278,6 +278,65 @@ type configFieldsToValidate struct {
 	output string
 }
 
+// validateGeneratedConfig runs the same checks as `pokkum config validate` over
+// a config Pokkum generated itself, base plus every profile. It exists so
+// `pokkum init` cannot write a file that `pokkum build` would refuse — a
+// generated config is Pokkum's own output, so an invalid value there is a bug in
+// Pokkum rather than a user error, and it should surface at the moment of
+// creation instead of on the user's first build.
+func validateGeneratedConfig(cfg *ports.ProjectConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	problems := validateConfigFields(configFieldsToValidate{
+		strategy:            cfg.Strategy,
+		runtime:             cfg.Runtime,
+		base:                cfg.Base,
+		platforms:           cfg.Platforms,
+		dockerRepo:          cfg.Docker.Repo,
+		dockerTags:          cfg.Docker.Tags,
+		failOnCVE:           cfg.Security.FailOnCVE,
+		sbomFormat:          cfg.SBOM.Format,
+		vexExemptions:       cfg.Security.VEXExemptions,
+		sbomAttach:          cfg.SBOM.Attach,
+		cacheVerifyMode:     cfg.Cache.VerifyMode,
+		imagePort:           cfg.Image.Port,
+		imageProbePort:      cfg.Image.ProbePort,
+		shutdownTimeout:     cfg.Image.ShutdownTimeout,
+		allowSecretPatterns: cfg.Security.AllowSecretPatterns,
+	})
+	// Profiles are walked in sorted order so the message is stable across runs
+	// rather than reflecting map iteration order.
+	names := make([]string, 0, len(cfg.Profiles))
+	for name := range cfg.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		profile := cfg.Profiles[name]
+		problems = append(problems, validateConfigFields(configFieldsToValidate{
+			profileName:         name,
+			strategy:            profile.Strategy,
+			runtime:             profile.Runtime,
+			base:                profile.Base,
+			platforms:           profile.Platforms,
+			dockerRepo:          profile.Docker.Repo,
+			dockerTags:          profile.Docker.Tags,
+			failOnCVE:           profile.Security.FailOnCVE,
+			sbomFormat:          profile.SBOM.Format,
+			vexExemptions:       profile.Security.VEXExemptions,
+			sbomAttach:          profile.SBOM.Attach,
+			cacheVerifyMode:     profile.Cache.VerifyMode,
+			imagePort:           profile.Image.Port,
+			imageProbePort:      profile.Image.ProbePort,
+			shutdownTimeout:     profile.Image.ShutdownTimeout,
+			allowSecretPatterns: profile.Security.AllowSecretPatterns,
+			output:              profile.Output,
+		})...)
+	}
+	return problems
+}
+
 // validateConfigFields runs the schema/value checks shared by the base
 // .pokkum.yaml config and every named profile within it. Errors are prefixed
 // with the profile name (`profile "production": ...`) when profileName is

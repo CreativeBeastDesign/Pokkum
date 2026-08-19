@@ -327,8 +327,14 @@ func (m *Manager) GenerateDefault(opts ports.InitConfigOptions) *ports.ProjectCo
 			FailOnCVE: opts.FailOnCVE,
 		},
 		SBOM: ports.SBOMConfig{
-			Format: "spdx-json",
-			Attach: "attestation",
+			// Both written from the port's own constants rather than as string
+			// literals. "attestation" used to sit in Attach — a plausible word,
+			// since an SBOM really is attached as an attestation, but never one
+			// of the mode's values — so every `pokkum init` produced a config
+			// that `pokkum build` refused to start with. Referencing the
+			// constants makes that class of typo a compile error.
+			Format: string(ports.SBOMFormatSPDXJSON),
+			Attach: string(ports.DefaultSBOMAttachMode),
 		},
 		Profiles: make(map[string]ports.BuildProfile),
 	}
@@ -343,7 +349,7 @@ func (m *Manager) GenerateDefault(opts ports.InitConfigOptions) *ports.ProjectCo
 				VerifyBase: &f,
 			},
 			SBOM: ports.SBOMConfig{
-				Format: "none",
+				Format: string(ports.SBOMFormatNone),
 			},
 		}
 	}

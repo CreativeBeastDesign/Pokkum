@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/term"
@@ -109,6 +110,30 @@ coverage
 		}
 
 		newCfg := cfgMgr.GenerateDefault(initOpts)
+
+		// Validate what we are about to write, with exactly the checks
+		// `pokkum config validate` applies, before it reaches disk.
+		//
+		// This binary already contained a validator that rejects a bad
+		// sbom.attach — init simply never ran it on its own output, so a
+		// generated `sbom.attach: attestation` (a real bug, shipped) meant every
+		// `pokkum init` produced a config that `pokkum build` refused to start
+		// with. The two commands a first-time user runs back to back did not
+		// work together, and nothing in the tool noticed even though something
+		// in the tool could have.
+		//
+		// Failing here rather than at the next build keeps the diagnosis at the
+		// point of creation, and turns any future generator typo into an
+		// immediate, self-inflicted error instead of a user's first impression.
+		if problems := validateGeneratedConfig(newCfg); len(problems) > 0 {
+			msg := fmt.Sprintf("internal error: generated %s is invalid (%s) — this is a bug in pokkum, not in your project; please report it",
+				ports.ConfigFilename, strings.Join(problems, "; "))
+			if outputFormat == ports.FormatJSON {
+				return jsonutils.WriteError(os.Stdout, "init", "ERR_INIT_FAILED", msg, "")
+			}
+			return fmt.Errorf("%s", msg)
+		}
+
 		if err := cfgMgr.Save(opts.dir, newCfg); err != nil {
 			msg := fmt.Sprintf("failed to create %s: %v", ports.ConfigFilename, err)
 			if outputFormat == ports.FormatJSON {
@@ -149,6 +174,35 @@ coverage
 	return nil
 }
 
+// promptChoice asks for a value constrained to a fixed set, re-asking on an
+// unrecognised answer instead of accepting it.
+//
+// The prompts used to take whatever was typed, verbatim, so a typo — or one of
+// the options the prompt itself offered but the code did not implement — went
+// straight into .pokkum.yaml and surfaced much later as a build failure a long
+// way from its cause. Empty input keeps the default.
+//
+// Returns "" when input runs out (a piped/EOF session), which callers treat as
+// "leave the default in place" rather than as a choice.
+func promptChoice(scanner *bufio.Scanner, number int, label string, allowed []string, def string) string {
+	for attempts := 0; attempts < 5; attempts++ {
+		fmt.Printf("%d. %s [%s] (default: %s): ", number, label, strings.Join(allowed, " / "), def)
+		if !scanner.Scan() {
+			return ""
+		}
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			return ""
+		}
+		if slices.Contains(allowed, strings.ToLower(input)) {
+			return strings.ToLower(input)
+		}
+		fmt.Printf("   %q is not one of: %s — please pick one of those.\n", input, strings.Join(allowed, ", "))
+	}
+	fmt.Printf("   Too many unrecognised answers; keeping the default (%s).\n", def)
+	return ""
+}
+
 func promptInitOptions(r io.Reader) ports.InitConfigOptions {
 	scanner := bufio.NewScanner(r)
 	opts := ports.InitConfigOptions{
@@ -168,22 +222,26 @@ func promptInitOptions(r io.Reader) ports.InitConfigOptions {
 		}
 	}
 
-	// 2. Base image preset
-	fmt.Print("2. Base Image Preset [distroless / chainguard / chainguard-static] (default: distroless): ")
-	if scanner.Scan() {
-		input := strings.TrimSpace(scanner.Text())
-		if input != "" {
-			opts.BasePreset = input
-		}
+	// 2. Base image preset. The offered set is exactly the presets that exist:
+	// this prompt used to offer "chainguard-static", which is an unimplemented
+	// roadmap item rather than a preset, so anyone picking option 3 got a
+	// .pokkum.yaml that pokkum build refused — and it omitted distroless-node,
+	// which is real.
+	if v := promptChoice(scanner, 2, "Base Image Preset",
+		[]string{
+			string(ports.BaseImageDistroless),
+			string(ports.BaseImageChainguard),
+			string(ports.BaseImageDistrolessNode),
+		}, string(ports.BaseImageDistroless)); v != "" {
+		opts.BasePreset = v
 	}
 
-	// 3. Strategy
-	fmt.Print("3. Build Strategy [layered / static] (default: layered): ")
-	if scanner.Scan() {
-		input := strings.TrimSpace(scanner.Text())
-		if input != "" {
-			opts.Strategy = input
-		}
+	// 3. Strategy. exe is deliberately not offered here — it is an advanced,
+	// single-binary mode rather than a sensible default for a new project — but
+	// it stays accepted in a hand-written config.
+	if v := promptChoice(scanner, 3, "Build Strategy",
+		[]string{"layered", "static"}, "layered"); v != "" {
+		opts.Strategy = v
 	}
 
 	// 4. Local profile
@@ -196,12 +254,9 @@ func promptInitOptions(r io.Reader) ports.InitConfigOptions {
 	}
 
 	// 5. CVE policy
-	fmt.Print("5. Fail build on vulnerability threshold [none / low / medium / high / critical] (default: none): ")
-	if scanner.Scan() {
-		input := strings.TrimSpace(strings.ToLower(scanner.Text()))
-		if input != "" && input != "none" {
-			opts.FailOnCVE = input
-		}
+	if v := promptChoice(scanner, 5, "Fail build on vulnerability threshold",
+		[]string{"none", "low", "medium", "high", "critical"}, "none"); v != "" {
+		opts.FailOnCVE = v
 	}
 
 	fmt.Println()
