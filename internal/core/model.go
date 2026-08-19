@@ -436,6 +436,76 @@ func ParseBaseImagePreset(s string) (BaseImagePreset, error) {
 	return p, nil
 }
 
+// baseImagePresetNames lists the recognized preset names for error messages,
+// kept as a single source so ParseBaseImageSpec's error text and
+// BaseImagePreset.Valid's switch cannot silently drift apart.
+var baseImagePresetNames = []BaseImagePreset{BaseImageDistroless, BaseImageChainguard, BaseImageDistrolessNode, BaseImageCustom}
+
+// looksLikeImageReference reports whether s carries punctuation that only a
+// genuine OCI image reference needs to identify a registry host, a
+// repository path, a tag, or a digest ('.', '/', ':', '@') — as opposed to a
+// bare word.
+//
+// This exists to keep ParseBaseImageSpec from ever treating a mistyped
+// preset name (e.g. "distrolss") as a deliberate custom reference: without
+// this guard, name.ParseReference would happily accept a bare word as
+// shorthand for Docker Hub's "docker.io/library/<word>:latest", so the typo
+// would sail through parsing and only fail much later, at pull time, with an
+// inscrutable "manifest unknown" error instead of the helpful
+// "unrecognized preset" error the user actually needs. A real custom base
+// image reference — the thing BaseImageCustom is for — always names a
+// registry host and/or path, a tag, or a digest, so requiring at least one
+// of those characters rejects the typo case without rejecting any reference
+// a real custom-base user would plausibly write.
+func looksLikeImageReference(s string) bool {
+	return strings.ContainsAny(s, "/.:@")
+}
+
+// ParseBaseImageSpec interprets a --base value (or the equivalent
+// .pokkum.yaml `base:`/profile field) as either a known preset name or a
+// full custom image reference, accepting any case and surrounding
+// whitespace for the preset check.
+//
+// Disambiguation rule, applied in this deliberate order rather than by
+// pattern-sniffing the input first: try it as a preset name; if that fails,
+// decide whether it is even plausibly a reference at all via
+// looksLikeImageReference before attempting to parse it as one. A bare word
+// that is neither a known preset nor reference-shaped is reported as an
+// unrecognized preset (naming the valid choices) rather than being handed to
+// name.ParseReference, which would silently accept it as a Docker Hub
+// shorthand — see looksLikeImageReference's doc comment for why that matters.
+//
+// A reference-shaped string is validated with name.ParseReference (the same
+// parser ValidateDockerRepo/ValidateDockerTag and every real adapter that
+// pulls or pushes an image reference already build on), so a syntactically
+// invalid custom reference is rejected here, with a clear error, instead of
+// failing much later at pull time.
+//
+// Returns (preset, "", nil) for a recognized preset name, or
+// (BaseImageCustom, ref, nil) for a valid custom reference — ref is the
+// trimmed input, suitable for BaseImageRequest.Ref. Both parts of the
+// preset-vs-reference decision are covered: recognized presets never fall
+// through to reference parsing, and a reference-shaped string is never
+// silently accepted without name.ParseReference actually validating it.
+func ParseBaseImageSpec(s string) (BaseImagePreset, string, error) {
+	trimmed := strings.TrimSpace(s)
+	if preset, err := ParseBaseImagePreset(trimmed); err == nil {
+		return preset, "", nil
+	}
+	if !looksLikeImageReference(trimmed) {
+		names := make([]string, len(baseImagePresetNames))
+		for i, p := range baseImagePresetNames {
+			names[i] = string(p)
+		}
+		return "", "", fmt.Errorf("base image %q is not a recognized preset (%s) and does not look like an image reference (expected something like registry/repo:tag or repo@sha256:...): %w",
+			s, strings.Join(names, ", "), ErrInvalidBaseImage)
+	}
+	if _, err := name.ParseReference(trimmed, name.WeakValidation); err != nil {
+		return "", "", fmt.Errorf("base image reference %q: %w: %v", s, ErrInvalidBaseImage, err)
+	}
+	return BaseImageCustom, trimmed, nil
+}
+
 // ParseBaseImageVerifyMode converts user input to a BaseImageVerifyMode,
 // accepting any case and surrounding whitespace.
 func ParseBaseImageVerifyMode(s string) (BaseImageVerifyMode, error) {

@@ -152,4 +152,15 @@ Sigstore TUF root refresh.
 **Severity:** none for the product; High for the guide, since every digest-dependent step downstream was broken.
 **Status:** ✅ fixed in the guide at the root and in all eight downstream uses. Recorded here because it is a good example of a doc that was internally consistent and entirely wrong — exactly what the guide's own "believe nothing" premise exists to catch, applied to itself.
 
+### 16. Every custom base image shared one `pokkum.lock` slot, and could return the wrong image
+
+**Found by:** implementing finding 13 (`--base` accepting a custom reference), while checking the lockfile-keying consequence rather than only the parse gap.
+**Where:** `internal/adapters/baseimage/resolver.go` — `lockKey = string(req.Preset)`.
+**What:** the lock key is the preset string, so every custom reference shared the literal `"custom"` slot. The consequence was worse than eviction: resolving custom base **B** after custom base **A** had been locked would trust A's entry and **silently return A's image content for a B request**. You ask for one base and get another, with no error.
+**Severity:** High for anyone using more than one custom base in a project — a wrong-base build is a supply-chain correctness failure, not a cache miss. It was latent until now only because the CLI had no way to supply a custom reference at all (finding 13), so the collision was unreachable in practice.
+**Reproduced:** two genuinely different images in a real in-memory registry; B resolved to A's digest before the fix, confirmed by stashing only the fix.
+**Fixed, narrowly:** a `"custom"`-keyed entry is now only trusted when its recorded ref matches the request (and its digest matches, for scan-metadata carryover). No lockfile schema change, so no migration.
+**Recommended proper fix, not done:** give custom refs their own slot — e.g. `"custom:" + sha256(ref)[:12]` — mirroring how `distroless-node` was made its own preset for exactly this reason (`f5229c3`), and what Roadmap Tier 2 already notes for `chainguard-static`. That changes lock keying and needs a migration story, so it is recorded rather than rushed.
+**Related doc correction:** `Vocabulary.md` already claimed `--base` accepted "a custom image reference". That was false when written and is true now — an overclaim that closed itself by accident.
+
 _(appended as work proceeds)_

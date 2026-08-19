@@ -120,6 +120,120 @@ profiles:
 	}
 }
 
+// TestBuild_CustomBaseReferenceReachesRequest is the CLI-reachability check
+// for the --base preset-vs-reference gap (mem:self_review_checklist row 16):
+// before this fix, buildRequestFromConfigAndFlags only ever called
+// core.ParseBaseImagePreset on --base, which rejects any string that is not
+// one of the four fixed preset names — so a full image reference could never
+// reach core.BuildRequest.BaseImage.Ref via the CLI at all, even though
+// ports.BaseImageCustom and BaseImageRequest.Ref already existed and the
+// resolver already consumed them. This drives the real production function
+// build.go's runBuild calls (buildRequestFromConfigAndFlags), not a
+// mirrored/duplicated copy, so it is direct evidence the flag reaches the
+// request — not just that a struct field can be set in isolation.
+func TestBuild_CustomBaseReferenceReachesRequest(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("CLI flag", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		flags := &buildFlags{
+			base:         "gcr.io/my-org/my-base:v1.2.3",
+			baseExplicit: true,
+			platforms:    []string{"linux/amd64"},
+			strategy:     "layered",
+			bunVariant:   "standard",
+			inject:       true,
+		}
+		req, err := buildRequestFromConfigAndFlags(context.Background(), logger, flags, tmpDir)
+		if err != nil {
+			t.Fatalf("buildRequestFromConfigAndFlags with custom --base failed: %v", err)
+		}
+		if req.BaseImage.Preset != ports.BaseImageCustom {
+			t.Errorf("expected BaseImage.Preset custom, got: %s", req.BaseImage.Preset)
+		}
+		if req.BaseImage.Ref != "gcr.io/my-org/my-base:v1.2.3" {
+			t.Errorf("expected BaseImage.Ref %q, got: %q", "gcr.io/my-org/my-base:v1.2.3", req.BaseImage.Ref)
+		}
+	})
+
+	t.Run("project config base field", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfgContent := `version: 1
+docker:
+  repo: ghcr.io/example/app
+base: gcr.io/my-org/my-base:v1.2.3
+`
+		_ = os.WriteFile(filepath.Join(tmpDir, ports.ConfigFilename), []byte(cfgContent), 0644)
+
+		flags := &buildFlags{
+			platforms:  []string{"linux/amd64"},
+			strategy:   "layered",
+			bunVariant: "standard",
+			inject:     true,
+		}
+		req, err := buildRequestFromConfigAndFlags(context.Background(), logger, flags, tmpDir)
+		if err != nil {
+			t.Fatalf("buildRequestFromConfigAndFlags with custom config base failed: %v", err)
+		}
+		if req.BaseImage.Preset != ports.BaseImageCustom {
+			t.Errorf("expected BaseImage.Preset custom, got: %s", req.BaseImage.Preset)
+		}
+		if req.BaseImage.Ref != "gcr.io/my-org/my-base:v1.2.3" {
+			t.Errorf("expected BaseImage.Ref %q, got: %q", "gcr.io/my-org/my-base:v1.2.3", req.BaseImage.Ref)
+		}
+	})
+
+	t.Run("profile base override", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfgContent := `version: 1
+docker:
+  repo: ghcr.io/example/app
+base: distroless
+profiles:
+  custom-dev:
+    base: gcr.io/my-org/my-base:v1.2.3
+`
+		_ = os.WriteFile(filepath.Join(tmpDir, ports.ConfigFilename), []byte(cfgContent), 0644)
+
+		flags := &buildFlags{
+			profile:    "custom-dev",
+			platforms:  []string{"linux/amd64"},
+			strategy:   "layered",
+			bunVariant: "standard",
+			inject:     true,
+		}
+		req, err := buildRequestFromConfigAndFlags(context.Background(), logger, flags, tmpDir)
+		if err != nil {
+			t.Fatalf("buildRequestFromConfigAndFlags with custom profile base failed: %v", err)
+		}
+		if req.BaseImage.Preset != ports.BaseImageCustom {
+			t.Errorf("expected BaseImage.Preset custom, got: %s", req.BaseImage.Preset)
+		}
+		if req.BaseImage.Ref != "gcr.io/my-org/my-base:v1.2.3" {
+			t.Errorf("expected BaseImage.Ref %q, got: %q", "gcr.io/my-org/my-base:v1.2.3", req.BaseImage.Ref)
+		}
+	})
+
+	t.Run("typo'd preset is rejected, not silently treated as a reference", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		flags := &buildFlags{
+			base:         "distrolss",
+			baseExplicit: true,
+			platforms:    []string{"linux/amd64"},
+			strategy:     "layered",
+			bunVariant:   "standard",
+			inject:       true,
+		}
+		_, err := buildRequestFromConfigAndFlags(context.Background(), logger, flags, tmpDir)
+		if err == nil {
+			t.Fatal("expected a typo'd base preset to be rejected, got nil")
+		}
+		if !strings.Contains(err.Error(), "not a recognized preset") {
+			t.Errorf("expected error to explain the preset is unrecognized, got: %v", err)
+		}
+	})
+}
+
 func TestBuild_AdversarialProfileEdgeCases(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 

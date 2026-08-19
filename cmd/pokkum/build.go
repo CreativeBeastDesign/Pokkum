@@ -201,7 +201,7 @@ The project directory defaults to the current working directory.`,
 	cmd.Flags().StringSliceVarP(&flags.tags, "tag", "t", nil,
 		"Image tag(s) to apply, without the repository prefix; repeatable or comma-separated, e.g. --tag v1.2.3 --tag latest. Defaults to \"latest\" if unset here, in POKKUM_DOCKER_TAGS, and in docker.tags")
 	cmd.Flags().StringVar(&flags.base, "base", "",
-		"Base image preset (distroless [default], chainguard, or custom reference)")
+		"Base image preset (distroless [default], chainguard, distroless-node) or a full custom image reference (e.g. registry/repo:tag or repo@sha256:...); a custom reference defaults to static-key signature verification and requires POKKUM_BASE_IMAGE_PUBKEY/--base-verify-mode or --no-verify-base")
 	cmd.Flags().BoolVar(&flags.hardened, "hardened", false,
 		"Select the Chainguard base preset (shorthand for --base chainguard)")
 	cmd.Flags().StringVar(&flags.sbom, "sbom", "spdx-json",
@@ -629,11 +629,14 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 		basePreset = "chainguard"
 	}
 	if basePreset != "" {
-		parsed, err := core.ParseBaseImagePreset(basePreset)
+		preset, ref, err := core.ParseBaseImageSpec(basePreset)
 		if err != nil {
-			return nil, fmt.Errorf("invalid base image preset: %w", err)
+			return nil, fmt.Errorf("invalid base image: %w", err)
 		}
-		req.BaseImage.Preset = parsed
+		req.BaseImage.Preset = preset
+		if ref != "" {
+			req.BaseImage.Ref = ref
+		}
 	}
 	req.BaseImage.UpdateBase = flags.updateBase
 	req.BaseImage.Offline = flags.offline

@@ -220,6 +220,71 @@ docker:
 	}
 }
 
+// TestConfigValidateCommand_CustomBaseReference guards the config/profile
+// half of --base's preset-vs-reference disambiguation (mem:self_review_checklist
+// row 10): a full custom image reference in .pokkum.yaml's top-level `base:`
+// field, and in a named profile's `base:` override, must validate
+// successfully now that validateConfigFields routes through
+// core.ParseBaseImageSpec instead of core.ParseBaseImagePreset (which
+// rejected anything that wasn't one of the four fixed preset names). A
+// typo'd preset must still fail, at both levels, exactly as before.
+func TestConfigValidateCommand_CustomBaseReference(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, ports.ConfigFilename)
+	opts := &configValidateOptions{dir: tmpDir, output: "json"}
+
+	// A full custom reference at the top level must pass.
+	customBaseCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+base: gcr.io/my-org/my-base:v1.2.3
+`
+	_ = os.WriteFile(cfgPath, []byte(customBaseCfg), 0644)
+	if err := runConfigValidate(nil, opts); err != nil {
+		t.Errorf("expected a full custom image reference in top-level base to pass validation, got: %v", err)
+	}
+
+	// The same custom reference, only set in a named profile, must also pass.
+	customBaseProfileCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+base: distroless
+profiles:
+  custom-dev:
+    base: gcr.io/my-org/my-base:v1.2.3
+`
+	_ = os.WriteFile(cfgPath, []byte(customBaseProfileCfg), 0644)
+	if err := runConfigValidate(nil, opts); err != nil {
+		t.Errorf("expected a full custom image reference in a profile's base to pass validation, got: %v", err)
+	}
+
+	// A typo'd preset must still fail at the top level, not be silently
+	// accepted as a bizarre reference.
+	typoBaseCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+base: distrolss
+`
+	_ = os.WriteFile(cfgPath, []byte(typoBaseCfg), 0644)
+	if err := runConfigValidate(nil, opts); err == nil {
+		t.Fatal("expected a typo'd base preset to fail validation, got nil")
+	}
+
+	// The same typo, only in a named profile, must also fail.
+	typoBaseProfileCfg := `version: 1
+docker:
+  repo: ghcr.io/example/app
+base: distroless
+profiles:
+  custom-dev:
+    base: distrolss
+`
+	_ = os.WriteFile(cfgPath, []byte(typoBaseProfileCfg), 0644)
+	if err := runConfigValidate(nil, opts); err == nil {
+		t.Fatal("expected a typo'd base preset in a profile to fail validation, got nil")
+	}
+}
+
 // TestConfigValidateCommand_ProfileValidation exercises the profile
 // validation path of runConfigValidate: a valid top-level config with an
 // invalid field buried in a named profile must fail validation, name the

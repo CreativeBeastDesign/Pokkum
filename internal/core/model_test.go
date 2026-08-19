@@ -413,6 +413,114 @@ func TestParseBaseImagePreset(t *testing.T) {
 	}
 }
 
+// TestParseBaseImageSpec guards the --base preset-vs-reference disambiguation
+// this function performs. Before this function existed, --base's only path
+// was core.ParseBaseImagePreset, which rejects any string that isn't one of
+// the four fixed preset names — meaning a full custom image reference
+// (`gcr.io/my/base:tag`) was rejected outright despite BaseImageCustom and
+// BaseImageRequest.Ref already existing and being consumed by the resolver.
+// Confirmed failing against the pre-fix code: ParseBaseImagePreset("gcr.io/my/base:tag")
+// returns an error, so any caller routed only through it can never reach
+// BaseImageCustom with that ref.
+func TestParseBaseImageSpec(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		wantPreset core.BaseImagePreset
+		wantRef    string
+		wantErr    bool
+		errSubstr  string
+	}{
+		{
+			name:       "known preset distroless still resolves as a preset",
+			input:      "distroless",
+			wantPreset: core.BaseImageDistroless,
+			wantRef:    "",
+		},
+		{
+			name:       "known preset chainguard still resolves as a preset",
+			input:      "chainguard",
+			wantPreset: core.BaseImageChainguard,
+			wantRef:    "",
+		},
+		{
+			name:       "known preset distroless-node still resolves as a preset",
+			input:      "distroless-node",
+			wantPreset: core.BaseImageDistrolessNode,
+			wantRef:    "",
+		},
+		{
+			name:       "preset name is case-insensitive, same as ParseBaseImagePreset",
+			input:      "DISTROLESS",
+			wantPreset: core.BaseImageDistroless,
+			wantRef:    "",
+		},
+		{
+			name:       "bare 'custom' still resolves as the custom preset with no ref",
+			input:      "custom",
+			wantPreset: core.BaseImageCustom,
+			wantRef:    "",
+		},
+		{
+			name:       "full reference maps to BaseImageCustom with Ref set",
+			input:      "gcr.io/my-org/my-base:v1.2.3",
+			wantPreset: core.BaseImageCustom,
+			wantRef:    "gcr.io/my-org/my-base:v1.2.3",
+		},
+		{
+			name:       "digest-pinned reference maps to BaseImageCustom with Ref set",
+			input:      "gcr.io/my-org/my-base@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			wantPreset: core.BaseImageCustom,
+			wantRef:    "gcr.io/my-org/my-base@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		},
+		{
+			name:       "surrounding whitespace is trimmed from a custom reference",
+			input:      "  gcr.io/my-org/my-base:v1.2.3  ",
+			wantPreset: core.BaseImageCustom,
+			wantRef:    "gcr.io/my-org/my-base:v1.2.3",
+		},
+		{
+			name:      "typo'd preset produces a helpful error, not a bizarre reference",
+			input:     "distrolss",
+			wantErr:   true,
+			errSubstr: "not a recognized preset",
+		},
+		{
+			name:      "invalid reference is rejected with a clear message, not deferred to pull time",
+			input:     "gcr.io/UPPERCASE/not:valid:tag",
+			wantErr:   true,
+			errSubstr: "base image reference",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			preset, ref, err := core.ParseBaseImageSpec(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ParseBaseImageSpec(%q) = (%q, %q, nil), want error containing %q", tt.input, preset, ref, tt.errSubstr)
+				}
+				if !errors.Is(err, core.ErrInvalidBaseImage) {
+					t.Errorf("ParseBaseImageSpec(%q) error = %v, expected ErrInvalidBaseImage", tt.input, err)
+				}
+				if tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Errorf("ParseBaseImageSpec(%q) error = %v, want substring %q", tt.input, err, tt.errSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseBaseImageSpec(%q) unexpected error: %v", tt.input, err)
+			}
+			if preset != tt.wantPreset {
+				t.Errorf("ParseBaseImageSpec(%q) preset = %q, want %q", tt.input, preset, tt.wantPreset)
+			}
+			if ref != tt.wantRef {
+				t.Errorf("ParseBaseImageSpec(%q) ref = %q, want %q", tt.input, ref, tt.wantRef)
+			}
+		})
+	}
+}
+
 func TestParseSourceDateEpoch(t *testing.T) {
 	tests := []struct {
 		input   string

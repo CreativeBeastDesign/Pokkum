@@ -523,6 +523,85 @@ func TestResolve_LockfileResolutionAndSave(t *testing.T) {
 	}
 }
 
+// TestResolve_CustomBaseLockKeyCollision guards a lockfile-keying gap found
+// while adding --base's custom-reference support: lockKey for
+// BaseImageCustom is always the literal string "custom" (resolver.go's
+// lockKey = string(req.Preset)), regardless of what the actual custom Ref
+// is — unlike every other preset, where lockKey already uniquely identifies
+// one specific image. Two different custom bases sharing one project's
+// pokkum.lock therefore share that single "custom" slot.
+//
+// Before the fix, this was worse than a mere cache-slot eviction: resolving
+// custom base B after custom base A had already been locked would find A's
+// entry under the "custom" key (lockKey lookup does not consider what Ref
+// was actually requested), trust its entry.Ref and entry.PinnedRef, and
+// silently resolve and return A's image — a different image than the one B
+// actually requested — even though B's own Ref was passed through
+// correctly. This test resolves A, then resolves B against the same
+// lockfile and asserts the result is actually B's digest, not A's.
+func TestResolve_CustomBaseLockKeyCollision(t *testing.T) {
+	s, _ := newTestRegistry(t)
+	refA := pushImage(t, s, "app/custom-a:v1", ports.LinuxAMD64)
+	refB := pushImage(t, s, "app/custom-b:v1", ports.LinuxAMD64)
+
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "pokkum.lock")
+
+	r := NewResolver(nil)
+	ctx := context.Background()
+
+	reqA := ports.BaseImageRequest{
+		Preset:       ports.BaseImageCustom,
+		Ref:          refA,
+		Platforms:    []ports.Platform{ports.LinuxAMD64},
+		Insecure:     true,
+		LockfilePath: lockPath,
+	}
+	resA, err := r.Resolve(ctx, reqA)
+	if err != nil {
+		t.Fatalf("Resolve custom base A: %v", err)
+	}
+
+	reqB := ports.BaseImageRequest{
+		Preset:       ports.BaseImageCustom,
+		Ref:          refB,
+		Platforms:    []ports.Platform{ports.LinuxAMD64},
+		Insecure:     true,
+		LockfilePath: lockPath,
+	}
+	resB, err := r.Resolve(ctx, reqB)
+	if err != nil {
+		t.Fatalf("Resolve custom base B (after A was already locked under the shared \"custom\" key): %v", err)
+	}
+
+	if resA.Digest == resB.Digest {
+		t.Fatalf("custom base A and B resolved to the same digest %s; the test fixtures are supposed to differ", resA.Digest)
+	}
+	if resB.Ref != refB {
+		t.Errorf("resolved base B's Ref = %q, want %q (the requested ref, not A's locked pinned ref)", resB.Ref, refB)
+	}
+	if resB.UpstreamRef != refB {
+		t.Errorf("resolved base B's UpstreamRef = %q, want %q; got a value that suggests A's stale lock entry (keyed only by preset \"custom\") was trusted for a different reference", resB.UpstreamRef, refB)
+	}
+
+	// The lockfile's single "custom" slot now reflects B (the most recently
+	// resolved custom base) — the pre-existing, documented single-slot
+	// limitation for BaseImageCustom, not itself a bug: what this test
+	// exists to catch is B silently coming back as A's content, not the
+	// slot being shared.
+	lf, err := lockfileutils.LoadLockfile(lockPath)
+	if err != nil {
+		t.Fatalf("LoadLockfile: %v", err)
+	}
+	entry, ok := lockfileutils.GetLockedBase(lf, "custom")
+	if !ok {
+		t.Fatal("expected a locked \"custom\" entry after resolving B")
+	}
+	if entry.Ref != refB {
+		t.Errorf("locked \"custom\" entry.Ref = %q, want %q (B, the most recent resolve)", entry.Ref, refB)
+	}
+}
+
 func TestResolve_OfflineMode(t *testing.T) {
 	tmpDir := t.TempDir()
 	lockPath := filepath.Join(tmpDir, "empty.lock")

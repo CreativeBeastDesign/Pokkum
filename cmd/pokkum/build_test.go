@@ -134,10 +134,11 @@ func reconcileStaticStrategy(static, strategyExplicit bool, strategy, base strin
 		basePreset = "chainguard"
 	}
 	var parsedPreset core.BaseImagePreset
+	var parsedRef string
 	if basePreset != "" {
-		parsedPreset, err = core.ParseBaseImagePreset(basePreset)
+		parsedPreset, parsedRef, err = core.ParseBaseImageSpec(basePreset)
 		if err != nil {
-			return "", "", "", fmt.Errorf("invalid base image preset: %w", err)
+			return "", "", "", fmt.Errorf("invalid base image: %w", err)
 		}
 	}
 
@@ -147,6 +148,7 @@ func reconcileStaticStrategy(static, strategyExplicit bool, strategy, base strin
 
 	effectiveStrategy = strategy
 	preset = parsedPreset
+	ref = parsedRef
 	if static {
 		effectiveStrategy = "static"
 		if basePreset == "" {
@@ -218,6 +220,23 @@ func TestBuildStaticStrategyReconciliation(t *testing.T) {
 			wantStrategy: "static",
 			wantPreset:   core.BaseImageChainguard,
 			wantRef:      "",
+		},
+		{
+			// Guards the CLI-reachability half of the --base custom-reference
+			// gap: a full image reference must resolve to BaseImageCustom with
+			// Ref populated, not be rejected as an unrecognized preset.
+			name:         "a full custom image reference resolves to BaseImageCustom with Ref set",
+			strategy:     "layered",
+			base:         "gcr.io/my-org/my-base:v1.2.3",
+			wantStrategy: "layered",
+			wantPreset:   core.BaseImageCustom,
+			wantRef:      "gcr.io/my-org/my-base:v1.2.3",
+		},
+		{
+			name:            "a typo'd preset is rejected rather than silently treated as a reference",
+			strategy:        "layered",
+			base:            "distrolss",
+			wantErrContains: "not a recognized preset",
 		},
 	}
 

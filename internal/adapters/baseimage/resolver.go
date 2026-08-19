@@ -56,6 +56,43 @@
 // core never does this — BuildRequest.Platforms is fixed for the life of one
 // Resolve call — so this is a documented limitation of sharing a Resolver
 // across independently-cancelled contexts, not a bug in the common path.
+//
+// # Lockfile keying
+//
+// Resolve keys every pokkum.lock entry by lockKey = string(req.Preset), never
+// by the Ref actually requested. For BaseImageDistroless, BaseImageChainguard
+// and BaseImageDistrolessNode this is fine because the preset already
+// uniquely identifies one specific upstream image (that one-preset-per-image
+// invariant is exactly why BaseImageDistrolessNode is its own preset rather
+// than a Ref override on BaseImageDistroless — see that constant's doc
+// comment). BaseImageCustom breaks the invariant: it is one preset value
+// covering every possible custom reference a project might use, so every
+// custom base in a project shares the single "custom" lockfile slot
+// regardless of which Ref each one actually names.
+//
+// Two consequences follow, both guarded explicitly in Resolve rather than
+// left implicit:
+//
+//   - Resolving a locked entry found under lockKey "custom" is only trusted
+//     when entry.Ref matches the Ref actually being resolved. Without this,
+//     switching a project's custom base to a different reference would find
+//     the previous reference's stale entry (same lockKey, different image),
+//     trust its PinnedRef, and silently resolve and return the *previous*
+//     image's content instead of the one just requested — not a mere
+//     evicted cache slot, but the wrong image served transparently.
+//   - Carrying a locked entry's scan metadata (LastScannedAt,
+//     VulnerabilitiesCount, MaxSeverity) or mirror ref onto a freshly
+//     resolved image is only done when the entry's Digest matches the
+//     digest just pulled, for the same reason.
+//
+// Both guards are narrow patches, not a redesign: they stop a *different*
+// custom image's data from being trusted for the current one, but they do
+// not give distinct custom references their own lock slots — the second
+// custom base a project resolves still evicts the first from the shared
+// "custom" key, exactly like any other single-slot cache. A real fix (e.g.
+// keying custom entries by a hash of their Ref, the same shape as
+// BaseImageDistrolessNode's dedicated preset) would need a pokkum.lock
+// schema migration and is tracked as follow-up work, not done here.
 package baseimage
 
 import (
@@ -277,7 +314,26 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		loaded, lerr := lockfileutils.LoadLockfile(req.LockfilePath)
 		if lerr == nil {
 			lf = loaded
-			if entry, ok := lockfileutils.GetLockedBase(lf, lockKey); ok && !req.UpdateBase {
+			entry, ok := lockfileutils.GetLockedBase(lf, lockKey)
+			// BaseImageCustom shares a single "custom" lockKey across every
+			// distinct custom reference a project might use (there is no
+			// per-reference lock slot — see the package doc's "Lockfile
+			// keying" note). Without this guard, a locked entry from a
+			// *different* custom ref than the one actually requested would
+			// still match on lockKey alone and get trusted below: its
+			// entry.Ref would overwrite upstreamRef and its entry.PinnedRef
+			// would silently replace ref, so the build would resolve and
+			// pull the previous custom image instead of the one just
+			// requested — not merely an evicted cache entry, but the wrong
+			// image served transparently. Requiring entry.Ref to match the
+			// requested ref before trusting the entry closes that hole
+			// without changing the lockKey scheme (still just "custom");
+			// every other preset's lockKey already uniquely identifies one
+			// specific image, so this check is a no-op for them.
+			if ok && req.Preset == core.BaseImageCustom && entry.Ref != ref {
+				ok = false
+			}
+			if ok && !req.UpdateBase {
 				lockedFound = true
 				if entry.Ref != "" {
 					upstreamRef = entry.Ref
@@ -361,7 +417,14 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		Images:      make(map[ports.Platform]v1.Image, len(req.Platforms)),
 	}
 	if lf != nil {
-		if existing, ok := lockfileutils.GetLockedBase(lf, lockKey); ok {
+		// existing.Digest must match the image just pulled before its scan
+		// metadata is trusted: for BaseImageCustom, lockKey alone ("custom")
+		// does not identify which custom reference the entry belongs to
+		// (see the lockKey collision note above), and even for the
+		// single-image presets, an entry from before the last
+		// --update-base would otherwise misattribute a stale scan result to
+		// the digest actually resolved here.
+		if existing, ok := lockfileutils.GetLockedBase(lf, lockKey); ok && existing.Digest == pull.digest.String() {
 			out.LastScannedAt = existing.LastScannedAt
 			out.VulnerabilitiesCount = existing.VulnerabilitiesCount
 			out.MaxSeverity = existing.MaxSeverity
@@ -444,9 +507,18 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 			if mirrorRef == "" && existing.MirrorRef != "" && existing.Digest == entry.Digest {
 				entry.MirrorRef = existing.MirrorRef
 			}
-			entry.LastScannedAt = existing.LastScannedAt
-			entry.VulnerabilitiesCount = existing.VulnerabilitiesCount
-			entry.MaxSeverity = existing.MaxSeverity
+			// Same digest-match requirement as the mirror carry-over just
+			// above: an entry found under lockKey alone may belong to a
+			// different digest — for BaseImageCustom, possibly an entirely
+			// different custom reference sharing the single "custom" slot
+			// (see the lockKey collision note above) — so its scan metadata
+			// must not be attributed to the digest actually being locked
+			// here.
+			if existing.Digest == entry.Digest {
+				entry.LastScannedAt = existing.LastScannedAt
+				entry.VulnerabilitiesCount = existing.VulnerabilitiesCount
+				entry.MaxSeverity = existing.MaxSeverity
+			}
 		}
 		lockfileutils.SetLockedBase(lf, lockKey, entry)
 		if serr := lockfileutils.SaveLockfile(req.LockfilePath, lf); serr != nil {

@@ -301,8 +301,8 @@ func validateConfigFields(f configFieldsToValidate) []string {
 	}
 
 	if f.base != "" {
-		if _, err := core.ParseBaseImagePreset(f.base); err != nil {
-			errs = append(errs, fmt.Sprintf("%sinvalid base preset %q: %v", prefix, f.base, err))
+		if _, _, err := core.ParseBaseImageSpec(f.base); err != nil {
+			errs = append(errs, fmt.Sprintf("%sinvalid base %q: %v", prefix, f.base, err))
 		}
 	}
 
