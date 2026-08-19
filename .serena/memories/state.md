@@ -143,14 +143,26 @@ before trusting a claim that predates the commit it cites.
   `VerifyBaseImage`/native inspection by design — the base digest is already
   bound into the cache key, so a hit can only match the exact base a full build
   would have used.
-- **Real gap, still open**: the cache-verify key chain
-  (`--cache-verify-key`/`POKKUM_CACHE_PUBKEY`/`POKKUM_SIGNING_PUBKEY`/`POKKUM_BASE_IMAGE_PUBKEY`)
-  never reads `req.Signing.PublicKeyPEM` — `internal/core/pipeline.go`'s
-  `RemoteCache.Check` call doesn't populate it. A build signed via
-  `--signing-key` alone doesn't automatically make its own cache entries
-  verifiable; the practical outcome is fail-safe (falls through to a full
-  rebuild) rather than fail-fast-with-a-clear-story. See `mem:open_decisions`
-  row 7.
+- **Closed 2026-08-19: the cache-verify key chain now ends in the signing
+  key's public half.** Chain order is `--cache-verify-key`/`.pokkum.yaml
+  cache.pubkey` → `POKKUM_CACHE_PUBKEY` → `POKKUM_SIGNING_PUBKEY` →
+  `POKKUM_BASE_IMAGE_PUBKEY` → `ports.RemoteCacheVerifyOptions.SigningPublicKeyPEM`.
+  Three things to know before touching it: (1) precedence lives in exactly ONE
+  place — `internal/adapters/remotecacheutils`' static-key arm — and
+  `internal/core/pipeline.go` only *offers* the derived key via the dedicated
+  `SigningPublicKeyPEM` field (populated from `req.Signing.PublicKeyPEM` at the
+  `RemoteCache.Check` call). It deliberately does NOT write `PublicKeyPEM`,
+  because that would pre-empt the `POKKUM_*_PUBKEY` links the adapter resolves
+  after it and silently override an explicit operator choice — and it would
+  fork the chain into two drifting copies (row 41). (2) The fallback NARROWS
+  trust, never widens it: the static-key arm accepts a candidate only if its
+  Simple Signing payload verifies against that one key, and keyless-vs-static
+  mode selection keys on `KeylessIdentity` alone, so no key field can flip the
+  mode. Without the fallback there is no key at all and every candidate is
+  refused. (3) It logs at INFO when it engages, asserted by a test — an
+  unannounced implicit trust derivation is the rows 38/41 shape. No signing key
+  configured leaves the chain behaving exactly as before. Supersedes
+  what had been `mem:open_decisions` row 7, deleted as resolved.
 - Layer cache (`layercacheutils`) key dropped its `modTime` parameter entirely
   (`1675d4c`) — immutable-binary layers (Bun, supervisor, static-server) use a
   fixed epoch constant, not `SOURCE_DATE_EPOCH`, so their digests don't churn
@@ -160,9 +172,29 @@ before trusting a claim that predates the commit it cites.
 - `secretguard` (`deps.SecretGuard`, invoked by `internal/core/pipeline.go`'s
   `runSecretScan`) scans build **output** directories, wired whenever
   `deps.SecretGuard != nil` — not gated by strategy in the pipeline itself.
-- Open question, not yet resolved: whether `--strategy=exe`'s single compiled
-  binary output gets equivalent coverage to layered/static's directory scan.
-  See `mem:open_decisions` row 5.
+- **`--strategy=exe` coverage, resolved 2026-08-19 (partially — read the
+  residual gap).** The pipeline already scanned exe's `prep.OutputDir`; the
+  actually-uncovered surface was the *compile entrypoint's own directory*,
+  which is not always inside `OutputDir` — with `--telemetry`,
+  `sveltekitutils.PrepareVirtualTelemetryEntry` rewrites `EntrypointPath` to
+  `<projectDir>/.pokkum/telemetry-entry.ts` alongside a generated
+  `.pokkum/otel-bootstrap.ts`, both bundled into the shipped binary by
+  `bun build --compile`. Neither was scanned at either stage: they are written
+  by `Prepare` (so absent at the pre-build scan) AND
+  `secretguard.ScanDirectory` hard-skips `.pokkum`/`.svelte-kit`/`node_modules`/
+  `.git` subdirectories — but only when `rel != "."`, so those trees ARE
+  scannable when handed to it as the scan ROOT, which is what makes this fix
+  work at all. `postBuildScanDirs(strategy, outputDir, entrypointPath)` now
+  returns both trees for exe, deduped via `dirWithin` so the common
+  no-telemetry layout (entrypoint inside `OutputDir`) is still scanned once.
+  **Residual gap, deliberately not closed**: a secret injected by the
+  `bun build --compile` step itself (a `bunfig.toml` preload plugin, a
+  `with { type: "macro" }` import) is in neither tree. Scanning the compiled
+  binary's string sections was rejected — non-line-oriented, size-unbounded,
+  constants may be transformed/split, so it risks both false negatives and the
+  noisy false positives that get a scanner switched off. exe is NOT at parity
+  with layered/static. Closes what had been `mem:open_decisions` row 5,
+  deleted as resolved.
 
 ## Documentation system (generated — read this before editing any status doc)
 - **`docs/roadmap/*.yaml` is the single source; the markdown is generated output.
@@ -257,9 +289,26 @@ before trusting a claim that predates the commit it cites.
   (`dedupeAttestRecordsByRel`), a path-traversal fix in `extractImmutableAssets`,
   a cross-repo `ResolveDigest` fix, and two availability caps. See `Lessons.md`'s
   2026-08-18 "Adversarial review" entry.
-- **Known, still-open gap**: `pokkum verify`'s default rebuild-and-compare path
-  is not `--asset-overlay`-aware — verifying an asset-overlay image reports a
-  false-positive digest mismatch. See `mem:open_decisions` row 6.
+- **Closed 2026-08-19** (`5455fb3`): `pokkum verify`'s rebuild-and-compare path
+  used to report a false-positive digest mismatch on any `--asset-overlay`
+  image. `comparator.CompareImages` now reads `pokkum.dev/asset-overlay-sources`
+  off the image, rebuilds the merged overlay through the real `assetoverlay`
+  resolver using the remote config's own `Created` timestamp (the value the
+  original build stamped into every tar entry, so the only one that reproduces
+  the DiffID), and splices it in **only** once the reconstructed DiffID equals
+  the image's actual overlay-layer DiffID. Compression is fixed at gzip
+  regardless of the original, since a DiffID hashes the uncompressed stream.
+  Absent annotation, malformed entry, missing reconstruction support,
+  unreachable predecessor, and an annotation with no matching overlay layer are
+  all hard errors; a *stripped* annotation still fails, because the overlay
+  layer remains and the plain rebuild lacks it (tested, not argued).
+  Reconstruction reaches layer building via the new `ports.LayerBuilder`, not an
+  adapter→adapter import.
+- **Residual gap, narrow**: an image whose only output was `--output=tarball`
+  carries no annotations at all (the legacy docker-save format has no
+  annotations field), so this path cannot engage for it and the old false
+  positive survives in that one mode. `--output=tarball`/`--local` now warn and
+  name the dropped keys (`cd5c7f0`).
 
 ## Hermetic mode (`--hermetic`)
 - Network isolation (`CLONE_NEWNET`+`CLONE_NEWUSER`) covers both

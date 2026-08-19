@@ -840,7 +840,7 @@ func TestResolve_BaseImageCosignSignatureVerification_RealSignature(t *testing.T
 // genuinely, validly signed static-key base image is refused — not silently
 // accepted, and not silently reported as unverified — when
 // POKKUM_BASE_IMAGE_PUBKEY is unset. This is the regression guard for the
-// deleted DefaultBaseImagePublicKeyPEM fallback (Roadmap.md item 2h): a
+// deleted DefaultBaseImagePublicKeyPEM fallback (docs/archive/Roadmap.md item 2h): a
 // shared, unattributed placeholder public key used to stand in here, but
 // nothing ever signed with its (nonexistent) private half. The setup is
 // otherwise identical to the "genuinely signed image passes verification"

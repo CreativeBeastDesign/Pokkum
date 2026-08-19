@@ -601,7 +601,7 @@ func TestResolveProvenance_WithCosignSignature(t *testing.T) {
 // POKKUM_SIGNING_PUBKEY, POKKUM_BASE_IMAGE_PUBKEY all unset).
 //
 // This is the regression guard for the deleted cosign.DefaultPublicKeyPEM
-// fallback (Roadmap.md item 2h): a shared, unattributed placeholder public
+// fallback (docs/archive/Roadmap.md item 2h): a shared, unattributed placeholder public
 // key used to stand in here so parsePublicKeyPEM always succeeded, but
 // nothing ever signed with its (nonexistent) private half. The setup below
 // is otherwise identical to TestResolveProvenance_WithCosignSignature (a

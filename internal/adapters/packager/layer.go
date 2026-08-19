@@ -91,7 +91,7 @@ const (
 // internal/adapters/layercacheutils' on-disk cache (guaranteed miss every
 // commit for unchanged content) and registry-side cross-image
 // deduplication of the ~90MB Bun blob across a fleet of differently
-// -committed images (Roadmap.md item 3f).
+// -committed images (docs/archive/Roadmap.md item 3f).
 //
 // Pinning these three layers to a fixed constant instead is strictly MORE
 // deterministic, not less: determinism means identical inputs produce

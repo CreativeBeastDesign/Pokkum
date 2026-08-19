@@ -215,7 +215,7 @@ items:
   - id: exe-secret-scan-gap
     title: "`--strategy=exe` secret-scanning gap"
     stage: backlog
-    status: open
+    status: shipped
     kind: hardening
     tier: foundation
     summary: "The compiled exe strategy's single binary output has no post-build secret scan, unlike layered/static/asset-overlay."
@@ -232,6 +232,27 @@ items:
         description: "Treat exe the same as layered/static by scanning its bundled JS output before `bun build --compile` runs, closing the gap at the same stage the other strategies are covered."
         tradeoffs: "Cheaper and reuses the existing text-scan path, but a secret injected by the compile step itself (rather than present in JS source) would still be missed."
     recommendation: ""
+    decision: |
+      Option B in spirit, shipped 2026-08-19 — but implementing it corrected this item's own
+      premise. `postBuildScanDirs` already returned `[outputDir]` for `StrategyExe`, so exe's
+      pre-compile tree was never the uncovered surface.
+
+      The genuinely unscanned surface was the compile entrypoint's own directory when it sits
+      outside `prep.OutputDir`. With `--telemetry`, `PrepareVirtualTelemetryEntry` rewrites
+      `EntrypointPath` to `<projectDir>/.pokkum/telemetry-entry.ts` and generates
+      `.pokkum/otel-bootstrap.ts`, both bundled into the binary by `bun build --compile`.
+      Neither was scanned at either stage: they are written by `Prepare`, so they do not exist
+      at the pre-build scan, and `secretguard.ScanDirectory` hard-skips `.pokkum` and
+      `.svelte-kit` subdirectories — though only when `rel != "."`, which is why handing them
+      in as a scan *root* works. `postBuildScanDirs` now takes the entrypoint path and returns
+      both trees, deduped, with an unresolvable path resolving to "scan it".
+
+      Scanning the compiled binary's string sections was rejected: not line-oriented,
+      size-unbounded, and compiled constants can be transformed or split, risking both false
+      negatives and the noisy false positives that get a scanner switched off entirely.
+    limitations:
+      - "exe is **not** at parity with layered/static: a secret injected by the `bun build --compile` step itself — a `bunfig.toml` preload plugin, a `with { type: \"macro\" }` import — is present in neither scanned tree."
+      - "Covered by unit-level tests through real `core.Build` with the real secretguard adapter, but not yet by a real `bun build --compile` run; that empirical test class has caught nearly every severe bug in Lessons.md and remains the highest-value follow-up here."
     related: ["secret-inlining-guard"]
     impl:
       - internal/adapters/secretguard/guard.go
@@ -518,7 +539,7 @@ items:
   - id: remote-cache-verify-key-inheritance
     title: "Remote-cache verify key should inherit the signing key"
     stage: backlog
-    status: open
+    status: shipped
     kind: hardening
     tier: foundation
     summary: "A build signed via --signing-key alone doesn't automatically make its own remote-cache entries verifiable, since the cache-verify key chain never reads the signing public key."
@@ -537,8 +558,29 @@ items:
         description: "Keep the two key chains independent and clearly document that full cache-verification acceleration needs its own key configured."
         tradeoffs: "No implicit trust-chain surprises, but a real ergonomic gap for the common case where one key would suffice."
     recommendation: ""
+    decision: |
+      Option A, shipped 2026-08-19. The derived key is offered as a dedicated
+      last-resort chain entry (`RemoteCacheVerifyOptions.SigningPublicKeyPEM`), not by
+      writing `PublicKeyPEM` from core — that field is the *first* link, and the three
+      `POKKUM_*_PUBKEY` links are resolved afterwards inside `remotecacheutils`, so
+      populating it from core would have pre-empted three explicit sources and forked the
+      precedence chain into two copies free to drift. Precedence therefore stays in exactly
+      one place, and every explicit source still wins.
+
+      Why this narrows rather than widens trust, verified against the code and not assumed:
+      the static-key arm accepts a candidate only when its signature verifies against the
+      single key handed to it, and keyless-vs-static mode selection keys on
+      `KeylessIdentity` alone, so no key field can flip the mode. Falling back to the
+      operator's own signing public key therefore means "accept only cache entries I signed
+      myself", against a status quo of no key at all and every candidate refused. A test
+      proves an entry signed by a different key still fails closed.
+
+      Logged once per check rather than silently: an implicitly derived trust anchor nobody
+      is told about is the shape checklist rows 38/41 warn about.
     impl:
+      - internal/ports/cache.go
       - internal/core/pipeline.go
+      - internal/adapters/remotecacheutils/remotecacheutils.go
 
   - id: composition-root-verifier-injection
     title: "Composition-root refactor for verifier injection"

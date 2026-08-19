@@ -91,11 +91,9 @@ _None._
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
 | [Dedicated chainguard-static base image preset](items/chainguard-static-preset.md) | Give --strategy=static its own base-image preset so it stops sharing a pokkum.lock slot with an explicit chainguard glibc-dynamic --base build. | hardening | open |
-| [`--strategy=exe` secret-scanning gap](items/exe-secret-scan-gap.md) | The compiled exe strategy's single binary output has no post-build secret scan, unlike layered/static/asset-overlay. | hardening | open |
 | [Lifecycle-script execution provenance](items/lifecycle-script-provenance.md) | Record which packages actually ran install-time lifecycle scripts during the build as a provenance field. | feature | open |
 | [Native addon (.node binary) provenance](items/native-addon-provenance.md) | Hash and record prebuilt native addon binaries in provenance instead of leaving them outside the SBOM/SLSA story entirely. | feature | open |
 | [Node-core CVE lookup for --runtime=node](items/node-cve-lookup.md) | Decide whether to add an OSV Node-core ecosystem query path, or document the gap and leave base-image CVE posture to the operator. | feature | open |
-| [Remote-cache verify key should inherit the signing key](items/remote-cache-verify-key-inheritance.md) | A build signed via --signing-key alone doesn't automatically make its own remote-cache entries verifiable, since the cache-verify key chain never reads the signing public key. | hardening | open |
 | [Verify base image on cache hit](items/verify-base-on-cache-hit.md) | Opt-in flag to re-verify the base image's signature even on a confirmed remote-cache hit, for audit environments that need a uniform verified-base guarantee. | hardening | open |
 
 ### Testing & Infrastructure

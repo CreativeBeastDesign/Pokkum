@@ -54,7 +54,7 @@ var (
 	// placeholder public key (cosign.DefaultPublicKeyPEM) used to paper over
 	// this distinction — no real signer ever held its private half, so it
 	// could never actually verify anything — and has been deleted
-	// (Roadmap.md item 2h).
+	// (docs/archive/Roadmap.md item 2h).
 	ErrStaticKeyRequired = errors.New("provenance resolver: image carries a Cosign static-key signature but no verification key was configured")
 
 	// ErrUnverifiedSourceProvenance means req.ExpectSource was set but the
@@ -280,7 +280,7 @@ func (r *Resolver) ResolveProvenance(ctx context.Context, req ports.ProvenanceRe
 	// No fallback key beyond this. A shared, unattributed placeholder public
 	// key used to live here (cosign.DefaultPublicKeyPEM) — no real signer
 	// ever held its private half, so it could never actually verify
-	// anything; it has been deleted (Roadmap.md item 2h). verifyCosignSignature
+	// anything; it has been deleted (docs/archive/Roadmap.md item 2h). verifyCosignSignature
 	// below tracks whether a static signature was present with nothing
 	// configured to check it against (sigVerifyOutcome.staticSigSeenNoKey),
 	// so that case fails closed with ErrStaticKeyRequired instead of quietly

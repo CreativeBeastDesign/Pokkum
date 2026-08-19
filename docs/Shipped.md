@@ -6,6 +6,15 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 # Shipped
 
+## backlog
+
+### Supply Chain & Attestation
+
+| Title | Summary | Kind | Status | Commits |
+| --- | --- | --- | --- | --- |
+| [`--strategy=exe` secret-scanning gap](items/exe-secret-scan-gap.md) | The compiled exe strategy's single binary output has no post-build secret scan, unlike layered/static/asset-overlay. | hardening | shipped |  |
+| [Remote-cache verify key should inherit the signing key](items/remote-cache-verify-key-inheritance.md) | A build signed via --signing-key alone doesn't automatically make its own remote-cache entries verifiable, since the cache-verify key chain never reads the signing public key. | hardening | shipped |  |
+
 ## v1.2
 
 ### Observability

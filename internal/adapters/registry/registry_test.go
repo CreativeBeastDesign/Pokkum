@@ -252,7 +252,7 @@ func TestRegistry_CustomRegistryConfig(t *testing.T) {
 
 // TestPush_DockerHubMountSuppression_IsRealAndAppliesToOurPushPath documents
 // and pins a load-bearing quirk of go-containerregistry that the planned
-// cross-repo-blob-mount optimization for Push (Roadmap.md "Registry Push
+// cross-repo-blob-mount optimization for Push (docs/archive/Roadmap.md "Registry Push
 // Optimizations") must not be surprised by: when a.Push's target repo is
 // Docker Hub, go-containerregistry deliberately never attempts a cross-repo
 // blob mount for an inherited *remote.MountableLayer whose source registry

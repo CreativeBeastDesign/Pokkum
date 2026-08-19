@@ -1002,7 +1002,7 @@ func (r *Resolver) logger() *slog.Logger {
 //     placeholder key used to live here, but nothing signs with its (nonexistent)
 //     private half, so resolving with no key configured now fails closed with an
 //     actionable error instead of silently "verifying" against a key nobody
-//     owns (Roadmap.md item 2h). This is how Pokkum itself signs a custom or
+//     owns (docs/archive/Roadmap.md item 2h). This is how Pokkum itself signs a custom or
 //     self-hosted base, and it is the default for ports.BaseImageCustom.
 //
 //   - keyless: a Sigstore keyless signature — a short-lived Fulcio
@@ -1059,7 +1059,7 @@ func (r *Resolver) verifyBaseImage(ctx context.Context, ref, upstreamRef string,
 			// its own doc comment admitted no real signer held the private
 			// half, so it "verified" nothing and only failed closed by
 			// accident. A trust anchor nobody owns is worse than no default
-			// (Roadmap.md item 2h), so this is now a named, actionable
+			// (docs/archive/Roadmap.md item 2h), so this is now a named, actionable
 			// error — distinct from a signature that was checked and found
 			// invalid — rather than a silent, unverifiable default.
 			return fmt.Errorf(

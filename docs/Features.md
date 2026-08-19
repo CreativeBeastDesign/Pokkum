@@ -292,6 +292,14 @@ pokkum-init and pokkum-static are now built by CI/releases and freshness-checked
   - [internal/adapters/staticserver/blob_freshness_test.go](../internal/adapters/staticserver/blob_freshness_test.go)
   - [Makefile](../Makefile)
 
+### [`--strategy=exe` secret-scanning gap](items/exe-secret-scan-gap.md)
+
+The compiled exe strategy's single binary output has no post-build secret scan, unlike layered/static/asset-overlay.
+
+- Implementation:
+  - [internal/adapters/secretguard/guard.go](../internal/adapters/secretguard/guard.go)
+  - [internal/core/pipeline.go](../internal/core/pipeline.go)
+
 ### [`--expect-source` requires verified provenance](items/expect-source-verified.md)
 
 `--expect-source` now refuses to compare against unsigned source annotations unless the caller opts into the explicitly-marked-unverified escape hatch.
@@ -334,6 +342,15 @@ Deleted the single hardcoded placeholder public key that silently backstopped si
 - Implementation:
   - [internal/adapters/cosign/signer.go](../internal/adapters/cosign/signer.go)
   - [internal/adapters/baseimage/resolver.go](../internal/adapters/baseimage/resolver.go)
+
+### [Remote-cache verify key should inherit the signing key](items/remote-cache-verify-key-inheritance.md)
+
+A build signed via --signing-key alone doesn't automatically make its own remote-cache entries verifiable, since the cache-verify key chain never reads the signing public key.
+
+- Implementation:
+  - [internal/ports/cache.go](../internal/ports/cache.go)
+  - [internal/core/pipeline.go](../internal/core/pipeline.go)
+  - [internal/adapters/remotecacheutils/remotecacheutils.go](../internal/adapters/remotecacheutils/remotecacheutils.go)
 
 ### [Secret-inlining guard (secretguard)](items/secret-inlining-guard.md)
 
@@ -424,6 +441,8 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - The bug was an interop assumption about cosign's own wire format encoded in a code comment and never checked against cosign's actual source — the attestation layer now writes `dev.cosignproject.cosign/signature: ""` to match cosign's convention exactly. ([cosign verify-attestation interop fix](items/cosign-attestation-interop.md))
 - The two embedded blobs are gitignored build artifacts (only `.gitkeep` is tracked), so `make check-embedded-blobs` guards local working-tree staleness specifically — CI itself is structurally safe since it always rebuilds both blobs from the checked-out commit before any test runs. ([Embedded PID-1 binaries brought under CI attestation](items/embedded-pid1-attestation-coverage.md))
 - This closes the gap described in the finding, not a hypothetical: for a supply-chain tool, the one component that had been running as PID 1 in every produced image, outside the CLI's own SLSA-attested build, was the sharpest edge found during that run. ([Embedded PID-1 binaries brought under CI attestation](items/embedded-pid1-attestation-coverage.md))
+- Covered by unit-level tests through real `core.Build` with the real secretguard adapter, but not yet by a real `bun build --compile` run; that empirical test class has caught nearly every severe bug in Lessons.md and remains the highest-value follow-up here. ([`--strategy=exe` secret-scanning gap](items/exe-secret-scan-gap.md))
+- exe is **not** at parity with layered/static: a secret injected by the `bun build --compile` step itself — a `bunfig.toml` preload plugin, a `with { type: "macro" }` import — is present in neither scanned tree. ([`--strategy=exe` secret-scanning gap](items/exe-secret-scan-gap.md))
 - Breaking change: CI using `--expect-source` on unsigned images now fails until it signs or passes `--allow-unverified-source`. ([`--expect-source` requires verified provenance](items/expect-source-verified.md))
 - Static-key signing only — there is no keyless (Fulcio/OIDC) signing path. Keyless Sigstore exists only on the verification side (base images, `pokkum verify`). ([Image signing with Cosign/DSSE](items/image-signing.md))
 - The placeholder trust-anchor fallback was removed; an unconfigured key now hard-fails instead of silently no-op signing (a breaking change for anyone who relied on the old default). ([Image signing with Cosign/DSSE](items/image-signing.md))
