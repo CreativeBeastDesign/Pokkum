@@ -1,0 +1,116 @@
+name: Sigstore TUF Trust Root Divergence Guard
+
+# TestTrustedRootSnapshot_TracksLiveTUFRepository (internal/adapters/sigstore/
+# trustedroot_network_test.go) is one of three staleness guards added for the
+# embedded Sigstore trust root (see Lessons.md's 2026-08-19 "the embedded
+# Sigstore trust root was already rejecting valid signatures as forgeries"
+# entry). It is the only one of the three that compares the embedded
+# snapshot's trust anchors against Sigstore's *live* public-good TUF
+# repository, so it is the only one that would have caught the incident that
+# motivated it: the embedded snapshot covered one Rekor transparency log, the
+# live root has covered two since 2025-09-23, and every signature logged to
+# the second log failed verification with an error indistinguishable from a
+# forgery.
+#
+# It is deliberately skipped under `-short`, and every job in ci.yml runs
+# with `-short` (see ci.yml's "Run Full Test Suite" step), so this guard has
+# never actually executed in CI. This workflow is its only home.
+#
+# Scheduled rather than run on every push: it depends on an external service
+# (Sigstore's TUF repository) and its entire purpose is catching *slow*
+# upstream drift (Rekor shard rotation happens on the order of months), so a
+# nightly cadence is already far more frequent than the drift it watches for,
+# and keeps a flaky/degraded network from ever pressuring the fast per-push
+# gate.
+on:
+  schedule:
+    # Every night at 03:00 UTC (distinct from fuzz.yml's 02:00 slot).
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tuf-divergence-guard:
+    name: Check Embedded Trust Root Against Live TUF Repository
+    runs-on: ubuntu-latest
+    # 60s test-internal timeout (trustedroot_network_test.go) plus Go
+    # toolchain setup; this never does a full build, so a short job timeout
+    # keeps a genuinely hung run from occupying a runner all night.
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # -count=1 (not a plain `go test`): go test's result cache has no way
+      # to know that "the live TUF repository may have changed since
+      # yesterday" is a reason to rerun — from its point of view, the
+      # package's own source is unchanged, so a cached run would report
+      # yesterday's answer forever without ever making another network call.
+      # This mirrors RefreshTrustedRootCommand's own use of -count=1
+      # (internal/adapters/sigstore/trustedroot_freshness.go) for the same
+      # reason.
+      #
+      # Real outcomes:
+      #   - divergence found  -> `go test` exits non-zero -> this step fails
+      #     -> the job fails -> GitHub's default scheduled-workflow-failure
+      #     notification fires. This is the guard actually working.
+      #   - repository unreachable -> the test itself calls t.Skip (verified
+      #     by reading trustedroot_network_test.go before relying on it:
+      #     FetchTrustedRootJSON's error path is t.Skipf, not t.Fatalf/
+      #     t.Errorf) -> `go test` exits 0 -> this step passes.
+      #   - checked, no divergence -> `go test` exits 0 -> this step passes.
+      # The next step tells these last two apart, since both exit 0 here.
+      - name: Run TUF Trust Root Divergence Guard
+        id: tuf_guard
+        run: |
+          set -o pipefail
+          go test -v -count=1 -run TestTrustedRootSnapshot_TracksLiveTUFRepository \
+            ./internal/adapters/sigstore/... 2>&1 | tee tuf-guard.log
+
+      # A skip must never be indistinguishable from "checked, no divergence":
+      # both leave the job green, and a job that is silently green either way
+      # is a guard that can go dark for good the day the network happens to
+      # be unreachable on every future nightly run, with nobody the wiser.
+      #
+      # This step does not fail the job on a skip (continue-on-error below) —
+      # doing so would recreate, one layer up, the exact "flaky network wedges
+      # the guard" failure mode the test's own t.Skip was written to avoid,
+      # just moved from the test to the workflow. Instead it renders as a
+      # visibly failed-but-non-blocking step (a red mark on this run, job
+      # still green) plus a job-summary banner, so a real, sustained outage
+      # shows up as a repeating visible pattern across this workflow's run
+      # history rather than as nothing at all.
+      - name: Flag it loudly if the guard was skipped rather than actually run
+        if: always()
+        continue-on-error: true
+        run: |
+          if grep -q -- '--- SKIP' tuf-guard.log; then
+            {
+              echo "## :warning: TUF divergence guard did not run tonight"
+              echo
+              echo "\`TestTrustedRootSnapshot_TracksLiveTUFRepository\` skipped:" \
+                   "the live Sigstore TUF repository (or this runner's network" \
+                   "path to it) was unreachable. **This run did not verify" \
+                   "trust-root freshness** — it is evidence of a connectivity" \
+                   "problem, not evidence the embedded snapshot is current."
+              echo
+              echo "The always-on age guard (\`TestEmbeddedTrustedRoot_IsFreshNow\`," \
+                   "run on every push) still bounds staleness independently of" \
+                   "this workflow. If this skip repeats across several" \
+                   "consecutive nightly runs, treat it as a real, persistent" \
+                   "outage or a CI network/egress policy change worth" \
+                   "investigating — check this workflow's recent run history for" \
+                   "the same banner before assuming it is a one-off blip."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=TUF divergence guard skipped::Live Sigstore TUF repository was unreachable; the guard did not actually run this time. Check this workflow's recent run history for a repeating pattern before assuming it is a one-off blip."
+            exit 1
+          fi
+          echo "Guard actually executed (pass or fail) — nothing to flag."

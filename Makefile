@@ -1,8 +1,32 @@
-.PHONY: help build supervisor static-server test test-short test-integration test-race coverage check-coverage fuzz-smoke check-arch lint fmt verify clean e2e-runtime-smoke
+.PHONY: help build supervisor static-server test test-short test-integration test-race coverage check-coverage fuzz-smoke check-arch check-embedded-blobs lint fmt verify clean e2e-runtime-smoke
 
 check-arch:  ##  Run hexagonal architecture purity test suite
 	@echo "Checking hexagonal architecture purity..."
 	@go test -v ./internal/architecture_test.go
+
+# Guards against the exact incident logged in Lessons.md's 2026-08-19 "no CI
+# job built them" entry recurring in its second half: CI now always rebuilds
+# pokkum-init/pokkum-static fresh (see the "Build Embedded PID-1 Binaries"
+# step in ci.yml), so a *locally* stale go:embedded blob structurally cannot
+# reach CI -- but it absolutely can sit around on a developer's or agent's
+# machine after editing supervisor/cmd/pokkum-static or supervisor/cmd/
+# pokkum-init without rerunning `make supervisor static-server`, and get
+# silently exercised by every subsequent local build/test.
+#
+# TestEmbeddedPID1Binaries_MatchSource (internal/adapters/staticserver/
+# blob_freshness_test.go) rebuilds both binaries from source for every
+# embedded platform and diffs the result against what is actually embedded.
+# It is invoked here with -count=1 rather than as a plain `go test`: go test
+# caches successful results per package, and its cache has no visibility
+# into a subprocess `go build` of a *different* package's source (see `go
+# help test`'s "rule for a match in the cache") -- so a plain `go test
+# ./internal/adapters/...` can replay a stale cached PASS from before the
+# source changed. -count=1 is the documented, idiomatic way to force a real
+# rerun. This is why `verify` (below) calls this target rather than trusting
+# its own "Adapter Unit Tests" step to have covered it.
+check-embedded-blobs:  ##  Verify embedded pokkum-init/pokkum-static binaries actually match their source (bypasses go test's result cache; see comment above)
+	@echo "Checking embedded PID-1 binaries match their source (forces a real rerun; a plain 'go test' can replay a stale cached PASS here -- see Makefile comment)..."
+	@go test -count=1 -run TestEmbeddedPID1Binaries_MatchSource -v ./internal/adapters/staticserver/...
 
 test-integration:  ##  Run integration tests (go test ./tests/integration)
 	@echo "Running integration tests..."
@@ -149,6 +173,11 @@ verify:  ##  Full agent verification suite: fmt+vet, lint, adapter tests, CLI bu
 	@go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test
 	@echo "Step 5/5 - Full internal test suite (incl. architecture purity)..."
 	@go test ./internal/...
+	@echo ""
+	@echo "Extra (beyond the 5 canonical steps) - Embedded PID-1 blob freshness guard..."
+	@echo "  Run with -count=1 deliberately: see check-embedded-blobs' comment for why a plain"
+	@echo "  'go test' cannot be trusted to catch a stale local blob here."
+	@$(MAKE) check-embedded-blobs
 
 clean:  ##  Clean build artifacts
 	@echo "Cleaning build artifacts..."
