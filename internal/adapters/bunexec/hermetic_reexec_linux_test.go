@@ -5,6 +5,7 @@ package bunexec
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -299,10 +300,72 @@ exit 1
 	if strings.Contains(err.Error(), "SOCKET_CONNECTED") {
 		t.Fatalf("--hermetic-mount-isolation failed to block the test socket from a real Prepare call: %v", err)
 	}
-	if strings.Contains(err.Error(), "failed to start inside the hermetic network sandbox") {
+	if hermeticEnvironmentUnavailable(err) {
 		t.Skipf("hermetic sandbox unavailable in this environment: %v", err)
 	}
 	if !strings.Contains(err.Error(), "SOCKET_BLOCKED") {
 		t.Fatalf("expected the error to carry the fake bun script's socket probe result, got: %v", err)
+	}
+}
+
+// hermeticEnvironmentUnavailable reports whether err means "this machine cannot
+// do hermetic sandboxing at all", as opposed to "hermetic sandboxing ran and
+// something is wrong".
+//
+// It exists because the original guard recognised only a failure to *start* the
+// sandbox, while applyHermeticMountIsolation's mask step needs the same
+// privilege and fails with entirely different wording. On GitHub's ubuntu
+// runners the bind-mount over the probe socket returns EPERM (unprivileged
+// user-namespace mounts are restricted on recent Ubuntu — see
+// kernel.apparmor_restrict_unprivileged_userns), so the end-to-end test failed
+// hard on an environmental limitation, naming the wrong cause and blocking the
+// e2e job. This is mem:self_review_checklist row 39: a skip guard must cover
+// every operation that depends on the precondition, not just the first one.
+//
+// Deliberately narrow. Callers must check for a genuine isolation *failure*
+// (SOCKET_CONNECTED) BEFORE consulting this, so that a real regression can
+// never be converted into a skip — the two errors are asymmetric: too narrow
+// restores a red build, too broad silently retires a security gate.
+func hermeticEnvironmentUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "failed to start inside the hermetic network sandbox"):
+		return true
+	case strings.Contains(msg, "mask hermetic-sensitive paths") &&
+		(strings.Contains(msg, "permission denied") || strings.Contains(msg, "operation not permitted")):
+		return true
+	}
+	return false
+}
+
+// TestHermeticEnvironmentUnavailable_BothDirections tests the skip-vs-fail
+// predicate in both directions, per row 39: an environmental error must skip,
+// and a substantive one must NOT, including when it is wrapped behind the same
+// message prefix the environmental case uses.
+func TestHermeticEnvironmentUnavailable_BothDirections(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"sandbox cannot start", errors.New("bunexec: failed to start inside the hermetic network sandbox: operation not permitted"), true},
+		{"mask denied by kernel policy", errors.New("bunexec: mask hermetic-sensitive paths: mask /tmp/x/test.sock: bind-mount /tmp/pokkum-hermetic-mask-1 over /tmp/x/test.sock: permission denied"), true},
+		{"mask denied, EPERM wording", errors.New("bunexec: mask hermetic-sensitive paths: bind-mount a over b: operation not permitted"), true},
+		// The substantive cases: isolation ran and something is actually wrong.
+		{"isolation breached", errors.New("bunexec: sveltekit build failed: SOCKET_CONNECTED"), false},
+		{"mask failed for a non-privilege reason", errors.New("bunexec: mask hermetic-sensitive paths: mask /tmp/x: no such file or directory"), false},
+		{"ordinary build failure", errors.New("bunexec: sveltekit build failed: exit status 1"), false},
+		{"permission denied elsewhere", errors.New("bunexec: write .pokkum/svelte.config.js: permission denied"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hermeticEnvironmentUnavailable(tt.err); got != tt.want {
+				t.Errorf("hermeticEnvironmentUnavailable(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }

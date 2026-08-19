@@ -52,15 +52,32 @@ jobs:
       - name: Roadmap Docs Freshness Guard
         run: bash scripts/check-docs-freshness.sh
 
+      # install-mode: goinstall builds golangci-lint from source with THIS
+      # job's Go toolchain. The prebuilt release binaries are compiled with
+      # whatever Go was current at their release, and golangci-lint refuses to
+      # load a config whose target Go version is newer than its own build
+      # version: v1.62.2's binary is built with go1.23, so against go.mod's
+      # 1.26.6 it exited 3 with "can't load config" — never linting anything.
+      # Because it failed at the *step* level, every later step in this job
+      # (govulncheck, architecture purity, race detector, the full test suite,
+      # the coverage floor, the CLI build) was skipped, so a dead linter had
+      # silently disabled the entire gate. Building from source keeps the
+      # linter's Go version equal to the module's by construction, so this
+      # cannot recur on the next Go bump. Version tracks .golangci.yml's
+      # documented ">= 1.64.0" assumption; do not lower go.mod to satisfy a
+      # linter (see CLAUDE.md's toolchain-stability rule).
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.62.2
+          version: v1.64.8
+          install-mode: goinstall
 
       - name: Run govulncheck
+        if: ${{ !cancelled() }}
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       - name: Check Hexagonal Architecture Purity
+        if: ${{ !cancelled() }}
         run: go test -v ./internal/architecture_test.go
 
       # Scoped race detector: internal/adapters/registry/mount_test.go's
@@ -71,6 +88,7 @@ jobs:
       # since -race roughly doubles-to-triples test time for little payoff
       # elsewhere. See Makefile's RACE_PACKAGES for the exact set.
       - name: Run Race Detector (scoped)
+        if: ${{ !cancelled() }}
         run: make test-race
 
       # Full suite + coverage profile in one pass (short mode: no network /
@@ -79,6 +97,7 @@ jobs:
       # hermetic). -coverpkg=./... so the profile reflects true whole-module
       # statement coverage, not just same-package self-coverage.
       - name: Run Full Test Suite (with coverage)
+        if: ${{ !cancelled() }}
         run: go test -short -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
 
       # Coverage floor: a "must not regress much below today" ratchet, not
@@ -87,6 +106,7 @@ jobs:
       # minus ~2.5 points of slack — see scripts/check-coverage.sh for the
       # full rationale and how to move the floor as coverage improves.
       - name: Enforce Coverage Floor
+        if: ${{ !cancelled() }}
         run: bash scripts/check-coverage.sh coverage.out
 
       - name: Upload Coverage Profile
@@ -99,6 +119,7 @@ jobs:
           retention-days: 14
 
       - name: Verify CLI Build
+        if: ${{ !cancelled() }}
         run: go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test
 
   # Real-build e2e tests: tests/integration/reproducibility_e2e_test.go,
@@ -166,6 +187,21 @@ jobs:
               (cd "$dir" && bun install --frozen-lockfile)
             fi
           done
+
+      # Recent Ubuntu restricts mount operations inside unprivileged user
+      # namespaces via AppArmor, which makes applyHermeticMountIsolation's
+      # bind-mount masking return EPERM on this runner. The bunexec hermetic
+      # tests skip cleanly in that case (hermeticEnvironmentUnavailable), but
+      # skipping means --hermetic-mount-isolation — a build-sandbox security
+      # control — would have no executing test anywhere, since the tests are
+      # Linux-only and this is the only Linux job that runs them. Relaxing the
+      # restriction here lets them actually run. Best-effort on purpose: if the
+      # knob is absent or refused on a future runner image, the tests skip with
+      # a message naming this cause rather than failing the job.
+      - name: Allow unprivileged user-namespace mounts (for hermetic sandbox tests)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+            echo "could not relax the restriction; hermetic mount-isolation tests will skip"
 
       - name: Run Real-Build E2E Tests
         run: |
