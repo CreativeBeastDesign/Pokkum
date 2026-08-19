@@ -21,6 +21,17 @@ runtime.
   (default `/app/client:/app/prerendered`), final 404, `Range`/`If-Range` (206),
   strong ETags, Content-Encoding negotiation against `.gz`/`.br`/`.zst` sidecars,
   immutable cache headers, `/healthz`+`/readyz` probes, graceful shutdown.
+- **Conditional GET (`If-None-Match` → 304, fixed 2026-08-19).** The server always
+  computed and sent a strong `ETag` but never checked `If-None-Match` at all — no
+  304 was ever possible, so a client already holding the current copy re-downloaded
+  the full body every time (worst for prerendered HTML, which is `no-cache` and thus
+  revalidated on every load). Now parses `If-None-Match` as an entity-tag list per
+  RFC 9110 (`*` matches anything; comparison is weak, since the server only ever
+  emits strong tags), checked after the `ETag` is set and before the `Range` block
+  so a match wins over a would-be 206. `If-Modified-Since` deliberately NOT
+  implemented: no `Last-Modified` is sent and in-image mtimes are pinned to a fixed
+  epoch, so a mtime-derived validator would be a constant, not a real signal. Found
+  by executing `paranoid-testing-guide.md` rather than reading it. See `Lessons.md`.
 - **Candidate resolution order (fixed 2026-08-19): exact file → `<rel>.html` →
   directory `index.html`, all three through one shared containment-checked
   resolver.** Previously there was no `.html` candidate at all, so every
@@ -83,9 +94,19 @@ CI job and no `.goreleaser.yaml` hook ran `make static-server` before
 all — `go:embed all:bin` embeds an almost-empty directory without error, so
 this was invisible until something looked for the missing blob at runtime.
 Fixed: `static-server` joins the goreleaser before-hooks and a CI build step
-in all three workflows. Still open: nothing asserts the embedded blob matches
-a fresh build of its own source (a stale local blob could still ship
-unnoticed) — tracked in `Roadmap.md`.
+in all three workflows. **The remaining gap is closed too (2026-08-19):**
+`make check-embedded-blobs` (`blob_freshness_test.go`'s
+`TestEmbeddedPID1Binaries_MatchSource`, `-count=1` since `go test`'s result
+cache can't see through an exec'd `go build` into another package's source)
+rebuilds both binaries fresh and compares them byte-for-byte against what's
+embedded; wired into `make verify` as an explicit extra step, deliberately
+NOT in the PR-gate CI job (CI always rebuilds both from the checked-out
+commit first, so this exact staleness is a local-only hazard there). This
+guard immediately found a second, unrelated bug: Go's default `-buildvcs`
+stamping made both binaries' content change on every commit regardless of
+source (byte counts matched, content didn't) — fixed with `-buildvcs=false`
+on both `Makefile` build targets and on the guard's own rebuild. See
+`Lessons.md` and `mem:self_review_checklist` row 31.
 
 ## Determinism
 

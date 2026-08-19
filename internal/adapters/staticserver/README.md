@@ -45,7 +45,20 @@ roots listed in `POKKUM_STATIC_ROOTS` (set by the packager to
   only incidentally, via the directory-index branch. All three candidates
   go through one shared containment-checked resolver).
 - `Range`/`If-Range` support (206 responses).
-- Strong `ETag`s (`"<hex>"` of content hash) for revalidation.
+- Strong `ETag`s (`"<hex>"` of content hash) for revalidation, and, as of
+  2026-08-19, an actual conditional-GET path: `If-None-Match` is checked
+  (parsed as a list of entity-tags, `*` matches any representation, weak
+  comparison so a `W/`-prefixed request tag still matches) and answered with
+  a bodiless `304` rather than resending the full response — previously the
+  server computed and sent the `ETag` but never consulted `If-None-Match` at
+  all, so it never returned 304, which mattered most for prerendered HTML
+  (marked `no-cache`, so revalidated on every load). The check runs after the
+  `ETag` is set and before the `Range` block, so a matching conditional wins
+  over a would-be 206. `If-Modified-Since` is deliberately not implemented —
+  no `Last-Modified` is sent, and in-image mtimes are pinned to a fixed epoch
+  for reproducibility, so a mtime-derived validator would be constant across
+  every build. Found by executing `paranoid-testing-guide.md`'s static
+  section rather than reading it. See `Lessons.md`'s 2026-08-19 entry.
 - `Content-Encoding` negotiation against the `.gz`/`.br`/`.zst` sidecars that
   `precompressutils` generates at build time.
 - Immutable cache headers on hashed/versioned assets.
@@ -75,6 +88,26 @@ listener, never the real `ListenAndServe` bind path — the regression tests
 added with the fix bind a real ephemeral port and issue a real TCP request
 instead. See `Lessons.md`'s 2026-08-19 entry.
 
+## A collapsed port configuration is rejected outright, not merged or documented (fixed 2026-08-19)
+
+`PORT == POKKUM_PROBE_PORT` used to skip the probe listener on the (false)
+assumption that the content mux covered `/healthz`/`/readyz` too — there is
+no mux merge anywhere in this package, so a single-port deployment had no
+working probes at all while still serving pages happily; Kubernetes would
+route traffic to it with no signal that anything was wrong. `config.go`'s
+`validate()` now fails closed on this combination (naming both env vars,
+exit code `exitUsage`) before either listener is constructed, reached from
+env, from flags, and from an explicit `PORT` colliding with the *default*
+`POKKUM_PROBE_PORT`. `main.go`'s `if cfg.Port != cfg.ProbePort` guard around
+the probe listener is consequently always true and was removed — both
+listeners are now unconditional, with a comment recording the invariant
+that makes that safe. `pokkum build` could never have produced this
+configuration itself (`internal/core/model.go` rejects `Port == ProbePort`
+for every build request before packaging, and `build` has no `--port` flags
+at all), so this is defense-in-depth for configs assembled outside
+`pokkum build` — a hand-edited pod spec, or the binary run directly — not a
+build-time gap it closes.
+
 ## `--strategy=static`'s production bugs were only found once a real fixture existed (2026-08-19)
 
 Until `testdata/fixtures/sveltekit-static` (a genuine `@sveltejs/adapter-static`
@@ -99,10 +132,21 @@ published release) embedded no static-server binary at all: `go:embed
 all:bin` happily embeds an almost-empty directory with no build error, so
 the gap was invisible until something tried to use the missing blob at
 runtime. `static-server` now joins the goreleaser before-hooks and a
-`Build Embedded PID-1 Binaries` CI step in all three workflows. Still
-open: nothing yet asserts the embedded blob matches a fresh build of its
-own source, so a stale local blob committed by mistake wouldn't be caught
-— tracked in `Roadmap.md`.
+`Build Embedded PID-1 Binaries` CI step in all three workflows. **The
+remaining gap — nothing asserted the embedded blob matches a fresh build of
+its own source — is closed too (2026-08-19):** `make check-embedded-blobs`
+(`blob_freshness_test.go`'s `TestEmbeddedPID1Binaries_MatchSource`, run
+`-count=1` since `go test`'s result cache can't see through an exec'd
+`go build` into another package's source) rebuilds both binaries from
+source with the exact `Makefile` flags and compares them byte-for-byte
+against what's actually embedded, wired into `make verify` as an explicit
+extra step. Not part of the PR-gate CI job on purpose — CI always rebuilds
+both blobs from the checked-out commit before any test runs, so this
+specific staleness is a local working-tree hazard, not something a fresh
+CI checkout could ever hit. Building this guard immediately surfaced a
+second bug: Go's default `-buildvcs` stamping made both binaries' *content*
+change on every commit regardless of source, closed with `-buildvcs=false`
+on both build targets — see `Lessons.md`'s 2026-08-19 entry.
 
 ## Determinism
 

@@ -4,6 +4,84 @@ Most of [fixes-to-v1.md](fixes-to-v1.md) is invisible unless you were
 relying on the specific broken behavior. This page covers what you might
 actually notice, and what — if anything — you need to do.
 
+## 2026-08-19: `pokkum dev --no-container` — skip the image build for day-to-day iteration
+
+**What's new.** `pokkum dev` used to go through full image construction and a
+container daemon on every change, even for a quick local edit-and-reload
+loop. `--no-container` skips image construction entirely and runs your
+project's own dev server (`bun run dev`) directly on the host:
+
+    pokkum dev --no-container .
+
+**What you're trading away, stated plainly rather than left for you to
+discover.** This mode has none of the runtime guarantees a real Pokkum image
+provides — no supervisor, no startup attestation, no probes, no base image,
+no non-root user — and it does not reproduce production. A warning says so
+every time you start it. Use the default container-parity mode whenever a
+real environment check actually matters (before a release, or when
+debugging something that might be environment-specific).
+
+**Flags that describe an image, rejected rather than silently ignored:**
+`--debug`, `--platform`, `--bun-version`, and `--bun-variant` all error out
+immediately in this mode, since there's no image for them to describe.
+`--port` and `--watch` just warn if you pass them — the dev server picks its
+own port, and hot reload is already inherent to it, not something Pokkum
+switches on. `--bun-binary` and `--env-file` keep working normally.
+
+## 2026-08-19: `--base` now accepts a full custom image reference, not just the four preset names
+
+**Before:** `--base`'s own `--help` text said you could pass a custom image
+reference, but every actual attempt was rejected — only `distroless`,
+`chainguard`, `distroless-node`, and `custom` (as literal preset names) ever
+worked. The capability the port layer already supported had no CLI path to
+reach it.
+
+**Now:**
+
+    pokkum build --base gcr.io/my-org/my-base:latest --tag myapp:latest .
+
+Preset names are tried first, so a typo like `distrolss` is rejected with
+the list of valid presets rather than being silently parsed as a Docker Hub
+shorthand reference and failing much later at pull time. Anything shaped
+like a reference (containing `/`, `.`, `:`, or `@`) that isn't a known
+preset name is resolved as a custom base image.
+
+**The consequence you'll hit immediately: a custom reference defaults to
+static-key verification, and that now fails closed with no key configured**
+(the placeholder trust anchor that used to make this a silent no-op is
+gone — see the entry below). You'll see an error naming
+`POKKUM_BASE_IMAGE_PUBKEY`. Set it to the Cosign public key your custom base
+was signed with, or pass `--no-verify-base` if you don't have one and
+accept the risk.
+
+**A narrower thing worth knowing if you use more than one custom base in
+the same project:** every custom reference currently shares one lockfile
+slot in `pokkum.lock`. A locked entry is only reused when its recorded
+reference and digest both match what you're currently building, so you
+won't get served a *different* custom base's content — but the slot itself
+is still shared, so pinning multiple distinct custom bases in one project
+evicts each other rather than caching independently. A dedicated slot per
+reference is tracked as follow-up work in [Roadmap.md](Roadmap.md).
+
+## 2026-08-19: `cosign verify-attestation` now works against Pokkum's images
+
+**Before:** running `cosign verify-attestation` against an image Pokkum had
+built and attested failed with `missing "dev.cosignproject.cosign/signature"
+annotation` — even though `pokkum verify` read the exact same attestation
+material correctly. This wasn't a bad signature; it was a narrow interop gap
+in how the attestation layer was tagged, found by actually running `cosign`
+against a real build rather than trusting that a matching media type was
+sufficient.
+
+**Now:** Pokkum's attestation layer carries the same
+`dev.cosignproject.cosign/signature: ""` annotation cosign's own attest path
+always writes (empty, because the value is meaningless for an attestation —
+cosign's own code says so). `cosign verify-attestation` now succeeds against
+both the image index and every per-platform manifest Pokkum publishes to. If
+you were independently cross-checking Pokkum-built images with `cosign`
+(the entire point of dual-publishing to the index and per-platform
+manifests), this should now just work — no change needed on your side.
+
 ## 2026-08-19: `--runtime=node` — an escape hatch if Bun doesn't work for you
 
 Bun-only used to mean that a Bun compatibility bug (`AsyncLocalStorage`,
