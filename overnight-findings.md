@@ -121,4 +121,33 @@ Sigstore TUF root refresh.
 **Status:** not fixed — deliberately. The honest fix is to make every real-build test copy the fixture into `t.TempDir()` first (the pattern the smoke test already establishes) rather than patching individual collisions, and that is a broader test-hygiene change than belongs at the end of a long queue. Logged with the reproduction detail so it is not mistaken for a one-off flake.
 **Note:** I could not reproduce the failure after the fact, so this entry records an observation and a mechanism, not a confirmed root cause. Stated that way on purpose.
 
+### 12. `pokkum-static` emits `ETag` but never honours `If-None-Match` — no 304 responses
+
+**Found by:** rewriting `paranoid-testing-guide.md`, whose §22 told the reader to verify a 304. Executing that step live showed a 200 every time.
+**Where:** `supervisor/cmd/pokkum-static/server.go`. Confirmed by grep: no `If-None-Match`, `IfNoneMatch`, `StatusNotModified` or `304` anywhere in the package's non-test code.
+**What:** the server computes and sends a strong content-hash `ETag`, and uses it for `If-Range` validation, but has no conditional-GET path. So a client that already holds the current copy re-downloads the whole body on every request.
+**Severity:** Medium. Not a correctness or security fault — responses are valid, just wasteful — but this is a static file server whose whole job is serving cacheable assets, and it advertises the validator it then ignores. On prerendered HTML (deliberately `no-cache`, so revalidated every time) this is precisely the case 304 exists for.
+**Status:** fix dispatched.
+
+### 13. `--base`'s help promises a custom reference that no code path accepts
+
+**Found by:** verifying §10's commands against the real CLI.
+**What:** `--base`'s help text offers a custom image reference, but attempting one does not reach the build. Worth noting the *preset* path is fine and the `custom` preset itself works — it is the flag's documented free-form-ref affordance that dead-ends.
+**Severity:** Medium as a UX/docs mismatch; the flag advertises a capability the code does not provide. Not a security issue.
+**Status:** logged and recorded in the guide as a known gap so a reader does not file a bug against it. Not fixed — it needs a decision (wire the ref through, or narrow the help text to presets only) rather than a reflex patch.
+
+### 14. `cosign verify-attestation` rejects Pokkum's DSSE attestation in tag-fallback mode
+
+**Found by:** running the guide's §8 against a real registry with cosign v3.1.3.
+**What:** cosign reports `no matching attestations: ... missing "dev.cosignproject.cosign/signature" annotation`. Pokkum's own `pokkum verify` reads the same attestation correctly. So this is an **interop gap in the tag-fallback layout**, not a broken signature — but a reader following the guide would reasonably conclude the attestation was bad.
+**Severity:** Medium. It undercuts the independent-verification story that Tier 2d's dual-publish work exists to support: the whole point is that `cosign` and a Kyverno-style checker should both agree.
+**Status:** documented in the guide with the exact error text and the correct interpretation. Not fixed — needs a look at which annotations cosign requires on a tag-fallback attestation manifest.
+
+### 15. The guide's own `--output=json` assumption was wrong, and that is by design
+
+**Found by:** the same live-execution pass. `pokkum build`'s stdout is unconditionally the plain `repo@sha256:...` ref, so `build --output=json` produces no JSON envelope and the guide's `jq -r '.data.digest'` extraction — reused in eight places — could never have worked.
+**Not a product bug.** `internal/core/pipeline.go`'s Stage 11 is explicit that this is deliberate: "the one line of program output. Callers pipe this straight into `kubectl set image` or a manifest rewrite, so nothing else may ever share the stream." Also `--print-manifest`'s JSON has no `.data` wrapper — the envelope is per-command, not universal.
+**Severity:** none for the product; High for the guide, since every digest-dependent step downstream was broken.
+**Status:** ✅ fixed in the guide at the root and in all eight downstream uses. Recorded here because it is a good example of a doc that was internally consistent and entirely wrong — exactly what the guide's own "believe nothing" premise exists to catch, applied to itself.
+
 _(appended as work proceeds)_
