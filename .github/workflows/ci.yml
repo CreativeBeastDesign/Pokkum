@@ -203,11 +203,17 @@ jobs:
       # them), run exactly those tests in a privileged container. Without this
       # step they skip cleanly via hermeticEnvironmentUnavailable and the control
       # has no executing test at all.
+      # -buildvcs=false is load-bearing, not tidiness: the tests build a real
+      # pokkum binary, and git inside the container rejects the bind-mounted
+      # workspace as dubiously-owned (different UID), so `go build` fails with
+      # "error obtaining VCS status: exit status 128". That failure surfaces as a
+      # t.Skipf, so without this flag the step passes green while testing nothing
+      # — the same shape of silent hole this whole CI repair is about.
       - name: Hermetic Sandbox Tests (privileged container)
         run: |
           docker run --rm --privileged \
             -v "$PWD":/src -w /src \
-            -e GOFLAGS=-mod=mod \
+            -e GOFLAGS="-mod=mod -buildvcs=false" \
             golang:1.26 \
             go test -count=1 -run 'Hermetic' -v ./internal/adapters/bunexec/
 
