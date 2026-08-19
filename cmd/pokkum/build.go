@@ -159,6 +159,7 @@ type buildFlags struct {
 	cacheKeylessIdentity string
 	cacheKeylessIssuer   string
 	cacheVerifyStrict    bool
+	sigstoreTUFRefresh   bool
 }
 
 func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -348,6 +349,8 @@ The project directory defaults to the current working directory.`,
 		"Expected OIDC issuer for keyless cache verification")
 	cmd.Flags().BoolVar(&flags.cacheVerifyStrict, "cache-verify-strict", false,
 		"Strict cache verification: fail build if candidate cache tag has invalid signature")
+	cmd.Flags().BoolVar(&flags.sigstoreTUFRefresh, "sigstore-tuf-refresh", false,
+		"Opt-in: refresh the Sigstore trust root from the live TUF repository for cache-signature verification, falling back to the snapshot embedded in this binary (with a warning) if the refresh fails. Ignored when --sigstore-trusted-root is set, which always wins. Bound to --hermetic: a hermetic build never attempts this network fetch and uses the embedded snapshot instead, so hermetic builds cannot reach the network even with this flag set")
 
 	return cmd
 }
@@ -533,6 +536,19 @@ func newProvenanceResolver(logger *slog.Logger) *provenance.Resolver {
 		provenance.WithDSSESigner(dsse.NewSigner(logger)),
 	)
 }
+
+// sigstoreTUFOptionsFactory constructs the base TUFOptions for an opt-in
+// --sigstore-tuf-refresh, before Offline is bound to --hermetic (build.go) or
+// hardcoded false (verify.go, which has no hermetic mode of its own). A
+// package-level var, mirroring exitFunc's pattern in verify.go, so a test can
+// point it at a local request-counting server instead of the real Sigstore
+// TUF CDN and prove that a hermetic build makes zero network attempts even
+// with the refresh flag set -- something a struct-field assertion alone
+// cannot distinguish from "attempted and silently fell back". The network
+// safety guarantee itself (Offline refuses before any TUF client is even
+// constructed) lives in and is already tested by internal/adapters/sigstore;
+// this seam only proves this package's own wiring reaches it correctly.
+var sigstoreTUFOptionsFactory = sigstore.DefaultTUFOptions
 
 func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, flags *buildFlags, projectDir string) (*core.BuildRequest, error) {
 	// Load configuration
@@ -1064,6 +1080,26 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 		if data, err := os.ReadFile(flags.sigstoreTrustedRoot); err == nil {
 			req.CacheVerify.TrustedRootJSON = data
 		}
+	} else if flags.sigstoreTUFRefresh {
+		// Only reached when --sigstore-trusted-root was not given, so the
+		// explicit file always wins over the refresh flag. Offline is bound
+		// to the same value as --hermetic (req.Hermetic, set just above from
+		// flags.hermetic): a hermetic build must never reach the network for
+		// this either, so FetchTrustedRootJSON refuses before constructing a
+		// TUF client and ResolveTrustedRootJSON goes straight to the
+		// embedded snapshot. A live TUF fetch failure never fails the
+		// build; it only warns and falls back to the embedded snapshot.
+		tufOpts := sigstoreTUFOptionsFactory()
+		tufOpts.Offline = flags.hermetic
+		data, origin, err := sigstore.ResolveTrustedRootJSON(ctx, logger, tufOpts, time.Now())
+		if err != nil {
+			// Only fails if the embedded snapshot itself cannot be assessed,
+			// meaning this binary was built wrong -- fail closed rather than
+			// build against material that could not be characterized.
+			return nil, fmt.Errorf("resolve sigstore trust root for cache verification: %w", err)
+		}
+		req.CacheVerify.TrustedRootJSON = data
+		logger.Info("resolved Sigstore trust root for cache-signature verification", "origin", string(origin))
 	}
 
 	return &req, nil

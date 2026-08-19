@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/comparator"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
 )
@@ -23,6 +25,7 @@ type verifyOptions struct {
 	keylessIssuer         string
 	publicKey             string
 	trustedRoot           string
+	sigstoreTUFRefresh    bool
 }
 
 var exitFunc = os.Exit
@@ -65,6 +68,8 @@ func newVerifyCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
 		"Path or PEM string for the static Cosign public key to verify the image signature against")
 	cmd.Flags().StringVar(&opts.trustedRoot, "sigstore-trusted-root", "",
 		"Path to a Sigstore trusted-root JSON snapshot to verify keyless material against, instead of the embedded public-good snapshot")
+	cmd.Flags().BoolVar(&opts.sigstoreTUFRefresh, "sigstore-tuf-refresh", false,
+		"Opt-in: refresh the Sigstore trust root from the live TUF repository before verifying keyless material, falling back to the snapshot embedded in this binary (with a warning) if the refresh fails. Ignored when --sigstore-trusted-root is set, which always wins. verify has no hermetic/offline mode of its own -- it already reaches the registry to pull the image, its attestations and signatures -- so this performs the network fetch whenever set rather than refusing it; a fetch failure only warns and falls back, it never fails the command")
 
 	return cmd
 }
@@ -109,6 +114,39 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 			return nil
 		}
 		provReq.TrustedRootJSON = data
+	} else if opts.sigstoreTUFRefresh {
+		// Only reached when --sigstore-trusted-root was not given, so the
+		// explicit file always wins over the refresh flag. verify has no
+		// --hermetic of its own: it is never offline-guaranteed to begin
+		// with (it already pulls the image, attestations and signatures
+		// from the registry named on the command line), so Offline is
+		// deliberately false here -- unlike build's binding to --hermetic,
+		// there is no air-gapped invariant to protect on this path. A TUF
+		// fetch failure never fails verification; ResolveTrustedRootJSON
+		// warns and degrades to the embedded snapshot.
+		log := logger
+		if log == nil {
+			log = slog.Default()
+		}
+		tufOpts := sigstoreTUFOptionsFactory()
+		tufOpts.Offline = false
+		data, origin, rerr := sigstore.ResolveTrustedRootJSON(ctx, log, tufOpts, time.Now())
+		if rerr != nil {
+			// Only fails if the embedded snapshot itself cannot be assessed,
+			// which means this binary was built wrong -- fail closed rather
+			// than verify against material that could not be characterized.
+			msg := fmt.Sprintf("cannot resolve Sigstore trust root: %v", rerr)
+			if outputFormat == ports.FormatJSON {
+				_ = jsonutils.WriteError(os.Stdout, "verify", "ERR_INVALID_ARGUMENT", msg, "")
+				exitFunc(2)
+				return nil
+			}
+			fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+			exitFunc(2)
+			return nil
+		}
+		provReq.TrustedRootJSON = data
+		log.Info("resolved Sigstore trust root for verification", "origin", string(origin))
 	}
 
 	provResolver := newProvenanceResolver(logger)
