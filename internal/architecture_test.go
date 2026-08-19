@@ -2,12 +2,14 @@ package internal_test
 
 import (
 	"bytes"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/printer"
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -701,5 +703,108 @@ func TestEnumSwitchExhaustiveness(t *testing.T) {
 				"to enumSwitchAllowlist in internal/architecture_test.go with a comment explaining why.",
 				v.relPath, v.line, v.tagText, v.family, v.family)
 		}
+	}
+}
+
+// bannedImports maps an import path that must never appear anywhere in this
+// module to the reason it is banned. Each entry is a decision the project has
+// already taken, expressed as something the test suite enforces rather than
+// something a reader has to know.
+var bannedImports = map[string]string{
+	"golang.org/x/crypto/openpgp": "unmaintained and unsafe by design (GO-2026-5932, which has no fixed " +
+		"version and never will — the remediation is not using it). Pokkum verifies Bun's release " +
+		"signatures with github.com/ProtonMail/go-crypto/openpgp instead, which is the maintained fork. " +
+		"golang.org/x/crypto stays in the module graph for unrelated primitives (sha3, cast5, argon2, " +
+		"ssh, ...), so nothing stops someone importing this package by habit or autocomplete",
+}
+
+// TestBannedImportsAreAbsent enforces the openpgp substitution that go.mod only
+// ever *looked* like it enforced.
+//
+// go.mod used to carry `replace golang.org/x/crypto/openpgp =>
+// github.com/ProtonMail/go-crypto/openpgp`, which reads like a module-level
+// swap and is in fact inert: `replace` operates on module paths, and
+// golang.org/x/crypto/openpgp is a *package* inside the golang.org/x/crypto
+// module, never a module of its own (`go list -m` answers "not a known
+// dependency"). The substitution was real, but it came from the source
+// importing ProtonMail directly — nothing enforced it, and a single stray
+// import would have silently reintroduced the unmaintained package while the
+// directive sat there implying otherwise.
+//
+// This test is that enforcement, so the guarantee lives somewhere it can fail.
+func TestBannedImportsAreAbsent(t *testing.T) {
+	rootPath, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("Failed to resolve current directory: %v", err)
+	}
+	repoRoot := rootPath
+	if filepath.Base(rootPath) == "internal" {
+		repoRoot = filepath.Dir(rootPath)
+	}
+
+	// Every directory holding first-party Go source. Deliberately includes
+	// tests/ and scripts/: a banned import in a test still links the package
+	// into a binary this project builds, and the ban is about the dependency
+	// existing at all, not about which build it reaches.
+	searchRoots := []string{
+		filepath.Join(repoRoot, "internal"),
+		filepath.Join(repoRoot, "cmd"),
+		filepath.Join(repoRoot, "supervisor"),
+		filepath.Join(repoRoot, "tests"),
+		filepath.Join(repoRoot, "scripts"),
+		filepath.Join(repoRoot, "pkg"),
+	}
+
+	var scanned int
+	for _, root := range searchRoots {
+		if _, statErr := os.Stat(root); statErr != nil {
+			continue
+		}
+		walkErr := filepath.Walk(root, func(path string, fi os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if fi.IsDir() {
+				if name := fi.Name(); name == "testdata" || name == "node_modules" || name == ".pokkum" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") {
+				return nil
+			}
+			fset := token.NewFileSet()
+			file, parseErr := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+			if parseErr != nil {
+				return fmt.Errorf("parse %s: %w", path, parseErr)
+			}
+			scanned++
+			for _, imp := range file.Imports {
+				p, unquoteErr := strconv.Unquote(imp.Path.Value)
+				if unquoteErr != nil {
+					continue
+				}
+				if reason, banned := bannedImports[p]; banned {
+					rel, relErr := filepath.Rel(repoRoot, path)
+					if relErr != nil {
+						rel = path
+					}
+					t.Errorf("[BANNED IMPORT] %s:%d imports %q, which is banned: %s",
+						rel, fset.Position(imp.Pos()).Line, p, reason)
+				}
+			}
+			return nil
+		})
+		if walkErr != nil {
+			t.Fatalf("walking %s: %v", root, walkErr)
+		}
+	}
+
+	// A silently-blind walker is the failure mode this guards against: if the
+	// search roots ever stop matching the layout, the test must fail loudly
+	// rather than pass by scanning nothing.
+	if scanned == 0 {
+		t.Fatal("[TEST SETUP] scanned 0 Go files — the search roots no longer match the repository layout, " +
+			"so this test has gone blind rather than legitimately found nothing")
 	}
 }

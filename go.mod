@@ -105,5 +105,3 @@ require (
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 )
-
-replace golang.org/x/crypto/openpgp => github.com/ProtonMail/go-crypto/openpgp v1.4.1
