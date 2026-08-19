@@ -315,12 +315,18 @@ exit 1
 // It exists because the original guard recognised only a failure to *start* the
 // sandbox, while applyHermeticMountIsolation's mask step needs the same
 // privilege and fails with entirely different wording. On GitHub's ubuntu
-// runners the bind-mount over the probe socket returns EPERM (unprivileged
-// user-namespace mounts are restricted on recent Ubuntu — see
-// kernel.apparmor_restrict_unprivileged_userns), so the end-to-end test failed
-// hard on an environmental limitation, naming the wrong cause and blocking the
-// e2e job. This is mem:self_review_checklist row 39: a skip guard must cover
-// every operation that depends on the precondition, not just the first one.
+// runners the bind-mount over the probe socket returns EPERM, so the end-to-end
+// test failed hard on an environmental limitation, naming the wrong cause and
+// blocking the e2e job. This is mem:self_review_checklist row 39: a skip guard
+// must cover every operation that depends on the precondition, not just the
+// first one.
+//
+// The cause is the runner's mount privileges, not AppArmor's unprivileged-userns
+// restriction specifically: setting kernel.apparmor_restrict_unprivileged_userns=0
+// applied cleanly and the mount still returned "operation not permitted". The
+// control itself works — these tests pass in a privileged Linux container, which
+// is how CI now runs them (see the workflow's "Hermetic Sandbox Tests" step), so
+// this skip is the fallback rather than the normal path.
 //
 // Deliberately narrow. Callers must check for a genuine isolation *failure*
 // (SOCKET_CONNECTED) BEFORE consulting this, so that a real regression can

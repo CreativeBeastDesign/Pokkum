@@ -188,20 +188,28 @@ jobs:
             fi
           done
 
-      # Recent Ubuntu restricts mount operations inside unprivileged user
-      # namespaces via AppArmor, which makes applyHermeticMountIsolation's
-      # bind-mount masking return EPERM on this runner. The bunexec hermetic
-      # tests skip cleanly in that case (hermeticEnvironmentUnavailable), but
-      # skipping means --hermetic-mount-isolation — a build-sandbox security
-      # control — would have no executing test anywhere, since the tests are
-      # Linux-only and this is the only Linux job that runs them. Relaxing the
-      # restriction here lets them actually run. Best-effort on purpose: if the
-      # knob is absent or refused on a future runner image, the tests skip with
-      # a message naming this cause rather than failing the job.
-      - name: Allow unprivileged user-namespace mounts (for hermetic sandbox tests)
+      # --hermetic-mount-isolation's end-to-end test cannot run as a normal
+      # runner user: applyHermeticMountIsolation bind-mounts a mask over
+      # hermetic-sensitive paths, and on this runner that returns EPERM inside
+      # the unprivileged user namespace. Relaxing
+      # kernel.apparmor_restrict_unprivileged_userns was tried first and did NOT
+      # help (the sysctl applied cleanly and the mount still returned "operation
+      # not permitted"), so the cause is the runner's mount privileges rather
+      # than AppArmor's userns restriction specifically.
+      #
+      # The test itself is sound: it passes in a privileged Linux container. So
+      # rather than let a build-sandbox security control go untested everywhere
+      # (these tests are Linux-only, and this is the only Linux job that runs
+      # them), run exactly those tests in a privileged container. Without this
+      # step they skip cleanly via hermeticEnvironmentUnavailable and the control
+      # has no executing test at all.
+      - name: Hermetic Sandbox Tests (privileged container)
         run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
-            echo "could not relax the restriction; hermetic mount-isolation tests will skip"
+          docker run --rm --privileged \
+            -v "$PWD":/src -w /src \
+            -e GOFLAGS=-mod=mod \
+            golang:1.26 \
+            go test -count=1 -run 'Hermetic' -v ./internal/adapters/bunexec/
 
       - name: Run Real-Build E2E Tests
         run: |
