@@ -147,7 +147,10 @@ func runBaseCheck(ctx context.Context, logger *slog.Logger, args []string) error
 
 	resolver := newBaseImageResolver(logger)
 	for name, entry := range lf.Bases {
-		preset, err := core.ParseBaseImagePreset(name)
+		// Custom bases occupy per-reference slots ("custom:<hash>"), which are
+		// not preset names; PresetNameForLockKey maps them back to "custom" so
+		// they are still checked instead of being silently skipped here.
+		preset, err := core.ParseBaseImagePreset(lockfileutils.PresetNameForLockKey(name))
 		if err != nil {
 			continue
 		}

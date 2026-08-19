@@ -114,7 +114,7 @@ func (m *mockBaseImageResolver) Resolve(ctx context.Context, req ports.BaseImage
 	}, nil
 }
 
-func (m *mockBaseImageResolver) RecordScanResult(ctx context.Context, lockfilePath string, preset ports.BaseImagePreset, scan ports.ScanResult) error {
+func (m *mockBaseImageResolver) RecordScanResult(ctx context.Context, lockfilePath string, preset ports.BaseImagePreset, _ string, scan ports.ScanResult) error {
 	if m.recordScanResultFn != nil {
 		return m.recordScanResultFn(ctx, lockfilePath, preset, scan)
 	}

@@ -214,7 +214,7 @@ func (m *recordingBaseResolver) Resolve(_ context.Context, req ports.BaseImageRe
 	}, nil
 }
 
-func (m *recordingBaseResolver) RecordScanResult(_ context.Context, _ string, _ ports.BaseImagePreset, _ ports.ScanResult) error {
+func (m *recordingBaseResolver) RecordScanResult(_ context.Context, _ string, _ ports.BaseImagePreset, _ string, _ ports.ScanResult) error {
 	return nil
 }
 

@@ -53,6 +53,42 @@ func TestLockfileLoadAndSave(t *testing.T) {
 	}
 }
 
+// TestDeleteLockedBase_ExactKeyOnly guards the asymmetry between GetLockedBase
+// and DeleteLockedBase: lookups fall back to case-insensitive and Ref-based
+// matching, which is harmless when it guesses wrong, but a delete that guessed
+// wrong would discard a pin the caller never named. The per-reference custom
+// lock-slot migration relies on this: it deletes the legacy bare "custom" slot
+// and must not touch any "custom:<hash>" sibling.
+func TestDeleteLockedBase_ExactKeyOnly(t *testing.T) {
+	lf := &ports.PokkumLockfile{Bases: map[string]ports.BaseLockEntry{
+		"custom":              {Ref: "example.com/a:v1"},
+		"custom:0123456789ab": {Ref: "example.com/a:v1"},
+		"distroless":          {Ref: "gcr.io/distroless/cc-debian12:nonroot"},
+	}}
+
+	lockfileutils.DeleteLockedBase(lf, "custom")
+
+	if _, ok := lf.Bases["custom"]; ok {
+		t.Error("DeleteLockedBase did not remove the exact key")
+	}
+	for _, survivor := range []string{"custom:0123456789ab", "distroless"} {
+		if _, ok := lf.Bases[survivor]; !ok {
+			t.Errorf("DeleteLockedBase(%q) also removed %q", "custom", survivor)
+		}
+	}
+
+	// Neither a case variant nor a matching Ref may act as a delete key.
+	lockfileutils.DeleteLockedBase(lf, "DISTROLESS")
+	lockfileutils.DeleteLockedBase(lf, "example.com/a:v1")
+	if len(lf.Bases) != 2 {
+		t.Errorf("fuzzy delete removed entries: %v", lf.Bases)
+	}
+
+	// Nil-safe, so callers do not need a guard of their own.
+	lockfileutils.DeleteLockedBase(nil, "custom")
+	lockfileutils.DeleteLockedBase(&ports.PokkumLockfile{}, "custom")
+}
+
 func TestLoadNonExistentLockfile(t *testing.T) {
 	tmpDir := t.TempDir()
 	lockPath := filepath.Join(tmpDir, "nonexistent.lock")

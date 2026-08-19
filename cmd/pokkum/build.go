@@ -971,8 +971,28 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	if flags.baseKeylessIssuer != "" {
 		req.BaseImage.KeylessIssuer = flags.baseKeylessIssuer
 	}
+	// --sigstore-trusted-root names a file, but every Sigstore trust-root
+	// consumer inside Pokkum takes raw JSON bytes
+	// (ports.BaseImageRequest.TrustedRootJSON, core.CacheVerifyOptions'
+	// TrustedRootJSON, and sigstore.Verifier's own trustedRootJSON). Reading it
+	// exactly once here, in the composition root, keeps the adapters off the
+	// filesystem and guarantees both consumers verify against the same bytes.
+	//
+	// Fail closed on an unreadable file: silently degrading to the embedded
+	// snapshot would verify against a different trust root than the operator
+	// explicitly asked for, which is precisely the substitution they passed the
+	// flag to avoid (`pokkum verify` has always handled this flag that way).
+	// core.ErrBaseSignatureInvalid is carried over from when the base-image
+	// resolver performed this read itself, so `errors.Is` on that sentinel
+	// still matches.
+	var explicitTrustedRootJSON []byte
 	if flags.sigstoreTrustedRoot != "" {
-		req.BaseImage.TrustedRootPath = flags.sigstoreTrustedRoot
+		data, rerr := os.ReadFile(flags.sigstoreTrustedRoot)
+		if rerr != nil {
+			return nil, fmt.Errorf("read --sigstore-trusted-root %s: %w: %w", flags.sigstoreTrustedRoot, rerr, core.ErrBaseSignatureInvalid)
+		}
+		explicitTrustedRootJSON = data
+		req.BaseImage.TrustedRootJSON = data
 	}
 
 	req.AllowSecretPatterns = flags.allowSecretPatterns
@@ -1080,9 +1100,11 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 
 	req.CacheVerify.Strict = flags.cacheVerifyStrict
 	if flags.sigstoreTrustedRoot != "" {
-		if data, err := os.ReadFile(flags.sigstoreTrustedRoot); err == nil {
-			req.CacheVerify.TrustedRootJSON = data
-		}
+		// Same bytes the base-image resolver gets, read once above. This used
+		// to re-read the file and swallow the error (`if err == nil`), silently
+		// falling back to the embedded snapshot for cache verification while
+		// the operator believed their explicit trust root was in force.
+		req.CacheVerify.TrustedRootJSON = explicitTrustedRootJSON
 	} else if flags.sigstoreTUFRefresh {
 		// Only reached when --sigstore-trusted-root was not given, so the
 		// explicit file always wins over the refresh flag. Offline is bound

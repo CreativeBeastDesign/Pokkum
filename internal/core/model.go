@@ -649,8 +649,9 @@ type BaseImageOptions struct {
 	// KeylessIssuer is the expected OIDC issuer for keyless verification. Empty means use the preset default.
 	KeylessIssuer string
 
-	// TrustedRootPath is the path to a Sigstore trusted-root JSON file overriding the embedded default. Empty means use the embedded default.
-	TrustedRootPath string
+	// TrustedRootJSON is the raw Sigstore trusted-root JSON overriding the embedded default. Empty means use the embedded default.
+	// The CLI reads any --sigstore-trusted-root file into these bytes, so every Sigstore trust-root consumer takes the same shape.
+	TrustedRootJSON []byte
 }
 
 // SBOMOptions controls bill-of-materials generation and attachment.

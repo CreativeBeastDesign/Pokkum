@@ -18,6 +18,33 @@ const IsUtilityPackage = true
 // LockfileSchemaVersion is the current pokkum.lock schema version.
 const LockfileSchemaVersion = 1
 
+// CustomLockKeyPrefix namespaces the per-reference slots used for custom base
+// images ("custom:<hash-of-ref>"). Fixed presets store their pin under their
+// bare preset name, which stays unique because each of those presets names one
+// specific upstream image; the custom preset names every reference a project
+// might use, so it needs one slot per reference instead.
+//
+// The bare "custom" key (this prefix without the colon) is the legacy shared
+// slot from before per-reference keying. It is still read for migration, and
+// PresetNameForLockKey maps both forms back to it.
+const CustomLockKeyPrefix = "custom:"
+
+// PresetNameForLockKey maps a lockfile slot name back to the base image preset
+// name it belongs to: fixed presets are their own slot name, and every
+// per-reference custom slot maps back to "custom".
+//
+// Anything that walks an arbitrary lockfile and wants the preset behind a slot
+// (pokkum base check, pokkum doctor) must go through this instead of parsing
+// the slot name as a preset directly — a raw parse rejects "custom:<hash>" and
+// silently drops every custom base from the output.
+func PresetNameForLockKey(key string) string {
+	key = strings.TrimSpace(key)
+	if rest, found := strings.CutPrefix(key, CustomLockKeyPrefix); found && rest != "" {
+		return strings.TrimSuffix(CustomLockKeyPrefix, ":")
+	}
+	return key
+}
+
 // LoadLockfile reads and parses a pokkum.lock file from disk.
 // Returns os.ErrNotExist if the file does not exist.
 func LoadLockfile(path string) (*ports.PokkumLockfile, error) {
@@ -87,6 +114,19 @@ func GetLockedBase(lf *ports.PokkumLockfile, key string) (ports.BaseLockEntry, b
 	}
 
 	return ports.BaseLockEntry{}, false
+}
+
+// DeleteLockedBase removes the entry stored under exactly key, if any.
+//
+// Unlike GetLockedBase it deliberately performs no case-insensitive or
+// Ref-based fallback matching: a lookup that guesses which entry the caller
+// meant costs nothing when it guesses wrong, but a delete that guesses wrong
+// discards a pin the caller never named.
+func DeleteLockedBase(lf *ports.PokkumLockfile, key string) {
+	if lf == nil || lf.Bases == nil {
+		return
+	}
+	delete(lf.Bases, strings.TrimSpace(key))
 }
 
 // SetLockedBase adds or updates a locked base image entry in the lockfile.

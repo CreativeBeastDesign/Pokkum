@@ -445,7 +445,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			SAN:    req.BaseImage.KeylessSAN,
 			Issuer: req.BaseImage.KeylessIssuer,
 		},
-		TrustedRootPath: req.BaseImage.TrustedRootPath,
+		TrustedRootJSON: req.BaseImage.TrustedRootJSON,
 		// Only a static-strategy payload is fully static. Layered and exe
 		// payloads are dynamically linked against glibc, so the static-base gate
 		// (which rejects distroless/static and scratch) must stay armed for them;
@@ -548,7 +548,10 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 
 			// Record scan result in pokkum.lock if lockfile tracking is available
 			if deps.BaseImages != nil {
-				_ = deps.BaseImages.RecordScanResult(ctx, lockPath, req.BaseImage.Preset, scanRes)
+				// req.BaseImage.Ref is passed alongside the preset because a
+				// custom base's lockfile entry is keyed per reference, not per
+				// preset — the same raw Ref handed to Resolve above.
+				_ = deps.BaseImages.RecordScanResult(ctx, lockPath, req.BaseImage.Preset, req.BaseImage.Ref, scanRes)
 			}
 
 			if scanErr != nil {

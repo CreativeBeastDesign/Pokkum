@@ -326,10 +326,18 @@ type BaseImageRequest struct {
 	// an empty identity.
 	KeylessIdentity KeylessIdentity
 
-	// TrustedRootPath is an optional path to a Sigstore trusted-root JSON
-	// file overriding the embedded public-good default. Empty means use the
+	// TrustedRootJSON is an optional raw Sigstore trusted-root JSON document
+	// overriding the embedded public-good default. Empty means use the
 	// embedded default.
-	TrustedRootPath string
+	//
+	// It carries bytes rather than a file path deliberately: the composition
+	// root reads any --sigstore-trusted-root file itself, so the resolver
+	// never touches the filesystem, and all three of Pokkum's Sigstore
+	// trust-root consumers (this field, CacheVerifyOptions.TrustedRootJSON
+	// and the TUF refresh option) take the same shape — a trust root
+	// obtained from a live TUF refresh can be handed to any of them without
+	// a temp file in between.
+	TrustedRootJSON []byte
 
 	// RegistryConfigPath is the optional custom OCI config.json path for authentication.
 	RegistryConfigPath string
@@ -432,8 +440,13 @@ type BaseImageResolver interface {
 	// platform. It must not mutate the returned images.
 	Resolve(ctx context.Context, req BaseImageRequest) (*BaseImage, error)
 
-	// RecordScanResult updates the locked base image entry in pokkum.lock with the latest scan findings.
-	RecordScanResult(ctx context.Context, lockfilePath string, preset BaseImagePreset, scan ScanResult) error
+	// RecordScanResult updates the locked base image entry in pokkum.lock with
+	// the latest scan findings. ref must be the same raw BaseImageRequest.Ref
+	// the entry was resolved with (empty for a preset's default reference):
+	// preset alone does not identify a lockfile entry, because
+	// BaseImageCustom covers every reference a project might name and each one
+	// has its own entry.
+	RecordScanResult(ctx context.Context, lockfilePath string, preset BaseImagePreset, ref string, scan ScanResult) error
 
 	// VerifyBaseImage verifies the Cosign/Sigstore signature of an
 	// already-resolved base image. resolved must be the exact value a prior

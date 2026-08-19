@@ -167,7 +167,7 @@ func (m *mockBaseResolver) Resolve(_ context.Context, req ports.BaseImageRequest
 	}, nil
 }
 
-func (m *mockBaseResolver) RecordScanResult(_ context.Context, _ string, _ ports.BaseImagePreset, _ ports.ScanResult) error {
+func (m *mockBaseResolver) RecordScanResult(_ context.Context, _ string, _ ports.BaseImagePreset, _ string, _ ports.ScanResult) error {
 	return nil
 }
 

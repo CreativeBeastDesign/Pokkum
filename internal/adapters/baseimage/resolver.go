@@ -59,40 +59,48 @@
 //
 // # Lockfile keying
 //
-// Resolve keys every pokkum.lock entry by lockKey = string(req.Preset), never
-// by the Ref actually requested. For BaseImageDistroless, BaseImageChainguard
-// and BaseImageDistrolessNode this is fine because the preset already
+// Resolve keys pokkum.lock entries by lockKey = lockKeyFor(req.Preset,
+// requested ref).
+//
+// For BaseImageDistroless, BaseImageChainguard and BaseImageDistrolessNode
+// that is just the preset string, because each of those presets already
 // uniquely identifies one specific upstream image (that one-preset-per-image
 // invariant is exactly why BaseImageDistrolessNode is its own preset rather
 // than a Ref override on BaseImageDistroless — see that constant's doc
-// comment). BaseImageCustom breaks the invariant: it is one preset value
-// covering every possible custom reference a project might use, so every
-// custom base in a project shares the single "custom" lockfile slot
-// regardless of which Ref each one actually names.
+// comment). Their keys are unchanged and must stay unchanged: changing them
+// would orphan every pin in every existing lockfile for no benefit.
 //
-// Two consequences follow, both guarded explicitly in Resolve rather than
-// left implicit:
+// BaseImageCustom is the one preset value that covers every possible
+// reference a project might name, so it cannot share the pattern. Custom
+// entries are keyed per reference, as "custom:" + the first 12 hex digits of
+// the normalized reference's SHA-256, so two custom bases in one project each
+// hold their own stable pin instead of evicting each other from a single
+// shared "custom" slot.
 //
-//   - Resolving a locked entry found under lockKey "custom" is only trusted
-//     when entry.Ref matches the Ref actually being resolved. Without this,
-//     switching a project's custom base to a different reference would find
-//     the previous reference's stale entry (same lockKey, different image),
-//     trust its PinnedRef, and silently resolve and return the *previous*
-//     image's content instead of the one just requested — not a mere
-//     evicted cache slot, but the wrong image served transparently.
+// Three properties of that scheme are load-bearing:
+//
+//   - A locked entry is only trusted when its recorded entry.Ref names the
+//     reference actually being resolved. This guard predates the per-reference
+//     keying (it is what closed the bug where switching a project's custom
+//     base found the previous reference's entry under the shared "custom"
+//     key, trusted its PinnedRef, and silently returned the *previous* image's
+//     content) and is deliberately kept: the per-reference key is a truncated
+//     hash and pokkum.lock is hand-editable, so a slot can still end up paired
+//     with an entry describing something else. With the guard, that degrades to
+//     a cache miss instead of to the wrong image.
+//   - Lockfiles written before per-reference slots existed hold their custom
+//     pin under the bare "custom" key. Resolve reads that legacy slot as a
+//     fallback — subject to the same entry.Ref match — and, when it is
+//     honoured, rewrites the entry verbatim under the per-reference key and
+//     drops the legacy one, so an existing pin migrates instead of being
+//     silently discarded and re-pulled. The legacy key is never written.
 //   - Carrying a locked entry's scan metadata (LastScannedAt,
-//     VulnerabilitiesCount, MaxSeverity) or mirror ref onto a freshly
-//     resolved image is only done when the entry's Digest matches the
-//     digest just pulled, for the same reason.
+//     VulnerabilitiesCount, MaxSeverity) or mirror ref onto a freshly resolved
+//     image additionally requires the entry's Digest to match the digest just
+//     pulled: naming the same reference is not the same as describing the same
+//     content, since a tag moves.
 //
-// Both guards are narrow patches, not a redesign: they stop a *different*
-// custom image's data from being trusted for the current one, but they do
-// not give distinct custom references their own lock slots — the second
-// custom base a project resolves still evicts the first from the shared
-// "custom" key, exactly like any other single-slot cache. A real fix (e.g.
-// keying custom entries by a hash of their Ref, the same shape as
-// BaseImageDistrolessNode's dedicated preset) would need a pokkum.lock
-// schema migration and is tracked as follow-up work, not done here.
+// See lockKeyFor and lookupLockedBase for the implementation of all three.
 package baseimage
 
 import (
@@ -201,15 +209,19 @@ type imageEntry struct {
 // POKKUM_BASE_IMAGE_PUBKEY mid-process cannot be satisfied by a cache entry
 // proved against the previous key.
 type verifyKey struct {
-	ref                string
-	upstreamRef        string
-	digest             string
-	mode               ports.BaseImageVerifyMode
-	identity           ports.KeylessIdentity
-	trustedRootPath    string
-	pubKeyFingerprint  string
-	insecure           bool
-	registryConfigPath string
+	ref         string
+	upstreamRef string
+	digest      string
+	mode        ports.BaseImageVerifyMode
+	identity    ports.KeylessIdentity
+	// trustedRootFingerprint digests the trusted-root JSON itself rather than
+	// naming the file it came from: the bytes are what the verification
+	// actually depends on, so two different trust roots can no longer share a
+	// cache entry just because they arrived from the same path.
+	trustedRootFingerprint string
+	pubKeyFingerprint      string
+	insecure               bool
+	registryConfigPath     string
 }
 
 // Option supplies a Resolver dependency to NewResolver.
@@ -298,6 +310,14 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 	// mirror the bytes happened to be fetched through.
 	upstreamRef := ref
 
+	// keyRef is the reference this call was asked to resolve, captured before
+	// ref is rebound below to a locked pinned digest or an escrow mirror tag.
+	// Both the lockfile slot and the entry.Ref match guard must be evaluated
+	// against what the caller asked for, never against whatever the bytes were
+	// eventually fetched through — otherwise the slot a build reads from and
+	// the slot it writes to could differ within one Resolve.
+	keyRef := ref
+
 	nameOpts := []name.Option{name.WeakValidation}
 	if req.Insecure {
 		nameOpts = append(nameOpts, name.Insecure)
@@ -307,31 +327,26 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 	var (
 		lf          *ports.PokkumLockfile
 		lockedFound bool
-		lockKey     = string(req.Preset)
+		lockKey     = lockKeyFor(req.Preset, keyRef)
+		// migrateLegacyLock records that this resolve's entry was found in the
+		// legacy shared "custom" slot, so the entry gets rewritten under
+		// lockKey before Resolve returns.
+		migrateLegacyLock bool
 	)
 
 	if req.LockfilePath != "" {
 		loaded, lerr := lockfileutils.LoadLockfile(req.LockfilePath)
 		if lerr == nil {
 			lf = loaded
-			entry, ok := lockfileutils.GetLockedBase(lf, lockKey)
-			// BaseImageCustom shares a single "custom" lockKey across every
-			// distinct custom reference a project might use (there is no
-			// per-reference lock slot — see the package doc's "Lockfile
-			// keying" note). Without this guard, a locked entry from a
-			// *different* custom ref than the one actually requested would
-			// still match on lockKey alone and get trusted below: its
-			// entry.Ref would overwrite upstreamRef and its entry.PinnedRef
-			// would silently replace ref, so the build would resolve and
-			// pull the previous custom image instead of the one just
-			// requested — not merely an evicted cache entry, but the wrong
-			// image served transparently. Requiring entry.Ref to match the
-			// requested ref before trusting the entry closes that hole
-			// without changing the lockKey scheme (still just "custom");
-			// every other preset's lockKey already uniquely identifies one
-			// specific image, so this check is a no-op for them.
-			if ok && req.Preset == core.BaseImageCustom && entry.Ref != ref {
-				ok = false
+			// lookupLockedBase owns both the per-reference/legacy slot
+			// selection and the entry.Ref match guard that keeps a
+			// different custom reference's entry from ever being trusted
+			// for this one; see its doc comment.
+			entry, ok, fromLegacy := lookupLockedBase(lf, req.Preset, lockKey, keyRef)
+			if fromLegacy {
+				migrateLegacyLock = true
+				r.logger().Info("migrating custom base image lock entry to a per-reference slot",
+					"lockfile", req.LockfilePath, "legacy_key", legacyCustomLockKey, "key", lockKey, "ref", keyRef)
 			}
 			if ok && !req.UpdateBase {
 				lockedFound = true
@@ -378,6 +393,48 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 					ref = entry.PinnedRef
 					r.logger().Info("using locked base image from lockfile", "lockfile", req.LockfilePath, "key", lockKey, "ref", ref)
 				}
+
+				if migrateLegacyLock {
+					// Complete the migration by copying the legacy entry
+					// *verbatim* under the per-reference key. Verbatim, and
+					// here rather than in the write path at the bottom of
+					// Resolve, for two reasons:
+					//
+					//  1. The pin's fields belong together. Digest, PinnedRef,
+					//     MirrorRef and the scan metadata all describe one
+					//     locked image; rebuilding the entry from values
+					//     derived later in Resolve would, when the escrow
+					//     mirror was used just above, record the *mirror's*
+					//     pinned reference as the upstream pin.
+					//  2. The bottom write path only runs for an unlocked or
+					//     --update-base resolve. A legacy entry that resolves
+					//     perfectly well would otherwise never be rewritten,
+					//     so every later build would keep reading the shared
+					//     slot and a second custom reference would still be
+					//     competing for it — the migration would never finish.
+					//
+					// The legacy entry is dropped in the same write. It named
+					// this exact reference (lookupLockedBase proved that before
+					// the entry was trusted at all), so nothing is lost, and
+					// leaving it behind would leave a second copy of one pin
+					// that only the new key ever updates: the two diverge on
+					// the next --update-base and the stale copy keeps claiming
+					// a digest the project no longer builds against. A legacy
+					// entry belonging to a *different* reference is never
+					// reached here and never touched — it is still that
+					// reference's only pin, and its own next build's migration
+					// source.
+					lockfileutils.SetLockedBase(lf, lockKey, entry)
+					lockfileutils.DeleteLockedBase(lf, legacyCustomLockKey)
+					if serr := lockfileutils.SaveLockfile(req.LockfilePath, lf); serr != nil {
+						r.logger().Warn("failed to save base image lockfile after per-reference slot migration",
+							"path", req.LockfilePath, "err", serr)
+					} else {
+						r.logger().Info("migrated custom base image lock entry to a per-reference slot",
+							"path", req.LockfilePath, "key", lockKey, "ref", keyRef)
+					}
+					migrateLegacyLock = false
+				}
 			}
 		} else if !os.IsNotExist(lerr) {
 			r.logger().Warn("failed to load base image lockfile", "path", req.LockfilePath, "err", lerr)
@@ -418,13 +475,13 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 	}
 	if lf != nil {
 		// existing.Digest must match the image just pulled before its scan
-		// metadata is trusted: for BaseImageCustom, lockKey alone ("custom")
-		// does not identify which custom reference the entry belongs to
-		// (see the lockKey collision note above), and even for the
-		// single-image presets, an entry from before the last
-		// --update-base would otherwise misattribute a stale scan result to
-		// the digest actually resolved here.
-		if existing, ok := lockfileutils.GetLockedBase(lf, lockKey); ok && existing.Digest == pull.digest.String() {
+		// metadata is trusted. lookupLockedBase already guarantees the entry
+		// names this reference, but naming the same reference is not the same
+		// as describing the same content: an entry written before the last
+		// --update-base, or a legacy entry whose tag has since moved, would
+		// otherwise misattribute a stale scan result to the digest actually
+		// resolved here.
+		if existing, ok, _ := lookupLockedBase(lf, req.Preset, lockKey, keyRef); ok && existing.Digest == pull.digest.String() {
 			out.LastScannedAt = existing.LastScannedAt
 			out.VulnerabilitiesCount = existing.VulnerabilitiesCount
 			out.MaxSeverity = existing.MaxSeverity
@@ -503,17 +560,15 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 			MirrorRef: mirrorRef,
 			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		}
-		if existing, ok := lockfileutils.GetLockedBase(lf, lockKey); ok {
+		if existing, ok, _ := lookupLockedBase(lf, req.Preset, lockKey, keyRef); ok {
 			if mirrorRef == "" && existing.MirrorRef != "" && existing.Digest == entry.Digest {
 				entry.MirrorRef = existing.MirrorRef
 			}
 			// Same digest-match requirement as the mirror carry-over just
-			// above: an entry found under lockKey alone may belong to a
-			// different digest — for BaseImageCustom, possibly an entirely
-			// different custom reference sharing the single "custom" slot
-			// (see the lockKey collision note above) — so its scan metadata
-			// must not be attributed to the digest actually being locked
-			// here.
+			// above: an entry naming this reference may still have been
+			// written for a different digest (a moved tag, or an entry
+			// predating this --update-base), so its scan metadata must not be
+			// attributed to the digest actually being locked here.
 			if existing.Digest == entry.Digest {
 				entry.LastScannedAt = existing.LastScannedAt
 				entry.VulnerabilitiesCount = existing.VulnerabilitiesCount
@@ -521,6 +576,15 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 			}
 		}
 		lockfileutils.SetLockedBase(lf, lockKey, entry)
+		if migrateLegacyLock {
+			// Only reachable on a --update-base resolve: the non-update
+			// migration path above already rewrote and pruned the entry, and
+			// cleared this flag. The legacy entry named this same reference,
+			// and the fresh entry written just above supersedes it under the
+			// per-reference key, so leaving it would strand a stale duplicate
+			// of a pin this build has just replaced.
+			lockfileutils.DeleteLockedBase(lf, legacyCustomLockKey)
+		}
 		if serr := lockfileutils.SaveLockfile(req.LockfilePath, lf); serr != nil {
 			r.logger().Warn("failed to save updated base image lockfile", "path", req.LockfilePath, "err", serr)
 		} else {
@@ -544,18 +608,129 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 // req.Ref when set, otherwise req.Preset.DefaultRef(). It is split out of
 // Resolve so the fallback logic can be unit-tested without a network call.
 func effectiveRef(req ports.BaseImageRequest) (string, error) {
-	if !req.Preset.Valid() {
-		return "", fmt.Errorf("baseimage: preset %q: %w", req.Preset, core.ErrInvalidBaseImage)
+	return effectiveRefFor(req.Preset, req.Ref)
+}
+
+// effectiveRefFor is effectiveRef over the two fields it actually needs, so
+// callers that hold a preset and a raw ref but no full BaseImageRequest (see
+// RecordScanResult) derive the identical reference — and therefore the
+// identical lockfile key — instead of approximating it.
+func effectiveRefFor(preset ports.BaseImagePreset, rawRef string) (string, error) {
+	if !preset.Valid() {
+		return "", fmt.Errorf("baseimage: preset %q: %w", preset, core.ErrInvalidBaseImage)
 	}
-	ref := strings.TrimSpace(req.Ref)
+	ref := strings.TrimSpace(rawRef)
 	if ref != "" {
 		return ref, nil
 	}
-	defRef, ok := req.Preset.DefaultRef()
+	defRef, ok := preset.DefaultRef()
 	if !ok {
-		return "", fmt.Errorf("baseimage: preset %q has no default reference and none was supplied: %w", req.Preset, core.ErrInvalidBaseImage)
+		return "", fmt.Errorf("baseimage: preset %q has no default reference and none was supplied: %w", preset, core.ErrInvalidBaseImage)
 	}
 	return defRef, nil
+}
+
+// legacyCustomLockKey is the single pokkum.lock slot that every
+// BaseImageCustom reference shared before per-reference slots existed. It is
+// still read — never written — so that an existing lockfile's custom pin
+// survives the upgrade; see lookupLockedBase.
+//
+// It is also the stem of lockfileutils.CustomLockKeyPrefix, which is what makes
+// lockfileutils.PresetNameForLockKey able to map a per-reference slot back to
+// this preset. TestLockKeyPrefixMatchesTheCustomPreset pins that relationship,
+// since the two constants live in different packages.
+const legacyCustomLockKey = string(core.BaseImageCustom)
+
+// lockKeyFor returns the pokkum.lock slot a resolve of preset/ref belongs in.
+//
+// Fixed presets keep their historical key, the bare preset string, and must
+// keep it: each of them already names exactly one specific upstream image
+// (that one-preset-per-image invariant is why BaseImageDistrolessNode is its
+// own preset rather than a Ref override on BaseImageDistroless), so their keys
+// are already as granular as the values that can share them, and changing them
+// would orphan every existing pin for no gain.
+//
+// BaseImageCustom is the exception the scheme has to accommodate: one preset
+// value covers every reference a project might name, so it gets a
+// per-reference slot, "custom:" + the first 12 hex digits of the normalized
+// reference's SHA-256. Truncation is safe here because the slot is not a trust
+// decision on its own — lookupLockedBase still requires the entry's recorded
+// Ref to name the reference being resolved before anything in it is believed,
+// so a collision degrades to a cache miss rather than to the wrong image.
+func lockKeyFor(preset ports.BaseImagePreset, ref string) string {
+	if preset != core.BaseImageCustom {
+		return string(preset)
+	}
+	sum := sha256.Sum256([]byte(normalizeRefForLockKey(ref)))
+	return lockfileutils.CustomLockKeyPrefix + fmt.Sprintf("%x", sum[:6])
+}
+
+// normalizeRefForLockKey canonicalizes a base image reference so that two
+// spellings of the same image ("alpine:3.19" and
+// "index.docker.io/library/alpine:3.19") land in one slot rather than two, and
+// so that lockKeyFor's slot granularity and sameLockedRef's guard always agree
+// on what "the same reference" means.
+//
+// An unparseable reference falls back to its trimmed literal form. That is not
+// a silent tolerance of bad input: Resolve parses the same reference a few
+// lines further down and fails there, so the only job left for the key is to
+// be stable and not collide.
+func normalizeRefForLockKey(ref string) string {
+	trimmed := strings.TrimSpace(ref)
+	parsed, err := name.ParseReference(trimmed, name.WeakValidation)
+	if err != nil {
+		return trimmed
+	}
+	return parsed.Name()
+}
+
+// sameLockedRef reports whether a lockfile entry's recorded Ref names the same
+// image as the reference being resolved. An empty entryRef never matches a real
+// reference: an entry that does not say what it is cannot be trusted to be
+// anything.
+func sameLockedRef(entryRef, ref string) bool {
+	if entryRef == ref {
+		return true
+	}
+	if strings.TrimSpace(entryRef) == "" || strings.TrimSpace(ref) == "" {
+		return false
+	}
+	return normalizeRefForLockKey(entryRef) == normalizeRefForLockKey(ref)
+}
+
+// lookupLockedBase finds the pokkum.lock entry for a resolve of preset/ref,
+// preferring the per-reference slot and falling back to the legacy shared
+// "custom" slot. ref must be the reference the caller asked for, never one
+// already rebound to a locked pinned digest or an escrow mirror.
+//
+// The legacy fallback is what makes per-reference keying a migration instead of
+// a silent cache flush. A pokkum.lock written before per-reference slots
+// existed holds a project's only custom-base pin under the bare "custom" key;
+// ignoring it would re-pull and re-pin on the next build, defeating the
+// lockfile at exactly the moment it is supposed to hold. It is honoured only
+// when the entry's recorded Ref names the reference actually being resolved: a
+// bare "custom" entry left behind by a *different* custom base must never be
+// trusted for this one, which was the wrong-image-served bug fixed in 69914ac.
+//
+// fromLegacy reports that the returned entry came out of the legacy slot, so
+// the caller can finish the migration by rewriting it under lockKey.
+func lookupLockedBase(lf *ports.PokkumLockfile, preset ports.BaseImagePreset, lockKey, ref string) (entry ports.BaseLockEntry, ok bool, fromLegacy bool) {
+	entry, ok = lockfileutils.GetLockedBase(lf, lockKey)
+	if !ok && preset == core.BaseImageCustom && lockKey != legacyCustomLockKey {
+		entry, ok = lockfileutils.GetLockedBase(lf, legacyCustomLockKey)
+		fromLegacy = ok
+	}
+
+	// Defence in depth, applied whichever slot the entry came from and kept
+	// deliberately after the per-reference keying rather than replaced by it: a
+	// per-reference key is a truncated hash, and a lockfile is a plain JSON
+	// file anyone can hand-edit, so a slot can still end up paired with an
+	// entry describing a different image. entry.Ref is the entry's own
+	// authoritative statement of what it is, and it has to agree.
+	if ok && preset == core.BaseImageCustom && !sameLockedRef(entry.Ref, ref) {
+		return ports.BaseLockEntry{}, false, false
+	}
+	return entry, ok, fromLegacy
 }
 
 // pull resolves ref to its top-level manifest, index or image, using the
@@ -928,12 +1103,12 @@ func (r *Resolver) verifyBaseImage(ctx context.Context, ref, upstreamRef string,
 				ref, req.Preset, core.ErrBaseSignatureInvalid)
 		}
 
-		if req.TrustedRootPath != "" {
-			b, err := os.ReadFile(req.TrustedRootPath)
-			if err != nil {
-				return fmt.Errorf("baseimage: %s: read trusted root %s: %w: %w", ref, req.TrustedRootPath, err, core.ErrBaseSignatureInvalid)
-			}
-			trustedRootJSON = b
+		// req.TrustedRootJSON already holds the bytes: the composition root
+		// reads any --sigstore-trusted-root file, so there is nothing to
+		// read here (and an unreadable file has already failed the command
+		// with core.ErrBaseSignatureInvalid before the build began).
+		if len(req.TrustedRootJSON) > 0 {
+			trustedRootJSON = req.TrustedRootJSON
 		}
 
 	default:
@@ -941,15 +1116,15 @@ func (r *Resolver) verifyBaseImage(ctx context.Context, ref, upstreamRef string,
 	}
 
 	key := verifyKey{
-		ref:                ref,
-		upstreamRef:        upstreamRef,
-		digest:             pull.digest.String(),
-		mode:               mode,
-		identity:           identity,
-		trustedRootPath:    req.TrustedRootPath,
-		pubKeyFingerprint:  fingerprint(pubKeyPEM),
-		insecure:           req.Insecure,
-		registryConfigPath: req.RegistryConfigPath,
+		ref:                    ref,
+		upstreamRef:            upstreamRef,
+		digest:                 pull.digest.String(),
+		mode:                   mode,
+		identity:               identity,
+		trustedRootFingerprint: fingerprint(req.TrustedRootJSON),
+		pubKeyFingerprint:      fingerprint(pubKeyPEM),
+		insecure:               req.Insecure,
+		registryConfigPath:     req.RegistryConfigPath,
 	}
 	r.mu.Lock()
 	_, cached := r.verifications[key]
@@ -1358,9 +1533,16 @@ func (r *Resolver) VerifyBaseImage(ctx context.Context, resolved *ports.BaseImag
 }
 
 // RecordScanResult updates the locked base image entry in pokkum.lock with the latest scan findings.
-func (r *Resolver) RecordScanResult(_ context.Context, lockfilePath string, preset ports.BaseImagePreset, scan ports.ScanResult) error {
+func (r *Resolver) RecordScanResult(_ context.Context, lockfilePath string, preset ports.BaseImagePreset, ref string, scan ports.ScanResult) error {
 	if lockfilePath == "" {
 		return nil
+	}
+	// Derive the reference — and therefore the lockfile slot — exactly the way
+	// Resolve did, so a custom base's scan result lands in that reference's own
+	// entry instead of being dropped or written to a sibling reference's.
+	keyRef, err := effectiveRefFor(preset, ref)
+	if err != nil {
+		return fmt.Errorf("baseimage: record scan result: %w", err)
 	}
 	lf, err := lockfileutils.LoadLockfile(lockfilePath)
 	if err != nil {
@@ -1370,8 +1552,12 @@ func (r *Resolver) RecordScanResult(_ context.Context, lockfilePath string, pres
 		return fmt.Errorf("baseimage: record scan load lockfile %s: %w", lockfilePath, err)
 	}
 
-	lockKey := string(preset)
-	entry, ok := lockfileutils.GetLockedBase(lf, lockKey)
+	// A legacy shared "custom" entry is read but not pruned here: Resolve owns
+	// the migration (it has the resolved digest and pinned ref to write a
+	// faithful entry), and a scan-result recorder restructuring the lockfile on
+	// its own would be doing so from strictly less information.
+	lockKey := lockKeyFor(preset, keyRef)
+	entry, ok, _ := lookupLockedBase(lf, preset, lockKey, keyRef)
 	if !ok {
 		return nil
 	}

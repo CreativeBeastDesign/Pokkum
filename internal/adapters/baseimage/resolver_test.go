@@ -584,21 +584,27 @@ func TestResolve_CustomBaseLockKeyCollision(t *testing.T) {
 		t.Errorf("resolved base B's UpstreamRef = %q, want %q; got a value that suggests A's stale lock entry (keyed only by preset \"custom\") was trusted for a different reference", resB.UpstreamRef, refB)
 	}
 
-	// The lockfile's single "custom" slot now reflects B (the most recently
-	// resolved custom base) — the pre-existing, documented single-slot
-	// limitation for BaseImageCustom, not itself a bug: what this test
-	// exists to catch is B silently coming back as A's content, not the
-	// slot being shared.
+	// Each custom reference now owns its own lockfile slot, so B's resolve no
+	// longer evicts A's pin. That the slots are independently *usable* is
+	// covered by TestResolve_TwoCustomRefs_EachKeepsItsOwnLockSlot; what this
+	// test still exists to catch is B silently coming back as A's content.
 	lf, err := lockfileutils.LoadLockfile(lockPath)
 	if err != nil {
 		t.Fatalf("LoadLockfile: %v", err)
 	}
-	entry, ok := lockfileutils.GetLockedBase(lf, "custom")
+	entryB, ok := lf.Bases[lockKeyFor(ports.BaseImageCustom, refB)]
 	if !ok {
-		t.Fatal("expected a locked \"custom\" entry after resolving B")
+		t.Fatalf("expected a locked entry for B after resolving it; keys: %v", lockfileKeys(lf))
 	}
-	if entry.Ref != refB {
-		t.Errorf("locked \"custom\" entry.Ref = %q, want %q (B, the most recent resolve)", entry.Ref, refB)
+	if entryB.Ref != refB {
+		t.Errorf("B's locked entry.Ref = %q, want %q", entryB.Ref, refB)
+	}
+	entryA, ok := lf.Bases[lockKeyFor(ports.BaseImageCustom, refA)]
+	if !ok {
+		t.Fatalf("A's pin was evicted by B's resolve; keys: %v", lockfileKeys(lf))
+	}
+	if entryA.Ref != refA {
+		t.Errorf("A's locked entry.Ref = %q, want %q", entryA.Ref, refA)
 	}
 }
 
@@ -1504,9 +1510,9 @@ func TestResolve_EscrowMirror_Success_Index(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLockfile: %v", err)
 	}
-	entry, ok := lockfileutils.GetLockedBase(lf, string(ports.BaseImageCustom))
+	entry, ok := lf.Bases[lockKeyFor(ports.BaseImageCustom, ref)]
 	if !ok {
-		t.Fatalf("lock entry not found for custom preset")
+		t.Fatalf("lock entry not found for custom ref %s; keys: %v", ref, lockfileKeys(lf))
 	}
 	if entry.MirrorRef != expectedMirrorRef {
 		t.Fatalf("lock entry MirrorRef = %q, want %q", entry.MirrorRef, expectedMirrorRef)
@@ -1584,9 +1590,9 @@ func TestResolve_EscrowMirror_Success_SingleImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLockfile: %v", err)
 	}
-	entry, ok := lockfileutils.GetLockedBase(lf, string(ports.BaseImageCustom))
+	entry, ok := lf.Bases[lockKeyFor(ports.BaseImageCustom, ref)]
 	if !ok || entry.MirrorRef != expectedMirrorRef {
-		t.Fatalf("expected MirrorRef = %q, got %+v", expectedMirrorRef, entry)
+		t.Fatalf("expected MirrorRef = %q, got %+v (keys: %v)", expectedMirrorRef, entry, lockfileKeys(lf))
 	}
 
 	mTag, err := name.NewTag(expectedMirrorRef, name.WeakValidation)
@@ -2282,9 +2288,9 @@ func TestResolve_UpdateBase_DoesNotPreserveStaleMirrorRefForNewDigest(t *testing
 	if err != nil {
 		t.Fatalf("LoadLockfile: %v", err)
 	}
-	entry, ok := lockfileutils.GetLockedBase(lfUpdated, string(ports.BaseImageCustom))
+	entry, ok := lfUpdated.Bases[lockKeyFor(ports.BaseImageCustom, ref)]
 	if !ok {
-		t.Fatalf("lock entry missing")
+		t.Fatalf("lock entry missing for custom ref %s; keys: %v", ref, lockfileKeys(lfUpdated))
 	}
 	if entry.Digest != desc.Digest.String() {
 		t.Fatalf("expected updated digest %s, got %s", desc.Digest, entry.Digest)
@@ -2341,7 +2347,7 @@ func TestResolver_RecordScanResult(t *testing.T) {
 		},
 	}
 
-	err = r.RecordScanResult(context.Background(), lockPath, ports.BaseImageCustom, scan)
+	err = r.RecordScanResult(context.Background(), lockPath, ports.BaseImageCustom, ref, scan)
 	if err != nil {
 		t.Fatalf("RecordScanResult: %v", err)
 	}
@@ -2351,9 +2357,12 @@ func TestResolver_RecordScanResult(t *testing.T) {
 		t.Fatalf("LoadLockfile: %v", err)
 	}
 
-	entry, ok := lockfileutils.GetLockedBase(updatedLF, string(ports.BaseImageCustom))
+	// The lockfile above was seeded with a legacy bare "custom" entry, so
+	// RecordScanResult migrates it: the findings land in the per-reference slot.
+	entry, ok := lockfileutils.GetLockedBase(updatedLF, lockKeyFor(ports.BaseImageCustom, ref))
 	if !ok {
-		t.Fatalf("missing locked base entry")
+		t.Fatalf("missing locked base entry under per-reference key %q; lockfile keys: %v",
+			lockKeyFor(ports.BaseImageCustom, ref), lockfileKeys(updatedLF))
 	}
 
 	if entry.LastScannedAt == "" {
