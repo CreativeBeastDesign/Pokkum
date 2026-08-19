@@ -199,3 +199,19 @@ Sigstore TUF root refresh.
 **Latent flaw corrected while there:** the established pattern is `defer os.RemoveAll(dir)` followed by `os.Exit(m.Run())`. `os.Exit` does not run deferred functions, so four sibling packages silently leak their temp directory on every run. The new ones clean up before exiting; the existing four are left as-is rather than touched in an unrelated change, and are recorded here.
 
 _(appended as work proceeds)_
+
+### 21. The live-registry tripwire reported a transient TCP reset as an upstream image-format change
+
+**Found by:** a full-suite run after the finding-20 hang fix, which finally let the whole suite complete and surfaced the one remaining failure.
+
+**Where:** `internal/adapters/scanner/tripwire_test.go`, `TestTripwire_LiveDistroBaseImages`.
+
+**What:** the test guards against being run offline with `t.Skipf("cannot reach registry (offline/sandboxed)")` on `remote.Image(ref)` — but that call fetches only the manifest, a few kilobytes. The multi-megabyte layer download happens one line later inside `scannerutils.ExtractImagePackages`, whose failure was a bare `t.Fatalf`. The reachability precondition was therefore proven on the cheapest call in the test and assumed to hold across the expensive one. Observed as `tar read error: read tcp 192.168.1.196:65227->74.125.133.82:443: read: connection reset by peer`.
+
+**Severity:** Medium, and specifically because of W3: the non-`-short` CI job added this session is exactly where this test now runs, so a transient reset in GitHub Actions would block merges while reporting the cause as "upstream changed its image format".
+
+**Fixed:** a new `isTransientNetworkErr` classifies transport failures (`net.Error`, `*net.OpError`, `syscall.ECONNRESET`/`EPIPE`, plus `io.ErrUnexpectedEOF` for a reset already re-wrapped by the gzip/tar layers) and the extraction step skips on those; every other error still fails. `scannerutils` wraps with `%w`, so the transport cause stays reachable through its own `tar read error:` prefix.
+
+**The part worth keeping:** the classifier is unit-tested in both directions on purpose, because the two mistakes are asymmetric. Too narrow merely restores the flake. Too broad would make the tripwire silently skip the format change it exists to catch — a fail-open in a correctness gate, which is strictly worse than the flake it replaced. The negative cases pin that a wrapped *format* error (`tar read error: malformed tar header`) and a clean `io.EOF` both still fail. Logged in `Lessons.md` and as `mem:self_review_checklist` row 39.
+
+**Also resolved here:** the `tests/integration` 600s timeout and the order-dependent `TestFixtureDrivenE2E_Static_SPAFallback` failure, both previously unexplained, were consequences of finding 20 rather than defects of their own. With `cmd/pokkum` and `remotecacheutils` each occupying a core for ~660 seconds, the Docker-backed integration tests were starved. After the isolation fix, `tests/integration` passes in 36.6s within a full `go test ./...` run (it had been timing out at 600s), and the SPA-fallback failure does not reproduce. Recorded rather than left open: the hypothesis was that they were load-sensitive rather than genuinely order-dependent, and removing the load confirmed it.

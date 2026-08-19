@@ -2,7 +2,12 @@ package scanner
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -170,6 +175,15 @@ func TestTripwire_LiveDistroBaseImages(t *testing.T) {
 		}
 
 		pkgs, distro, err := scannerutils.ExtractImagePackages(ctx, img)
+		if isTransientNetworkErr(err) {
+			// remote.Image above only fetches the manifest, so reaching it
+			// proves nothing about the multi-megabyte layer pull that happens
+			// here — which is where nearly all the bytes, and nearly all the
+			// transient-failure risk, actually are. A mid-stream reset says
+			// nothing about upstream image format, so it cannot render the
+			// verdict this tripwire exists to give: skip rather than fail.
+			t.Skipf("network error during layer pull (not an upstream format change): %v", err)
+		}
 		if err != nil {
 			t.Fatalf("Tripwire failed on gcr.io/distroless/cc-debian12:latest: %v", err)
 		}
@@ -181,4 +195,76 @@ func TestTripwire_LiveDistroBaseImages(t *testing.T) {
 		}
 		t.Logf("Distroless Debian 12 tripwire verified: %d packages found, distro %s %s", len(pkgs), distro.ID, distro.VersionID)
 	})
+}
+
+// isTransientNetworkErr reports whether err is a transport failure rather than
+// a content or format problem. It exists so the live tripwire below can tell
+// "upstream changed its image format", which is the signal this test is for
+// and must fail loudly, apart from "the TCP connection dropped mid-pull",
+// which is noise that would otherwise turn a correctness gate into a flaky
+// one — this test runs in the non-short CI job, so a flake here blocks merges
+// for reasons unrelated to the code under test.
+//
+// scannerutils wraps read failures with %w, so the transport error is still
+// reachable via errors.As/errors.Is through the "tar read error: ..." wrapper.
+func isTransientNetworkErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	// A reset mid-stream commonly surfaces as an unexpected EOF from the tar
+	// reader rather than as a net error, once the gzip/tar layers have
+	// re-wrapped it.
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
+}
+
+// TestIsTransientNetworkErr guards both directions, because each mistake has a
+// different cost: too narrow makes the live tripwire flaky, while too broad
+// makes it silently skip the upstream format change it exists to catch — a
+// fail-open in a correctness gate, which is the worse of the two.
+func TestIsTransientNetworkErr(t *testing.T) {
+	transient := []struct {
+		name string
+		err  error
+	}{
+		{"raw ECONNRESET", syscall.ECONNRESET},
+		{"raw EPIPE", syscall.EPIPE},
+		{"unexpected EOF", io.ErrUnexpectedEOF},
+		{"net.OpError wrapping reset", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}},
+		// The shape actually observed in CI: scannerutils wraps the transport
+		// error with %w behind its own "tar read error" message.
+		{"wrapped as scannerutils does", fmt.Errorf("tar read error: %w", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET})},
+		{"double-wrapped", fmt.Errorf("outer: %w", fmt.Errorf("tar read error: %w", io.ErrUnexpectedEOF))},
+	}
+	for _, c := range transient {
+		t.Run("transient/"+c.name, func(t *testing.T) {
+			if !isTransientNetworkErr(c.err) {
+				t.Errorf("isTransientNetworkErr(%v) = false, want true", c.err)
+			}
+		})
+	}
+
+	notTransient := []struct {
+		name string
+		err  error
+	}{
+		{"nil", nil},
+		{"plain format error", errors.New("dpkg status: unexpected field layout")},
+		{"clean EOF is not a mid-stream reset", io.EOF},
+		{"wrapped format error", fmt.Errorf("tar read error: %w", errors.New("malformed tar header"))},
+	}
+	for _, c := range notTransient {
+		t.Run("fatal/"+c.name, func(t *testing.T) {
+			if isTransientNetworkErr(c.err) {
+				t.Errorf("isTransientNetworkErr(%v) = true, want false — a real format change would be silently skipped", c.err)
+			}
+		})
+	}
 }
