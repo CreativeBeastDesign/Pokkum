@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/andybalholm/brotli"
@@ -56,8 +57,49 @@ type PrecompressOptions struct {
 	Zstd   bool
 }
 
+// dirLocks serialises PrecompressDirectory per directory.
+//
+// This is a work-deduplication measure, not the race fix — a distinction worth
+// stating precisely, because getting it wrong is how the first attempt at this
+// fix stopped short. A multi-platform build fans out over platforms and every
+// platform packages from the same tree, so without the lock all of them compress
+// the same files simultaneously on the first pass. With it, one does the work and
+// the rest find the sidecars already fresh.
+//
+// Together with correct freshness detection it is nevertheless what closes the
+// race, and the argument is worth spelling out because it is not obvious.
+//
+// Every platform precompresses before it tars. The first platform takes the lock
+// and writes every sidecar while all the others are still blocked on it, so no tar
+// walk has begun. Each subsequent platform then acquires the lock, finds the
+// sidecars already fresh, writes nothing, and only then tars. Writes therefore
+// happen strictly before any walk starts, which is the property the race needed.
+//
+// That safety rests on freshness being correct — see PrecompressFile, where
+// pinning sidecar mtimes to the build epoch had made every sidecar permanently
+// stale, so every platform rewrote everything and the window was maximal.
+//
+// Writing sidecars atomically (temp file plus rename) was tried instead and is
+// worse here: os.CreateTemp places the temporary file in the very directory the
+// packager walks, so a concurrent walk either fails its lstat when the file is
+// renamed away or packages a .tmp-* file into the image. A test caught exactly
+// that.
+var dirLocks sync.Map // cleaned absolute path -> *sync.Mutex
+
+func lockForDir(dir string) *sync.Mutex {
+	key := dir
+	if abs, err := filepath.Abs(dir); err == nil {
+		key = filepath.Clean(abs)
+	}
+	actual, _ := dirLocks.LoadOrStore(key, &sync.Mutex{})
+	return actual.(*sync.Mutex)
+}
+
 // PrecompressDirectory recursively traverses dir and generates sidecars
 // (per opts) for all compressible static assets.
+//
+// Safe for concurrent use with the same dir: calls are serialised per directory,
+// and a second caller finds the sidecars already fresh and rewrites nothing.
 func PrecompressDirectory(dir string, modTime time.Time, opts PrecompressOptions) error {
 	if dir == "" {
 		return nil
@@ -66,6 +108,10 @@ func PrecompressDirectory(dir string, modTime time.Time, opts PrecompressOptions
 	if err != nil || !info.IsDir() {
 		return nil
 	}
+
+	mu := lockForDir(dir)
+	mu.Lock()
+	defer mu.Unlock()
 
 	return filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -84,8 +130,26 @@ func PrecompressDirectory(dir string, modTime time.Time, opts PrecompressOptions
 }
 
 // PrecompressFile generates sidecars (per opts) for srcPath if compressible,
-// preserving modTime and only keeping sidecars that achieve positive compression savings.
+// keeping only those that achieve positive compression savings.
+//
+// A sidecar's on-disk mtime is set to its SOURCE file's mtime, not to modTime.
+// That looks like it weakens reproducibility and does not: the only ModTime that
+// reaches a tar header is the pinned value the packager passes to writeTar (see
+// packager/layer.go), so an on-disk mtime never influences image bytes.
+//
+// Pinning sidecars to the build epoch actively broke freshness. isStale compares
+// the sidecar's mtime against the source's, and a build's source files are
+// written *now* while the epoch is derived from the last commit — so every
+// sidecar was permanently "older than its source" and every platform in a
+// multi-platform build re-ran brotli at BestCompression over the entire tree.
+// Using the source's own mtime makes the comparison meaningful: freshly written
+// sidecars are fresh, while a source overwritten in place afterwards is newer
+// than its sidecar and correctly regenerates it — which is the guard isStale was
+// written for in the first place.
 func PrecompressFile(srcPath string, modTime time.Time, opts PrecompressOptions) error {
+	// modTime is retained in the signature for callers and future use; sidecar
+	// timestamps deliberately come from the source file instead, per the doc above.
+	_ = modTime
 	if !IsCompressible(srcPath) {
 		return nil
 	}
@@ -118,7 +182,7 @@ func PrecompressFile(srcPath string, modTime time.Time, opts PrecompressOptions)
 				_ = gw.Close()
 				if buf.Len() < origSize {
 					if err := os.WriteFile(gzPath, buf.Bytes(), 0o644); err == nil {
-						_ = os.Chtimes(gzPath, modTime, modTime)
+						_ = os.Chtimes(gzPath, srcInfo.ModTime(), srcInfo.ModTime())
 					}
 				}
 			}
@@ -136,7 +200,7 @@ func PrecompressFile(srcPath string, modTime time.Time, opts PrecompressOptions)
 			_ = bw.Close()
 			if buf.Len() < origSize {
 				if err := os.WriteFile(brPath, buf.Bytes(), 0o644); err == nil {
-					_ = os.Chtimes(brPath, modTime, modTime)
+					_ = os.Chtimes(brPath, srcInfo.ModTime(), srcInfo.ModTime())
 				}
 			}
 			poolutils.PutByteBuffer(buf)
@@ -154,7 +218,7 @@ func PrecompressFile(srcPath string, modTime time.Time, opts PrecompressOptions)
 				_ = zw.Close()
 				if buf.Len() < origSize {
 					if err := os.WriteFile(zstPath, buf.Bytes(), 0o644); err == nil {
-						_ = os.Chtimes(zstPath, modTime, modTime)
+						_ = os.Chtimes(zstPath, srcInfo.ModTime(), srcInfo.ModTime())
 					}
 				}
 			}

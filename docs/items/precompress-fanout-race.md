@@ -8,7 +8,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
+| Status | shipped |
 | Stage | v1.1 |
 | Kind | fix |
 | Tier | foundation |
@@ -58,11 +58,48 @@ duplicated per platform, compressing identical bytes N times for N platforms.
 
 Precompress once before the fan-out. The per-platform call is not just unsafe but meaningless — the bytes are identical for every platform — so hoisting it fixes the race and removes N-1 redundant compressions rather than merely making the collision orderly.
 
+## Decision
+
+Shipped 2026-08-19 — but not by hoisting, and the reason is a hard constraint the
+recommendation missed: `internal/core` may not import a `*utils` package (enforced by
+`TestUtilityPackagesNotImportedFromCoreOrPorts`), so core cannot call precompression at all
+without introducing a new port. That is a larger change than the defect warrants.
+
+What shipped instead achieves the same two effects inside the adapter:
+
+1. **Freshness made meaningful.** A sidecar's on-disk mtime now comes from its source rather
+   than the build epoch. `isStale` compares those two, and pinning sidecars to the epoch while
+   a build writes its sources *now* made every sidecar permanently stale — so every platform
+   re-ran brotli at BestCompression over the whole tree. Safe for reproducibility: the only
+   `ModTime` that reaches a tar header is the pinned value `writeTar` receives, so on-disk
+   mtimes never influence image bytes. This removes the N-1 redundant compressions the
+   recommendation wanted.
+2. **Per-directory serialisation.** Precompressors no longer overlap each other.
+
+Together they give the invariant the race needed: **writes never overlap a walk.** The first
+platform writes while the others block on the lock; every later platform then finds the
+sidecars fresh and writes nothing; so all writing has finished before any tar walk begins.
+
+The three discarded `_ =` errors now warn through the packager's logger — a precompression
+failure previously shipped a slower image with no signal.
+
+**Two rejected approaches, recorded because both looked better than they were.** Atomic
+writes (temp file plus rename) seemed strictly safer and are wrong here: `os.CreateTemp` puts
+the temporary file in the very directory the packager walks, so a concurrent walk either fails
+its lstat when the file is renamed away or packages a `.tmp-*` file into the image — caught by
+a test. And a test forcing rewrites during a walk was written, failed intermittently, and was
+deleted: it asserts write atomicity, a guarantee this design deliberately does not provide.
+
 ## Implementation
 
 - [internal/adapters/precompressutils/precompressutils.go](../../internal/adapters/precompressutils/precompressutils.go)
 - [internal/adapters/packager/packager.go](../../internal/adapters/packager/packager.go)
 - [internal/core/pipeline.go](../../internal/core/pipeline.go)
+
+## Known Limitations
+
+- The race has no reproducing test. Four designs were tried; the vulnerable window is roughly one syscall wide and `-race` is blind to a filesystem-mediated race. The guard is instead the freshness test — if later passes ever start rewriting again the ordering argument collapses and it fails, verified 12/12 against the reverted fix.
+- Safety rests on freshness detection being correct. A source genuinely modified mid-build would be recompressed by a later platform while an earlier one tars; that does not happen in a normal build, and is stated in the code rather than assumed away.
 
 ## Related
 

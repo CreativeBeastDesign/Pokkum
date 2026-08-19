@@ -336,7 +336,13 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 					// Layered strategy's runtime (adapter-node's bundled sirv
 					// server) only ever negotiates gzip/brotli, never zstd —
 					// see precompressutils.PrecompressOptions's doc comment.
-					_ = precompressutils.PrecompressDirectory(req.AppClientDir, ts, precompressutils.PrecompressOptions{Gzip: true, Brotli: true})
+					if err := precompressutils.PrecompressDirectory(req.AppClientDir, ts, precompressutils.PrecompressOptions{Gzip: true, Brotli: true}); err != nil {
+						// Warned, not fatal: sidecars are a serving
+						// optimisation, so a failure degrades response size
+						// rather than correctness. Silence was the defect —
+						// the image simply shipped slower with no signal.
+						p.logger().Warn("packager: precompressing the client tree failed; the image will ship without some gzip/brotli sidecars", "dir", req.AppClientDir, "err", err)
+					}
 				}
 				clientLayer, _, clientRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppClientDir, ports.AppClientDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true})
 				if err != nil {
@@ -400,7 +406,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 			}
 		}
 		var prerenderedRecs []attestutils.Record
-		if addenda, prerenderedRecs, err = appendPrerenderedLayer(ctx, req, ts, layerMediaType, addenda); err != nil {
+		if addenda, prerenderedRecs, err = appendPrerenderedLayer(ctx, p.logger(), req, ts, layerMediaType, addenda); err != nil {
 			return nil, err
 		}
 		attestRecords = append(attestRecords, prerenderedRecs...)
@@ -424,7 +430,9 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 				if !req.NoPrecompress {
 					// pokkum-static genuinely negotiates zstd, unlike the
 					// layered strategy's sirv server — keep all three formats.
-					_ = precompressutils.PrecompressDirectory(req.AppClientDir, ts, precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: true})
+					if err := precompressutils.PrecompressDirectory(req.AppClientDir, ts, precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: true}); err != nil {
+						p.logger().Warn("packager: precompressing the client tree failed; the image will ship without some gzip/brotli/zstd sidecars", "dir", req.AppClientDir, "err", err)
+					}
 				}
 				clientLayer, err := BuildDirectoryTreeLayer(ctx, req.Platform, req.AppClientDir, ports.AppClientDirPrefix, ts, req.Compression)
 				if err != nil {
@@ -438,7 +446,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 			}
 		}
 
-		if addenda, _, err = appendPrerenderedLayer(ctx, req, ts, layerMediaType, addenda); err != nil {
+		if addenda, _, err = appendPrerenderedLayer(ctx, p.logger(), req, ts, layerMediaType, addenda); err != nil {
 			return nil, err
 		}
 	} else {
@@ -559,7 +567,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 // static-strategy branches of Build, which both ship prerendered pages in
 // their own dedicated layer rather than folded into the client/server tree.
 // A no-op (returns addenda unchanged) when the directory is unset or absent.
-func appendPrerenderedLayer(ctx context.Context, req ports.PackageRequest, ts time.Time, layerMediaType types.MediaType, addenda []mutate.Addendum) ([]mutate.Addendum, []attestutils.Record, error) {
+func appendPrerenderedLayer(ctx context.Context, log *slog.Logger, req ports.PackageRequest, ts time.Time, layerMediaType types.MediaType, addenda []mutate.Addendum) ([]mutate.Addendum, []attestutils.Record, error) {
 	if req.AppPrerenderedDir == "" {
 		return addenda, nil, nil
 	}
@@ -571,7 +579,9 @@ func appendPrerenderedLayer(ctx context.Context, req ports.PackageRequest, ts ti
 		// Only pokkum-static (--strategy=static) negotiates zstd; the layered
 		// strategy's sirv server never does, so skip generating dead bytes.
 		opts := precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: req.Strategy.ApplyStatic()}
-		_ = precompressutils.PrecompressDirectory(req.AppPrerenderedDir, ts, opts)
+		if err := precompressutils.PrecompressDirectory(req.AppPrerenderedDir, ts, opts); err != nil {
+			log.Warn("packager: precompressing the prerendered tree failed; the image will ship without some sidecars", "dir", req.AppPrerenderedDir, "err", err)
+		}
 	}
 	prerenderedLayer, _, prerenderedRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppPrerenderedDir, ports.AppPrerenderedDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true})
 	if err != nil {

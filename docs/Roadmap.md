@@ -16,7 +16,6 @@ _None._
 
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
-| [Concurrent per-platform builds race on precompressed sidecars](items/precompress-fanout-race.md) | Every platform re-runs precompression over the same output directory while other platforms are tarring it, so a multi-arch build can fail with archive/tar write too long. | fix | open |
 | [Tarball output silently drops every OCI annotation](items/tarball-output-drops-annotations.md) | pokkum build --output=tarball writes the legacy docker-save format, which has no annotations field, so every annotation Pokkum stamps is lost without warning. | fix | open |
 
 ### Developer Experience

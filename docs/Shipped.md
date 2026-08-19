@@ -36,6 +36,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | Title | Summary | Kind | Status | Commits |
 | --- | --- | --- | --- | --- |
 | [pokkum verify doesn't reproduce the asset-overlay layer](items/asset-overlay-verify-gap.md) | Verifying an image built with --asset-overlay reports a false-positive digest mismatch, because verify's rebuild path has no way to re-resolve the same predecessor chain. | fix | shipped |  |
+| [Concurrent per-platform builds race on precompressed sidecars](items/precompress-fanout-race.md) | Every platform re-runs precompression over the same output directory while other platforms are tarring it, so a multi-arch build can fail with archive/tar write too long. | fix | shipped |  |
 
 ### Developer Experience
 
