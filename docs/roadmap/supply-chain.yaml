@@ -256,7 +256,7 @@ items:
   - id: custom-base-lock-slot
     title: "Per-ref pokkum.lock slot for custom --base images"
     stage: v1.1
-    status: open
+    status: shipped
     kind: hardening
     tier: foundation
     summary: "Give every custom --base reference its own pokkum.lock slot instead of sharing one, since two custom bases in a project still evict each other today."
@@ -277,10 +277,34 @@ items:
         description: "Leave the ref/digest match check as the permanent mitigation; accept that multiple custom bases in one project never get independent stable pins."
         tradeoffs: "Zero migration risk, but the underlying correctness gap (two custom bases can't coexist with cached pins) stays open indefinitely."
     recommendation: ""
-    decision: "Option A — give each custom ref its own slot (e.g. `custom:<hash-of-ref>`), mirroring why `distroless-node` became its own preset. Needs a `pokkum.lock` migration story, which is why it is not done yet."
+    decision: |
+      Option A, shipped 2026-08-19. Custom entries key as `custom:<sha256(normalized ref)[:12]>`;
+      the fixed presets keep their historical keys untouched. The `Ref`/`Digest` identity guard
+      from `69914ac` is kept on top of the new keying rather than deleted as redundant — a
+      truncated hash can collide, and `pokkum.lock` is a hand-editable plain file.
+
+      Migration, which was the hard part: lookup tries the per-ref key first and falls back to a
+      legacy bare `"custom"` entry only when its recorded ref matches the request; writes always
+      use the new key. The legacy entry is copied verbatim and deleted only when it was the entry
+      just consumed for this ref, so nothing is lost and no duplicate is stranded to diverge on
+      the next `--update-base`; a legacy entry belonging to a different ref is never touched,
+      since it is still that ref's only pin. The copy is written early rather than through the
+      normal write path, or an escrow-mirror resolve would record the mirror's pinned ref as the
+      upstream pin and a legacy entry that resolves cleanly would never migrate at all.
+
+      Widening the key was a caller-chain change that compiled silently: `RecordScanResult(preset)`
+      could no longer name a custom entry and would have returned nil having recorded nothing, and
+      `pokkum base check` parsed each slot name as a preset, so every `custom:<hash>` slot would
+      have vanished from its output. Both fixed.
+
+      Behaviour change: the first build after upgrading rewrites `pokkum.lock` once to migrate a
+      bare `"custom"` entry, so the lockfile hash recorded in SLSA `resolvedDependencies` changes
+      that once. No image bytes depend on it.
     flags: ["--base"]
     impl:
       - internal/adapters/baseimage/resolver.go
+      - internal/adapters/lockfileutils/lockfile.go
+      - cmd/pokkum/base.go
     evidence:
       commits: ["69914ac"]
       findings: [16]
@@ -288,7 +312,7 @@ items:
   - id: trusted-root-bytes
     title: "TrustedRootPath should take bytes, not a file path"
     stage: v1.1
-    status: open
+    status: shipped
     kind: hardening
     tier: foundation
     summary: "Change the base-image trusted-root field from a file path to bytes so all three Sigstore trust-root consumers take the same shape."
@@ -307,10 +331,27 @@ items:
         description: "Change `ports.BaseImageRequest.TrustedRootPath` to a byte slice and have the CLI/caller read the file itself, matching the other two consumers."
         tradeoffs: "One field-shape change plus updating its single caller; makes all three trust-root consumers structurally consistent going forward."
     recommendation: ""
-    decision: "Option B — change it to take bytes so all three consumers are consistent, rather than bridging with a temp file whose location relative to the hermetic sandbox would need its own decision."
+    decision: |
+      Option B, shipped 2026-08-19. `TrustedRootPath string` became `TrustedRootJSON []byte`; the
+      single `os.ReadFile` moved to the composition root in `cmd/pokkum/build.go`, so no adapter
+      touches the filesystem for this and both consumers provably verify against the same bytes.
+      `core.ErrBaseSignatureInvalid` is still wrapped, so existing `errors.Is` checks match.
+
+      Implementing it exposed a pre-existing fail-open on the same lines: the flag was read a
+      *second* time for `req.CacheVerify.TrustedRootJSON` as `if data, err := os.ReadFile(...);
+      err == nil`, so an unreadable or mistyped path silently left the field empty — which every
+      consumer reads as "use the embedded public-good root". An operator running a private
+      Sigstore deployment had cache signatures checked against the public-good root with no
+      warning, no log, and exit 0. `pokkum verify` already had the correct shape, with a comment
+      explaining why. The single shared read fixes it.
+
+      Behaviour change, deliberate: an unreadable `--sigstore-trusted-root` now fails the build up
+      front rather than only when keyless base verification happens to run, so `--no-verify-base`
+      no longer tolerates it.
     impl:
       - internal/ports/baseimage.go
       - internal/adapters/baseimage/resolver.go
+      - cmd/pokkum/build.go
 
   - id: base-image-signature-verification
     title: "Base image signature verification"

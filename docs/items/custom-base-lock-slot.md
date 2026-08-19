@@ -8,7 +8,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
+| Status | shipped |
 | Stage | v1.1 |
 | Kind | hardening |
 | Tier | foundation |
@@ -38,7 +38,28 @@ entry rather than getting its own.
 
 ## Decision
 
-Option A — give each custom ref its own slot (e.g. `custom:<hash-of-ref>`), mirroring why `distroless-node` became its own preset. Needs a `pokkum.lock` migration story, which is why it is not done yet.
+Option A, shipped 2026-08-19. Custom entries key as `custom:<sha256(normalized ref)[:12]>`;
+the fixed presets keep their historical keys untouched. The `Ref`/`Digest` identity guard
+from `69914ac` is kept on top of the new keying rather than deleted as redundant — a
+truncated hash can collide, and `pokkum.lock` is a hand-editable plain file.
+
+Migration, which was the hard part: lookup tries the per-ref key first and falls back to a
+legacy bare `"custom"` entry only when its recorded ref matches the request; writes always
+use the new key. The legacy entry is copied verbatim and deleted only when it was the entry
+just consumed for this ref, so nothing is lost and no duplicate is stranded to diverge on
+the next `--update-base`; a legacy entry belonging to a different ref is never touched,
+since it is still that ref's only pin. The copy is written early rather than through the
+normal write path, or an escrow-mirror resolve would record the mirror's pinned ref as the
+upstream pin and a legacy entry that resolves cleanly would never migrate at all.
+
+Widening the key was a caller-chain change that compiled silently: `RecordScanResult(preset)`
+could no longer name a custom entry and would have returned nil having recorded nothing, and
+`pokkum base check` parsed each slot name as a preset, so every `custom:<hash>` slot would
+have vanished from its output. Both fixed.
+
+Behaviour change: the first build after upgrading rewrites `pokkum.lock` once to migrate a
+bare `"custom"` entry, so the lockfile hash recorded in SLSA `resolvedDependencies` changes
+that once. No image bytes depend on it.
 
 ## Flags
 
@@ -47,6 +68,8 @@ Option A — give each custom ref its own slot (e.g. `custom:<hash-of-ref>`), mi
 ## Implementation
 
 - [internal/adapters/baseimage/resolver.go](../../internal/adapters/baseimage/resolver.go)
+- [internal/adapters/lockfileutils/lockfile.go](../../internal/adapters/lockfileutils/lockfile.go)
+- [cmd/pokkum/base.go](../../cmd/pokkum/base.go)
 
 ## Evidence
 

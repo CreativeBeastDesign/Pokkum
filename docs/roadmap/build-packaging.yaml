@@ -166,7 +166,7 @@ items:
   - id: asset-overlay-verify-gap
     title: "pokkum verify doesn't reproduce the asset-overlay layer"
     stage: v1.1
-    status: open
+    status: shipped
     kind: fix
     tier: foundation
     summary: "Verifying an image built with --asset-overlay reports a false-positive digest mismatch, because verify's rebuild path has no way to re-resolve the same predecessor chain."
@@ -185,7 +185,67 @@ items:
         description: "Stamp the resolved predecessor digests onto a pokkum.dev/asset-overlay-sources annotation at build time, and have verify read it back automatically before rebuilding."
         tradeoffs: "No extra flags for the caller, self-describing — but adds another annotation to keep in sync with the actual overlay layer contents."
     recommendation: "Read the chain back off a pokkum.dev/asset-overlay-sources annotation, since it needs no caller-side bookkeeping and keeps verify's rebuild path self-contained."
-    related: ["rolling-deploy-asset-overlay"]
+    decision: |
+      Option B, shipped 2026-08-19. The annotation already existed on every per-platform manifest
+      of the pushed image, so only the read side was missing. `comparator.CompareImages` now reads
+      it, reconstructs the merged overlay from the named predecessors through the real
+      `assetoverlay` resolver, rebuilds the layer using the remote config's own `Created`
+      timestamp, and only splices it into the comparison once the reconstructed DiffID equals the
+      image's actual overlay-layer DiffID.
+
+      That equality check is what makes this safe rather than merely permissive: a tampered
+      annotation and a tampered layer are indistinguishable from outside, so any mismatch is
+      treated as tampering. Absent annotation, malformed entry, missing reconstruction support,
+      an unreachable predecessor, or an annotation with no matching overlay layer in the image's
+      own history are all hard errors. Stripping the annotation buys an attacker nothing: the
+      overlay layer is still there, the plain rebuild still lacks it, and the ordinary comparison
+      reports L3 — proven by test, not by argument.
+
+      A new `ports.LayerBuilder` port keeps this out of an adapter-to-adapter import.
+    flags: ["--asset-overlay", "--asset-overlay-from"]
+    impl:
+      - internal/adapters/comparator/comparator.go
+      - internal/adapters/packager/layerbuilder.go
+      - internal/ports/packager.go
+      - cmd/pokkum/verify.go
+    limitations:
+      - "Images whose only output is a local tarball carry no annotations at all, so this path cannot help them — see [Tarball output silently drops every OCI annotation](item:tarball-output-drops-annotations)."
+    related: ["rolling-deploy-asset-overlay", "tarball-output-drops-annotations"]
+
+  - id: tarball-output-drops-annotations
+    title: "Tarball output silently drops every OCI annotation"
+    stage: v1.1
+    status: open
+    kind: fix
+    tier: foundation
+    summary: "pokkum build --output=tarball writes the legacy docker-save format, which has no annotations field, so every annotation Pokkum stamps is lost without warning."
+    problem: |
+      `internal/adapters/registry/tarball.go`'s `Write` uses go-containerregistry's
+      `tarball.MultiWriteToFile`, the legacy `docker save` format. Its manifest entry carries only
+      `Config`, `RepoTags`, `Layers` and `LayerSources` — there is no annotations field in the
+      format at all, confirmed by reading the writer's own struct in
+      go-containerregistry v0.21.9.
+
+      Every annotation Pokkum stamps is therefore silently discarded for tarball output:
+      `pokkum.dev/predecessor`, `pokkum.dev/asset-overlay-sources`, `pokkum.dev/vex-exemptions`,
+      `pokkum.dev/env-baked` and the `org.opencontainers.image.*` set. Registry push is
+      unaffected. Nothing warns.
+
+      Found while implementing [pokkum verify doesn't reproduce the asset-overlay layer](item:asset-overlay-verify-gap),
+      whose fix depends on reading one of those annotations back — so for an `--asset-overlay`
+      image whose only output was a tarball, that fix cannot engage and the old false positive
+      remains for that output mode specifically.
+    options:
+      - title: "Write an OCI layout instead"
+        description: "Emit an OCI image layout, which has first-class annotation support, either replacing the docker-save tarball or as a second output mode."
+        tradeoffs: "Correct and future-proof, and overlaps with the already-planned --to-oci-layout work — but docker load does not accept an OCI layout, so replacing the current format outright would break anyone piping into Docker."
+      - title: "Warn when annotations would be dropped"
+        description: "Keep the format and emit a loud warning listing the annotations being discarded whenever tarball output is used on an image that has any."
+        tradeoffs: "Cheap and honest, but leaves the data genuinely lost — it converts a silent failure into a visible one rather than fixing it."
+    recommendation: "Do both, in order: warn now, since a silent loss of provenance metadata is the actual defect, then fold real annotation support into the --to-oci-layout work rather than duplicating it."
+    impl:
+      - internal/adapters/registry/tarball.go
+    related: ["asset-overlay-verify-gap", "oci-layout-dev-output"]
 
   - id: ecr-repo-autocreate
     title: "ECR repository auto-create"

@@ -8,7 +8,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
+| Status | shipped |
 | Stage | v1.1 |
 | Kind | hardening |
 | Tier | foundation |
@@ -36,10 +36,26 @@ called out in that commit message as "a bigger call than belongs in this change.
 
 ## Decision
 
-Option B — change it to take bytes so all three consumers are consistent, rather than bridging with a temp file whose location relative to the hermetic sandbox would need its own decision.
+Option B, shipped 2026-08-19. `TrustedRootPath string` became `TrustedRootJSON []byte`; the
+single `os.ReadFile` moved to the composition root in `cmd/pokkum/build.go`, so no adapter
+touches the filesystem for this and both consumers provably verify against the same bytes.
+`core.ErrBaseSignatureInvalid` is still wrapped, so existing `errors.Is` checks match.
+
+Implementing it exposed a pre-existing fail-open on the same lines: the flag was read a
+*second* time for `req.CacheVerify.TrustedRootJSON` as `if data, err := os.ReadFile(...);
+err == nil`, so an unreadable or mistyped path silently left the field empty — which every
+consumer reads as "use the embedded public-good root". An operator running a private
+Sigstore deployment had cache signatures checked against the public-good root with no
+warning, no log, and exit 0. `pokkum verify` already had the correct shape, with a comment
+explaining why. The single shared read fixes it.
+
+Behaviour change, deliberate: an unreadable `--sigstore-trusted-root` now fails the build up
+front rather than only when keyless base verification happens to run, so `--no-verify-base`
+no longer tolerates it.
 
 ## Implementation
 
 - [internal/ports/baseimage.go](../../internal/ports/baseimage.go)
 - [internal/adapters/baseimage/resolver.go](../../internal/adapters/baseimage/resolver.go)
+- [cmd/pokkum/build.go](../../cmd/pokkum/build.go)
 

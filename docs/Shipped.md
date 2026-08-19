@@ -14,6 +14,21 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | --- | --- | --- | --- | --- |
 | [Reconsider pokkum metrics' shape](items/metrics-command-shape.md) | Decided by removal: pokkum metrics claimed to run a metrics server, never listened on anything, and is deleted, since it neither runs a server nor exposes anything the way its own text claims. | dx | shipped |  |
 
+## v1.1
+
+### Build & Packaging
+
+| Title | Summary | Kind | Status | Commits |
+| --- | --- | --- | --- | --- |
+| [pokkum verify doesn't reproduce the asset-overlay layer](items/asset-overlay-verify-gap.md) | Verifying an image built with --asset-overlay reports a false-positive digest mismatch, because verify's rebuild path has no way to re-resolve the same predecessor chain. | fix | shipped |  |
+
+### Supply Chain & Attestation
+
+| Title | Summary | Kind | Status | Commits |
+| --- | --- | --- | --- | --- |
+| [Per-ref pokkum.lock slot for custom --base images](items/custom-base-lock-slot.md) | Give every custom --base reference its own pokkum.lock slot instead of sharing one, since two custom bases in a project still evict each other today. | hardening | shipped | `69914ac` |
+| [TrustedRootPath should take bytes, not a file path](items/trusted-root-bytes.md) | Change the base-image trusted-root field from a file path to bytes so all three Sigstore trust-root consumers take the same shape. | hardening | shipped |  |
+
 ## Unscheduled
 
 ### Build & Packaging

@@ -35,13 +35,24 @@ before trusting a claim that predates the commit it cites.
   `@` is parsed as a reference — order is load-bearing (`name.ParseReference`
   accepts a typo'd preset as Docker Hub shorthand, e.g. `distrolss` →
   `docker.io/library/distrolss:latest`).
-- **Lock-slot gap, narrowly patched, not resolved** (`internal/adapters/baseimage/resolver.go`):
-  every custom `--base` ref shares one `pokkum.lock` key (`lockKey = string(req.Preset)`
-  = `"custom"`). `69914ac` added a guard so a `"custom"`-keyed entry is only
-  trusted when its recorded `Ref`/`Digest` matches the current request — this
-  closes the silent-wrong-image bug, but a second custom ref still evicts the
-  first from the shared slot. Proper fix (a per-ref slot) needs a lockfile
-  migration — see `mem:open_decisions` row 1.
+- **Lock slots are per-reference for custom bases (closed 2026-08-19).**
+  `internal/adapters/baseimage/resolver.go`'s `lockKeyFor(preset, ref)`: fixed
+  presets keep their bare-preset-name key unchanged (re-keying them would orphan
+  every existing pin); `BaseImageCustom` gets
+  `"custom:" + sha256(normalizeRefForLockKey(ref))[:12]`, so two custom bases in
+  one project each hold their own stable pin. Three things to know before
+  touching this: (1) the `69914ac` `Ref`/`Digest` match guard is deliberately
+  KEPT on top of the new keying (truncated hash + hand-editable JSON file), and a
+  guard failure degrades to a cache miss, never to the wrong image;
+  (2) `lookupLockedBase` reads the legacy bare `"custom"` slot as a fallback,
+  only when its recorded `Ref` matches, then copies it verbatim under the new key
+  and deletes it — the legacy key is never written, and a legacy entry belonging
+  to a *different* ref is neither trusted nor deleted; (3) anything mapping a
+  lockfile slot name back to a preset MUST go through
+  `lockfileutils.PresetNameForLockKey` (`cmd/pokkum/base.go`'s `runBaseCheck`
+  does) — a raw `core.ParseBaseImagePreset` on the slot name skips every
+  `custom:<hash>` entry silently. `ports.BaseImageResolver.RecordScanResult` now
+  takes `ref` alongside `preset` for the same reason.
 - Escrow-mirror pulls (`--mirror-registry`) are digest-pinned against
   `pokkum.lock`'s `entry.Digest` (fixed `a149b28`) — a mirror tag retargeted to
   different content now fails closed (`core.ErrBaseSignatureInvalid`).
@@ -61,11 +72,20 @@ before trusting a claim that predates the commit it cites.
   `-count=1` since Go's test cache can't see a live-repo change) — previously
   network-gated + `-short`-skipped, and CI always runs `-short`, so it had never
   actually executed once.
-- `TrustedRootPath` inconsistency, still open: `internal/ports/baseimage.go`'s
-  `TrustedRootPath string` (a file path, read via `os.ReadFile` in
-  `internal/adapters/baseimage/resolver.go`) is the odd one out — both
-  `internal/adapters/sigstore.Verifier` (`trustedRootJSON []byte`) and the TUF
-  refresh option consume bytes. Not bridged. See `mem:open_decisions` row 2.
+- **All three Sigstore trust-root consumers take bytes (closed 2026-08-19).**
+  `ports.BaseImageRequest.TrustedRootJSON []byte` replaced
+  `TrustedRootPath string`; `cmd/pokkum/build.go` reads any
+  `--sigstore-trusted-root` file ONCE and feeds both `req.BaseImage` and
+  `req.CacheVerify` from the same bytes, so no adapter touches the filesystem for
+  it and a TUF-refreshed root can be handed to any consumer without a temp file.
+  An unreadable file now fails the command closed (wrapping
+  `core.ErrBaseSignatureInvalid`) before the build starts, where it previously
+  only failed if keyless verification actually ran. Fixed in the same change: the
+  cache-verify consumer had been swallowing the read error (`if err == nil`) and
+  degrading to the embedded snapshot while the operator believed their explicit
+  root was in force — see `Lessons.md` 2026-08-19 and
+  `mem:self_review_checklist` row 41. `verifyKey` now keys on a fingerprint of
+  the trusted-root bytes, not the path.
 
 ## Static strategy (`--strategy=static`)
 - Genuinely functional end-to-end as of the 2026-08-19 fixture-driven batch —

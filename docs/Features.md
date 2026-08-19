@@ -274,6 +274,16 @@ cmd/pokkum now injects verifiers at every construction site instead of adapters 
   - [internal/architecture_test.go](../internal/architecture_test.go)
   - [internal/adapters/provenance/resolver.go](../internal/adapters/provenance/resolver.go)
 
+### [Per-ref pokkum.lock slot for custom --base images](items/custom-base-lock-slot.md)
+
+Give every custom --base reference its own pokkum.lock slot instead of sharing one, since two custom bases in a project still evict each other today.
+
+- Flags: `--base`
+- Implementation:
+  - [internal/adapters/baseimage/resolver.go](../internal/adapters/baseimage/resolver.go)
+  - [internal/adapters/lockfileutils/lockfile.go](../internal/adapters/lockfileutils/lockfile.go)
+  - [cmd/pokkum/base.go](../cmd/pokkum/base.go)
+
 ### [Embedded PID-1 binaries brought under CI attestation](items/embedded-pid1-attestation-coverage.md)
 
 pokkum-init and pokkum-static are now built by CI/releases and freshness-checked, closing the gap where every image's PID 1 was a developer-laptop binary outside the attested pipeline.
@@ -351,10 +361,20 @@ Queries OSV.dev for advisories against the exact embedded Bun version recorded i
 - Implementation:
   - [internal/adapters/scanner/adapter.go](../internal/adapters/scanner/adapter.go)
 
+### [TrustedRootPath should take bytes, not a file path](items/trusted-root-bytes.md)
+
+Change the base-image trusted-root field from a file path to bytes so all three Sigstore trust-root consumers take the same shape.
+
+- Implementation:
+  - [internal/ports/baseimage.go](../internal/ports/baseimage.go)
+  - [internal/adapters/baseimage/resolver.go](../internal/adapters/baseimage/resolver.go)
+  - [cmd/pokkum/build.go](../cmd/pokkum/build.go)
+
 ## Known Limitations
 
 ### Build & Packaging
 
+- Images whose only output is a local tarball carry no annotations at all, so this path cannot help them — see [Tarball output silently drops every OCI annotation](items/tarball-output-drops-annotations.md). ([pokkum verify doesn't reproduce the asset-overlay layer](items/asset-overlay-verify-gap.md))
 - The fix was itself silently undermined until 81a6fb6: Go's default -buildvcs stamping made the pokkum-init/pokkum-static binaries' own content change every commit regardless of the tar-timestamp pin, so the two layers containing them kept churning anyway — the same failure class (build metadata leaking into a content-addressed artifact) as the first bug, a second independent source of it in the identical layers. Closed with -buildvcs=false on both embedded-binary build targets; the main CLI build deliberately keeps VCS stamping since it wants version reporting. ([Bun/supervisor layer diffID stability, pinned twice](items/bun-layer-diffid-stability.md))
 - This was a real bug, not a missing assertion: writing the stability test found the diffID derived its tar timestamp from SOURCE_DATE_EPOCH, which changes every commit, actively inverting what was supposed to be the single biggest fleet-wide size lever (fixed 1675d4c). ([Bun/supervisor layer diffID stability, pinned twice](items/bun-layer-diffid-stability.md))
 - PB-2's first-contact gap is a stated, permanent limitation, not an open TODO: the very first resolve of a genuinely new, unlisted (version, target) on a fresh cache has no independent trust anchor beyond the GPG-signed manifest itself — GitHub's Releases API shares the same trust root as the download host and exposes no per-asset digests, so it adds no real signal. Re-running scripts/pin-bun-checksums periodically narrows this; nothing closes it fully. ([Bun release checksum verification](items/bun-release-integrity.md))

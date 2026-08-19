@@ -16,7 +16,7 @@ _None._
 
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
-| [pokkum verify doesn't reproduce the asset-overlay layer](items/asset-overlay-verify-gap.md) | Verifying an image built with --asset-overlay reports a false-positive digest mismatch, because verify's rebuild path has no way to re-resolve the same predecessor chain. | fix | open |
+| [Tarball output silently drops every OCI annotation](items/tarball-output-drops-annotations.md) | pokkum build --output=tarball writes the legacy docker-save format, which has no annotations field, so every annotation Pokkum stamps is lost without warning. | fix | open |
 
 ### Developer Experience
 
@@ -29,8 +29,6 @@ _None._
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
 | [Build-environment capture (Go + SvelteKit versions)](items/build-environment-capture.md) | Round out toolchain provenance by also recording the SvelteKit version used, alongside Go and Bun which are already captured. | feature | open |
-| [Per-ref pokkum.lock slot for custom --base images](items/custom-base-lock-slot.md) | Give every custom --base reference its own pokkum.lock slot instead of sharing one, since two custom bases in a project still evict each other today. | hardening | open |
-| [TrustedRootPath should take bytes, not a file path](items/trusted-root-bytes.md) | Change the base-image trusted-root field from a file path to bytes so all three Sigstore trust-root consumers take the same shape. | hardening | open |
 
 ## v1.2
 
