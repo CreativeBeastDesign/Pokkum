@@ -32,7 +32,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | Flag | Env / Config | Default | Description |
 |---|---|---|---|
 | `--log-level` | — | `INFO` | Log level: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
-| `--log-format` | — | `text` | Log format: `text` or `json`. |
+| `--log-format` | — | `auto` | Log format. `auto` renders a human-readable console view (level glyph, bold message, attributes inline when short or as an aligned indented block when long) **only when stderr is an interactive terminal**, and byte-identical `text` logfmt otherwise — so piped and CI output is unchanged. `console` forces the human view even when piped (e.g. `2>&1 | less -R`); `text` forces logfmt even on a terminal, which is what scripts parsing the output should pin; `json` is unchanged. Colour additionally honours `NO_COLOR` and `TERM=dumb`, both of which keep the layout and drop the escape sequences. |
 | `--output` | — | `text` | Output serialization format: `text` or `json`. |
 
 ---

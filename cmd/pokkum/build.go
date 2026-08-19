@@ -219,8 +219,8 @@ The project directory defaults to the current working directory.`,
 		"Emit the computed OCI manifest/config without pushing")
 	cmd.Flags().StringVar(&flags.logLevel, "log-level", "INFO",
 		"Log level (DEBUG, INFO, WARN, ERROR)")
-	cmd.Flags().StringVar(&flags.logFormat, "log-format", "text",
-		"Log format (text or json)")
+	cmd.Flags().StringVar(&flags.logFormat, "log-format", "auto",
+		"Log format: auto (human-readable on a terminal, text otherwise), console, text, or json")
 
 	// Telemetry flags
 	cmd.Flags().BoolVar(&flags.telemetry, "telemetry", false,

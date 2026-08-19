@@ -27,7 +27,7 @@ func main() {
 	// Parse global flags early to set up logging
 	// We need to determine log level and format before creating the root command
 	logLevel := flag(os.Args, "log-level", "INFO")
-	logFormat := flag(os.Args, "log-format", "text")
+	logFormat := flag(os.Args, "log-format", "auto")
 
 	// Set up structured logging
 	logger := setupLogger(logLevel, logFormat)
@@ -72,10 +72,27 @@ func setupLogger(levelStr, format string) *slog.Logger {
 	var handler slog.Handler
 	opts := &slog.HandlerOptions{Level: level}
 
-	if format == "json" {
+	switch format {
+	case "json":
 		handler = slog.NewJSONHandler(os.Stderr, opts)
-	} else {
+	case "text":
+		// Explicitly requested: always logfmt, even on a terminal. This is the
+		// value scripts and CI pin when they parse the output.
 		handler = slog.NewTextHandler(os.Stderr, opts)
+	case "console":
+		// Explicitly requested: always the human renderer, even when piped
+		// (useful for `pokkum build 2>&1 | less -R`).
+		_, color := consoleRenderingWanted(os.Stderr)
+		handler = newConsoleHandler(os.Stderr, level, color)
+	default:
+		// "auto" and anything unrecognised: render for a human only when
+		// stderr is definitely an interactive terminal, and keep byte-identical
+		// logfmt everywhere else so log parsers and CI are unaffected.
+		if console, color := consoleRenderingWanted(os.Stderr); console {
+			handler = newConsoleHandler(os.Stderr, level, color)
+		} else {
+			handler = slog.NewTextHandler(os.Stderr, opts)
+		}
 	}
 
 	return slog.New(handler)
@@ -109,7 +126,7 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 
 	// Add global flags
 	rootCmd.PersistentFlags().String("log-level", "INFO", "Log level (DEBUG, INFO, WARN, ERROR)")
-	rootCmd.PersistentFlags().String("log-format", "text", "Log format (text or json)")
+	rootCmd.PersistentFlags().String("log-format", "auto", "Log format: auto (human-readable on a terminal, text otherwise), console, text, or json")
 	rootCmd.PersistentFlags().String("output", "text", "Output serialization format (text or json)")
 
 	// Add subcommands
