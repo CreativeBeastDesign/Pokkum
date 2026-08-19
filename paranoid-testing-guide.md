@@ -979,22 +979,28 @@ docker stop pokkum-static-test
 `file` the served body so you know you really got gzip bytes and not the
 plain file.
 
-**A known, currently-real gap — check for it and don't file a bug:**
-`pokkum-static` sends a strong `ETag` header, but it does **not** implement
-conditional-GET handling. Confirmed directly: capturing the `ETag` and
-replaying it as `If-None-Match` returns a plain `200`, not `304`, every
-time — `grep -rn "If-None-Match"` across the whole codebase returns nothing
-at all. The server's own `If-Range` handling (used only for validating a
-`Range` request against a stale byte offset, not for skipping a full
-response) is a different, narrower thing and is not affected. If you were
-relying on this guide's older text claiming `ETag` is "usable for 304,"
-that claim did not match the shipped code; the header is present and
-correct as a cache-validation *value*, it just isn't wired to trigger a
-`304` response yet:
+**Conditional GET — verify the 304, don't assume it.** `pokkum-static` sends a
+strong content-hash `ETag` and honours `If-None-Match`: a request presenting the
+current tag gets a `304` with no body. This was genuinely absent until it was
+found by running this very step, so it is worth actually checking rather than
+trusting the claim:
 ```bash
 ETAG=$(curl -s -D- -o /dev/null "$BASE/" | grep -i '^etag:' | sed -E 's/^[Ee][Tt][Aa][Gg]: //' | tr -d '\r')
-curl -s -o /dev/null -w '%{http_code}\n' -H "If-None-Match: $ETAG" "$BASE/"   # → 200, not 304 — this is the current, confirmed behavior
+curl -s -o /dev/null -w '%{http_code}\n' -H "If-None-Match: $ETAG" "$BASE/"          # → 304
+curl -s -o /dev/null -w '%{http_code}\n' -H 'If-None-Match: "not-the-tag"' "$BASE/"  # → 200
+curl -s -o /dev/null -w '%{http_code}\n' -H 'If-None-Match: *' "$BASE/"              # → 304
+# A matching conditional beats Range, per RFC 9110 — this must be 304, not 206:
+curl -s -o /dev/null -w '%{http_code}\n' -H "If-None-Match: $ETAG" -H 'Range: bytes=0-9' "$BASE/"
 ```
+**Verify independently:** confirm the `304` carries **no body** (`curl -s` should
+print nothing for it) while still returning the `ETag` and `Cache-Control`
+headers — a 304 that omits its validator is as wrong as one that ships a body.
+
+`If-Modified-Since` is deliberately **not** implemented, and its absence is
+correct rather than a gap: in-image file mtimes are pinned to a fixed epoch for
+bit-for-bit reproducibility, so a `Last-Modified` derived from them would be a
+constant across every build and actively misleading as a validator. The
+content-hash `ETag` is the honest one.
 
 ### 23e. Reproducibility — static builds must still be bit-for-bit
 

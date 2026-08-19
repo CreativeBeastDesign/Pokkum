@@ -231,6 +231,260 @@ func TestStaticServer_IfRange(t *testing.T) {
 	}
 }
 
+// TestStaticServer_IfNoneMatch_MatchingReturns304NoBody is the direct
+// regression/repro test for the reported bug: the server computes and sends
+// a strong ETag on every response but had no conditional-GET path at all, so
+// a client presenting the current ETag via If-None-Match still got a full
+// 200 with a body every time. This test must fail with 200 against the
+// pre-fix code (confirmed before implementing) and pass with 304 and an
+// empty body afterward.
+func TestStaticServer_IfNoneMatch_MatchingReturns304NoBody(t *testing.T) {
+	root := writeTree(t, map[string]string{"data.txt": "0123456789"})
+	srv := newTestServer(t, root)
+
+	// First request to learn the current strong ETag.
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/data.txt", nil))
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag on first response")
+	}
+
+	// Re-request presenting that exact ETag via If-None-Match.
+	rec2 := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/data.txt", nil)
+	req.Header.Set("If-None-Match", etag)
+	srv.handler().ServeHTTP(rec2, req)
+
+	if rec2.Code != http.StatusNotModified {
+		t.Fatalf("matching If-None-Match = %d, want 304", rec2.Code)
+	}
+	if rec2.Body.Len() != 0 {
+		t.Errorf("304 body = %q, want empty", rec2.Body.String())
+	}
+	if got := rec2.Header().Get("ETag"); got != etag {
+		t.Errorf("304 ETag = %q, want %q (must still carry the validator)", got, etag)
+	}
+	if cl := rec2.Header().Get("Content-Length"); cl != "" {
+		t.Errorf("304 Content-Length = %q, want absent", cl)
+	}
+}
+
+// TestStaticServer_IfNoneMatch_NonMatchingReturns200WithBody verifies a
+// non-matching If-None-Match value is simply ignored: the client gets the
+// normal full 200 response with its body, exactly as if the header were
+// absent.
+func TestStaticServer_IfNoneMatch_NonMatchingReturns200WithBody(t *testing.T) {
+	root := writeTree(t, map[string]string{"data.txt": "0123456789"})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/data.txt", nil)
+	req.Header.Set("If-None-Match", `"deadbeef"`)
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("non-matching If-None-Match = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != "0123456789" {
+		t.Errorf("body = %q, want the full content", rec.Body.String())
+	}
+}
+
+// TestStaticServer_IfNoneMatch_StarMatchesExistingFile verifies the "*"
+// wildcard matches any current representation, so a request for a file that
+// does exist gets 304 regardless of the (irrelevant) actual ETag value.
+func TestStaticServer_IfNoneMatch_StarMatchesExistingFile(t *testing.T) {
+	root := writeTree(t, map[string]string{"data.txt": "0123456789"})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/data.txt", nil)
+	req.Header.Set("If-None-Match", "*")
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf(`If-None-Match: * on an existing file = %d, want 304`, rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("304 body = %q, want empty", rec.Body.String())
+	}
+}
+
+// TestStaticServer_IfNoneMatch_ListContainingCurrentTagMatches verifies
+// If-None-Match's list form: a comma-separated set of entity-tags where any
+// one matching is sufficient, not just a single exact match.
+func TestStaticServer_IfNoneMatch_ListContainingCurrentTagMatches(t *testing.T) {
+	root := writeTree(t, map[string]string{"data.txt": "0123456789"})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/data.txt", nil))
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag")
+	}
+
+	rec2 := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/data.txt", nil)
+	req.Header.Set("If-None-Match", `"aaaaaaaa", `+etag+`, "bbbbbbbb"`)
+	srv.handler().ServeHTTP(rec2, req)
+
+	if rec2.Code != http.StatusNotModified {
+		t.Fatalf("list containing current tag = %d, want 304", rec2.Code)
+	}
+}
+
+// TestStaticServer_IfNoneMatch_WeakPrefixedRequestTagStillMatches verifies
+// weak comparison: a request tag prefixed "W/" must still match an otherwise
+// equal tag value, even though this server itself only ever emits strong
+// tags — the tolerance is for what arrives FROM the client (e.g. a cache or
+// proxy that downgraded a stored strong tag to weak).
+func TestStaticServer_IfNoneMatch_WeakPrefixedRequestTagStillMatches(t *testing.T) {
+	root := writeTree(t, map[string]string{"data.txt": "0123456789"})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/data.txt", nil))
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag")
+	}
+
+	rec2 := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/data.txt", nil)
+	req.Header.Set("If-None-Match", "W/"+etag)
+	srv.handler().ServeHTTP(rec2, req)
+
+	if rec2.Code != http.StatusNotModified {
+		t.Fatalf("weak-prefixed matching If-None-Match = %d, want 304", rec2.Code)
+	}
+}
+
+// TestStaticServer_IfNoneMatch_BeatsRange is the ordering regression test
+// mandated by RFC 9110 §13.1.2: If-None-Match is evaluated BEFORE Range/
+// If-Range. A request carrying both a matching conditional and a Range
+// header must 304, never fall through to a 206.
+func TestStaticServer_IfNoneMatch_BeatsRange(t *testing.T) {
+	root := writeTree(t, map[string]string{"data.txt": "0123456789"})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/data.txt", nil))
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag")
+	}
+
+	rec2 := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/data.txt", nil)
+	req.Header.Set("Range", "bytes=2-5")
+	req.Header.Set("If-None-Match", etag)
+	srv.handler().ServeHTTP(rec2, req)
+
+	if rec2.Code != http.StatusNotModified {
+		t.Fatalf("matching If-None-Match + Range = %d, want 304 (not 206)", rec2.Code)
+	}
+	if rec2.Body.Len() != 0 {
+		t.Errorf("304 body = %q, want empty", rec2.Body.String())
+	}
+	if cr := rec2.Header().Get("Content-Range"); cr != "" {
+		t.Errorf("304 Content-Range = %q, want absent", cr)
+	}
+}
+
+// TestStaticServer_IfNoneMatch_HeadConsistentWithGet verifies HEAD gets the
+// same conditional-GET treatment as GET: a matching If-None-Match on a HEAD
+// request must also 304 with no body.
+func TestStaticServer_IfNoneMatch_HeadConsistentWithGet(t *testing.T) {
+	root := writeTree(t, map[string]string{"data.txt": "0123456789"})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/data.txt", nil))
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag")
+	}
+
+	rec2 := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodHead, "/data.txt", nil)
+	req.Header.Set("If-None-Match", etag)
+	srv.handler().ServeHTTP(rec2, req)
+
+	if rec2.Code != http.StatusNotModified {
+		t.Fatalf("HEAD with matching If-None-Match = %d, want 304", rec2.Code)
+	}
+	if rec2.Body.Len() != 0 {
+		t.Errorf("304 body = %q, want empty", rec2.Body.String())
+	}
+
+	// A non-matching HEAD still gets 200 with an empty body (HEAD never
+	// carries a body regardless of status), matching TestStaticServer_HeadRequest.
+	rec3 := httptest.NewRecorder()
+	req3 := httptest.NewRequest(http.MethodHead, "/data.txt", nil)
+	req3.Header.Set("If-None-Match", `"deadbeef"`)
+	srv.handler().ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Errorf("HEAD with non-matching If-None-Match = %d, want 200", rec3.Code)
+	}
+}
+
+// TestStaticServer_IfNoneMatch_RangeAndIfRangeUnaffectedWhenAbsent is a
+// non-regression check for the pre-existing, tested Range/If-Range behaviour
+// (see TestStaticServer_RangeRequest and TestStaticServer_IfRange): with no
+// If-None-Match header at all, Range and If-Range must behave exactly as
+// before this change.
+func TestStaticServer_IfNoneMatch_RangeAndIfRangeUnaffectedWhenAbsent(t *testing.T) {
+	root := writeTree(t, map[string]string{"data.txt": "0123456789"})
+	srv := newTestServer(t, root)
+
+	// Plain Range, no conditional headers at all -> 206.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/data.txt", nil)
+	req.Header.Set("Range", "bytes=2-5")
+	srv.handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("plain Range = %d, want 206", rec.Code)
+	}
+	if rec.Body.String() != "2345" {
+		t.Errorf("range body = %q, want 2345", rec.Body.String())
+	}
+
+	// Range + matching If-Range, no If-None-Match -> still 206.
+	etag := rec.Header().Get("ETag")
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/data.txt", nil)
+	req2.Header.Set("Range", "bytes=2-5")
+	req2.Header.Set("If-Range", etag)
+	srv.handler().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusPartialContent {
+		t.Fatalf("Range + matching If-Range (no If-None-Match) = %d, want 206", rec2.Code)
+	}
+}
+
+// TestStaticServer_IfNoneMatch_NonMatchingWithRangeStill206 proves the two
+// checks compose correctly rather than one unconditionally overriding the
+// other: a non-matching If-None-Match must fall through to normal Range
+// handling, not force a 200 (or any other status) regardless of Range.
+func TestStaticServer_IfNoneMatch_NonMatchingWithRangeStill206(t *testing.T) {
+	root := writeTree(t, map[string]string{"data.txt": "0123456789"})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/data.txt", nil)
+	req.Header.Set("If-None-Match", `"deadbeef"`)
+	req.Header.Set("Range", "bytes=2-5")
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("non-matching If-None-Match + Range = %d, want 206", rec.Code)
+	}
+	if got := rec.Body.String(); got != "2345" {
+		t.Errorf("range body = %q, want 2345", got)
+	}
+}
+
 func TestStaticServer_MethodNotAllowed(t *testing.T) {
 	root := writeTree(t, map[string]string{"data.txt": "x"})
 	srv := newTestServer(t, root)

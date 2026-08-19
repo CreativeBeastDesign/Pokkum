@@ -418,6 +418,34 @@ func (s *staticServer) serveFile(w http.ResponseWriter, r *http.Request, path st
 	}
 	h.Set("ETag", `"`+etag+`"`)
 
+	// Conditional GET: RFC 9110 §13.1.2 places If-None-Match evaluation
+	// BEFORE Range/If-Range in request precondition order, so a matching
+	// conditional request must short-circuit to 304 here rather than fall
+	// into the Range handling below and produce a 206. This runs for both
+	// GET and HEAD — serveFile is only ever reached for those two methods
+	// (serveHTTP rejects everything else with 405 before resolving a file),
+	// so no extra method gate is needed here.
+	//
+	// A 304 must carry the same cache-relevant headers a 200 would (ETag,
+	// Cache-Control, and Vary, all already set above) but no body and no
+	// Content-Length describing one. WriteHeader(304) without writing a body
+	// satisfies that — Content-Length is only set later, below this check,
+	// so on this path it's never added to the header map in the first place.
+	if inm := r.Header.Get("If-None-Match"); inm != "" && ifNoneMatchMatches(inm, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	// No If-Modified-Since support, deliberately: this server never sends
+	// Last-Modified at all, and adding one would be actively misleading
+	// rather than merely unused. In-image file mtimes are pinned to a fixed
+	// epoch for build reproducibility (see packager.pinnedImmutableBinaryEpoch,
+	// commit 1675d4c) — so a Last-Modified derived from on-disk mtime would be
+	// the same constant timestamp across every build of every version of a
+	// file, making it useless (and worse than useless: a client caching on
+	// that basis could treat two genuinely different builds as identical).
+	// The content-derived strong ETag is the only meaningful validator here.
+
 	if r.Method == http.MethodGet {
 		if rng, sat, unsat := parseSingleRange(r.Header.Get("Range"), size); sat {
 			if ifRange := r.Header.Get("If-Range"); ifRange == "" || ifRangeMatches(ifRange, etag) {
@@ -590,6 +618,68 @@ func ifRangeMatches(ifRange, etag string) bool {
 	}
 	iv = strings.Trim(iv, `"`)
 	return iv == etag
+}
+
+// ifNoneMatchMatches reports whether the If-None-Match request header
+// matches the server's current entity-tag (etag: unquoted hex; this server
+// only ever emits strong tags). Per RFC 9110 §13.1.2:
+//
+//   - The header carries a comma-separated LIST of entity-tags, any one of
+//     which may match — not just a single exact tag. Each list element is
+//     scanned off in turn via scanETagToken.
+//   - "*" matches any current representation, regardless of value, and short-
+//     circuits the whole header (RFC 9110 §13.1.2: "or if '*' is given").
+//   - Comparison is WEAK: a request tag prefixed "W/" matches an otherwise
+//     equal tag value. This server itself never emits a weak tag, so in
+//     practice the only thing this needs to tolerate is a W/-prefixed tag
+//     arriving FROM the client (e.g. a cache or proxy that downgraded a
+//     stored strong tag to weak) — hence stripping "W/" and comparing the
+//     remaining quoted value is sufficient; there is no strong tag on the
+//     request side that also needs downgrading.
+func ifNoneMatchMatches(header, etag string) bool {
+	for {
+		header = strings.TrimSpace(header)
+		if header == "" {
+			return false
+		}
+		if header[0] == ',' {
+			header = header[1:]
+			continue
+		}
+		if header[0] == '*' {
+			return true
+		}
+		tag, remain := scanETagToken(header)
+		if tag == "" {
+			return false // malformed remainder: nothing left worth matching
+		}
+		tag = strings.TrimPrefix(tag, "W/")
+		if strings.Trim(tag, `"`) == etag {
+			return true
+		}
+		header = remain
+	}
+}
+
+// scanETagToken scans one entity-tag off the front of s, per the grammar in
+// RFC 9110 §8.8.3: a strong tag is a quoted string; a weak tag is "W/"
+// followed by a quoted string. Returns the raw token (including any "W/"
+// prefix and surrounding quotes) and the unconsumed remainder, or ("", "")
+// if s does not begin with a well-formed entity-tag.
+func scanETagToken(s string) (tag, remain string) {
+	start := 0
+	if strings.HasPrefix(s, "W/") {
+		start = 2
+	}
+	if len(s) < start+2 || s[start] != '"' {
+		return "", ""
+	}
+	for i := start + 1; i < len(s); i++ {
+		if s[i] == '"' {
+			return s[:i+1], s[i+1:]
+		}
+	}
+	return "", "" // unterminated quoted string
 }
 
 // writeRange streams bytes [start,end] of path to w.
