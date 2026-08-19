@@ -183,7 +183,9 @@ func TestLoad_DaemonIntegration_WarnsOnDroppedAnnotations(t *testing.T) {
 		t.Fatalf("warn-level log lines = %d, want exactly 1: %v", len(warnings), warnings)
 	}
 	want := "docker daemon load output drops OCI annotations: pokkum.dev/predecessor" +
-		" (annotations survive a registry push — use --output=push to keep them)"
+		" (annotations survive a registry push — use --output=push to keep them)" +
+		" — pokkum.dev/predecessor carry build metadata other pokkum commands read back," +
+		" so commands depending on them cannot work against this output"
 	if warnings[0] != want {
 		t.Errorf("warning = %q, want %q", warnings[0], want)
 	}
