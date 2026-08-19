@@ -59,7 +59,6 @@ _None._
 | [Build-time test gate (--test)](items/build-time-test-gate.md) | Condition image creation on the project's own test suite passing, once its interaction with --hermetic (a test suite needing network access conflicts with hermetic-by-default) has an explicit answer. | feature | open |
 | [pokkum doctor drift check](items/doctor-drift-check.md) | Nothing currently validates that a .pokkum.yaml's configured adapter, base image, and telemetry settings are still coherent after a SvelteKit or Bun upgrade. | dx | open |
 | [Registry-specific error surfacing](items/registry-error-surfacing.md) | Translate GAR/Harbor project-path errors and Docker Hub anonymous-pull rate limits into a readable, specific message instead of a generic push/pull failure. | dx | open |
-| [Scoped secret-allow annotations](items/scoped-secret-allow-annotations.md) | --allow-secret-pattern is a global regex; a .secretguardignore or inline // pokkum:allow-secret comment would give a known-safe string in one fixture the scoped exemption it actually needs. | feature | open |
 | [Source maps as an OCI referrer](items/source-maps-oci-referrer.md) | Strip source maps from the shipped image and attach them as a digest-keyed OCI referrer artifact, so Sentry release tagging works without shipping maps to production. | feature | open |
 
 ### Developer Experience

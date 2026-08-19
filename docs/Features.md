@@ -75,6 +75,12 @@ Targets a distroless-node base and execs adapter-node output directly under /nod
   - [internal/core/runtime_node_test.go](../internal/core/runtime_node_test.go)
   - [tests/integration/runtime_smoke_node_test.go](../tests/integration/runtime_smoke_node_test.go)
 
+### [Scoped secret-allow annotations](items/scoped-secret-allow-annotations.md)
+
+--allow-secret-pattern is a global regex; an inline pokkum:allow-secret comment gives a known-safe line the scoped exemption it actually needs.
+
+- Flags: `--allow-secret-pattern`
+
 ### [--strategy=static](items/strategy-static.md)
 
 Compiles a pure static SvelteKit site onto chainguard/static with an embedded pokkum-static Go file server as PID 1 — genuinely functional only since 2026-08-19, after six independent bugs were found by its first real boot test.

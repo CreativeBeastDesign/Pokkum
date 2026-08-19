@@ -234,6 +234,27 @@ func looksBinary(head []byte) bool {
 // exactly the minified bundle this scan most needs to catch). Reading the
 // whole (size-bounded) file and splitting in memory has no such line-length
 // ceiling.
+
+// lineIsAnnotated reports whether the line at idx is exempted by an inline
+// marker, either on that line or on the one immediately above it.
+//
+// Both positions are accepted because a long line — a redaction table, a test
+// fixture — is usually annotated above rather than pushed wider, and requiring
+// the marker on the flagged line would make the feature unusable exactly where
+// lines are longest.
+func lineIsAnnotated(lines [][]byte, idx int) bool {
+	if idx < 0 || idx >= len(lines) {
+		return false
+	}
+	if bytes.Contains(lines[idx], []byte(ports.AllowSecretMarker)) {
+		return true
+	}
+	if idx > 0 && bytes.Contains(lines[idx-1], []byte(ports.AllowSecretMarker)) {
+		return true
+	}
+	return false
+}
+
 func scanFile(absPath, relPath string, allowPatterns []*regexp.Regexp, maxSize int64) ([]ports.SecretMatch, *ports.SecretSkip, error) {
 	f, err := os.Open(absPath)
 	if err != nil {
@@ -275,6 +296,13 @@ func scanFile(absPath, relPath string, allowPatterns []*regexp.Regexp, maxSize i
 	for i, lineBytes := range lines {
 		lineNo := i + 1
 		line := string(lineBytes)
+
+		// An inline marker exempts this line without anyone having to describe
+		// its content in a config file. Checked before the regexes because it is
+		// the cheaper test and the more specific intent.
+		if lineIsAnnotated(lines, i) {
+			continue
+		}
 
 		allowed := false
 		for _, allowRE := range allowPatterns {

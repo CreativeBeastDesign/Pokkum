@@ -66,3 +66,26 @@ type SecretScanResult struct {
 type SecretGuard interface {
 	ScanDirectory(ctx context.Context, req SecretScanRequest) (SecretScanResult, error)
 }
+
+// AllowSecretMarker is the inline annotation that exempts a single line from
+// secret scanning. It may sit on the flagged line itself or on the line directly
+// above it, in any comment syntax — it is matched as a substring, so //, #,
+// /* */ and <!-- --> all work without the scanner needing to know the language.
+//
+// Why a marker and not only a regex: an allow pattern matches a whole *line*, so
+// writing one means describing the offending content, and if the finding is a
+// genuine secret that regex ends up in a committed config file. A marker needs no
+// description of the content at all. It is also line-scoped and travels with the
+// code, so unlike a file:line suppression it cannot go stale when lines shift.
+//
+// It lives here rather than in the adapter because core names it when telling an
+// operator how to accept a finding, and internal/core cannot import an adapter.
+//
+// Threat model, stated so it is not mistaken for an oversight: anyone able to add
+// this marker can equally well add the secret itself, so it grants no capability
+// an editor of the file did not already have. It records "this is deliberate"; it
+// is not a security boundary.
+// the opt-out marker itself, a fixed public token with no credential in it.
+//
+//nolint:gosec // G101 fires because the identifier contains "secret"; this is
+const AllowSecretMarker = "pokkum:allow-secret"

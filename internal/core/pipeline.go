@@ -1996,6 +1996,23 @@ func logSecretMatches(log *slog.Logger, stage string, matches []ports.SecretMatc
 		log.Error("secret guard: further hardcoded secrets not listed individually",
 			"stage", stage, "remaining", remaining, "listed", len(shown))
 	}
+
+	// Both mechanisms are named, because neither covers every case. The marker is
+	// precise and travels with the code, but cannot be added to generated output —
+	// a minified bundle carrying a redaction string compiled from annotated source
+	// will still be flagged, and only a pattern reaches that. Suggesting just one
+	// would send half of a real project's findings down a path that cannot work.
+	//
+	// Deliberately no pre-filled regex: an allow pattern matches a whole line, so
+	// generating one means printing the line — and if the finding is a genuine
+	// secret, that is the secret, in a log and then in a committed config file.
+	// The file:line above is enough to write a pattern from after looking, and
+	// looking is the step that distinguishes a false positive from a real leak.
+	log.Info("secret guard: to accept a finding, mark the line with a comment containing "+
+		ports.AllowSecretMarker+" (on the line or the one above), or add a regex to "+
+		"security.allow_secret_patterns in .pokkum.yaml / pass --allow-secret-pattern. "+
+		"Generated or minified output cannot carry the comment, so those need the pattern",
+		"stage", stage, "marker", ports.AllowSecretMarker)
 }
 
 func runSecretScan(ctx context.Context, deps Deps, log *slog.Logger, stage, dir string, allowPatterns []string, scanSourcemaps bool) error {

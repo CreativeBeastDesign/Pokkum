@@ -8,6 +8,12 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 ## backlog
 
+### Build & Packaging
+
+| Title | Summary | Kind | Status | Commits |
+| --- | --- | --- | --- | --- |
+| [Scoped secret-allow annotations](items/scoped-secret-allow-annotations.md) | --allow-secret-pattern is a global regex; an inline pokkum:allow-secret comment gives a known-safe line the scoped exemption it actually needs. | feature | shipped |  |
+
 ### Supply Chain & Attestation
 
 | Title | Summary | Kind | Status | Commits |
