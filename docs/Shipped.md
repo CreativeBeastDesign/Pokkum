@@ -36,6 +36,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | Title | Summary | Kind | Status | Commits |
 | --- | --- | --- | --- | --- |
 | [pokkum init wrote a config pokkum build refused](items/init-generates-invalid-config.md) | Every generated .pokkum.yaml carried an invalid sbom.attach value, so the first two commands a new user runs did not work together. | fix | shipped |  |
+| [pokkum init recommended a command it had guaranteed could not work](items/init-recommends-a-failing-command.md) | init always ended with "you can now run pokkum build", which fails immediately for the local-only setup its own first prompt invites. | fix | shipped |  |
 
 ### Supply Chain & Attestation
 

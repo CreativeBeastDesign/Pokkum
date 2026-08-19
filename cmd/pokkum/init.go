@@ -78,6 +78,7 @@ coverage
 	// 2. .pokkum.yaml creation
 	configPath := filepath.Join(opts.dir, ports.ConfigFilename)
 	createdConfig := false
+	var effectiveCfg *ports.ProjectConfig
 
 	cfgMgr, err := config.New(opts.dir, logger)
 	if err != nil {
@@ -142,7 +143,18 @@ coverage
 			return fmt.Errorf("%s", msg)
 		}
 		createdConfig = true
+		effectiveCfg = newCfg
 	}
+
+	// For an existing config, load it so the closing advice is right there too —
+	// re-running init on a configured project should not hand out advice derived
+	// from defaults it did not write.
+	if effectiveCfg == nil {
+		if loaded, loadErr := cfgMgr.Load(opts.dir); loadErr == nil {
+			effectiveCfg = loaded
+		}
+	}
+	nextCmd, nextWhy := suggestedNextCommand(effectiveCfg)
 
 	payload := map[string]interface{}{
 		"directory":      opts.dir,
@@ -151,6 +163,7 @@ coverage
 		"created_config": createdConfig,
 		"config_path":    configPath,
 		"status":         "initialized",
+		"next_command":   nextCmd,
 	}
 
 	if outputFormat == ports.FormatJSON {
@@ -169,7 +182,10 @@ coverage
 	} else {
 		fmt.Printf("✓ Existing .pokkumignore found at %s\n", ignorePath)
 	}
-	fmt.Println("✓ Pokkum initialization complete. You can now run `pokkum build`.")
+	fmt.Printf("✓ Pokkum initialization complete. You can now run `%s`.\n", nextCmd)
+	if nextWhy != "" {
+		fmt.Printf("  %s\n", nextWhy)
+	}
 
 	return nil
 }
@@ -184,6 +200,36 @@ coverage
 //
 // Returns "" when input runs out (a piped/EOF session), which callers treat as
 // "leave the default in place" rather than as a choice.
+// suggestedNextCommand returns the command to run next, and an optional line
+// explaining why it differs from the obvious one.
+//
+// This used to be the constant "pokkum build", which is wrong for exactly the
+// setup init's own first prompt invites: that prompt offers "empty for local
+// only", and accepting it leaves no destination repository, so plain
+// `pokkum build` — whose default output mode is push — fails immediately with
+// "destination repository is required in push mode". init was recommending a
+// command it had just guaranteed could not work.
+//
+// Reported from a real first run, and the same shape as the generated-config bug
+// before it: two things that are individually correct and do not compose. Advice
+// is output too, and output that the next command rejects is a defect.
+func suggestedNextCommand(cfg *ports.ProjectConfig) (string, string) {
+	if cfg == nil || strings.TrimSpace(cfg.Docker.Repo) != "" {
+		return "pokkum build", ""
+	}
+	// No destination repository. If init also wrote a local profile, that is the
+	// path that actually works; otherwise say what is missing rather than
+	// naming a command that will fail.
+	if _, ok := cfg.Profiles["local"]; ok {
+		return "pokkum build --local",
+			"No registry is configured, so --local builds into your container runtime instead of pushing. " +
+				"Set docker.repo in " + ports.ConfigFilename + " (or pass --repo) when you want to push."
+	}
+	return "pokkum build --local",
+		"No registry is configured, so plain `pokkum build` (which pushes) will refuse to start. " +
+			"Set docker.repo in " + ports.ConfigFilename + " or pass --repo to push instead."
+}
+
 func promptChoice(scanner *bufio.Scanner, number int, label string, allowed []string, def string) string {
 	for attempts := 0; attempts < 5; attempts++ {
 		fmt.Printf("%d. %s [%s] (default: %s): ", number, label, strings.Join(allowed, " / "), def)

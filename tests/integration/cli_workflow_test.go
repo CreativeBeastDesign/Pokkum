@@ -438,3 +438,130 @@ func readCLIFile(t *testing.T, dir, rel string) string {
 	}
 	return string(body)
 }
+
+// TestCLIWorkflow_InitsRecommendedCommandActuallyWorks closes the class the
+// previous two bugs both belonged to, one level up: init's *advice* is output
+// too, and output the next command rejects is a defect.
+//
+// init used to end with a constant "You can now run `pokkum build`" — wrong for
+// exactly the setup its own first prompt invites. That prompt offers "empty for
+// local only", and accepting it leaves no destination repository, so plain
+// `pokkum build` (which pushes by default) refuses to start with "destination
+// repository is required in push mode". init recommended a command it had just
+// guaranteed could not work.
+//
+// The test reads the recommendation out of init's own JSON envelope rather than
+// hardcoding a command, so it follows the advice wherever it goes: change what
+// init suggests and this test checks the new suggestion instead. What it asserts
+// is not that the command succeeds — it cannot, without a JS toolchain — but
+// that it gets past configuration and usage entirely, reaching real build work.
+func TestCLIWorkflow_InitsRecommendedCommandActuallyWorks(t *testing.T) {
+	// Both shapes init can produce: no registry (its own "local only" offer),
+	// and a registry configured.
+	for _, tc := range []struct {
+		name string
+		repo string
+	}{
+		{name: "no registry configured", repo: ""},
+		{name: "registry configured", repo: "ghcr.io/example/cli-workflow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := newCLIProject(t)
+			var recommended string
+
+			steps := []cliStep{{
+				name: "init --output=json",
+				args: []string{"init", "--defaults", "--output=json"},
+				check: func(t *testing.T, _, output string) {
+					start := strings.Index(strings.TrimSpace(output), "{")
+					if start < 0 {
+						t.Fatalf("no JSON envelope in init output:\n%s", output)
+					}
+					var env struct {
+						Data struct {
+							NextCommand string `json:"next_command"`
+						} `json:"data"`
+					}
+					if err := json.NewDecoder(strings.NewReader(strings.TrimSpace(output)[start:])).Decode(&env); err != nil {
+						t.Fatalf("decode init envelope: %v\n%s", err, output)
+					}
+					recommended = strings.TrimSpace(env.Data.NextCommand)
+					if recommended == "" {
+						t.Fatal("init did not report a next_command; scripted callers and this test both rely on it")
+					}
+					if !strings.HasPrefix(recommended, "pokkum ") {
+						t.Fatalf("next_command = %q, expected a pokkum invocation", recommended)
+					}
+				},
+			}}
+
+			if tc.repo != "" {
+				// Configure a registry, then re-run init so its advice is
+				// recomputed from the config that actually exists.
+				steps = append(steps,
+					cliStep{
+						name: "configure a registry",
+						args: []string{"--version"},
+						check: func(t *testing.T, projectDir, _ string) {
+							body := readCLIFile(t, projectDir, ".pokkum.yaml")
+							// An empty repo is omitted from the generated YAML
+							// entirely (omitempty), so there may be no key to
+							// replace — add the block in that case rather than
+							// silently editing nothing and testing the wrong
+							// state.
+							switch {
+							case strings.Contains(body, "repo:"):
+								body = strings.Replace(body, "repo: \"\"", "repo: "+tc.repo, 1)
+							case strings.Contains(body, "docker:"):
+								body = strings.Replace(body, "docker:", "docker:\n    repo: "+tc.repo, 1)
+							default:
+								body = "docker:\n    repo: " + tc.repo + "\n" + body
+							}
+							if !strings.Contains(body, tc.repo) {
+								t.Fatalf("failed to set docker.repo in the fixture config:\n%s", body)
+							}
+							writeCLIFile(t, projectDir, ".pokkum.yaml", body)
+						},
+					},
+					cliStep{
+						name: "re-run init to recompute the advice",
+						args: []string{"init", "--defaults", "--output=json"},
+						check: func(t *testing.T, _, output string) {
+							if !strings.Contains(output, "pokkum build") {
+								t.Fatalf("expected a build recommendation, got:\n%s", output)
+							}
+							// With a registry set, the plain push build is the
+							// right advice and --local would be wrong.
+							if strings.Contains(output, "--local") {
+								t.Errorf("with a registry configured, init should recommend the plain push build, got:\n%s", output)
+							}
+						},
+					})
+			}
+
+			runWorkflow(t, dir, steps)
+
+			// Now run whatever init told the user to run.
+			args := strings.Fields(recommended)[1:] // drop the leading "pokkum"
+			runWorkflow(t, dir, []cliStep{{
+				name:    "run init's own recommendation: " + recommended,
+				args:    args,
+				wantErr: true, // no JS toolchain in this fixture
+				// The point of the test: whatever it fails on must be real build
+				// work, never configuration or usage. Every entry here is a way
+				// of saying "init handed you a command this project cannot run".
+				absent: []string{
+					"destination repository is required",
+					"no destination repository configured",
+					"invalid sbom attach mode",
+					"invalid strategy",
+					"invalid base",
+					"unknown flag",
+					"unknown command",
+					"unknown profile",
+					"accepts at most",
+				},
+			}})
+		})
+	}
+}
