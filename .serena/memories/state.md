@@ -145,7 +145,40 @@ before trusting a claim that predates the commit it cites.
   binary output gets equivalent coverage to layered/static's directory scan.
   See `mem:open_decisions` row 5.
 
+## Documentation system (generated — read this before editing any status doc)
+- **`docs/roadmap/*.yaml` is the single source; the markdown is generated output.
+  Never hand-edit `docs/Roadmap.md`, `docs/Shipped.md`, `docs/Features.md`, or
+  `docs/items/*.md` — `make docs` overwrites them and prunes orphaned item
+  pages.** 6 area files, 87 items.
+- `scripts/gen-docs` validates strictly: `KnownFields(true)`, every `impl` path
+  must exist on disk, enum fields checked against fixed sets, and every
+  `[title](item:<id>)` reference must resolve to a real item id. A bad edit
+  fails the build rather than shipping a wrong doc.
+- Doc-to-doc links use a depth-agnostic `[title](item:<id>)` scheme **in the
+  YAML**, resolved per output directory at render time — the same authored
+  string is emitted into both `docs/` and `docs/items/`, so no literal relative
+  path is correct in both. Two walker tests over the real generated tree assert
+  no dead relative links and no unresolved `item:` refs; they exist because the
+  original bug was a *call site* passing the wrong directory, which unit tests
+  on the helper passed straight through.
+- Root `Roadmap.md`, `Feature-list.md`, `AdditionalFeatures.md` and
+  `overnight-findings.md` still exist and are **not** yet retired: `Roadmap.md`
+  alone has 59 inbound references incl. `CLAUDE.md` and several `mem:*`. Until
+  that migration happens, treat `docs/` as authoritative and the root files as
+  historical.
+
 ## Test surface
+- Full `go test ./...` is green as of 2026-08-19 (`e4175ed`): 47 packages,
+  `tests/integration` 36.6s, `cmd/pokkum` 35.0s.
+- **Every package that invokes `authn.DefaultKeychain` must isolate
+  `DOCKER_CONFIG` in a `TestMain`**, or it hangs for the full 10-minute timeout
+  against a real `docker-credential-*` helper instead of failing. All 8 such
+  packages now do (`c360ab5` added the last two). `registryutils` is exempt by
+  evidence: it only asserts the returned keychain is non-nil, never resolves.
+  A previously unexplained `tests/integration` 600s timeout and an apparently
+  order-dependent `TestFixtureDrivenE2E_Static_SPAFallback` failure were both
+  consequences of two packages holding cores for ~660s — neither reproduces
+  now, so neither was a defect of its own.
 - `make verify`'s 5 steps cover `./internal/...` + a `cmd/pokkum` build only.
   `./supervisor/...` (`pokkum-init`, `pokkum-static`) needs its own
   `go build`/`go test` — not covered by any of the 5 steps.
