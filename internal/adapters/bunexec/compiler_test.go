@@ -970,3 +970,71 @@ func TestPreflight_HermeticViolation(t *testing.T) {
 		t.Fatalf("expected Preflight with node_modules present to pass, got %v", err)
 	}
 }
+
+// TestPrepare_DeclinedInjectionExplainsWhy pins the difference between "Pokkum
+// cannot do this" and "Pokkum would not do this here", which are very different
+// messages to receive.
+//
+// Zero-config adapter injection (Option B) is real and enabled by default, but
+// it engages only when package.json's build script is exactly `vite build`, so
+// that replacing the build invocation cannot silently skip env setup, codegen or
+// a task runner the script also runs. That guard is correct. What was wrong is
+// that declining was silent: the operator got Option C's "fix it in
+// vite.config.ts" with no hint that Pokkum would have done it for them under a
+// condition they could actually meet — and the docs simultaneously advertised
+// zero-config injection with no preconditions stated, so the failure read as the
+// feature being broken.
+//
+// Found by running the tool on a real project: injection is documented as
+// automatic, then declines without saying so.
+func TestPrepare_DeclinedInjectionExplainsWhy(t *testing.T) {
+	// svelte.config.js configures adapter-auto, so the target adapter is not
+	// effectively configured and the Option B branch is reached.
+	const adapterAutoConfig = `import adapter from '@sveltejs/adapter-auto';
+export default { kit: { adapter: adapter() } };`
+
+	cases := []struct {
+		name    string
+		pkgJSON string
+		want    []string
+	}{
+		{
+			name: "no build script at all",
+			pkgJSON: `{"name":"x","dependencies":{"@sveltejs/kit":"^2.5.0"},
+				"devDependencies":{"@jesterkit/exe-sveltekit":"^0.4.0"}}`,
+			want: []string{"injection was skipped", "no \"build\" script", "exactly `vite build`"},
+		},
+		{
+			name: "build script does more than vite build",
+			pkgJSON: `{"name":"x","dependencies":{"@sveltejs/kit":"^2.5.0"},
+				"devDependencies":{"@jesterkit/exe-sveltekit":"^0.4.0"},
+				"scripts":{"build":"npm run codegen && vite build"}}`,
+			// The actual script must be quoted back, or the operator cannot
+			// tell which of several scripts Pokkum objected to.
+			want: []string{"injection was skipped", "npm run codegen && vite build", "not exactly `vite build`"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := newProjectDir(t, tc.pkgJSON, adapterAutoConfig)
+			c := NewCompiler(discardLogger())
+			_, err := c.Prepare(context.Background(), ports.PrepareRequest{
+				ProjectDir: dir,
+				Strategy:   ports.StrategyExe,
+			})
+			if err == nil {
+				t.Fatal("expected Prepare to fail when the adapter is not configured and injection declines")
+			}
+			// Still the adapter error, so errors.Is consumers keep working.
+			if !errors.Is(err, core.ErrAdapterMissing) && !errors.Is(err, core.ErrAdapterMisconfigured) {
+				t.Errorf("error should still wrap an adapter sentinel, got %v", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error missing %q; a declined injection must say why.\nGot: %v", want, err)
+				}
+			}
+		})
+	}
+}

@@ -209,8 +209,16 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 		if shownStrategy == "" {
 			shownStrategy = ports.DefaultBuildStrategy
 		}
+		// Says why zero-config injection did not cover this. --inject rewrites
+		// the adapter *configuration* through .pokkum/vite.config.ts, so users
+		// are correctly told they need not edit svelte.config.js — which reads
+		// as "nothing to do" and makes this failure look like a bug in the
+		// injection. Configuring an adapter is not installing one, and the
+		// message has to say so or the next reader draws the same wrong
+		// conclusion.
 		return ports.PreflightResult{}, fmt.Errorf(
-			"bunexec: preflight %s: --strategy=%s requires %s, but it is not configured in svelte.config.js/vite.config.* or listed in package.json; install it with `bun add -D %s`: %w",
+			"bunexec: preflight %s: --strategy=%s requires %s, but it is not configured in svelte.config.js/vite.config.* or listed in package.json; install it with `bun add -D %s`. "+
+				"Zero-config injection (--inject) rewrites the adapter *configuration* for you, so you do not need to edit svelte.config.js — but it cannot install the package itself: %w",
 			req.ProjectDir, shownStrategy, targetAdapter, targetAdapter, core.ErrAdapterMissing,
 		)
 	}
@@ -310,7 +318,24 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		// else falls back to Option C's clear, actionable error.
 		pkg, pkgErr := sveltekitutils.ReadPackageJSON(req.ProjectDir)
 		if pkgErr != nil || strings.TrimSpace(pkg.Scripts["build"]) != "vite build" {
-			return ports.PrepareResult{}, checkErr
+			// Injection was available and declined, and saying so turns a dead
+			// end into a choice. Without this the operator gets Option C's
+			// "fix it in vite.config.ts" with no hint that Pokkum would have
+			// done it for them under a condition they can actually meet — and
+			// no way to tell "Pokkum cannot do this" from "Pokkum would not do
+			// this here", which are very different messages.
+			script := ""
+			if pkgErr == nil {
+				script = strings.TrimSpace(pkg.Scripts["build"])
+			}
+			switch {
+			case pkgErr != nil:
+				return ports.PrepareResult{}, fmt.Errorf("%w (zero-config adapter injection was skipped because package.json could not be read: %v)", checkErr, pkgErr)
+			case script == "":
+				return ports.PrepareResult{}, fmt.Errorf("%w (zero-config adapter injection was skipped because package.json has no \"build\" script; it engages only when that script is exactly `vite build`, so that taking over the build invocation cannot skip anything else your script does)", checkErr)
+			default:
+				return ports.PrepareResult{}, fmt.Errorf("%w (zero-config adapter injection was skipped because package.json's \"build\" script is %q, not exactly `vite build`; it only takes over the build invocation when the two are equivalent, so it cannot silently skip env setup, codegen or a task runner that your script also does)", checkErr, script)
+			}
 		}
 
 		viteSource, viteName := readViteConfigSource(req.ProjectDir)

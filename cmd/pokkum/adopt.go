@@ -32,11 +32,26 @@ adds @jesterkit/exe-sveltekit to package.json, generates .pokkumignore, and
 optionally removes legacy Dockerfile configurations. It refuses to run
 against a project with no @sveltejs/kit dependency.
 
-svelte.config.js is NOT rewritten by default: pokkum build already injects
-the adapter and SOURCE_DATE_EPOCH pin into a virtual copy at build time (see
-ARCHITECTURE.md's Zero-Mutation Build Sandbox), so no on-disk edit is
-actually required. Pass --write-config if you want the adapter swap made
-permanent and visible in the file itself anyway (e.g. for editor tooling).`,
+svelte.config.js is NOT rewritten by default: pokkum build injects the adapter
+*configuration* through a virtual .pokkum/vite.config.ts wrapper at build time
+(see ARCHITECTURE.md's Zero-Mutation Build Sandbox), so the adapter swap needs
+no edit to your own files. Pass --write-config if you want it visible in
+svelte.config.js anyway (e.g. for editor tooling).
+
+Injection has two preconditions, and pokkum build tells you which one failed
+rather than just refusing:
+
+  1. The adapter *package* must be installed. Configuring an adapter is not
+     installing one, and injection cannot supply it. --strategy=layered needs
+     @sveltejs/adapter-node, --strategy=static needs @sveltejs/adapter-static,
+     --strategy=exe needs @jesterkit/exe-sveltekit. This command adds the exe
+     adapter; for the others, install the one you want.
+  2. package.json's "build" script must be exactly "vite build". Injection
+     replaces the build invocation, so it declines when that would silently
+     skip anything else your script does -- env setup, codegen, a task runner.
+
+If either fails, configure the adapter in your own vite.config.ts (or
+svelte.config.js) and pokkum build uses it directly.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {

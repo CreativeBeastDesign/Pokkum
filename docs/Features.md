@@ -34,7 +34,7 @@ Two composable mitigations for stock Bun's full CLI attack surface in a layered 
 
 ### [Zero-dependency multi-arch OCI compilation](items/multi-arch-oci-compilation.md)
 
-Compiles a SvelteKit project straight into a multi-arch (linux/amd64, linux/arm64) OCI image with no Docker daemon or buildkit, via zero-config virtual injection of the target adapter into vite.config.ts/js.
+Compiles a SvelteKit project straight into a multi-arch (linux/amd64, linux/arm64) OCI image with no Docker daemon or buildkit, using the project's configured adapter — or injecting one virtually into .pokkum/vite.config.ts when its two preconditions hold.
 
 - Flags: `--strategy`, `--platform`
 - Implementation:
