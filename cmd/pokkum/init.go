@@ -64,6 +64,12 @@ node_modules
 .git
 .pokkum
 coverage
+
+# Generated output. adapter-node writes to build/ and adapter-static to a
+# configured output dir; a previous run's artifacts are not inputs to this
+# build, and the copy that actually ships is scanned separately after the
+# build. Delete this line if your project keeps real source under build/.
+build
 `
 		if err := os.WriteFile(ignorePath, []byte(defaultContent), 0644); err != nil {
 			msg := fmt.Sprintf("failed to create .pokkumignore: %v", err)

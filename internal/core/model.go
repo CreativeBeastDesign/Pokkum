@@ -879,6 +879,17 @@ type BuildRequest struct {
 	// AllowSecretPatterns contains regex patterns to ignore during build-time secret scanning.
 	AllowSecretPatterns []string
 
+	// ShowSecretValues reveals the matched text of each secret-guard finding
+	// instead of redacting it.
+	//
+	// Off by default because a finding's matched text is, for a genuine leak, the
+	// credential itself, and reporting it would copy the value into terminal
+	// scrollback and CI logs — the opposite of what the scanner exists for. It is
+	// nevertheless needed for triage: a false positive in minified output cannot
+	// be judged from a file, line and column alone without the operator reading
+	// bytes out of a 44 KB single-line chunk by hand.
+	ShowSecretValues bool
+
 	// Hermetic enforces zero-network egress and offline mode during build.
 	Hermetic bool
 

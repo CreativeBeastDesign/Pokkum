@@ -126,6 +126,7 @@ type buildFlags struct {
 	baseKeylessIssuer      string
 	sigstoreTrustedRoot    string
 	allowSecretPatterns    []string
+	showSecretValues       bool
 	hermetic               bool
 	hermeticMountIsolation bool
 	registryConfig         string
@@ -291,6 +292,8 @@ The project directory defaults to the current working directory.`,
 		"Path to a Sigstore trusted-root JSON file overriding the embedded public-good default")
 	cmd.Flags().StringSliceVar(&flags.allowSecretPatterns, "allow-secret-pattern", nil,
 		"Regex pattern to ignore during build-time secret scanning, repeatable")
+	cmd.Flags().BoolVar(&flags.showSecretValues, "show-secret-values", false,
+		"Reveal the matched text of secret-guard findings instead of redacting it. For local triage of a false positive in minified output; never set this in CI, where it would copy real credentials into build logs")
 
 	cmd.Flags().BoolVar(&flags.hermetic, "hermetic", false,
 		"Enforce strict hermetic build mode (zero network egress, cached base images and node_modules required)")
@@ -997,6 +1000,7 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	}
 
 	req.AllowSecretPatterns = flags.allowSecretPatterns
+	req.ShowSecretValues = flags.showSecretValues
 	if projCfg != nil && len(projCfg.Security.AllowSecretPatterns) > 0 {
 		req.AllowSecretPatterns = append(req.AllowSecretPatterns, projCfg.Security.AllowSecretPatterns...)
 	}

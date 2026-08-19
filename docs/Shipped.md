@@ -52,6 +52,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | --- | --- | --- | --- | --- |
 | [Per-ref pokkum.lock slot for custom --base images](items/custom-base-lock-slot.md) | Give every custom --base reference its own pokkum.lock slot instead of sharing one, since two custom bases in a project still evict each other today. | hardening | shipped | `69914ac` |
 | [POKKUM_*_PUBKEY meant two different things](items/pubkey-env-var-divergence.md) | The same public-key environment variable was resolved as a file path in one place and as literal PEM in another, so its meaning depended on which code path read it. | hardening | shipped |  |
+| [Secret findings gave no usable location in minified output, and build artifacts were scanned as source](items/secret-findings-navigable-in-minified-output.md) | A finding in a 44 KB single-line chunk reported only line 3, and that chunk was a generated build artifact being scanned during the pre-build source stage. | fix | shipped |  |
 | [Secret-guard findings reported a count with no locations](items/secretguard-reports-locations.md) | A failing build said how many secrets it found and nothing about where, so the finding could not be acted on. | fix | shipped |  |
 | [TrustedRootPath should take bytes, not a file path](items/trusted-root-bytes.md) | Change the base-image trusted-root field from a file path to bytes so all three Sigstore trust-root consumers take the same shape. | hardening | shipped |  |
 

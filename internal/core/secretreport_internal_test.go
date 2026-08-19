@@ -42,7 +42,7 @@ func TestLogSecretMatches_ReportsLocationsAndRedactsValues(t *testing.T) {
 		{FilePath: "src/lib/zeta.ts", LineNumber: 9, RuleName: "AWS Access Key ID", SecretSnippet: "AKIAIOSFODNN7EXAMPLE"},
 		{FilePath: "src/lib/alpha.ts", LineNumber: 2, RuleName: "GitHub Personal Access Token", SecretSnippet: secret},
 	}
-	logSecretMatches(log, "pre-build source", matches)
+	logSecretMatches(log, "pre-build source", matches, false)
 	out := buf.String()
 
 	for _, want := range []string{
@@ -84,7 +84,7 @@ func TestLogSecretMatches_CapsTheListing(t *testing.T) {
 			RuleName:   "Generic API Key",
 		})
 	}
-	logSecretMatches(log, "post-build output", matches)
+	logSecretMatches(log, "post-build output", matches, false)
 	out := buf.String()
 
 	if got := strings.Count(out, "secret guard: hardcoded secret"); got != maxReportedSecretMatches {
@@ -99,5 +99,50 @@ func TestLogSecretMatches_CapsTheListing(t *testing.T) {
 // not have supplied a logger, and reporting must never be the thing that panics a
 // build that was already failing.
 func TestLogSecretMatches_NilLoggerIsSafe(t *testing.T) {
-	logSecretMatches(nil, "pre-build source", []ports.SecretMatch{{FilePath: "a.ts", LineNumber: 1, RuleName: "r"}})
+	logSecretMatches(nil, "pre-build source", []ports.SecretMatch{{FilePath: "a.ts", LineNumber: 1, RuleName: "r"}}, false)
+}
+
+// TestLogSecretMatches_ColumnIsReportedForMinifiedOutput covers the case that
+// made a line number insufficient: a 44 KB minified chunk is one logical line, so
+// "line 3" points at the whole file and the operator has nowhere to look.
+func TestLogSecretMatches_ColumnIsReportedForMinifiedOutput(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logSecretMatches(log, "pre-build source", []ports.SecretMatch{
+		{FilePath: "build/client/_app/immutable/chunks/lZKtnC6z.js", LineNumber: 3, Column: 18342, RuleName: "Generic Hardcoded Password Assignment"},
+	}, false)
+	if out := buf.String(); !strings.Contains(out, "col=18342") {
+		t.Errorf("the column must be reported, or a finding in minified output is unnavigable:\n%s", out)
+	}
+}
+
+// TestLogSecretMatches_ShowValuesIsOptIn pins both sides of the reveal switch.
+// Default-off is the security property; on-when-asked is what makes triaging a
+// minified false positive possible at all.
+func TestLogSecretMatches_ShowValuesIsOptIn(t *testing.T) {
+	const secret = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+	match := ports.SecretMatch{FilePath: "a.ts", LineNumber: 1, Column: 7, RuleName: "GitHub PAT", SecretSnippet: secret}
+
+	t.Run("redacted by default", func(t *testing.T) {
+		var buf bytes.Buffer
+		log := slog.New(slog.NewTextHandler(&buf, nil))
+		logSecretMatches(log, "s", []ports.SecretMatch{match}, false)
+		out := buf.String()
+		if strings.Contains(out, secret) {
+			t.Error("the value must not appear unless explicitly requested")
+		}
+		// The operator has to be able to discover how to see it.
+		if !strings.Contains(out, "show-secret-values") {
+			t.Errorf("the redaction notice should name the flag that reveals it:\n%s", out)
+		}
+	})
+
+	t.Run("revealed when requested", func(t *testing.T) {
+		var buf bytes.Buffer
+		log := slog.New(slog.NewTextHandler(&buf, nil))
+		logSecretMatches(log, "s", []ports.SecretMatch{match}, true)
+		if !strings.Contains(buf.String(), secret) {
+			t.Errorf("--show-secret-values must actually reveal the match:\n%s", buf.String())
+		}
+	})
 }

@@ -596,7 +596,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	// replacement: a source-level hit points a developer straight at the
 	// offending source line, which the post-build scan (against
 	// minified/bundled output) generally cannot do as precisely.
-	if err := runSecretScan(ctx, deps, log, "pre-build source", req.ProjectDir, req.AllowSecretPatterns, false); err != nil {
+	if err := runSecretScan(ctx, deps, log, "pre-build source", req.ProjectDir, req.AllowSecretPatterns, false, req.ShowSecretValues); err != nil {
 		return BuildResult{}, err
 	}
 
@@ -1016,11 +1016,11 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		return BuildResult{}, err
 	}
 	for _, dir := range postBuildScanDirs(req.Compile.Strategy, prep.OutputDir, prep.EntrypointPath) {
-		if err := runSecretScan(ctx, deps, log, "post-build output", dir, req.AllowSecretPatterns, req.Compile.Sourcemap); err != nil {
+		if err := runSecretScan(ctx, deps, log, "post-build output", dir, req.AllowSecretPatterns, req.Compile.Sourcemap, req.ShowSecretValues); err != nil {
 			return BuildResult{}, err
 		}
 	}
-	if err := runSecretScan(ctx, deps, log, "post-build asset-overlay", assetOverlayDir, req.AllowSecretPatterns, req.Compile.Sourcemap); err != nil {
+	if err := runSecretScan(ctx, deps, log, "post-build asset-overlay", assetOverlayDir, req.AllowSecretPatterns, req.Compile.Sourcemap, req.ShowSecretValues); err != nil {
 		return BuildResult{}, err
 	}
 
@@ -1965,7 +1965,7 @@ const maxReportedSecretMatches = 10
 //
 // Order is file, then line, then rule, so the same project always reports the
 // same sequence instead of one reflecting filesystem walk order.
-func logSecretMatches(log *slog.Logger, stage string, matches []ports.SecretMatch) {
+func logSecretMatches(log *slog.Logger, stage string, matches []ports.SecretMatch, showValues bool) {
 	if log == nil {
 		return
 	}
@@ -1986,11 +1986,21 @@ func logSecretMatches(log *slog.Logger, stage string, matches []ports.SecretMatc
 		shown = shown[:maxReportedSecretMatches]
 	}
 	for _, m := range shown {
-		log.Error("secret guard: hardcoded secret",
-			"stage", stage, "file", m.FilePath, "line", m.LineNumber, "rule", m.RuleName,
+		attrs := []any{
+			"stage", stage, "file", m.FilePath, "line", m.LineNumber,
+			// The column is what makes a finding in generated code navigable: a
+			// minified bundle is one logical line tens of kilobytes long, so the
+			// line number alone points at the whole file.
+			"col", m.Column, "rule", m.RuleName,
+		}
+		if showValues {
+			attrs = append(attrs, "value", m.SecretSnippet)
+		} else {
 			// Named explicitly so an operator who wonders why the value is
-			// absent can see that it was a decision, not an oversight.
-			"value", "redacted")
+			// absent can see it was a decision, and how to change it.
+			attrs = append(attrs, "value", "redacted (--show-secret-values to reveal)")
+		}
+		log.Error("secret guard: hardcoded secret", attrs...)
 	}
 	if remaining := len(sorted) - len(shown); remaining > 0 {
 		log.Error("secret guard: further hardcoded secrets not listed individually",
@@ -2015,7 +2025,7 @@ func logSecretMatches(log *slog.Logger, stage string, matches []ports.SecretMatc
 		"stage", stage, "marker", ports.AllowSecretMarker)
 }
 
-func runSecretScan(ctx context.Context, deps Deps, log *slog.Logger, stage, dir string, allowPatterns []string, scanSourcemaps bool) error {
+func runSecretScan(ctx context.Context, deps Deps, log *slog.Logger, stage, dir string, allowPatterns []string, scanSourcemaps, showSecretValues bool) error {
 	if deps.SecretGuard == nil || dir == "" {
 		return nil
 	}
@@ -2041,7 +2051,7 @@ func runSecretScan(ctx context.Context, deps Deps, log *slog.Logger, stage, dir 
 		// at the terminal as a literal \n and the list becomes less readable
 		// than the single line it replaced. Structured fields also let a log
 		// processor filter by file or rule.
-		logSecretMatches(log, stage, res.Matches)
+		logSecretMatches(log, stage, res.Matches, showSecretValues)
 		return fmt.Errorf("secret guard (%s): detected %d hardcoded secret(s) in %s (locations logged above; exempt a false positive with --allow-secret-pattern=<regex>, repeatable): %w",
 			stage, len(res.Matches), dir, ErrSecretInlined)
 	}

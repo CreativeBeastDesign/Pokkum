@@ -4,9 +4,26 @@ import "context"
 
 // SecretMatch describes a detected secret or sensitive token leak in a file.
 type SecretMatch struct {
-	FilePath      string `json:"file_path"`
-	LineNumber    int    `json:"line_number"`
-	RuleName      string `json:"rule_name"`
+	FilePath   string `json:"file_path"`
+	LineNumber int    `json:"line_number"`
+
+	// Column is the 1-based byte offset of the match within its line.
+	//
+	// It exists because a line number alone is not a location in generated code:
+	// a minified bundle is routinely one logical line tens of kilobytes long, so
+	// "line 3" of a 44 KB chunk points at the whole file. The offset makes such a
+	// finding navigable — most editors take a line:column jump directly, and
+	// `cut -c` reaches it from a shell — without revealing any of the matched
+	// text.
+	Column int `json:"column"`
+
+	RuleName string `json:"rule_name"`
+
+	// SecretSnippet is the matched text. It is NOT reported by default: for a
+	// genuine finding it is the credential, and echoing it would copy the value
+	// into terminal scrollback and CI logs. Revealed only when the operator asks
+	// with --show-secret-values, which exists because triaging a false positive
+	// in minified output otherwise means hunting by byte offset.
 	SecretSnippet string `json:"secret_snippet"`
 }
 

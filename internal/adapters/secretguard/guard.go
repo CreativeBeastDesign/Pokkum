@@ -330,8 +330,11 @@ func scanFile(absPath, relPath string, allowPatterns []*regexp.Regexp, maxSize i
 					snippet = snippet[:37] + "..."
 				}
 				matches = append(matches, ports.SecretMatch{
-					FilePath:      relPath,
-					LineNumber:    lineNo,
+					FilePath:   relPath,
+					LineNumber: lineNo,
+					// loc[0] is a 0-based byte offset into the line; reported
+					// 1-based to match how editors and `cut -c` count columns.
+					Column:        loc[0] + 1,
 					RuleName:      r.Name,
 					SecretSnippet: snippet,
 				})
