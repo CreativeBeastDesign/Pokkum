@@ -20,7 +20,7 @@ Sign builds using a cloud KMS key instead of a local static key file.
 
 ## Problem
 
-Static-key signing (see [[items/image-signing|Image signing with Cosign/DSSE]]) requires
+Static-key signing (see [Image signing with Cosign/DSSE](image-signing.md)) requires
 operators to manage a private key file directly, which is a poor fit for teams already
 using AWS KMS, GCP KMS, or HashiCorp Vault for key custody.
 
@@ -41,5 +41,5 @@ Pluggable KMS signer interface, using each cloud's lightweight signing API direc
 
 ## Related
 
-- [[items/image-signing|Image signing with Cosign/DSSE]]
+- [Image signing with Cosign/DSSE](image-signing.md)
 

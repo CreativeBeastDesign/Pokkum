@@ -153,12 +153,17 @@ before trusting a claim that predates the commit it cites.
   `tests/integration/runtime_smoke_test.go` (real Docker boot: layered, static,
   and node variants) are outside `make verify`'s scope — run explicitly for any
   change touching layer compression, tar construction, or OCI assembly.
-- Real-build tests write into checked-in `testdata/fixtures/*` **in place** (not
-  `t.TempDir()`), leaving order-dependent state (`build/`, `.svelte-kit/`,
-  `.pokkum/`, a written `pokkum.lock`) that later tests/runs inherit — known
-  fragility, deliberately not fixed yet (see `Lessons.md`'s 2026-08-19
-  "shared-fixture" entry). `testdata/fixtures/*/.pokkum/` is gitignored so this
-  no longer pollutes commits, but doesn't fix cross-test ordering.
+- Real-build tests copy their fixture into `t.TempDir()` before building and
+  symlink `node_modules` (`20ba1ec`), so they no longer mutate checked-in
+  `testdata/fixtures/*` in place. Order-independence proven at
+  `-count=3 -shuffle=on` incl. the real-bun tests; `git status --porcelain
+  testdata/` is clean after a run. Read-only tests were left un-isolated
+  deliberately — `sbom`/`packager`/`nativeinspect` contain no `os.WriteFile`
+  or `MkdirAll` at all. Copy helper: `tests/integration/harness_test.go`, with a
+  justified small duplicate in `internal/adapters/bunexec/integration_test.go`
+  (separate package; an adapter→adapter import is banned). Generated
+  `testdata/fixtures/*/.pokkum/` and `*/pokkum.lock` are gitignored as
+  belt-and-suspenders.
 - The project's real-boot/real-compile empirical tests
   (`TestRuntimeSmoke_*` ×3, `TestRealBuild_AssetOverlay_TwoGenerations`,
   `TestLayeredTelemetryBootstrap_RealPreloadRun`) are the test class that has

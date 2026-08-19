@@ -1,0 +1,66 @@
+area: "Observability"
+items:
+  - id: otel-sdk-bootstrap
+    title: "OpenTelemetry SDK bootstrap (--telemetry)"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Starts a real OTel NodeSDK + OTLP trace exporter before the app runs, via a compile-entrypoint wrapper for `--strategy=exe` and a packaged `bun --preload` file for `--strategy=layered`."
+    problem: |
+      Two mechanisms depending on strategy, both wired through `pipeline.go` -> `bunexec.Compiler.Prepare`
+      -> the packager: a compile-entrypoint wrapper (`PrepareVirtualTelemetryEntry`) for `exe`, and a
+      packaged `bun --preload`'d bootstrap file (`PrepareLayeredTelemetryBootstrap`) for `layered`.
+      Verified end-to-end for both strategies against a real OTLP export reaching a fake collector,
+      not just unit-tested.
+    flags: ["--telemetry", "--no-telemetry", "--otel-export", "--telemetry-env", "--trace-sample-rate", "--metrics-only"]
+    impl:
+      - internal/adapters/sveltekitutils/telemetry.go
+      - internal/core/pipeline.go
+    limitations:
+      - "No automatic HTTP/framework instrumentation: `@opentelemetry/auto-instrumentations-node`'s module-patching approach does not take effect under Bun's runtime. Real spans require the documented `hooks.server.ts` snippet, never auto-injected."
+      - "`--metrics-only` is non-functional: combining an OTLP metrics exporter with the SDK crashes once compiled via `bun build --compile` — a real Bun bundler bug, not a Pokkum bug. It warns at runtime rather than silently doing nothing."
+      - "Rejected outright for `--runtime=node` — the layered bootstrap's `bun --preload` mechanism is Bun-specific with no Node equivalent yet."
+    related: ["metrics-command-shape"]
+
+  - id: otel-collector-sidecar
+    title: "Kubernetes OTel Collector sidecar injection (--with-otel-sidecar)"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Injects an OpenTelemetry Collector sidecar spec (4317 gRPC, 4318 HTTP, 8889 metrics) directly into generated Kubernetes workload manifests."
+    flags: ["--with-otel-sidecar"]
+    impl:
+      - cmd/pokkum/build.go
+      - internal/adapters/k8s/resolver.go
+
+  - id: metrics-command-shape
+    title: "Reconsider pokkum metrics' shape"
+    stage: v1.2
+    status: awaiting-decision
+    kind: dx
+    tier: foundation
+    summary: "Decide whether pokkum metrics should become the honest thing it currently only sounds like, since it neither runs a server nor exposes anything the way its own text claims."
+    problem: |
+      `pokkum metrics` reads like a client-side scraper rather than a server the image exposes, and
+      verifying it against the code shows the gap is more than an ergonomics complaint: `runMetrics`
+      (`cmd/pokkum/metrics.go`) parses `--metrics-port`, prints "Metrics pipeline ready. Press Ctrl+C
+      to stop.", and then returns — there is no `http.ListenAndServe`, `net.Listen`, or any blocking
+      call anywhere in the command. It reports `Status: "active"` and `UptimeSeconds: 0` in its JSON
+      output unconditionally. Nothing is actually listening on the port the command names. Separately,
+      the supervisor-level `/metrics` endpoint this command's description implies (`pokkum-init`
+      registers only `/livez` and `/readyz`) does not exist either — neither Bun runtime metrics
+      (event-loop lag, heap) nor cgroup limits are exported from PID 1. The app-side OTel metrics
+      pipeline itself (see [OpenTelemetry SDK bootstrap](item:otel-sdk-bootstrap)) is real; this
+      command's own claim about what it does is not.
+    options:
+      - title: "Fold into build flags, document the port contract, remove the standalone command"
+        description: "Drop the pretense of a running server and document `--metrics-port`/the OTel metrics export contract as build-time flags instead, matching what the app-side pipeline actually does."
+        tradeoffs: "Cheapest option and the one the roadmap's scope-discipline pass already leans toward, but removes a command name users may already reference in scripts."
+      - title: "Implement a real supervisor-side /metrics listener"
+        description: "Give `pokkum-init` an actual `/metrics` HTTP handler and make `pokkum metrics` a thin client against it, so the command's text stops overclaiming."
+        tradeoffs: "Closes the gap honestly, but is real new supervisor surface (Bun runtime metrics, cgroup limits) for a command currently scoped as a CLI nicety, not a monitoring server."
+    recommendation: ""
+    flags: ["--metrics-port"]
+    impl:
+      - cmd/pokkum/metrics.go
+    related: ["otel-sdk-bootstrap"]

@@ -1,0 +1,286 @@
+area: "Build & Packaging"
+items:
+  # ---------------------------------------------------------------------
+  # Shipped — core compilation & packaging (Feature-list.md "Core
+  # Compilation & Container Packaging")
+  # ---------------------------------------------------------------------
+
+  - id: multi-arch-oci-compilation
+    title: "Zero-dependency multi-arch OCI compilation"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Compiles a SvelteKit project straight into a multi-arch (linux/amd64, linux/arm64) OCI image with no Docker daemon or buildkit, via zero-config virtual injection of the target adapter into vite.config.ts/js."
+    flags: ["--strategy", "--platform"]
+    impl:
+      - internal/core/pipeline.go
+      - internal/adapters/bunexec/compiler.go
+      - internal/adapters/packager/packager.go
+    limitations:
+      - "Zero-config injection writes a transformed vite config one directory deeper (.pokkum/<viteConfigName>); __dirname/import.meta.url-derived paths and Vite's root/envDir/publicDir/build.outDir are corrected for this, but any new relative-path construct added to a future SvelteKit/Vite release needs the same audit before it can be assumed safe."
+    evidence:
+      commits: ["5693980"]
+
+  - id: strategy-static
+    title: "--strategy=static"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Compiles a pure static SvelteKit site onto chainguard/static with an embedded pokkum-static Go file server as PID 1 — genuinely functional only since 2026-08-19, after six independent bugs were found by its first real boot test."
+    flags: ["--strategy=static", "--static"]
+    impl:
+      - internal/adapters/staticserver
+      - supervisor/cmd/pokkum-static/main.go
+      - supervisor/cmd/pokkum-static/server.go
+      - internal/adapters/bunexec/compiler.go
+      - testdata/fixtures/sveltekit-static
+    limitations:
+      - "Had never worked in any prior release before 2026-08-19: both HTTP servers bound no Addr and silently fell back to port 80 (finding 2, fixed 8306d37); Preflight rejected every real adapter-static project because it hard-coded a bun/node adapter check (finding 3); real prerendered output nests under pages/dependencies/data while the code assumed a flat tree (finding 4); there was no <path>.html fallback so every non-root prerendered route 404'd (finding 7); and the embedded pokkum-static blob was gitignored and absent from every CI job and released binary until 5693980 (finding 6). All fixed in 1c33509/5693980, proven against a real @sveltejs/adapter-static fixture rather than the synthetic mock that had been encoding the same wrong flat-tree assumption."
+      - "Conditional GET (If-None-Match -> 304) was missing until 61fd873 (finding 12) — every request re-downloaded the full body even when the client already held the current copy."
+      - "Its own Cache-Control contract (immutable /_app/immutable, no-cache version.json/prerendered HTML) is genuinely tested here (server_test.go, integration_test.go) — see [Cache-Control contract, tested](item:cache-control-contract) for why the layered/exe strategies don't have the equivalent."
+    evidence:
+      commits: ["8306d37", "1c33509", "5693980", "61fd873"]
+      findings: [2, 3, 4, 6, 7, 12]
+
+  - id: runtime-node
+    title: "--runtime=node, the second runtime dimension"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Targets a distroless-node base and execs adapter-node output directly under /nodejs/bin/node with no Bun layer at all, proven by a real Docker boot and, since e918c52, an automated smoke test."
+    flags: ["--runtime=bun", "--runtime=node"]
+    impl:
+      - internal/core/model.go
+      - internal/core/pipeline.go
+      - internal/core/runtime_node_test.go
+      - tests/integration/runtime_smoke_node_test.go
+    limitations:
+      - "--telemetry is rejected outright for node, not silently ignored: the layered strategy's OTel bootstrap is a bun --preload mechanism with no Node equivalent."
+      - "Node-core CVEs are unqueryable: distroless-node ships Node outside dpkg, invisible to the OS-package scanner, and the zero-dependency scanner has no Node-core ecosystem entry to query against OSV.dev."
+      - "pokkum dev, pokkum resolve/apply, and standalone pokkum scan have zero runtime awareness — verified: no RuntimeNode reference anywhere in cmd/pokkum/dev.go, k8s.go, or scan.go."
+      - "Correction to the source docs: Roadmap.md and Feature-list.md both still read, at the time of this migration, as if no automated boot smoke test existed for this runtime. That is stale — TestRuntimeSmoke_NodeRuntime_BootsAndServes (tests/integration/runtime_smoke_node_test.go) shipped in e918c52 and also asserts the *absence* of a Bun layer two independent ways, so it is real coverage, not a manual one-off."
+    evidence:
+      commits: ["f5229c3", "e918c52"]
+
+  - id: rolling-deploy-asset-overlay
+    title: "Rolling-deploy asset overlay (--asset-overlay)"
+    status: shipped
+    kind: feature
+    tier: moat
+    summary: "Merges the last N generations' immutable /_app/immutable client assets into a separate overlay layer, registry-side, so a browser holding a prior generation's HTML never hits a 404 mid-rollout."
+    flags: ["--asset-overlay", "--asset-overlay-from"]
+    impl:
+      - internal/ports/assetoverlay.go
+      - internal/adapters/assetoverlay
+      - internal/core/pipeline.go
+      - internal/adapters/packager/packager.go
+      - tests/integration/asset_overlay_e2e_test.go
+    limitations:
+      - "pokkum verify's rebuild-and-compare path does not reproduce this layer — see [pokkum verify doesn't reproduce the asset-overlay layer](item:asset-overlay-verify-gap)."
+      - "Lineage discovery is registry-side via a pokkum.dev/predecessor manifest annotation, deliberately independent of Kubernetes' pokkum.dev/image-history — a build-time flag cannot depend on cluster state without coupling build to Kubernetes. The annotation is only stamped when --asset-overlay is actually in use, so auto-discovery can only find a chain that opted in from the start of a rollout sequence."
+      - "Requires --output=push for auto-discovery (there is no current tag to inspect for --local/--tarball); --asset-overlay-from's explicit refs work regardless of output mode."
+    evidence:
+      commits: ["f9c2f1d"]
+
+  - id: bun-layer-diffid-stability
+    title: "Bun/supervisor layer diffID stability, pinned twice"
+    status: shipped
+    kind: fix
+    tier: foundation
+    summary: "Immutable-binary layers (Bun, pokkum-init, pokkum-static) now use a fixed epoch and disable Go's VCS stamping, so their ~90MB digest stops churning on every commit for content that never actually changed."
+    impl:
+      - internal/adapters/packager/packager.go
+      - Makefile
+    limitations:
+      - "This was a real bug, not a missing assertion: writing the stability test found the diffID derived its tar timestamp from SOURCE_DATE_EPOCH, which changes every commit, actively inverting what was supposed to be the single biggest fleet-wide size lever (fixed 1675d4c)."
+      - "The fix was itself silently undermined until 81a6fb6: Go's default -buildvcs stamping made the pokkum-init/pokkum-static binaries' own content change every commit regardless of the tar-timestamp pin, so the two layers containing them kept churning anyway — the same failure class (build metadata leaking into a content-addressed artifact) as the first bug, a second independent source of it in the identical layers. Closed with -buildvcs=false on both embedded-binary build targets; the main CLI build deliberately keeps VCS stamping since it wants version reporting."
+    evidence:
+      commits: ["1675d4c", "81a6fb6"]
+      findings: [17]
+
+  - id: layered-runtime-hardening
+    title: "Layered-strategy runtime hardening (stub launcher + startup attestation)"
+    status: shipped
+    kind: hardening
+    tier: foundation
+    summary: "Two composable mitigations for stock Bun's full CLI attack surface in a layered image: a non-foldable compiled entrypoint launcher, and a supervisor-verified startup digest over the /app tree."
+    flags: ["--stub-launcher", "POKKUM_STUB_LAUNCHER", "POKKUM_ATTESTATION_DIGEST"]
+    impl:
+      - internal/adapters/bunexec/compiler.go
+      - internal/adapters/packager/packager.go
+    limitations:
+      - "Startup attestation only exists for --strategy=layered; --strategy=exe and --strategy=static don't attest."
+    evidence:
+      commits: ["fb23335"]
+
+  - id: bun-release-integrity
+    title: "Bun release checksum verification"
+    status: shipped
+    kind: hardening
+    tier: foundation
+    summary: "Every downloaded Bun release archive is checksum-verified before extraction — pinned digests for common versions, Bun's own GPG-signed SHASUMS256.txt.asc for anything else — failing closed rather than silently installing an unverifiable download."
+    impl:
+      - internal/adapters/bunruntime/resolver.go
+    limitations:
+      - "PB-2's first-contact gap is a stated, permanent limitation, not an open TODO: the very first resolve of a genuinely new, unlisted (version, target) on a fresh cache has no independent trust anchor beyond the GPG-signed manifest itself — GitHub's Releases API shares the same trust root as the download host and exposes no per-asset digests, so it adds no real signal. Re-running scripts/pin-bun-checksums periodically narrows this; nothing closes it fully."
+    evidence:
+      commits: ["0e8ae5e", "4d8ba1b"]
+
+  - id: registry-push-and-cache
+    title: "Registry push throughput, tagging, and composite remote-cache"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Parallel HTTP/2 layer uploads, cross-repo blob mounting, idempotent pushes, repeatable --tag support, and a composite input hash that skips a full rebuild in sub-100ms on a verified registry cache hit."
+    flags: ["--tag", "--push-concurrency", "--cache-verify", "--compression"]
+    impl:
+      - internal/adapters/registry/push.go
+      - internal/adapters/registry/mount.go
+      - internal/adapters/layercacheutils/layercacheutils.go
+    limitations:
+      - "Before b350ecb there was no way to tag an image at all — every build published latest unconditionally. Tags apply registry-side after the image is hashed, so the tag set never affects the digest."
+      - "A remote-cache hit skips VerifyBaseImage/native inspection by design (the base digest is already bound into the cache key), but the cache-verify key chain never reads req.Signing.PublicKeyPEM, so a build signed via --signing-key alone doesn't automatically make its own cache entries independently verifiable — falls through to a full rebuild rather than failing fast with a clear story (tracked in Serena mem:open_decisions, not this file's scope)."
+    evidence:
+      commits: ["b350ecb"]
+
+  - id: hermetic-build-mode
+    title: "Hermetic build mode (--hermetic)"
+    status: shipped
+    kind: hardening
+    tier: foundation
+    summary: "Enforces real Linux network-namespace isolation for the build subprocess (no IP egress regardless of what a compromised dependency's build-time code tries), falling back to advisory-only isolation elsewhere."
+    flags: ["--hermetic", "--hermetic-mount-isolation"]
+    impl:
+      - internal/core/pipeline.go
+    limitations:
+      - "Requires cached base image resolution, pre-populated node_modules/, and a pre-cached Bun binary — fails closed rather than downloading, so a cold cache cannot hermetic-build."
+      - "--hermetic-mount-isolation's docker.sock mask has an honest residual gap: the sandboxed process retains CAP_SYS_ADMIN in its own namespace (the capability that created the mask), so a sufficiently sophisticated dependency aware of the mechanism could in principle umount() it. Closing this needs capset(2) to drop the capability before the final exec — not attempted."
+    evidence:
+      commits: ["28582b3", "00f791d"]
+
+  # ---------------------------------------------------------------------
+  # Open — Tier 3 (Registry & Runtime Ergonomics) and Tier 5 (Monorepo &
+  # Config Drift)
+  # ---------------------------------------------------------------------
+
+  - id: asset-overlay-verify-gap
+    title: "pokkum verify doesn't reproduce the asset-overlay layer"
+    stage: v1.1
+    status: open
+    kind: fix
+    tier: foundation
+    summary: "Verifying an image built with --asset-overlay reports a false-positive digest mismatch, because verify's rebuild path has no way to re-resolve the same predecessor chain."
+    problem: |
+      [Rolling-deploy asset overlay](item:rolling-deploy-asset-overlay) shipped with a known,
+      deliberately-not-closed gap: `pokkum verify`'s default rebuild-and-compare path has no
+      `--asset-overlay`/`--asset-overlay-from` flags of its own, so it cannot reproduce the merged
+      overlay layer when rebuilding for comparison. An image legitimately built with
+      `--asset-overlay` therefore fails verification with an overlay-layer digest mismatch, even
+      though nothing is wrong with it.
+    options:
+      - title: "Accept the same --asset-overlay-from refs verify's caller already knows"
+        description: "Add --asset-overlay/--asset-overlay-from to pokkum verify, mirroring the build-side flags exactly."
+        tradeoffs: "Simple and consistent, but only works if the caller still knows (or can reconstruct) the exact generation chain the original build resolved."
+      - title: "Read the chain back off the image's own annotation"
+        description: "Stamp the resolved predecessor digests onto a pokkum.dev/asset-overlay-sources annotation at build time, and have verify read it back automatically before rebuilding."
+        tradeoffs: "No extra flags for the caller, self-describing — but adds another annotation to keep in sync with the actual overlay layer contents."
+    recommendation: "Read the chain back off a pokkum.dev/asset-overlay-sources annotation, since it needs no caller-side bookkeeping and keeps verify's rebuild path self-contained."
+    related: ["rolling-deploy-asset-overlay"]
+
+  - id: ecr-repo-autocreate
+    title: "ECR repository auto-create"
+    stage: v1.2
+    status: open
+    kind: feature
+    tier: polish
+    summary: "ECR requires the target repository to exist before the first push; --create-repository would close that first-push failure every ECR user hits once."
+
+  - id: resumable-chunked-upload
+    title: "Resumable chunked layer upload"
+    stage: v1.2
+    status: open
+    kind: hardening
+    tier: polish
+    summary: "Back off and retry on 429/5xx during a large layer push instead of failing the whole push on one transient registry hiccup."
+
+  - id: registry-error-surfacing
+    title: "Registry-specific error surfacing"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: polish
+    summary: "Translate GAR/Harbor project-path errors and Docker Hub anonymous-pull rate limits into a readable, specific message instead of a generic push/pull failure."
+
+  - id: supervisor-cgroup-awareness
+    title: "Supervisor cgroup awareness"
+    stage: v1.2
+    status: open
+    kind: feature
+    tier: polish
+    summary: "JSC (Bun's engine) doesn't read cgroup limits, so a Bun app in a 512Mi container OOMKills in ways that look random; read /sys/fs/cgroup/memory.max, export it, and warn below a sane floor."
+
+  - id: source-maps-oci-referrer
+    title: "Source maps as an OCI referrer"
+    stage: backlog
+    status: open
+    kind: feature
+    tier: polish
+    summary: "Strip source maps from the shipped image and attach them as a digest-keyed OCI referrer artifact, so Sentry release tagging works without shipping maps to production."
+
+  - id: cache-control-contract
+    title: "Cache-Control contract, tested for every strategy"
+    stage: v1.2
+    status: open
+    kind: infra
+    tier: foundation
+    summary: "The /_app/immutable, version.json, service-worker.js and prerendered-HTML header contract is a tested invariant only for --strategy=static today; layered/exe rely on adapter-node's bundled sirv defaults with no Pokkum-side test."
+    problem: |
+      Getting this contract wrong either breaks SvelteKit's own `updated.check()` polling or serves
+      stale HTML forever. `supervisor/cmd/pokkum-static/server_test.go` and `integration_test.go`
+      already assert it precisely for [--strategy=static](item:strategy-static). The layered and
+      exe strategies serve prerendered content through adapter-node's bundled `sirv`, which sets its
+      own defaults — nothing in this codebase currently asserts they match the intended contract
+      (`public, max-age=31536000, immutable` for hashed assets; `no-cache` for `version.json`,
+      `service-worker.js`, and prerendered HTML).
+    related: ["strategy-static"]
+
+  - id: monorepo-vendor-cache
+    title: "Shared vendor cache across a monorepo invocation"
+    stage: v1.2
+    status: open
+    kind: feature
+    tier: foundation
+    summary: "--since skips builds between unaffected projects but does nothing within a build when many packages in one invocation share dependencies; extending the layer cache into a content-addressable vendor-layer cache would close that."
+    problem: |
+      Extend `layercacheutils` into a cache keyed by `package.json` + lockfile subtree, shared
+      across every project built in one invocation — analogous to how `ko` leans on Go's build
+      cache. Confirmed by reading `internal/adapters/layercacheutils/layercacheutils.go`: the
+      existing cache has no cross-project sharing concept today, so this gap is real and not
+      merely asserted from the feature list, as the original roadmap note asked to verify.
+    flags: ["--since"]
+
+  - id: doctor-drift-check
+    title: "pokkum doctor drift check"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: polish
+    summary: "Nothing currently validates that a .pokkum.yaml's configured adapter, base image, and telemetry settings are still coherent after a SvelteKit or Bun upgrade."
+
+  - id: scoped-secret-allow-annotations
+    title: "Scoped secret-allow annotations"
+    stage: backlog
+    status: open
+    kind: feature
+    tier: polish
+    summary: "--allow-secret-pattern is a global regex; a .secretguardignore or inline // pokkum:allow-secret comment would give a known-safe string in one fixture the scoped exemption it actually needs."
+    flags: ["--allow-secret-pattern"]
+
+  - id: build-time-test-gate
+    title: "Build-time test gate (--test)"
+    stage: backlog
+    status: open
+    kind: feature
+    tier: polish
+    summary: "Condition image creation on the project's own test suite passing, once its interaction with --hermetic (a test suite needing network access conflicts with hermetic-by-default) has an explicit answer."
+    flags: ["--hermetic"]

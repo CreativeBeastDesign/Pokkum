@@ -1,28 +1,240 @@
 area: "Developer Experience"
 items:
-  - id: cluster-dev-loop-latency
-    title: "Sub-second cluster dev loop"
-    stage: v1.1
-    status: awaiting-decision
-    kind: dx
+  - id: no-container-dev-mode
+    title: "pokkum dev --no-container"
+    status: shipped
+    kind: feature
     tier: moat
-    summary: "Decide which of the remaining cluster dev-loop options to build next now that --no-container ships the cheap local-process half."
+    summary: "Runs the project's own dev server directly on the host, skipping image construction entirely, for the fastest possible local iteration loop."
     problem: |
-      `pokkum dev` used to go through full image construction and a Docker/Podman daemon on every
-      change — table stakes, not a differentiator, and both external reviews independently flagged
-      the dev loop as the weakest part of the day-to-day experience. `--no-container` (see
-      docs/steps/SubSecondClusterDevLoop.md) already shipped the cheap first option: a
-      hot-reloading local Bun process with no image build at all. What's still undecided is which
-      of the two remaining, more ambitious options to pursue next.
-    options:
-      - title: "pokkum dev --cluster"
-        description: "Watch, rebuild, and sync /app/server + /app/client directly into a running pod via the Kubernetes API, then restart the Bun process — no registry round-trip."
-        tradeoffs: "The actual differentiator (SvelteKit analog of hot-swapping a Go binary), but a materially larger implementation: needs a Kubernetes client, pod exec/copy, and a narrower reimplementation of what Skaffold/Tilt already do generically."
-      - title: "--to-oci-layout=<path> + direct kind/k3d/minikube load"
-        description: "Emit an OCI layout on disk and load it directly into a local cluster, for contributors and CI environments with no daemon at all."
-        tradeoffs: "Cheap and adjacent to existing build code, but doesn't address the actual latency complaint — it's a hermetic-CI nicety, not a faster inner loop."
-    recommendation: ""
-    decision: ""
-    flags: ["--cluster", "--to-oci-layout"]
+      The default container-parity dev loop goes through full image construction and a Docker/Podman
+      daemon on every change — table stakes, not a differentiator, and both external reviews
+      independently flagged the dev loop as the weakest part of the day-to-day experience.
+      `--no-container` closes the cheap half of that gap: it does not layer a second, Pokkum-owned
+      watch/rebuild loop on top of what Vite/SvelteKit's own HMR already does better, it simply gets
+      out of the way and runs `bun run dev` directly.
+    flags: ["--no-container"]
+    impl:
+      - cmd/pokkum/dev.go
+    limitations:
+      - "No supervisor, no startup attestation, no health/readiness probes, no base image, and no non-root user — a single startup warning states this explicitly and the default remains full container-parity mode so nobody debugs a production discrepancy against a mode never meant to model it."
+      - "`--debug`, `--platform`, `--bun-version`, and `--bun-variant` are rejected outright rather than silently ignored, since each describes a property of an image that is never built."
+      - "`--port` and `--watch` warn (rather than reject) when explicitly set, since the dev server picks its own port and hot reload is inherent rather than opt-in."
     evidence:
       commits: ["18f056c"]
+
+  - id: dev-hot-reload
+    title: "pokkum dev (container-parity hot reload)"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Builds the image, loads it into the local Docker/Podman daemon, and rebuilds on source changes so local iteration exercises the same runtime the production image ships."
+    problem: |
+      The container-mode watch/rebuild loop reused a single buffered result channel across container
+      generations: when a rebuild killed the previous container, its goroutine's now-irrelevant
+      "signal: killed" write landed in the same channel the next generation's select read from, so
+      the loop reported a false "container exited with error" and returned — the flagship dev loop
+      could not survive a single file save. Fixed by giving each generation its own channel, passed
+      in as a parameter rather than captured, so a superseded generation's write lands in a channel
+      nobody reads.
+    flags: ["--debug", "--port", "--watch", "--env-file", "--platform", "--bun-binary", "--bun-variant", "--bun-version"]
+    impl:
+      - cmd/pokkum/dev.go
+    evidence:
+      commits: ["1f8e5bf"]
+    related: ["no-container-dev-mode", "cluster-dev-loop"]
+
+  - id: cluster-dev-loop
+    title: "pokkum dev --cluster"
+    stage: v1.1
+    status: open
+    kind: dx
+    tier: moat
+    summary: "Watch, rebuild, and sync app server and client output directly into a running pod via the Kubernetes API, without an image build or registry round-trip."
+    problem: |
+      `--no-container` (see [pokkum dev --no-container](item:no-container-dev-mode)) shipped the
+      cheap local-process half of the dev-loop problem. This is the more ambitious, actual
+      differentiator: the SvelteKit analog of hot-swapping a Go binary in a running pod. It would put
+      Pokkum on Skaffold/Tilt's own turf, but with a narrower, SvelteKit-specific implementation —
+      watch, rebuild, sync `/app/server` + `/app/client` into a running pod, restart the Bun process,
+      no registry round-trip. Per the decision matrix, this scores highest on DX (10/10) of anything
+      on the roadmap, with the cost concentrated in needing a Kubernetes client and pod exec/copy
+      plumbing that a narrower reimplementation of what Skaffold/Tilt already do generically requires.
+      Both external reviews independently flagged the dev loop as the weakest part of the day-to-day
+      experience, and this is the option that actually answers that, as opposed to `--no-container`
+      which only removes the container-build tax.
+    flags: ["--cluster", "--namespace", "--selector"]
+    related: ["no-container-dev-mode", "oci-layout-dev-output"]
+
+  - id: oci-layout-dev-output
+    title: "--to-oci-layout for daemonless cluster loading"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: polish
+    summary: "Emit an OCI layout on disk and load it directly into kind/k3d/minikube, for contributors and CI environments with no Docker/Podman daemon at all."
+    problem: |
+      Adjacent to [pokkum dev --cluster](item:cluster-dev-loop) but structurally simpler and cheaper
+      to build — it doesn't touch the in-pod sync problem, it just gives daemonless environments a way
+      to get a built image into a local cluster without a registry round-trip. Ordered after the
+      cluster dev loop because it is a hermetic-CI nicety, not a faster inner loop, but it's cheap
+      enough to pick up independently.
+    flags: ["--to-oci-layout"]
+    related: ["cluster-dev-loop"]
+
+  - id: base-flag-custom-reference
+    title: "--base accepts a custom image reference"
+    status: shipped
+    kind: fix
+    tier: polish
+    summary: "`--base` now accepts a free-form custom image reference, closing a docs/CLI mismatch where the help text promised it and no code path accepted one."
+    problem: |
+      `--base`'s help text offered a custom image reference, but every value was routed through
+      `ParseBaseImagePreset`, so `--base gcr.io/my/base:tag` was rejected outright — a documented
+      capability the flag simply did not provide. The underlying port already supported it
+      (`BaseImageCustom` exists and its `Ref` field was already documented as required); only the
+      CLI could not reach it. A UX/docs mismatch, not a security issue — the preset path and the
+      `custom` preset itself worked throughout.
+    flags: ["--base"]
+    impl:
+      - internal/core/model.go
+    limitations:
+      - "Presets are tried first, and only a value containing `/`, `.`, `:`, or `@` is parsed as a reference — this ordering is load-bearing, since `name.ParseReference` would otherwise accept a typo'd preset (e.g. `distrolss`) as valid Docker Hub shorthand instead of surfacing a clear \"unknown preset\" error."
+    evidence:
+      commits: ["69914ac"]
+      findings: [13]
+
+  - id: layer-origin-tracing
+    title: "pokkum explain / explain why / explain diff"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Reads a real OCI image and reports its actual per-layer digests, sizes, and file origins, and diffs two images layer-by-layer."
+    problem: |
+      All three commands originally returned hardcoded fabricated data — `explain` returned a literal
+      layer list with invented digests and sizes, `why` hardcoded a layer index for whatever dependency
+      was passed, and `diff` hardcoded a fixed "modified" layer, none of which ever touched a real
+      image (no `remote.`, `Fetch`, or tar walk in the original implementation). Implemented for real
+      by reusing the layer-diffing and per-layer file-record machinery `pokkum verify`'s L3 comparison
+      and the packager already had, rather than deleting the commands.
+    impl:
+      - cmd/pokkum/explain.go
+    evidence:
+      findings: []
+
+  - id: workspace-init-wizard
+    title: "pokkum init"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Guided interactive setup for `.pokkum.yaml` and `.pokkumignore`, with a non-interactive `--defaults` mode."
+    flags: ["--defaults"]
+    impl:
+      - cmd/pokkum/init.go
+
+  - id: config-management
+    title: "pokkum config view / validate, build profiles"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Inspects resolved build configuration, strictly validates `.pokkum.yaml` schema and profile consistency, and applies named profile overrides at build time."
+    flags: ["--profile", "-P"]
+    impl:
+      - cmd/pokkum/config.go
+
+  - id: doctor-preflight
+    title: "pokkum doctor"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Audits local Bun runtime, SvelteKit version compatibility, `.pokkumignore`, and registry credentials, with `--fix` for mechanical repairs."
+    flags: ["--fix"]
+    impl:
+      - cmd/pokkum/doctor.go
+
+  - id: adopt-codemod
+    title: "pokkum adopt"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Migrates SvelteKit projects off `adapter-node`, `adapter-vercel`, `adapter-auto`, or a legacy Dockerfile onto Pokkum compilation defaults."
+    impl:
+      - cmd/pokkum/adopt.go
+
+  - id: signed-self-update
+    title: "pokkum upgrade"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Checks for new releases and verifies the release binary's checksum signature via Cosign before self-replacing."
+    impl:
+      - cmd/pokkum/upgrade.go
+
+  - id: json-output-envelope
+    title: "Standardized machine-readable output (--output=json)"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "A global `--output=json` flag emits a versioned JSON envelope across every command, instead of callers parsing human-readable stdout."
+    flags: ["--output"]
+    impl:
+      - cmd/pokkum/build.go
+
+  - id: pokkum-yaml-json-schema
+    title: "JSON Schema for .pokkum.yaml"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: polish
+    summary: "Publish a JSON Schema for `.pokkum.yaml` so editors can offer inline validation and completion instead of only failing at `pokkum config validate` time."
+
+  - id: config-view-provenance
+    title: "pokkum config view value provenance"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: polish
+    summary: "Show where each resolved `.pokkum.yaml` setting actually came from — flag, profile, env, or default — not just its final value."
+
+  - id: exit-code-reference
+    title: "Documented CLI exit-code table"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: polish
+    summary: "Publish a stable reference table for the CLI's exit codes — 125 and 126 already carry specific, undocumented meanings."
+
+  - id: stable-go-library-api
+    title: "Stable Go library API"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: foundation
+    summary: "Expose Pokkum's build pipeline as a stable, embeddable Go library API, for a future Skaffold/Tilt-style integration."
+
+  - id: hooks-system
+    title: "Pre/post-build shell hooks"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: foundation
+    summary: "Deferred: pre/post-build shell hooks would defuse plugin-system demand cheaply, but add new maintenance surface for something CI pipelines already provide natively."
+    problem: |
+      `pokkum hook pre-build`/`pokkum hook post-build` (database migrations, asset compilation, smoke
+      tests against the new image) scores well on DX but is real, ongoing cross-platform shell-exec
+      maintenance for a capability that is not differentiated — every CI pipeline already runs
+      pre/post steps around a build natively. Deferred rather than built; revisit if repeatedly
+      requested rather than build speculatively.
+
+  - id: plugin-system
+    title: "npm-distributed plugin system"
+    status: wont-do
+    kind: dx
+    tier: non-goal
+    summary: "Will not be built: an npm-based extension model would undercut the exact supply-chain hardening story Pokkum exists to provide."
+    decision: |
+      The DX case for a `pokkum-plugin-*` ecosystem (community plugins for custom adapters and
+      preprocessors, an esbuild/Vite-style marketplace) is real, but an npm-based extension model
+      directly undercuts Pokkum's own hardening story — this is a supply-chain-security tool that
+      would be inviting the exact npm supply-chain risk its own `secretguard`, hermetic-build, and
+      CVE-gate features exist to mitigate. Stated as a decision, not a silent omission.

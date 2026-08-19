@@ -1,0 +1,146 @@
+area: "Testing & Infrastructure"
+items:
+  # ---------------------------------------------------------------------
+  # Shipped
+  # ---------------------------------------------------------------------
+
+  - id: runtime-boot-smoke-tests
+    title: "Real Docker boot smoke tests"
+    status: shipped
+    kind: infra
+    tier: foundation
+    summary: "The first tests in this repo to actually boot a produced image and poll it, for both the default layered/Bun strategy and --runtime=node, instead of only proving the packaged bytes are right and stable."
+    impl:
+      - tests/integration/runtime_smoke_test.go
+      - tests/integration/runtime_smoke_node_test.go
+    limitations:
+      - "Every existing layer-structure/determinism/golden-manifest test had proven the packaged bytes were correct and stable, never that the result actually runs — that gap is exactly what let every layered image ship without a working entrypoint for this codebase's entire prior history (see Lessons.md's 2026-08-18 entry on the missing /app/server/index.js)."
+      - "Gated on -short/bun/docker/network, each skipping cleanly rather than failing when unavailable."
+      - "--strategy=static has its own separate fixture-driven boot test rather than this harness — see [Real @sveltejs/adapter-static test fixture](item:static-strategy-real-fixture)."
+    evidence:
+      commits: ["fc53968", "e918c52"]
+
+  - id: fuzz-targets
+    title: "Fuzz targets across parsers and codecs"
+    status: shipped
+    kind: infra
+    tier: foundation
+    summary: "Fuzz targets now exercise DSSE PAE encoding, ignore-pattern matching, Cosign payloads, asset-overlay merge logic, Bun SHASUMS parsing, scanner version comparison, and the static file server — none of these existed before."
+    impl:
+      - internal/adapters/dsse/pae_fuzz_test.go
+      - internal/adapters/ignoreutils/matcher_fuzz_test.go
+      - internal/adapters/cosign/payload_fuzz_test.go
+      - internal/adapters/assetoverlay/assetoverlay_fuzz_test.go
+      - internal/adapters/bunruntime/shasums_fuzz_test.go
+      - internal/adapters/scanner/version_fuzz_test.go
+      - supervisor/cmd/pokkum-static/server_fuzz_test.go
+    evidence:
+      commits: ["e6e4746"]
+
+  - id: race-detector-and-coverage-floor
+    title: "Race detector + enforced coverage floor"
+    status: shipped
+    kind: infra
+    tier: foundation
+    summary: "go test -race now runs in CI over the packages where concurrency actually lives, and coverage is measured and enforced at a 73% floor as a ratchet off the real baseline, not an aspirational number."
+    impl:
+      - scripts/check-coverage.sh
+      - Makefile
+    limitations:
+      - "-race is deliberately scoped to registry/core/packager/supervisor rather than the full ./... tree, to keep the added CI cost (~6s) proportionate to where concurrency actually lives."
+      - "Landed in the same change as fixing a structural CI blind spot: CI never installed Bun before this, so every genuinely-real-build e2e test silently skipped and CI's 'e2e' job was entirely mock-compiler. A separate e2e-real-build job now installs Bun, kept apart so the fast hermetic gate stays fast."
+    evidence:
+      commits: ["e6e4746"]
+
+  - id: cli-docs-invariant-tests
+    title: "CLI/docs drift as a mechanical test failure"
+    status: shipped
+    kind: infra
+    tier: foundation
+    summary: "Five new tests check Vocabulary.md and action.yml against the CLI's real flag/env-var surface in both directions, in the spirit of internal/architecture_test.go, and found three genuine drifts on their first run."
+    impl:
+      - cmd/pokkum/flags_docs_test.go
+      - cmd/pokkum/envvar_docs_test.go
+      - cmd/pokkum/actionyml_test.go
+    limitations:
+      - "Found and fixed on first run: POKKUM_LOG_LEVEL (read by both PID-1 binaries) was undocumented, --write-config on adopt was undocumented, and Vocabulary.md claimed a verify --rebuild flag that does not exist (the real behavior is rebuild-by-default with --no-rebuild to opt out)."
+      - "The same commit closed six merged-but-unvalidated .pokkum.yaml config fields, including profiles.<name>.output, which nothing had validated before."
+    evidence:
+      commits: ["548c0e1"]
+
+  - id: embedded-blob-freshness-guard
+    title: "Embedded PID-1 binary freshness guard"
+    status: shipped
+    kind: infra
+    tier: foundation
+    summary: "make check-embedded-blobs rebuilds pokkum-init and pokkum-static fresh from source with the exact Makefile flags and byte-compares them against what is actually embedded, catching local staleness a from-scratch CI build structurally cannot hit."
+    impl:
+      - internal/adapters/staticserver/blob_freshness_test.go
+      - Makefile
+    limitations:
+      - "Must run with -count=1: go test's result cache cannot see through an exec'd go build into another package's source, so a stale cached result would otherwise report clean."
+      - "Deliberately not added to the PR-gate CI job — CI always rebuilds both blobs from the checked-out commit before any test runs, so this specific staleness is structurally impossible there. It exists for the local working-tree hazard, which is exactly where it was first found live (concurrent commits had moved HEAD past the last local rebuild)."
+    evidence:
+      commits: ["a86baa3"]
+
+  - id: fixture-isolation
+    title: "Real-build tests copy their fixture into t.TempDir() first"
+    status: shipped
+    kind: infra
+    tier: foundation
+    summary: "Every mutating real-build test now copies its checked-in fixture into a fresh t.TempDir() before building, closing an order-dependence that had already caused three separate incidents, proven at -count=3 -shuffle=on."
+    impl:
+      - tests/integration/harness_test.go
+      - internal/adapters/bunexec/integration_test.go
+    limitations:
+      - "Stale-claim correction: overnight-findings.md's finding 11 recorded this as 'not fixed — deliberately,' calling it a broader test-hygiene change than belonged at the end of that queue. It was, in fact, done the same day. Serena's mem:state, as read at the start of this migration, still described it as 'known fragility, deliberately not fixed yet' — also stale. Commit 20ba1ec generalized the t.TempDir()-copy pattern tests/integration/runtime_smoke_test.go had already established to all five affected real-build tests, moved the shared helper into harness_test.go, and proved order-independence empirically rather than asserting it."
+      - "Read-only tests were deliberately left untouched, but only after confirming — by reading the actual production code, not assuming — that nothing in their dependency chain (sbom.Generator, packager.Packager, mockCompiler's StrategyExe branch) ever calls os.WriteFile/os.MkdirAll against ProjectDir."
+      - "bunexec cannot import the tests/integration helper (a separate package, and adapter-to-adapter imports are architecturally forbidden), so it carries a small, deliberate duplicate that — unlike the shared helper — does not skip .svelte-kit, since that test's precondition is a pre-prepared fixture."
+    evidence:
+      commits: ["ac5dc89", "20ba1ec"]
+      findings: [11]
+
+  - id: static-strategy-real-fixture
+    title: "Real @sveltejs/adapter-static test fixture replaces a fictional mock"
+    status: shipped
+    kind: infra
+    tier: foundation
+    summary: "A genuine, scaffolded-and-built @sveltejs/adapter-static project replaced a synthetic mock that had been fabricating a flat prerendered/index.html, immediately exposing four bugs the mock's own wrong assumption had been hiding."
+    impl:
+      - testdata/fixtures/sveltekit-static
+      - tests/integration/static_e2e_test.go
+    limitations:
+      - "This is the sharpest instance of a recurring lesson in this codebase: a mock encoding the same wrong assumption as the code it tests can never detect the mismatch. TestFixtureDrivenE2E_Static had passed throughout, because both the mock and the production code shared the same incorrect belief that prerendered output is a flat tree — see [--strategy=static](item:strategy-static) in build-packaging.yaml for the bugs this found (findings 2, 3, 4, 6, 7)."
+    evidence:
+      commits: ["0ef9dd0", "1c33509"]
+      findings: [4, 6, 7]
+
+  # ---------------------------------------------------------------------
+  # Open
+  # ---------------------------------------------------------------------
+
+  - id: verify-suite-scope-gaps
+    title: "make verify's five steps don't cover supervisor/ or the integration/golden test suites"
+    stage: backlog
+    status: open
+    kind: infra
+    tier: polish
+    summary: "supervisor/ (pokkum-init, pokkum-static) shares the root go.mod but needs its own explicit go build/go test, and tests/integration's golden-manifest and runtime-smoke suites also sit outside make verify's canonical five steps."
+    problem: |
+      `make verify`'s five steps run `go test ./internal/...` plus a `cmd/pokkum` build only.
+      `supervisor/...` is a separate build target entirely, and a diff that only touches
+      `supervisor/` can pass every one of the five steps while `go build ./supervisor/...` or
+      `go test ./supervisor/...` are actually broken. Separately, `tests/integration/golden_test.go`
+      (OCI manifest/config/index goldens) and the runtime-smoke suites are also outside `make
+      verify`'s scope and must be run explicitly for any change touching layer compression, tar
+      construction, OCI assembly, or a produced image's boot behavior. Both facts are currently
+      documented only as a reminder in `CLAUDE.md` and Serena's `mem:state`, not enforced by
+      tooling — nothing fails a CI run or a `make verify` invocation that skips them.
+    options:
+      - title: "Fold supervisor/ into a sixth make verify step"
+        description: "Add go build ./supervisor/... && go test ./supervisor/... as a mandatory sixth step, always run rather than conditionally on the diff touching supervisor/."
+        tradeoffs: "Simple and impossible to forget, but adds supervisor's build/test time to every make verify run even when nothing under supervisor/ changed."
+      - title: "Path-based CI trigger"
+        description: "Add a CI job that runs only when the diff touches supervisor/ or tests/integration/, keeping the fast local make verify loop unchanged."
+        tradeoffs: "Keeps the common case fast, but a local make verify still can't be trusted alone for a supervisor-touching change — a contributor without CI access could still miss it."
+    recommendation: "Fold supervisor/ into make verify unconditionally, since its build/test time is small relative to the rest of the suite and 'always run' is the only version of this that can't be silently skipped; keep tests/integration's heavier suites as an explicit, documented extra step given their real Docker/network cost."

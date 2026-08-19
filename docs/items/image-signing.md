@@ -22,6 +22,7 @@ Builds are signed via Cosign static-key or DSSE, with a fetch-back-and-reverify 
 - `--sign`
 - `--signing-key`
 - `POKKUM_SIGNING_KEY`
+- `--require-signed`
 
 ## Implementation
 
@@ -36,4 +37,5 @@ Builds are signed via Cosign static-key or DSSE, with a fetch-back-and-reverify 
 ## Known Limitations
 
 - The placeholder trust-anchor fallback was removed; an unconfigured key now hard-fails instead of silently no-op signing (a breaking change for anyone who relied on the old default).
+- Static-key signing only — there is no keyless (Fulcio/OIDC) signing path. Keyless Sigstore exists only on the verification side (base images, `pokkum verify`).
 

@@ -1,0 +1,156 @@
+area: "Kubernetes & Operations"
+items:
+  - id: k8s-uri-resolution
+    title: "pokkum resolve"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Resolves `pokkum://` image URIs embedded in Kubernetes YAML manifests to immutable `repo@sha256:...` digest references."
+    impl:
+      - cmd/pokkum/resolve.go
+      - internal/adapters/k8s/resolver.go
+    limitations:
+      - "Handles raw-YAML `pokkum://` references only. Most teams template with Helm or Kustomize and will never reach this path today — see [Helm post-renderer and Kustomize KRM function](item:helm-kustomize-integration)."
+      - "Operating on a static, untouched manifest file cannot accumulate multi-generation rollback history across independent CLI runs unless intermediate annotations are committed or seeded from live cluster state."
+
+  - id: k8s-apply
+    title: "pokkum apply"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Resolves manifests and applies them directly to a Kubernetes cluster via `kubectl apply -f -`, seeding rollback history from live cluster state first."
+    problem: |
+      A pre-flight `ports.ClusterInspector` query reads each target workload's current annotations
+      and container images from the live cluster before resolution, so multi-generation rollback
+      works reliably even when deploying from a static, uncommitted `pokkum://` manifest template
+      across independent CLI runs — the case `pokkum resolve` alone cannot cover (see its own
+      limitations).
+    impl:
+      - cmd/pokkum/apply.go
+      - internal/ports/k8s.go
+    related: ["k8s-uri-resolution", "multi-generation-rollback"]
+
+  - id: monorepo-affected-detection
+    title: "Monorepo affected-detection (--since)"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Diffs each project's tree against a git ref and skips builds entirely for projects with no changes and a known prior digest."
+    problem: |
+      Stronger than digest-HEAD skipping: a git-diff per `pokkum://` app means no build is attempted
+      at all for an unaffected project, not just no push.
+    flags: ["--since"]
+    impl:
+      - internal/adapters/gitutils/affected.go
+      - cmd/pokkum/k8s.go
+
+  - id: cluster-hardening-defaults
+    title: "Cluster hardening defaults"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Injects secure `securityContext`, resource requests/limits, `NetworkPolicy`/`PodDisruptionBudget` manifests, and probe defaults into resolved Kubernetes workloads."
+    problem: |
+      `securityContext` defaults (`runAsNonRoot`, `readOnlyRootFilesystem`, `seccompProfile:
+      RuntimeDefault`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`) and
+      `readinessProbe`/`livenessProbe`/`startupProbe` defaults against the supervisor's
+      `/readyz`/`/healthz` are each checked and injected independently per field/probe type, so an
+      existing custom setting of one kind doesn't block defaulting of the others.
+    flags: ["--security-context", "--no-security-context", "--network-policy", "--with-otel-sidecar"]
+    impl:
+      - internal/adapters/k8s/resolver.go
+
+  - id: multi-generation-rollback
+    title: "pokkum rollback"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Rolls back image references in Kubernetes manifests using `pokkum.dev/image-history` annotations, with generation depth selection."
+    flags: ["-g", "--generation", "--list", "--to"]
+    impl:
+      - cmd/pokkum/rollback.go
+    limitations:
+      - "History accumulation depends on the annotation surviving across independent CLI runs — a static, untouched manifest template with no live cluster query has no other source for it. `pokkum apply`'s pre-flight cluster inspection closes this for the deploy path; a bare `pokkum resolve` run does not."
+    related: ["k8s-apply"]
+
+  - id: multi-registry-auth
+    title: "Multi-registry authentication (--registry-config)"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Shells out to `docker-credential-*` binaries (ECR, GCR, OSXKeychain) with in-memory caching, falling back to static `auths` blocks."
+    flags: ["--registry-config"]
+    impl:
+      - internal/adapters/registryutils/keychain.go
+
+  - id: multi-env-management
+    title: "Multi-environment management"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: foundation
+    summary: "Deferred: staging/production config templating and secret-manager integration are real needs, but a large surface most teams already solve at the CI/CD layer."
+    problem: |
+      `pokkum config env` plus `--env=staging`-style overrides and secure secret injection from
+      1Password/Vault/AWS Secrets Manager would require config templating plus one or more
+      secret-manager SDK integrations. Real, but most teams already solve environment-specific
+      config and secret injection at the CI/CD layer rather than wanting their image builder to own
+      it. Revisit if repeatedly requested rather than build speculatively.
+
+  - id: policy-as-code
+    title: "Policy as code (pokkum policy check)"
+    stage: backlog
+    status: open
+    kind: infra
+    tier: foundation
+    summary: "Deferred: embedding OPA/Rego policy checking would add real CLI size and maintenance for something CI-level tools (Kyverno, Conftest) already cover well."
+    problem: |
+      `pokkum policy check` with built-in policies for common compliance frameworks (PCI-DSS, SOC2)
+      and custom Rego policies ("no images running as root", "must include SBOM") would add roughly
+      15MB to the CLI for an embedded OPA/Rego runtime, plus an ongoing policy-maintenance burden.
+      CI-level policy gates already own this space well. Revisit only if a real adopting team
+      specifically asks.
+
+  - id: helm-kustomize-integration
+    title: "Helm post-renderer + Kustomize KRM function"
+    stage: backlog
+    status: open
+    kind: feature
+    tier: foundation
+    summary: "Deferred: pokkum resolve only handles raw-YAML pokkum:// refs today, which most teams — who template with Helm or Kustomize — never reach at all."
+    problem: |
+      `pokkum resolve` handles `pokkum://` references in raw YAML only, which covers Knative-style
+      repos and roughly nobody else, since most teams template with Helm or Kustomize and will
+      therefore never reach `pokkum apply`. Deferred behind the dev-loop and asset-overlay work
+      because it is ergonomics, not differentiation — but per the roadmap's own framing, it is the
+      ergonomics item most likely to be the actual reason a team can't adopt Pokkum at all, so it is
+      the one to revisit first if the developer-experience tier stalls. Two thin entrypoints over the
+      existing `resolve` engine would unlock the two dominant templating toolchains at comparatively
+      low cost.
+    related: ["k8s-uri-resolution"]
+
+  - id: progressive-deployment-strategies
+    title: "Progressive deployment strategies"
+    status: wont-do
+    kind: infra
+    tier: non-goal
+    summary: "Will not be built: canary, blue-green, and auto-rollback are Argo Rollouts/Flagger's turf, with Kubernetes-native primitives Pokkum has no reason to reimplement."
+    decision: |
+      Argo Rollouts and Flagger already own progressive deployment strategies with Kubernetes-native
+      primitives; building `pokkum deploy --canary`/`--blue-green`/`--auto-rollback` would be a
+      massive maintenance burden competing directly with tools that already do this well.
+      `pokkum rollback`'s one-hop-deep, annotation-based rollback covers the narrower case Pokkum is
+      actually positioned to solve — fast, with no extra controller required.
+    related: ["multi-generation-rollback"]
+
+  - id: service-mesh-integration
+    title: "Service mesh integration"
+    status: wont-do
+    kind: infra
+    tier: non-goal
+    summary: "Will not be built: Istio/Linkerd sidecar config generation is real but narrow demand against real, ongoing API churn that dedicated mesh tooling already tracks."
+    decision: |
+      `pokkum mesh generate` (Istio/Linkerd sidecar configs, `--mtls` certificate/traffic-policy
+      wiring) would mean tracking real and ongoing service-mesh API churn for narrow demand.
+      Mesh-specific tooling already exists, and this isn't a place Pokkum's SvelteKit-specific
+      knowledge adds anything a generic Kubernetes tool wouldn't already provide.
