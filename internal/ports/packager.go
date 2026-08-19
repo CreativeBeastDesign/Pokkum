@@ -253,6 +253,19 @@ const (
 	// was not used or resolved zero generations.
 	AnnotationAssetOverlaySources = "pokkum.dev/asset-overlay-sources"
 
+	// HistoryCreatedByAssetOverlay is the exact v1.History.CreatedBy string
+	// the packager stamps on the --asset-overlay merged layer (see
+	// appendAssetOverlayLayer in internal/adapters/packager/packager.go).
+	// Exported so a different adapter package can locate this specific
+	// layer inside a pulled image by history — pokkum verify's comparator
+	// does exactly this to reconstruct and validate the layer from
+	// AnnotationAssetOverlaySources without importing the packager adapter
+	// directly, which the hexagonal architecture rules forbid (no
+	// adapter-to-adapter imports). Mirrors the same convention
+	// internal/adapters/assetoverlay's unexported clientLayerCreatedBy
+	// already uses for the client layer.
+	HistoryCreatedByAssetOverlay = "pokkum: add " + AppClientDirPrefix + " (asset overlay)"
+
 	// AnnotationRequiredEnv is the manifest annotation key for required env contract.
 	AnnotationRequiredEnv = "pokkum.dev/required-env"
 
@@ -642,6 +655,27 @@ type Packager interface {
 	// with a single platform may still call Index; whether to push an index or
 	// a bare manifest in that case is core's decision, not the packager's.
 	Index(ctx context.Context, req IndexRequest) (v1.ImageIndex, error)
+}
+
+// LayerBuilder builds a single OCI layer from a directory tree on host disk,
+// using the exact same deterministic construction the packager applies to
+// every layered-strategy directory layer (sorted tar entries, pinned
+// uid/gid, explicit directory entries — see internal/adapters/packager's
+// package doc comment for the full determinism contract). Implemented by
+// internal/adapters/packager and exposed as a port so that pokkum verify's
+// comparator — which per the hexagonal architecture rules may not import a
+// concrete adapter package — can reconstruct the --asset-overlay layer
+// byte-for-byte when reproducing a legitimately built image for comparison.
+// See AnnotationAssetOverlaySources.
+type LayerBuilder interface {
+	// BuildLayer builds one OCI layer from hostDir's content, mounted at
+	// targetPrefix in the image, with every tar entry's mtime pinned to
+	// modTime. compression only ever affects the layer's own compressed
+	// digest, never its DiffID (the hash of the raw uncompressed tar
+	// stream) — callers that only need DiffID-level comparison (as
+	// verify's comparator does) may pass any valid value here regardless
+	// of what the original image actually used.
+	BuildLayer(ctx context.Context, platform Platform, hostDir, targetPrefix string, modTime time.Time, compression CompressionAlgorithm) (v1.Layer, error)
 }
 
 // CompressionAlgorithm names the layer compression format.

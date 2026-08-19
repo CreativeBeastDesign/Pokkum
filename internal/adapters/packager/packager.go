@@ -621,7 +621,7 @@ func appendAssetOverlayLayer(ctx context.Context, req ports.PackageRequest, ts t
 	return append(addenda, mutate.Addendum{
 		Layer:     overlayLayer,
 		MediaType: layerMediaType,
-		History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppClientDirPrefix + " (asset overlay)"},
+		History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: ports.HistoryCreatedByAssetOverlay},
 	}), overlayRecs, nil
 }
 

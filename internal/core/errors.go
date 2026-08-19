@@ -242,6 +242,19 @@ var (
 	// to a target resolves to zero generations, not an error).
 	ErrAssetOverlayResolutionFailed = errors.New("asset overlay: failed to resolve or pull a prior generation")
 
+	// ErrAssetOverlayVerificationMismatch reports that pokkum verify's
+	// reconstruction of an image's --asset-overlay layer (built from the
+	// predecessor digests recorded in that image's own
+	// ports.AnnotationAssetOverlaySources annotation) does not match the
+	// actual asset-overlay layer content baked into the image under
+	// verification. Either the annotation was tampered with (names the
+	// wrong predecessors) or the layer itself was tampered with (real
+	// predecessors, wrong bytes) — either way this is a genuine mismatch,
+	// never silently downgraded to a skip: the whole point of
+	// reconstructing the layer is to make a legitimate --asset-overlay
+	// image verify, not to make verification of that layer optional.
+	ErrAssetOverlayVerificationMismatch = errors.New("asset overlay: reconstructed layer content does not match the image's own asset-overlay layer")
+
 	// ErrSigningKeyMissing reports that signing was required (--require-signed)
 	// but no signing key is available: neither --signing-key nor
 	// POKKUM_SIGNING_KEY supplied one. Without the gate, a missing key

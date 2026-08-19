@@ -7,8 +7,10 @@ import (
 	"os"
 	"time"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/assetoverlay"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/comparator"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
@@ -250,7 +252,16 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 		return nil
 	}
 
-	comp := comparator.NewComparator(logger)
+	// NewComparatorWithAssetOverlay, not the bare NewComparator: verify is
+	// cmd/pokkum's composition root for the comparator, the sole place
+	// permitted to construct concrete adapters (assetoverlay.Resolver,
+	// packager.LayerBuilderAdapter) and inject them behind their ports
+	// interfaces — see ports.LayerBuilder's doc comment and
+	// docs/items/asset-overlay-verify-gap.md. Without this, comparing any
+	// image built with --asset-overlay would hard-fail rather than
+	// reconstruct the overlay layer (Comparator fails closed when it
+	// carries the annotation but has no reconstruction support configured).
+	comp := comparator.NewComparatorWithAssetOverlay(logger, assetoverlay.NewResolver(), packager.NewLayerBuilder())
 	compResult, err := comp.CompareImages(ctx, ports.ImageComparatorRequest{
 		RemoteImageRef:     imageRef,
 		LocalTarball:       opts.against,
