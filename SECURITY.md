@@ -10,8 +10,7 @@ Pokkum is a supply-chain security tool, so a vulnerability in Pokkum is a vulner
 2. Click "Report a vulnerability" (green button, top right)
 3. GitHub will create a private discussion visible only to repository maintainers
 
-> [!IMPORTANT]
-> **The repository owner must enable private vulnerability reporting in repo Settings → Security for this link to work.** If you cannot access the form, please contact the maintainer directly and let them know this setting needs to be enabled.
+Private vulnerability reporting is enabled on this repository, so the form above is live. If you cannot reach it, open a regular issue saying only that you need a private channel — with no details of the vulnerability itself — and it will be sorted out.
 
 Do **NOT** open a public issue or discussion for any potential security problem.
 

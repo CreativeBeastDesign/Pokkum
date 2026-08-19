@@ -64,8 +64,8 @@ a private security advisory at:
 
 https://github.com/CreativeBeastDesign/pokkum/security/advisories
 
-> [!NOTE]
-> <!-- TODO: owner to decide: determine enforcement contact(s) and their role/title -->
+Reports go to the repository maintainer, who is currently the sole person
+responsible for enforcement.
 
 All complaints will be reviewed and investigated promptly and fairly.
 
