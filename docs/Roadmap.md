@@ -8,9 +8,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 ## Needs decision
 
-| Title | Summary | Kind | Status |
-| --- | --- | --- | --- |
-| [Reconsider pokkum metrics' shape](items/metrics-command-shape.md) | Decide whether pokkum metrics should become the honest thing it currently only sounds like, since it neither runs a server nor exposes anything the way its own text claims. | dx | awaiting-decision |
+_None._
 
 ## v1.1
 
@@ -45,12 +43,6 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | [Shared vendor cache across a monorepo invocation](items/monorepo-vendor-cache.md) | --since skips builds between unaffected projects but does nothing within a build when many packages in one invocation share dependencies; extending the layer cache into a content-addressable vendor-layer cache would close that. | feature | open |
 | [Resumable chunked layer upload](items/resumable-chunked-upload.md) | Back off and retry on 429/5xx during a large layer push instead of failing the whole push on one transient registry hiccup. | hardening | open |
 | [Supervisor cgroup awareness](items/supervisor-cgroup-awareness.md) | JSC (Bun's engine) doesn't read cgroup limits, so a Bun app in a 512Mi container OOMKills in ways that look random; read /sys/fs/cgroup/memory.max, export it, and warn below a sane floor. | feature | open |
-
-### Observability
-
-| Title | Summary | Kind | Status |
-| --- | --- | --- | --- |
-| [Reconsider pokkum metrics' shape](items/metrics-command-shape.md) | Decide whether pokkum metrics should become the honest thing it currently only sounds like, since it neither runs a server nor exposes anything the way its own text claims. | dx | awaiting-decision |
 
 ### Supply Chain & Attestation
 
@@ -89,6 +81,12 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | [Helm post-renderer + Kustomize KRM function](items/helm-kustomize-integration.md) | Deferred: pokkum resolve only handles raw-YAML pokkum:// refs today, which most teams — who template with Helm or Kustomize — never reach at all. | feature | open |
 | [Multi-environment management](items/multi-env-management.md) | Deferred: staging/production config templating and secret-manager integration are real needs, but a large surface most teams already solve at the CI/CD layer. | dx | open |
 | [Policy as code (pokkum policy check)](items/policy-as-code.md) | Deferred: embedding OPA/Rego policy checking would add real CLI size and maintenance for something CI-level tools (Kyverno, Conftest) already cover well. | infra | open |
+
+### Observability
+
+| Title | Summary | Kind | Status |
+| --- | --- | --- | --- |
+| [Supervisor-side /metrics endpoint](items/supervisor-metrics-endpoint.md) | Give pokkum-init a real /metrics HTTP handler exporting Bun runtime and cgroup metrics, which is the capability the removed pokkum metrics command only claimed to provide. | feature | open |
 
 ### Supply Chain & Attestation
 

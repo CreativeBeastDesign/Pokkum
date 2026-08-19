@@ -85,7 +85,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--telemetry-env` | — | — | (none) | Target environment for telemetry (`dev`, `preview`, `production`). |
 | `--trace-sample-rate` | — | — | `1.0` | Trace span sampling ratio, `0.0`–`1.0`. |
 | `--metrics-only` | — | — | `false` | ⚠️ **Currently non-functional** (see §3a) — combining an OTLP metrics exporter with the SDK crashes once compiled under Bun (a real Bun bundler bug, not a Pokkum bug). The compiled bootstrap detects this flag and logs a runtime warning rather than silently doing nothing or crashing. |
-| `--with-otel-sidecar` | — | — | `false` | Inject an OTEL Collector sidecar spec into generated Kubernetes manifests. |
+| `--with-otel-sidecar` | — | — | `false` | Inject an OTEL Collector sidecar spec into generated Kubernetes manifests. The sidecar container exposes `4317` (OTLP gRPC), `4318` (OTLP HTTP) and `8889` (Prometheus metrics scrape), and generated NetworkPolicy egress allows `4317`/`4318` always plus `8889` when this flag is set. **These ports belong to the `otel/opentelemetry-collector-contrib` sidecar, not to Pokkum** — no Pokkum binary ever binds them. |
 | `--sign` | — | — | `true` | Enable SLSA, Cosign, and DSSE signing. Real end-to-end as of 2026-08-18: signs, attaches (dual-published to the index and every per-platform manifest), then fetches the signature/attestation back from the registry and cryptographically re-verifies them before the build reports success. **Signing only actually happens with a key configured** (see `--signing-key` below) — without one, a signing-enabled build pushes UNSIGNED with a loud warning and records that in `BuildResult.Signing` rather than claiming to have signed. Static-key only; there is no keyless (Fulcio/OIDC) path for *signing* what Pokkum builds (keyless Sigstore is verification-only — base images, `pokkum verify`). |
 | `--no-sign` | — | — | `false` | Explicitly disable signing; wins over `--sign` if both are set. |
 | `--signing-key` | — | `POKKUM_SIGNING_KEY` | (none) | Private signing key (ECDSA P-256 or Ed25519): a path to a PEM file, or the PEM text itself. The public half is derived automatically and is what post-push self-verification checks against. Key material is never logged. Without this (and without `POKKUM_SIGNING_KEY`), `--sign`'s default behavior pushes unsigned with a warning. |
@@ -269,14 +269,6 @@ Subcommand group to inspect and validate project configuration files (`.pokkum.y
 | `pokkum explain diff <image1> <image2>` | — | Compares two real images' manifests and, for any layer whose digest differs, reports real added/removed/modified files. |
 | `--platform` (`-p`) | host platform | On all three: which child image to inspect when the target is a multi-arch index, e.g. `linux/amd64`. |
 | `--registry-config` | — | On all three: path to a `docker config.json`-style auth file for private registries. |
-
----
-
-## 9. `pokkum metrics`
-
-| Flag | Default | Description |
-|---|---|---|
-| `--metrics-port` | `8889` | Port exposed for application metrics scraping. |
 
 ---
 

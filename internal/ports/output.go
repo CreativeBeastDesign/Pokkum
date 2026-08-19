@@ -55,10 +55,3 @@ type ExplainOutput struct {
 	Layers    []LayerExplain `json:"layers"`
 	Platform  string         `json:"platform,omitempty"`
 }
-
-// MetricsOutput represents the status of the OTEL metrics server in `pokkum metrics`.
-type MetricsOutput struct {
-	ListeningPort int    `json:"listening_port"`
-	Status        string `json:"status"`
-	UptimeSeconds int64  `json:"uptime_seconds"`
-}

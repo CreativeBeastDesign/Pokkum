@@ -36,10 +36,10 @@ items:
   - id: metrics-command-shape
     title: "Reconsider pokkum metrics' shape"
     stage: v1.2
-    status: awaiting-decision
+    status: shipped
     kind: dx
     tier: foundation
-    summary: "Decide whether pokkum metrics should become the honest thing it currently only sounds like, since it neither runs a server nor exposes anything the way its own text claims."
+    summary: "Decided by removal: pokkum metrics claimed to run a metrics server, never listened on anything, and is deleted, since it neither runs a server nor exposes anything the way its own text claims."
     problem: |
       `pokkum metrics` reads like a client-side scraper rather than a server the image exposes, and
       verifying it against the code shows the gap is more than an ergonomics complaint: `runMetrics`
@@ -59,8 +59,37 @@ items:
       - title: "Implement a real supervisor-side /metrics listener"
         description: "Give `pokkum-init` an actual `/metrics` HTTP handler and make `pokkum metrics` a thin client against it, so the command's text stops overclaiming."
         tradeoffs: "Closes the gap honestly, but is real new supervisor surface (Bun runtime metrics, cgroup limits) for a command currently scoped as a CLI nicety, not a monitoring server."
-    recommendation: ""
-    flags: ["--metrics-port"]
+    recommendation: "Option 1 (fold in and remove). Telemetry already works through the build path, so the command added no capability \u2014 only a promise. Removing a flag before publication is free; removing it after is a breaking change."
+    decision: |
+      Taken 2026-08-19: fold in and remove. `pokkum metrics` and its `--metrics-port` flag are
+      deleted, along with the now-unused `ports.MetricsOutput`. Vocabulary.md's phantom section for
+      the command is gone \u2014 it had been a duplicate "9" alongside `pokkum explain`, so removing it
+      also repaired the section numbering. The 4317/4318/8889 contract is documented where those
+      ports are actually opened: on the `--with-otel-sidecar` flag, with the point made explicit
+      that they belong to the injected `otel/opentelemetry-collector-contrib` container and that no
+      Pokkum binary ever binds them. Option 2 is kept as a separate backlog item rather than
+      discarded \u2014 see [Supervisor-side /metrics endpoint](item:supervisor-metrics-endpoint).
     impl:
-      - cmd/pokkum/metrics.go
-    related: ["otel-sdk-bootstrap"]
+      - cmd/pokkum/main.go
+      - internal/adapters/k8s/resolver.go
+    related: ["otel-sdk-bootstrap", "supervisor-metrics-endpoint"]
+
+  - id: supervisor-metrics-endpoint
+    title: "Supervisor-side /metrics endpoint"
+    stage: backlog
+    status: open
+    kind: feature
+    tier: polish
+    summary: "Give pokkum-init a real /metrics HTTP handler exporting Bun runtime and cgroup metrics, which is the capability the removed pokkum metrics command only claimed to provide."
+    problem: |
+      `pokkum-init` registers `/livez` and `/readyz` only. Nothing exports Bun runtime metrics
+      (event-loop lag, heap) or the container's cgroup limits from PID 1, so an operator wanting
+      those has no Pokkum-provided source for them \u2014 the app-side OTel pipeline covers
+      application spans, not the runtime the app sits on. This is the honest version of what
+      [Reconsider pokkum metrics' shape](item:metrics-command-shape) was asked to decide; that item
+      was closed by deleting the overclaiming command, which removed the false promise without
+      adding the capability. Kept as a distinct item so the capability question stays visible
+      instead of disappearing with the command that misrepresented it.
+    impl:
+      - supervisor/cmd/pokkum-init/main.go
+    related: ["metrics-command-shape", "otel-collector-sidecar"]

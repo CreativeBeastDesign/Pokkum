@@ -6,6 +6,14 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 # Shipped
 
+## v1.2
+
+### Observability
+
+| Title | Summary | Kind | Status | Commits |
+| --- | --- | --- | --- | --- |
+| [Reconsider pokkum metrics' shape](items/metrics-command-shape.md) | Decided by removal: pokkum metrics claimed to run a metrics server, never listened on anything, and is deleted, since it neither runs a server nor exposes anything the way its own text claims. | dx | shipped |  |
+
 ## Unscheduled
 
 ### Build & Packaging
