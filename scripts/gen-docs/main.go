@@ -27,7 +27,7 @@ func run() error {
 		return err
 	}
 
-	findingsPath := filepath.Join(repoRoot, "overnight-findings.md")
+	findingsPath := filepath.Join(repoRoot, findingsFromPath)
 	findingsNumbers, err := ParseFindingsNumbers(findingsPath)
 	if err != nil {
 		return err

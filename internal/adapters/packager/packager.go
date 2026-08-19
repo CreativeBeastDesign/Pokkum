@@ -20,7 +20,7 @@
 //     deliberately NOT the mtime of the three immutable embedded-binary
 //     layers (the Bun runtime, pokkum-init, pokkum-static), which are pinned
 //     to the fixed layer.go's pinnedImmutableBinaryEpoch instead; see that
-//     constant's doc comment and Roadmap.md item 3f for why. time.Now is
+//     constant's doc comment and docs/archive/Roadmap.md item 3f for why. time.Now is
 //     never called; the package does not import time for anything but type
 //     declarations, Truncate and that one fixed constant.
 //
@@ -277,7 +277,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		// not this build's own source content: their tar ModTime (and cache
 		// key) is deliberately pinnedImmutableBinaryEpoch, not ts
 		// (SOURCE_DATE_EPOCH) — see that constant's doc comment in layer.go
-		// and Roadmap.md item 3f. The layers below that DO derive from ts
+		// and docs/archive/Roadmap.md item 3f. The layers below that DO derive from ts
 		// (server, client, vendor, native, prerendered) are exactly the ones
 		// that legitimately reflect this build's own source snapshot.
 		// The Bun runtime layer exists only for RuntimeBun: a --runtime=node

@@ -13,5 +13,6 @@
 | `mem:memory_maintenance` | Discovery model and the rule for which memory a new fact belongs in | Before writing or editing any memory |
 
 Roadmap/feature status (what's planned, prioritized, or shipped in product
-terms) lives in `Roadmap.md` / `Roadmap-v1-Archive.md` / `docs/roadmap/*.yaml`
+terms) lives in `docs/roadmap/*.yaml` (generated into `docs/`; retired
+hand-maintained predecessors are read-only under `docs/archive/`)
 (generated docs, the intended single source once built) — not in Serena.

@@ -24,7 +24,8 @@ const HermeticReexecEnvVar = "POKKUM_HERMETIC_REEXEC_TARGET"
 // existing path at each of these makes it unreachable as a socket (a
 // connect() against a regular file fails, cleanly and immediately) — this
 // is a named-path allowlist, not exhaustive protection against every
-// conceivable bind-mounted socket; see Roadmap.md for the honest scope.
+// conceivable bind-mounted socket; see docs/items/hermetic-build-mode.md for
+// the honest scope.
 // A path that doesn't exist in the build's mount table is silently
 // skipped, never created — masking never turns an absent path into a
 // present one, only ever makes a present one unreachable.

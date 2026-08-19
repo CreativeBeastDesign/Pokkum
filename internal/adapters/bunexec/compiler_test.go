@@ -140,7 +140,7 @@ func TestPreflight_MissingPackageJSON(t *testing.T) {
 // adapter entirely via vite.config.ts instead, so treating the file's mere
 // absence as "not a SvelteKit project" hard-failed every real build before
 // Prepare's own, strategy-aware checkEffectiveAdapter ever got a chance to
-// run. See Roadmap.md's "Layered-Strategy Real-Build Correctness" and
+// run. See docs/archive/Roadmap.md's "Layered-Strategy Real-Build Correctness" and
 // tests/integration/layered_prerendered_e2e_test.go, which caught this by
 // actually running core.Build end to end against such a project.
 func TestPreflight_MissingSvelteConfig_NotAnError(t *testing.T) {

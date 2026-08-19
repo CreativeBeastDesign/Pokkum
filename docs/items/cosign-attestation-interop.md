@@ -24,7 +24,7 @@ Fixed a missing annotation key that made real cosign v3 reject Pokkum's own vali
 ## Evidence
 
 - Commits: `e918c52`
-- Findings: #14 (see overnight-findings.md)
+- Findings: #14 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

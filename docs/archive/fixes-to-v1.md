@@ -8,7 +8,7 @@ still partial or unaddressed after re-verification.
 
 ## PodDisruptionBudget selector was namespace-wide
 
-**File:** [internal/adapters/k8s/resolver.go](internal/adapters/k8s/resolver.go)
+**File:** [internal/adapters/k8s/resolver.go](../../internal/adapters/k8s/resolver.go)
 
 `generatePodDisruptionBudgetDocument` emitted `selector: matchLabels: {}` —
 an empty selector matches every Pod in the namespace, not just the workload
@@ -31,7 +31,7 @@ skip path.
 
 ## Base image Cosign signature verification was non-functional
 
-**File:** [internal/adapters/baseimage/resolver.go](internal/adapters/baseimage/resolver.go)
+**File:** [internal/adapters/baseimage/resolver.go](../../internal/adapters/baseimage/resolver.go)
 
 Four separate bugs, each independently making `--verify-base` unable to
 actually verify anything:
@@ -71,7 +71,7 @@ below.
 
 ## `pokkum upgrade` signature verification could fail open
 
-**File:** [cmd/pokkum/upgrade.go](cmd/pokkum/upgrade.go)
+**File:** [cmd/pokkum/upgrade.go](../../cmd/pokkum/upgrade.go)
 
 Both signature and checksum verification were previously gated behind
 `if verifier != nil`, with no `else` — a nil verifier silently skipped both
@@ -137,7 +137,7 @@ change was needed; noted here so the false alarm doesn't get re-investigated.
 
 ## Base image signature verification now covers real upstream distroless/Chainguard signatures (keyless Sigstore)
 
-**Files:** [internal/adapters/baseimage/resolver.go](internal/adapters/baseimage/resolver.go), [internal/adapters/sigstore/](internal/adapters/sigstore/) (new package), [internal/ports/keyless.go](internal/ports/keyless.go) (new), [internal/ports/baseimage.go](internal/ports/baseimage.go).
+**Files:** [internal/adapters/baseimage/resolver.go](../../internal/adapters/baseimage/resolver.go), [internal/adapters/sigstore/](../../internal/adapters/sigstore/) (new package), [internal/ports/keyless.go](../../internal/ports/keyless.go) (new), [internal/ports/baseimage.go](../../internal/ports/baseimage.go).
 
 The static-key verifier fixed in the "Base image Cosign signature verification was non-functional" section above could not structurally check keyless Sigstore signatures (Fulcio short-lived certificates + Rekor transparency log, no fixed public key). Real upstream `distroless` and `chainguard` images sign with keyless Sigstore, so their signatures were never actually verified: `VerifySignature` defaulting to `true` for those presets either required `--no-verify-base` as a workaround or failed with `core.ErrBaseSignatureInvalid`.
 
@@ -163,13 +163,13 @@ Verified default identities (confirmed by decoding real live Sigstore signatures
 New tests: `internal/adapters/sigstore` includes hermetic tests against real captured signature fixtures (no network, doesn't expire — verification uses Rekor entry's recorded time), plus `internal/adapters/baseimage/resolver_network_test.go`'s `TestResolve_LiveKeylessVerification` testing against live upstream images. The resolver level also has a test proving the anti-downgrade guarantee: an image signed only with a static key, resolved under forced keyless mode, correctly fails rather than silently falling back.
 
 **Independent re-verification** (a second audit pass, adversarial by design given this codebase's history of security features that looked real but weren't): confirmed the verifier calls real `sigstore-go` APIs for chain building, SCT checking, and Rekor inclusion — nothing hand-rolled; confirmed `req.ChainPEM` (the attacker-suppliable chain annotation) is referenced in zero non-test verification-path lines; confirmed the empty-identity refusal runs before any Sigstore call; confirmed the verifier uses the Rekor entry's integrated time rather than `time.Now()` (proven empirically — a real captured cert whose 10-minute validity window expired days before this check still verifies); and confirmed `TestResolve_LiveKeylessVerification` genuinely hits the live `distroless` and `chainguard` registries with the exact zero-extra-flags shape of a plain `pokkum build` and both verify. Three minor, non-security items surfaced and are now documented rather than silently left:
-- `pokkum base update`/`base check` pin digests into `pokkum.lock` without running verification (trust-on-first-use) — `pokkum build` re-verifies the locked digest at build time regardless, so this isn't a bypass, but see [Vocabulary.md](Vocabulary.md) §14. **Correction (2026-08-18, commit `a149b28`): this claim was false on the escrow-mirror path until that commit.** A mirrored base was pulled by its mutable `mirror_ref` tag, and the locked `digest` field was written to `pokkum.lock` but never read back for comparison — so "re-verifies the locked digest" wasn't actually true for a mirrored base; only the signature was checked, against whatever the mirror happened to be serving at pull time. An attacker with push access to the mirror could retarget the tag at a different, older, but still genuinely-signed image and every check would pass. `Resolve` now compares the mirror-served digest against the locked one and fails closed on mismatch, so the claim below is accurate as of this date, not before it.
-- Setting only one of `--base-keyless-identity`/`--base-keyless-issuer` (not both) fails with a generic "must specify Issuer criteria" error instead of falling back to the preset's default for the unset half — fail-closed and safe, just a confusing message for a plausible mistake. See [Vocabulary.md](Vocabulary.md) §3.
+- `pokkum base update`/`base check` pin digests into `pokkum.lock` without running verification (trust-on-first-use) — `pokkum build` re-verifies the locked digest at build time regardless, so this isn't a bypass, but see [Vocabulary.md](../../Vocabulary.md) §14. **Correction (2026-08-18, commit `a149b28`): this claim was false on the escrow-mirror path until that commit.** A mirrored base was pulled by its mutable `mirror_ref` tag, and the locked `digest` field was written to `pokkum.lock` but never read back for comparison — so "re-verifies the locked digest" wasn't actually true for a mirrored base; only the signature was checked, against whatever the mirror happened to be serving at pull time. An attacker with push access to the mirror could retarget the tag at a different, older, but still genuinely-signed image and every check would pass. `Resolve` now compares the mirror-served digest against the locked one and fails closed on mismatch, so the claim below is accurate as of this date, not before it.
+- Setting only one of `--base-keyless-identity`/`--base-keyless-issuer` (not both) fails with a generic "must specify Issuer criteria" error instead of falling back to the preset's default for the unset half — fail-closed and safe, just a confusing message for a plausible mistake. See [Vocabulary.md](../../Vocabulary.md) §3.
 - The verification cache keys on the trusted-root file *path*, not its contents, so a mid-process edit of a custom `--sigstore-trusted-root` file could theoretically serve a stale cached result. Low real-world risk (the file doesn't change during a single build), noted for completeness.
 
 ## Rollback history (manifest-based, one hop deep)
 
-**Files:** [cmd/pokkum/rollback.go](cmd/pokkum/rollback.go), [internal/adapters/k8s/resolver.go](internal/adapters/k8s/resolver.go), [internal/ports/k8s.go](internal/ports/k8s.go).
+**Files:** [cmd/pokkum/rollback.go](../../cmd/pokkum/rollback.go), [internal/adapters/k8s/resolver.go](../../internal/adapters/k8s/resolver.go), [internal/ports/k8s.go](../../internal/ports/k8s.go).
 
 Previously `pokkum rollback` required `--to=<ref>` unconditionally — the caller had to already know what to roll back to. Now `pokkum rollback -f <manifest>` works with no `--to`: `resolve`/`apply` write the displaced image ref into a `pokkum.dev/previous-image` manifest annotation whenever they overwrite an already-concrete `image:` value (not a fresh `pokkum://` reference), and `rollback` reads that annotation when `--to` is omitted. `rollback` itself also writes the annotation on every run — the ref it just replaced becomes the new "previous" — so it's self-toggling: running it twice in a row swaps back to where you started.
 
@@ -179,7 +179,7 @@ This is genuinely real (verified independently): `setAnnotation`/`getAnnotation`
 
 ## OCI annotations now auto-populate from git
 
-**Files:** [cmd/pokkum/git_metadata.go](cmd/pokkum/git_metadata.go) (new), [cmd/pokkum/build.go](cmd/pokkum/build.go).
+**Files:** [cmd/pokkum/git_metadata.go](../../cmd/pokkum/git_metadata.go) (new), [cmd/pokkum/build.go](../../cmd/pokkum/build.go).
 
 Previously `org.opencontainers.image.*` annotations only ever appeared if a user passed `--image-label` explicitly — no git integration existed despite Roadmap.md claiming there was one. Now `discoverGitMetadata` runs unconditionally on every `pokkum build` and populates three of the four standard keys:
 - `org.opencontainers.image.revision` ← `git rev-parse HEAD` (or `GITHUB_SHA` in CI, checked first).
@@ -244,7 +244,7 @@ is accurate for both paths as of this date.
 
 ## Real `cosign` dry-run found three more release-pipeline bugs
 
-**Files:** [scripts/cosign-sign-blob.sh](scripts/cosign-sign-blob.sh) (new), [.goreleaser.yaml](.goreleaser.yaml), [.github/workflows/release.yml](.github/workflows/release.yml), [cmd/pokkum/upgrade.go](cmd/pokkum/upgrade.go).
+**Files:** [scripts/cosign-sign-blob.sh](../../scripts/cosign-sign-blob.sh) (new), [.goreleaser.yaml](../../.goreleaser.yaml), [.github/workflows/release.yml](../../.github/workflows/release.yml), [cmd/pokkum/upgrade.go](../../cmd/pokkum/upgrade.go).
 
 The earlier signature-verification fix was written and tested without a
 real `cosign` CLI available — the crypto mechanism was proven correct with

@@ -25,7 +25,7 @@ A genuine, scaffolded-and-built @sveltejs/adapter-static project replaced a synt
 ## Evidence
 
 - Commits: `0ef9dd0`, `1c33509`
-- Findings: #4, #6, #7 (see overnight-findings.md)
+- Findings: #4, #6, #7 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

@@ -222,7 +222,8 @@ Do not restate the full plan on every update; save prose for actual problems or 
 Keep docs and the persistent knowledge graph synchronized whenever code, CLI flags, interfaces, or architectural patterns change:
 
 - **`Lessons.md`** — bug post-mortems, root causes, preventative rules.
-- **`Roadmap.md`** — task completion status (`[x]`), scopes, priorities.
+- **Roadmap / shipped log / feature list — edit `docs/roadmap/*.yaml`, then run `make docs`.** `docs/Roadmap.md`, `docs/Shipped.md`, `docs/Features.md` and `docs/items/*.md` are generated output; `make docs` overwrites them and prunes orphaned pages, so hand-edits there are silently lost. `make check-docs-freshness` fails the build on drift.
+- **`docs/archive/`** — retired historical docs (old `Roadmap.md`, `Feature-list.md`, `AdditionalFeatures.md`, `overnight-findings.md`). Read-only; cite, never update.
 - **`ARCHITECTURE.md`** — diagrams, adapter contracts, layer layouts, boundary descriptions.
 - **`Vocabulary.md`** — complete reference of CLI commands, subcommands, flags, defaults, runtime env vars.
 - **Serena MCP memories (`mem:*`)** — machine-readable knowledge graph for agents (`mem:core`, `mem:conventions`, `mem:tech_stack`, `mem:telemetry`, `mem:task_completion`, etc.).
@@ -234,5 +235,5 @@ Keep docs and the persistent knowledge graph synchronized whenever code, CLI fla
 
 After finishing any implementation task, milestone, or phase, MUST include a **"Next Best Steps"** section in the final answer.
 
-- Base recommendations on remaining items in `Roadmap.md` and `AdditionalFeatures.md`.
+- Base recommendations on the open items in `docs/Roadmap.md` (generated from `docs/roadmap/*.yaml`).
 - Highlight logical next features by priority, developer-experience impact, and architectural dependencies.

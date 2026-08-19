@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -126,8 +127,12 @@ func TestGeneratedDocsHaveNoDeadRelativeLinks(t *testing.T) {
 		t.Skipf("docs/ not present: %v", err)
 	}
 
+	// docs/archive/ is included deliberately: retiring the hand-maintained
+	// status docs into it moved 33 links that had been correct relative to the
+	// repository root and silently became dead one directory deeper. Nothing
+	// regenerates those files, so a walker is the only thing that can catch it.
 	var files []string
-	for _, pat := range []string{"*.md", "items/*.md"} {
+	for _, pat := range []string{"*.md", "items/*.md", "archive/*.md"} {
 		matches, err := filepath.Glob(filepath.Join(docsDir, pat))
 		if err != nil {
 			t.Fatalf("glob %s: %v", pat, err)
@@ -154,6 +159,14 @@ func TestGeneratedDocsHaveNoDeadRelativeLinks(t *testing.T) {
 			target = strings.SplitN(target, "#", 2)[0]
 			if target == "" {
 				continue
+			}
+			// A link to a filename containing spaces is legitimately written
+			// percent-encoded ("Supply%20Chain%20Hardening%20v1.md") and
+			// resolves that way in a browser and an IDE, so decode before
+			// touching the filesystem — otherwise the walker rejects a link
+			// that is in fact correct.
+			if decoded, err := url.PathUnescape(target); err == nil {
+				target = decoded
 			}
 			checked++
 			if _, err := os.Stat(filepath.Join(filepath.Dir(f), target)); err != nil {

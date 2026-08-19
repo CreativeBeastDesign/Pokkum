@@ -126,7 +126,7 @@ Options:
 | Migration cost          | None                                                                               | One orphaned lockfile entry per existing `--static` user, self-healing (§4)                                                                                                                                                                                                             |
 | Symmetry                | N/A                                                                                | Raises the question of whether `distroless` needs an equivalent (`BaseImageDistrolessStatic`) for consistency, even though nothing currently uses `distroless/static` as a real base (it's explicitly the libc-free trap `staticBaseReason` exists to reject for non-static strategies) |
 
-The residual collision the shipped fix leaves open is narrow enough (requires deliberately combining `--base cgr.dev/chainguard/glibc-dynamic` _and_ `--static` in one project) that this is a **low-priority** correctness polish, not an open bug — see `Roadmap.md`'s backlog framing.
+The residual collision the shipped fix leaves open is narrow enough (requires deliberately combining `--base cgr.dev/chainguard/glibc-dynamic` _and_ `--static` in one project) that this is a **low-priority** correctness polish, not an open bug — see `docs/archive/Roadmap.md`'s backlog framing.
 
 ---
 

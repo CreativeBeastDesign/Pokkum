@@ -25,7 +25,7 @@ import (
 // TestRealBuild_StrategyLayered_PrerenderedRoute is the first test in this
 // repo to drive --strategy=layered through the real bunexec.Compiler against
 // a project with real @sveltejs/adapter-node and an actual prerendered
-// route — the exact combination Roadmap.md's "Layered-Strategy Real-Build
+// route — the exact combination docs/archive/Roadmap.md's "Layered-Strategy Real-Build
 // Correctness" item found broken twice over:
 //
 //  1. Zero-Config Auto-Injection never took effect, so a project whose

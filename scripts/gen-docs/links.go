@@ -81,7 +81,7 @@ func formatCommits(commits []string) string {
 	return strings.Join(parts, ", ")
 }
 
-// formatFindings renders a list of overnight-findings.md entry numbers,
+// formatFindings renders a list of docs/archive/overnight-findings.md entry numbers,
 // e.g. "#1, #14".
 func formatFindings(findings []int) string {
 	parts := make([]string, 0, len(findings))

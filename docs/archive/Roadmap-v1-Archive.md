@@ -9,7 +9,7 @@
 
 # Pokkum Roadmap
 
-See [Vocabulary.md](Vocabulary.md) for the full CLI flag reference, naming
+See [Vocabulary.md](../../Vocabulary.md) for the full CLI flag reference, naming
 conventions, and the rationale behind each new flag noted below.
 
 See [fixes-to-v1.md](fixes-to-v1.md) for a post-v1.0 audit that found
@@ -43,22 +43,22 @@ result.
 - [x] SLSA provenance attestation
 - [x] SBOM as OCI 1.1 referrer instead of `.sbom` tag convention (new flag: `--sbom-attach=referrer|tag`, default `referrer`)
 - [x] `pokkum dev` — Hot-Reload Container Development (build + `--local` + run in one command; new flag: `--debug` to drop into a shell inside the container)
-- [x] Zero-Config Auto-Injection: Auto-injecting the adapter and `SOURCE_DATE_EPOCH` pinning without manual `svelte.config.js` edits (supported via `--inject` and `--no-inject` flags). (see [pokkum-injection-concept.md](concepts/archive/pokkum-injection-concept.md)) — **correction (2026-08-17):** as implemented, this had no effect on real builds; see "Layered-Strategy Real-Build Correctness" below for the finding and [concepts/archive/zero-config-injection-concept.md](concepts/archive/zero-config-injection-concept.md) for the fix actually shipped (a fast, actionable error on misconfiguration, not a self-correcting build).
-- [x] Base Image Lockfile (`pokkum.lock`): Enable reproducible base image resolving (distroless/chainguard) to prevent drift. (new flags: `--update-base`, `--offline`; new subcommand `pokkum base update --preset <name>`) (see [pokkum-lock-concept.md](concepts/archive/pokkum-lock-concept.md))
+- [x] Zero-Config Auto-Injection: Auto-injecting the adapter and `SOURCE_DATE_EPOCH` pinning without manual `svelte.config.js` edits (supported via `--inject` and `--no-inject` flags). (see [pokkum-injection-concept.md](../../concepts/archive/pokkum-injection-concept.md)) — **correction (2026-08-17):** as implemented, this had no effect on real builds; see "Layered-Strategy Real-Build Correctness" below for the finding and [concepts/archive/zero-config-injection-concept.md](../../concepts/archive/zero-config-injection-concept.md) for the fix actually shipped (a fast, actionable error on misconfiguration, not a self-correcting build).
+- [x] Base Image Lockfile (`pokkum.lock`): Enable reproducible base image resolving (distroless/chainguard) to prevent drift. (new flags: `--update-base`, `--offline`; new subcommand `pokkum base update --preset <name>`) (see [pokkum-lock-concept.md](../../concepts/archive/pokkum-lock-concept.md))
 
 ## v0.3: Layer Caching & Core Architecture Shift
 
-_Refactoring to replace the `exe` adapter with a hand-rolled adapter for layer caching, dramatically reducing per-commit image size._ (see [pokkum-layer-caching-concept.md](concepts/archive/pokkum-layer-caching-concept.md))
+_Refactoring to replace the `exe` adapter with a hand-rolled adapter for layer caching, dramatically reducing per-commit image size._ (see [pokkum-layer-caching-concept.md](../../concepts/archive/pokkum-layer-caching-concept.md))
 
-- [x] M1: Packager + runtime plumbing (Bun runtime resolution, pinned downloads). (new flags: `--bun-binary=<path>` offline escape hatch, `--bun-variant=baseline` for pre-AVX2 hosts) (see [pokkum-layer-caching-concept.md](concepts/archive/pokkum-layer-caching-concept.md))
-- [x] M2: Hand-rolled SvelteKit adapter + Phase-1 layering (separating app JS from runtime). (new flag: `--strategy=layered|exe`, `layered` default) (see [pokkum-layer-caching-concept.md](concepts/archive/pokkum-layer-caching-concept.md))
-- [x] M3: Vendor splitting (`bun build --splitting`) + native closure support (unblocking native `.node` addons). (no new flag — internal to `--strategy=layered`) (see [pokkum-layer-caching-concept.md](concepts/archive/pokkum-layer-caching-concept.md))
-- [x] M4: Hardening (`readOnlyRootFilesystem`) & cutover from the old `exe` adapter. (no new flag — folds into `--security-context`'s hardened-defaults bundle) (see [pokkum-layer-caching-concept.md](concepts/archive/pokkum-layer-caching-concept.md))
-- [x] Image Optimization: Deduplication across layers, optional zstd layer compression. (new flag: `--compression=gzip|zstd`, default `gzip`) (see [pokkum-layer-caching-concept.md](concepts/archive/pokkum-layer-caching-concept.md))
+- [x] M1: Packager + runtime plumbing (Bun runtime resolution, pinned downloads). (new flags: `--bun-binary=<path>` offline escape hatch, `--bun-variant=baseline` for pre-AVX2 hosts) (see [pokkum-layer-caching-concept.md](../../concepts/archive/pokkum-layer-caching-concept.md))
+- [x] M2: Hand-rolled SvelteKit adapter + Phase-1 layering (separating app JS from runtime). (new flag: `--strategy=layered|exe`, `layered` default) (see [pokkum-layer-caching-concept.md](../../concepts/archive/pokkum-layer-caching-concept.md))
+- [x] M3: Vendor splitting (`bun build --splitting`) + native closure support (unblocking native `.node` addons). (no new flag — internal to `--strategy=layered`) (see [pokkum-layer-caching-concept.md](../../concepts/archive/pokkum-layer-caching-concept.md))
+- [x] M4: Hardening (`readOnlyRootFilesystem`) & cutover from the old `exe` adapter. (no new flag — folds into `--security-context`'s hardened-defaults bundle) (see [pokkum-layer-caching-concept.md](../../concepts/archive/pokkum-layer-caching-concept.md))
+- [x] Image Optimization: Deduplication across layers, optional zstd layer compression. (new flag: `--compression=gzip|zstd`, default `gzip`) (see [pokkum-layer-caching-concept.md](../../concepts/archive/pokkum-layer-caching-concept.md))
 
 ## v0.4: Unified Telemetry & Developer Experience
 
-- [x] Unified Metrics & Telemetry: Zero-config injection of OpenTelemetry setup for traces and metrics (`pokkum metrics` and app-side). (new flag: `--metrics-port` on the `pokkum metrics` subcommand; build-time half reuses existing `--telemetry`/`--otel-export` family) (see [pokkum-metrics-otel-concept.md](concepts/archive/pokkum-metrics-otel-concept.md))
+- [x] Unified Metrics & Telemetry: Zero-config injection of OpenTelemetry setup for traces and metrics (`pokkum metrics` and app-side). (new flag: `--metrics-port` on the `pokkum metrics` subcommand; build-time half reuses existing `--telemetry`/`--otel-export` family) (see [pokkum-metrics-otel-concept.md](../../concepts/archive/pokkum-metrics-otel-concept.md))
 - [x] `pokkum init` & Project Configuration (`.pokkum.yaml`): Interactive setup wizard, rich configuration schema (profiles like `local`/`production`, OCI image metadata/ports/env, security fail-on-cve gates, SBOM, cache, OTel), `pokkum build --profile <name>`, and config inspection tools (`pokkum config view`, `pokkum config validate`).
 - [x] `pokkum doctor`: Environment preflight checks (Bun version, registry auth, `svelte.config.js` sanity). (new flag: `--fix` for mechanical repairs)
 - [x] Interactive Failure Diagnostics: Automatic log dump and exit code analysis on local container failure. (new flag: `--no-diagnostics` opt-out for CI)
@@ -69,10 +69,10 @@ _Refactoring to replace the `exe` adapter with a hand-rolled adapter for layer c
 
 _Closing the loop on reproducibility with verifiable rebuilds and non-determinism bisection._
 
-- [x] M0: Provenance completeness (recording Go version, builder OS/arch, lockfile hashes in SLSA statement). (no new flag — recorded automatically) (see [pokkum-verify-concept.md](concepts/archive/pokkum-verify-concept.md))
-- [x] M1/M2: Stage recorder, bisection core, and attestation-check mode (`pokkum verify --no-rebuild`). Provenance resolution and Cosign/Sigstore signature and SLSA attestation validation are fully functional and tested against real in-memory OCI registries (`internal/adapters/provenance/resolver.go`). (see [pokkum-verify-concept.md](concepts/archive/pokkum-verify-concept.md))
-- [x] M3: `layerdiff` component, L3 explanation, and `pokkum repro doctor` diagnostics. (new flag: `--fast` for static-checks-only, no build) (see [pokkum-verify-concept.md](concepts/archive/pokkum-verify-concept.md) & [pokkum-repro-doctor-concept.md](concepts/archive/pokkum-repro-doctor-concept.md))
-- [x] M4: `pokkum verify --rebuild` (L1/L2 compare) with `--perturb` mode, K8s + CI ergonomics. (new flags: `--against <path>`, `--expect-source <repo>@<ref>`, `--all-platforms`) (see [pokkum-verify-concept.md](concepts/archive/pokkum-verify-concept.md) & [pokkum-repro-doctor-concept.md](concepts/archive/pokkum-repro-doctor-concept.md))
+- [x] M0: Provenance completeness (recording Go version, builder OS/arch, lockfile hashes in SLSA statement). (no new flag — recorded automatically) (see [pokkum-verify-concept.md](../../concepts/archive/pokkum-verify-concept.md))
+- [x] M1/M2: Stage recorder, bisection core, and attestation-check mode (`pokkum verify --no-rebuild`). Provenance resolution and Cosign/Sigstore signature and SLSA attestation validation are fully functional and tested against real in-memory OCI registries (`internal/adapters/provenance/resolver.go`). (see [pokkum-verify-concept.md](../../concepts/archive/pokkum-verify-concept.md))
+- [x] M3: `layerdiff` component, L3 explanation, and `pokkum repro doctor` diagnostics. (new flag: `--fast` for static-checks-only, no build) (see [pokkum-verify-concept.md](../../concepts/archive/pokkum-verify-concept.md) & [pokkum-repro-doctor-concept.md](../../concepts/archive/pokkum-repro-doctor-concept.md))
+- [x] M4: `pokkum verify --rebuild` (L1/L2 compare) with `--perturb` mode, K8s + CI ergonomics. (new flags: `--against <path>`, `--expect-source <repo>@<ref>`, `--all-platforms`) (see [pokkum-verify-concept.md](../../concepts/archive/pokkum-verify-concept.md) & [pokkum-repro-doctor-concept.md](../../concepts/archive/pokkum-repro-doctor-concept.md))
 
 ## v1.0: MVP Launch (Supply Chain Hardening & Production Readiness)
 
@@ -85,7 +85,7 @@ _The shippable minimum viable product for enterprise-grade adoption._
 - [x] Toolchain CVE Awareness: OSV.dev advisory lookups keyed on embedded Bun and SvelteKit versions. (new flag: `pokkum scan --toolchain`, extending `scan`)
 - [x] Base Image Signature Verification: Two modes — static-key Cosign verification for custom/self-signed bases (`POKKUM_BASE_IMAGE_PUBKEY`), and keyless Sigstore verification (Fulcio + Rekor) for stock `distroless`/`chainguard` presets by default. (new flags: `--base-verify-mode {auto|keyless|static-key}`, `--base-keyless-identity`, `--base-keyless-issuer`, `--sigstore-trusted-root`, `--no-verify-base` opt-out)
 - [x] Secret-Inlining Guard: Build-time entropy/pattern scan to prevent leaked secrets in layers. (new flag: `--allow-secret-pattern` escape hatch for false positives)
-- [x] Base image digest pinning + automated update PRs (Renovate/Dependabot-style). (reuses `pokkum base update --preset <name>` from the v0.2 lockfile item; update-PR half is a bot, not a flag) (see [pokkum-lock-concept.md](concepts/archive/pokkum-lock-concept.md))
+- [x] Base image digest pinning + automated update PRs (Renovate/Dependabot-style). (reuses `pokkum base update --preset <name>` from the v0.2 lockfile item; update-PR half is a bot, not a flag) (see [pokkum-lock-concept.md](../../concepts/archive/pokkum-lock-concept.md))
 - [x] Standard OCI Annotations: `org.opencontainers.image.revision`/`.source`/`.version`/`.created` auto-populate on every build by default — no flag needed, and no opt-out flag exists. `revision`/`source`/`version` come from git (commit SHA, remote URL, `git describe`) or CI env vars; `created` is set to the exact same `SOURCE_DATE_EPOCH`-resolved timestamp used for layer mtimes and the image config elsewhere in the build (not resolved independently, so it can't disagree with what's actually in the image) and is left unset — not fabricated from `time.Now()` — when that timestamp can't be determined. `--image-label key=value` still works for explicit overrides (checked first, so an explicit value always wins) and any other annotation. Outside a git repository (or without `git` on `PATH`), `revision`/`source`/`version` are silently absent — no warning is printed. (new flag: `--image-label key=value`, repeatable — matches `ko build --image-label`)
 
 ### Cluster-side hardening

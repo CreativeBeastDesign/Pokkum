@@ -10,6 +10,10 @@ const (
 	roadmapSourceGlob = "docs/roadmap/*.yaml"
 	docsFromDir       = "docs"       // repo-relative dir docs/Roadmap.md etc. live in
 	itemsFromDir      = "docs/items" // repo-relative dir docs/items/*.md live in
+	// findingsFromPath is the retired overnight bug log. It moved under
+	// docs/archive/ when the hand-maintained status docs were retired; the
+	// generator still reads it to validate evidence.findings numbers.
+	findingsFromPath = "docs/archive/overnight-findings.md"
 )
 
 // --- filtering / grouping helpers -------------------------------------
@@ -403,7 +407,7 @@ func RenderItemPage(it Item, allByID map[string]Item) string {
 			b.WriteString(fmt.Sprintf("- Commits: %s\n", formatCommits(it.Evidence.Commits)))
 		}
 		if len(it.Evidence.Findings) > 0 {
-			b.WriteString(fmt.Sprintf("- Findings: %s (see overnight-findings.md)\n", formatFindings(it.Evidence.Findings)))
+			b.WriteString(fmt.Sprintf("- Findings: %s (see [overnight-findings.md](%s))\n", formatFindings(it.Evidence.Findings), relLink(itemsFromDir, findingsFromPath)))
 		}
 		b.WriteString("\n")
 	}

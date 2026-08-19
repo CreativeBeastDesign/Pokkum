@@ -18,7 +18,7 @@ exercises `patchPrerenderedHandler` — the only reason a project with real
 file is exactly what `sv create` emitted; no `svelte.config.js` exists
 because current `sv create` scaffolds don't generate one (the adapter is
 configured entirely in `vite.config.ts`, matching this project's real
-default — see `Roadmap.md`'s "Layered-Strategy Real-Build Correctness" and
+default — see `docs/archive/Roadmap.md`'s "Layered-Strategy Real-Build Correctness" and
 `concepts/archive/zero-config-injection-concept.md`).
 
 This is the fixture `tests/integration/layered_prerendered_e2e_test.go`

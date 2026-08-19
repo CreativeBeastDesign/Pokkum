@@ -269,7 +269,7 @@ func TestPokkumLayersOrderAndContents(t *testing.T) {
 	// The supervisor is an immutable embedded binary, not this build's own
 	// source content, so its tar ModTime is pinnedImmutableBinaryEpoch (the
 	// Unix epoch), not buildEpoch — see that constant's doc comment in
-	// layer.go and Roadmap.md item 3f. The app layer below is this build's
+	// layer.go and docs/archive/Roadmap.md item 3f. The app layer below is this build's
 	// own compiled content and correctly keeps using buildEpoch.
 	gotSupervisor := readLayer(t, supervisorLayer)
 	wantSupervisor := []tarMember{
@@ -309,7 +309,7 @@ func TestPokkumLayersOrderAndContents(t *testing.T) {
 //
 // The supervisor layer (layers[1]) is an immutable embedded binary pinned to
 // pinnedImmutableBinaryEpoch regardless of CreatedAt (see that constant's
-// doc comment and Roadmap.md item 3f), so its entries are checked against
+// doc comment and docs/archive/Roadmap.md item 3f), so its entries are checked against
 // that fixed value, not against the (truncated) CreatedAt under test. The
 // app layer (layers[2]) is this build's own compiled content and still
 // derives from CreatedAt, so it is checked against the truncated buildEpoch

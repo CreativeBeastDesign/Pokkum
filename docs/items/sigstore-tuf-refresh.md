@@ -32,7 +32,7 @@ The embedded Sigstore trust root is regenerated from a TUF-verified fetch and ca
 ## Evidence
 
 - Commits: `9188d56`, `eeaa83a`, `a86baa3`
-- Findings: #10 (see overnight-findings.md)
+- Findings: #10 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

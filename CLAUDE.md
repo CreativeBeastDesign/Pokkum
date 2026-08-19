@@ -96,7 +96,7 @@ The verification protocol applies **ONLY when Go source code (`.go` files, build
 
 > [!IMPORTANT]
 >
-> - Do **NOT** run the verification test suite for simple user questions, code exploration, planning, or documentation updates (e.g. `Roadmap.md`, `AGENTS.md`, `CLAUDE.md`, `Lessons.md`, `.md` files, docstrings, or memory graph edits).
+> - Do **NOT** run the verification test suite for simple user questions, code exploration, planning, or documentation updates (e.g. `docs/roadmap/*.yaml`, `AGENTS.md`, `CLAUDE.md`, `Lessons.md`, `.md` files, docstrings, or memory graph edits).
 > - Tests should be executed **only before declaring completion of actual code modifications**.
 
 When code changes have occurred, agents **MUST** execute the following 5-step verification suite before declaring completion (`make verify` runs all five in order):
@@ -229,7 +229,8 @@ Do not restate the full plan or Execution Table on every update — one line, re
 Agents **MUST** keep the project documentation and persistent knowledge graph synchronized whenever code, CLI flags, interfaces, or architectural patterns change:
 
 - **`Lessons.md`**: Record bug post-mortems, root causes, and preventative rules flagged during self-review or debugging sessions — and close the loop by updating `mem:self_review_checklist` per Section 5.3.
-- **`Roadmap.md`**: Update task completion status (`[x]`), adjust scopes, or re-prioritize items.
+- **Roadmap / shipped log / feature list — `docs/roadmap/*.yaml` ONLY.** These four documents are **generated**: `docs/Roadmap.md`, `docs/Shipped.md`, `docs/Features.md`, and `docs/items/*.md`. **Never hand-edit them** — `make docs` overwrites them and deletes orphaned item pages, so an edit made there is silently discarded. Edit the item in `docs/roadmap/<area>.yaml`, then run `make docs`. `make check-docs-freshness` fails the build if generated output does not match its source, and the generator rejects an unknown field, a bad enum value, an `impl` path that does not exist on disk, or an `[title](item:<id>)` reference to an unknown id.
+- **`docs/archive/`**: retired historical documents (the old hand-maintained `Roadmap.md`, `Feature-list.md`, `AdditionalFeatures.md`, `overnight-findings.md` and the v1-era logs). **Read-only** — cite them for provenance, never update them.
 - **`ARCHITECTURE.md`**: Update architectural diagrams, adapter contracts, layer layouts, and boundary descriptions.
 - **`Vocabulary.md`**: Maintain the complete, human-readable reference of all CLI commands, subcommands, flags, defaults, and runtime environment variables.
 - **Package-level `README.md` files** (e.g. `internal/adapters/<name>/README.md`): update alongside the top-level docs above whenever that package's behavior changes. These are human-facing, same as `ARCHITECTURE.md`/`Vocabulary.md` (Serena `mem:*` remains the source of truth for agents) — a new flag or field documented at the top level but not in its own package's README leaves a human contributor working in that directory with a stale picture.
@@ -244,5 +245,5 @@ Agents **MUST** keep the project documentation and persistent knowledge graph sy
 
 After finishing any implementation task, milestone, or phase, agents **MUST** include a **"Next Best Steps"** section in their final answer.
 
-- Base recommendations directly on remaining items in [`Roadmap.md`](Roadmap.md) and [`AdditionalFeatures.md`](AdditionalFeatures.md).
+- Base recommendations directly on the open items in [`docs/Roadmap.md`](docs/Roadmap.md) (generated from [`docs/roadmap/*.yaml`](docs/roadmap)).
 - Highlight logical next features based on priority, developer experience impact, and architectural dependencies.

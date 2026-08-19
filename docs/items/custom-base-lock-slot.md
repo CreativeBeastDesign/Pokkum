@@ -51,5 +51,5 @@ Option A — give each custom ref its own slot (e.g. `custom:<hash-of-ref>`), mi
 ## Evidence
 
 - Commits: `69914ac`
-- Findings: #16 (see overnight-findings.md)
+- Findings: #16 (see [overnight-findings.md](../archive/overnight-findings.md))
 

@@ -41,7 +41,7 @@ import (
 // NOT. That split is expected, not a red flag: the supervisor layer is now
 // pinned to pinnedImmutableBinaryEpoch (the Unix epoch) instead of this
 // fixture's buildEpoch (see layer.go's pinnedImmutableBinaryEpoch doc comment
-// and Roadmap.md item 3f), so its tar bytes — and everything whose digest
+// and docs/archive/Roadmap.md item 3f), so its tar bytes — and everything whose digest
 // transitively includes them (the config's rootfs diff_ids, the manifest's
 // layer digests, the index) — changed, while the app layer (this build's own
 // content, still keyed on buildEpoch) is untouched. Confirmed by diffing the

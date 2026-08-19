@@ -67,7 +67,7 @@ func sortedEnvSlice(m map[string]string) []string {
 // namespaced by the mount namespace, not the network namespace, and
 // CLONE_NEWNS is deliberately not set (closing that fully needs a
 // /proc/self/exe reexec helper doing selective mount masking — real, but
-// materially riskier engineering than this fix; see Roadmap.md).
+// materially riskier engineering than this fix; see docs/items/hermetic-build-mode.md).
 //
 // What this actually closes, precisely: SSH_AUTH_SOCK is the *only* way
 // ssh/git tooling locates the agent socket — with the env var gone, nothing
@@ -82,7 +82,7 @@ func sortedEnvSlice(m map[string]string) []string {
 // protection against the common case — /var/run/docker.sock is a filesystem
 // convention a malicious script can hardcode or probe directly
 // (`test -S /var/run/docker.sock`) with zero reliance on any environment
-// variable. That vector remains genuinely open; see Roadmap.md.
+// variable. That vector remains genuinely open; see docs/items/hermetic-build-mode.md.
 var hermeticStrippedEnvVars = []string{
 	"SSH_AUTH_SOCK",
 	"SSH_AGENT_PID",

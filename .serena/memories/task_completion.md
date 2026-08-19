@@ -2,7 +2,7 @@
 
 The verification protocol applies **ONLY when Go source code (`.go` files, build manifests, dependencies) has been created, modified, or refactored**.
 
-- Do **NOT** run the verification test suite for simple user questions, code exploration, planning, or documentation updates (e.g. `Roadmap.md`, `.md` files, docstrings, or memory graph edits).
+- Do **NOT** run the verification test suite for simple user questions, code exploration, planning, or documentation updates (e.g. `docs/roadmap/*.yaml`, `.md` files, docstrings, or memory graph edits).
 - Tests must be executed **only before declaring completion of actual code modifications**.
 
 When code changes have occurred, agents **MUST** run the consolidated 5-step suite via the canonical make target:

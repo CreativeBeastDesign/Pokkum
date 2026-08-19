@@ -2,7 +2,7 @@
 
 **Status: v1.0 shipped, Pre-Publication Gate closed (2026-08-18).** Every blocker and overclaim risk two independent external reviews found was verified against the code and fixed — see [Roadmap-v1-Archive.md](Roadmap-v1-Archive.md) for that full history, root causes, and fixes in detail. This document starts from where that gate left off.
 
-See [Vocabulary.md](Vocabulary.md) for the full CLI flag reference, naming conventions, and the rationale behind each flag below, and [AdditionalFeatures.md](AdditionalFeatures.md) for the underlying decision matrix (DX/Security/Cost scoring) this roadmap draws its priorities from.
+See [Vocabulary.md](../../Vocabulary.md) for the full CLI flag reference, naming conventions, and the rationale behind each flag below, and [AdditionalFeatures.md](AdditionalFeatures.md) for the underlying decision matrix (DX/Security/Cost scoring) this roadmap draws its priorities from.
 
 ## The thesis this roadmap is built around
 
@@ -177,4 +177,4 @@ An unstated non-goal reads as a gap; a stated one reads as focus. All of the bel
 
 ## Beyond this roadmap
 
-For the full v0.1–v1.0 build history, every root-caused bug, and the exact fix applied to each Pre-Publication Gate item — see [Roadmap-v1-Archive.md](Roadmap-v1-Archive.md). For the underlying feature-by-feature decision matrix (DX/Security/Cost scoring) this document's priorities are drawn from, see [AdditionalFeatures.md](AdditionalFeatures.md). For architectural invariants and layer-boundary rules that any of the above must respect, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For the full v0.1–v1.0 build history, every root-caused bug, and the exact fix applied to each Pre-Publication Gate item — see [Roadmap-v1-Archive.md](Roadmap-v1-Archive.md). For the underlying feature-by-feature decision matrix (DX/Security/Cost scoring) this document's priorities are drawn from, see [AdditionalFeatures.md](AdditionalFeatures.md). For architectural invariants and layer-boundary rules that any of the above must respect, see [ARCHITECTURE.md](../../ARCHITECTURE.md).

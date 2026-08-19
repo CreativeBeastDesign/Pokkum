@@ -25,7 +25,7 @@ Every mutating real-build test now copies its checked-in fixture into a fresh t.
 ## Evidence
 
 - Commits: `ac5dc89`, `20ba1ec`
-- Findings: #11 (see overnight-findings.md)
+- Findings: #11 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

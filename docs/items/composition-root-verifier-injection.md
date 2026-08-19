@@ -25,7 +25,7 @@ cmd/pokkum now injects verifiers at every construction site instead of adapters 
 ## Evidence
 
 - Commits: `e5dd73c`
-- Findings: #8 (see overnight-findings.md)
+- Findings: #8 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

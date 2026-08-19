@@ -33,7 +33,7 @@ Compiles a pure static SvelteKit site onto chainguard/static with an embedded po
 ## Evidence
 
 - Commits: `8306d37`, `1c33509`, `5693980`, `61fd873`
-- Findings: #2, #3, #4, #6, #7, #12 (see overnight-findings.md)
+- Findings: #2, #3, #4, #6, #7, #12 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

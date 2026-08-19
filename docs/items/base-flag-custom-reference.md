@@ -37,7 +37,7 @@ CLI could not reach it. A UX/docs mismatch, not a security issue — the preset 
 ## Evidence
 
 - Commits: `69914ac`
-- Findings: #13 (see overnight-findings.md)
+- Findings: #13 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

@@ -57,8 +57,8 @@
   - `--require-env=KEY1,KEY2` on `pokkum build` declares required runtime environment variables. Stamped in OCI manifest annotations (`pokkum.dev/required-env`), labels (`dev.pokkum.required-env`), and injected as `POKKUM_REQUIRED_ENV` in the container environment. The PID-1 supervisor (`/pokkum/init`) enforces presence at startup, failing fast before binding probe ports or starting the application.
 - **Fake Implementation Strict Verification & Documentation Policy**:
   - Fake, stub, or mock implementations must NEVER be assumed or reported as completed; any simulated logic must be explicitly flagged.
-  - Keep `Roadmap.md`, `ARCHITECTURE.md`, `Vocabulary.md` (human-readable) and Serena MCP (`mem:*` for agents) continuously in sync.
-  - Propose "Next Best Steps" after each completed implementation based on `Roadmap.md` / `AdditionalFeatures.md`.
+  - Keep `docs/roadmap/*.yaml` (then `make docs`), `ARCHITECTURE.md`, `Vocabulary.md` (human-readable) and Serena MCP (`mem:*` for agents) continuously in sync. **Never hand-edit the generated `docs/Roadmap.md`/`Shipped.md`/`Features.md`/`items/*.md`.**
+  - Propose "Next Best Steps" after each completed implementation based on the open items in `docs/Roadmap.md`.
 - **Live Cluster Annotation Inspection & Multi-Generation Rollback (`Tier 3 Post-v1.0`)**:
   - `pokkum apply` queries live cluster state (`kubectl get <kind>/<name> -n <ns> -o json`) before manifest resolution (`--cluster-inspect`, `--no-cluster-inspect`) to extract active annotations and seed `pokkum.dev/image-history` and `pokkum.dev/previous-image`, enabling seamless multi-generation history accumulation across independent CLI runs on static `pokkum://` templates.
   - `pokkum rollback` supports multi-generation rollback via `pokkum.dev/image-history` annotations in Kubernetes manifests with timeline listing (`--list`) and generation depth (`--generation=<n>`, `-g <n>`).

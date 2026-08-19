@@ -309,7 +309,7 @@ export default defineConfig({
 	}
 }
 
-// TestShimDirnameAndImportMetaURL guards the fix for PB-5 (see Roadmap.md/
+// TestShimDirnameAndImportMetaURL guards the fix for PB-5 (see docs/archive/Roadmap.md/
 // Lessons.md): the virtual config written to <projectDir>/.pokkum/ executes
 // one directory level deeper than the real vite.config.ts it was copied
 // from, so a real Bun runtime's ambient __dirname (and any

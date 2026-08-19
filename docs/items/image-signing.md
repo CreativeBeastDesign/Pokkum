@@ -32,7 +32,7 @@ Builds are signed via Cosign static-key or DSSE, with a fetch-back-and-reverify 
 ## Evidence
 
 - Commits: `2f03609`
-- Findings: #14 (see overnight-findings.md)
+- Findings: #14 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

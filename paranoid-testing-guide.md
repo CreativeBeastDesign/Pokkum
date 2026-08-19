@@ -10,7 +10,7 @@ believe it.
 
 This is written from direct experience auditing this codebase: several past
 "passed" states here were previously backed by hardcoded `true` values and
-no real check at all (see [fixes-to-v1.md](fixes-to-v1.md)). Those are
+no real check at all (see [docs/archive/fixes-to-v1.md](docs/archive/fixes-to-v1.md)). Those are
 fixed now, but the discipline of not trusting a tool's self-report is worth
 keeping regardless of which tool it is.
 
@@ -185,7 +185,7 @@ git log -1 --format=%cI                         # compare to org.opencontainers.
 ```
 If you built outside a git repo, confirm these labels are genuinely
 *absent* (not blank-string or fabricated) — that's documented behavior
-(see [for-users.md](for-users.md)), not a bug, but worth confirming it's
+(see [docs/archive/for-users.md](docs/archive/for-users.md)), not a bug, but worth confirming it's
 actually absent rather than silently wrong.
 
 ## 7. SBOM — don't trust "SBOM generated," read it
@@ -731,7 +731,7 @@ that's a regression; the real verdict on those comes from `pokkum verify`.
 # Deploy three times in a row against the same manifest to build real history:
 for i in 1 2 3; do
   ./pokkum-test resolve -f deployment.yaml > /tmp/resolved-$i.yaml
-  cp /tmp/resolved-$i.yaml deployment.yaml   # persist annotations forward, per fixes-to-v1.md's documented workflow requirement
+  cp /tmp/resolved-$i.yaml deployment.yaml   # persist annotations forward, per docs/archive/fixes-to-v1.md's documented workflow requirement
 done
 ./pokkum-test rollback -f deployment.yaml --list
 ```

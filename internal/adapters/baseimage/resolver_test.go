@@ -1938,7 +1938,7 @@ func TestResolve_EscrowMirror_VerifySignature_SucceedsAgainstUpstreamRepo(t *tes
 // will look for once it discovers the pulled digest is DB.
 //
 // Originally (before the escrow-mirror digest-pin enforcement fix,
-// Roadmap.md item 2h) this was caught by cosign.Signer.Verify's own
+// docs/archive/Roadmap.md item 2h) this was caught by cosign.Signer.Verify's own
 // independent DockerManifestDigest comparison, deep inside signature
 // verification — proving the repo-name claim matched (so the fix under test
 // at the time wasn't accidentally what failed here) while digest integrity
@@ -2072,7 +2072,7 @@ func TestResolve_EscrowMirror_VerifySignature_TamperedMirrorDigestFailsClosed(t 
 
 // TestResolve_EscrowMirror_DigestSubstitution_DifferentLegitimatelySignedImageFailsClosed
 // proves the escrow-mirror digest-substitution attack described in
-// Roadmap.md item 2h/Lessons.md: an attacker with push access to the
+// docs/archive/Roadmap.md item 2h/Lessons.md: an attacker with push access to the
 // project's own escrow mirror retargets the mutable "sha256-<hex>" tag a
 // locked entry.MirrorRef names to a DIFFERENT image — one that is itself
 // entirely genuine and validly signed by the real upstream signer, e.g. an

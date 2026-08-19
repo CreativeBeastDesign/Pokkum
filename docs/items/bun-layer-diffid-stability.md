@@ -25,7 +25,7 @@ Immutable-binary layers (Bun, pokkum-init, pokkum-static) now use a fixed epoch 
 ## Evidence
 
 - Commits: `1675d4c`, `81a6fb6`
-- Findings: #17 (see overnight-findings.md)
+- Findings: #17 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

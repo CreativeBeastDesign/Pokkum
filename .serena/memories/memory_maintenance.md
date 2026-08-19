@@ -47,7 +47,8 @@ Ask, in order:
    don't create a new one for process content.
 5. **Is this roadmap/feature status** (what's planned, prioritized, or "done"
    in product terms)? → it does NOT go in Serena at all. That lives in
-   `Roadmap.md` / `Roadmap-v1-Archive.md` / `docs/roadmap/*.yaml` (generated).
+   `docs/roadmap/*.yaml` (generated into `docs/`; retired predecessors are
+   read-only under `docs/archive/`).
    Serena's `mem:state` records *implementation* reality an agent needs while
    coding — which mechanism is wired, which path fails closed — and should
    point at the roadmap docs for status rather than restate it.

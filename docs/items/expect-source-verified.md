@@ -30,7 +30,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 ## Evidence
 
 - Commits: `91dc3cd`
-- Findings: #1 (see overnight-findings.md)
+- Findings: #1 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

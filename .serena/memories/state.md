@@ -1,9 +1,8 @@
 # Pokkum State — Current Shipped Reality
 
-Not roadmap/feature status — that lives in `Roadmap.md` / `Roadmap-v1-Archive.md` /
-`docs/roadmap/*.yaml` (a parallel effort generating `docs/Roadmap.md`,
-`docs/Shipped.md`, `docs/Features.md` — the intended single source for
-roadmap/feature status once built). This memory is implementation reality an
+Not roadmap/feature status — that lives in `docs/roadmap/*.yaml`, the single
+source generating `docs/Roadmap.md`, `docs/Shipped.md`, `docs/Features.md` and
+`docs/items/*.md`. This memory is implementation reality an
 agent needs while coding: which mechanism is wired, which path fails closed,
 which invariant actually holds today. Update **in place** per subsystem —
 don't append prose; each bullet should stay independently editable. Every
@@ -161,11 +160,13 @@ before trusting a claim that predates the commit it cites.
   no dead relative links and no unresolved `item:` refs; they exist because the
   original bug was a *call site* passing the wrong directory, which unit tests
   on the helper passed straight through.
-- Root `Roadmap.md`, `Feature-list.md`, `AdditionalFeatures.md` and
-  `overnight-findings.md` still exist and are **not** yet retired: `Roadmap.md`
-  alone has 59 inbound references incl. `CLAUDE.md` and several `mem:*`. Until
-  that migration happens, treat `docs/` as authoritative and the root files as
-  historical.
+- **Retired 2026-08-19.** The hand-maintained `Roadmap.md`, `Feature-list.md`,
+  `AdditionalFeatures.md`, `overnight-findings.md` and the v1-era logs now live
+  under `docs/archive/` and are read-only — cite them for provenance, never
+  update them. `docs/` is the only authoritative status surface. The generator
+  still reads `docs/archive/overnight-findings.md` to validate
+  `evidence.findings` numbers, so that file's path is a real code dependency
+  (`scripts/gen-docs/render.go`'s `findingsFromPath`), not just a citation.
 
 ## Test surface
 - Full `go test ./...` is green as of 2026-08-19 (`e4175ed`): 47 packages,

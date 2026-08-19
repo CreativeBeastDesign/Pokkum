@@ -183,9 +183,12 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)**: Architectural invariants, Hexagonal layer boundaries, and image layer layout.
 - **[Vocabulary.md](Vocabulary.md)**: Complete CLI flag reference and configuration options.
-- **[Roadmap.md](Roadmap.md)**: What's next — SvelteKit-specific DX, supply-chain completions, and ergonomics. See [Roadmap-v1-Archive.md](Roadmap-v1-Archive.md) for the full v1.0 build history.
-- **[fixes-to-v1.md](fixes-to-v1.md)**: Post-v1.0 audit findings and the fixes applied for each.
-- **[for-users.md](for-users.md)**: User-visible behavior changes from that fix round and what they require of you.
+- **[docs/Roadmap.md](docs/Roadmap.md)**: What's next — SvelteKit-specific DX, supply-chain completions, and ergonomics.
+- **[docs/Features.md](docs/Features.md)**: Every shipped capability, with its known limitations stated alongside it.
+- **[docs/Shipped.md](docs/Shipped.md)**: What landed, newest first. These three are generated from [docs/roadmap/*.yaml](docs/roadmap) — edit the YAML, not the markdown.
+- **[docs/archive/](docs/archive)**: Retired historical documents, including [Roadmap-v1-Archive.md](docs/archive/Roadmap-v1-Archive.md) for the full v1.0 build history.
+- **[docs/archive/fixes-to-v1.md](docs/archive/fixes-to-v1.md)**: Post-v1.0 audit findings and the fixes applied for each.
+- **[docs/archive/for-users.md](docs/archive/for-users.md)**: User-visible behavior changes from that fix round and what they require of you.
 - **[paranoid-testing-guide.md](paranoid-testing-guide.md)**: Step-by-step "believe nothing" verification guide for testing Pokkum against a real project — cross-checks every claim (build, signature, provenance, reproducibility) with an independent tool.
 
 ---

@@ -36,7 +36,7 @@ func TestComputeKey(t *testing.T) {
 	// Same content hash, path, platform and compression must always produce
 	// the same key regardless of when the two calls happen — the whole point
 	// of this cache key is that it does NOT vary with build time (see
-	// ComputeKey's doc comment / Roadmap.md item 3f). There is deliberately
+	// ComputeKey's doc comment / docs/archive/Roadmap.md item 3f). There is deliberately
 	// no "different modTime" case here anymore: a build-timestamp parameter
 	// was removed from ComputeKey's signature entirely, rather than merely
 	// asking callers to pass a fixed value, so this invariant can't quietly

@@ -25,7 +25,7 @@ pokkum-init and pokkum-static are now built by CI/releases and freshness-checked
 ## Evidence
 
 - Commits: `5693980`, `a86baa3`, `81a6fb6`
-- Findings: #6 (see overnight-findings.md)
+- Findings: #6 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

@@ -4,8 +4,9 @@
 //
 // Why this exists: before this tool, "where does the project stand" meant
 // reading and reconciling up to eight hand-maintained markdown files
-// (Roadmap.md, overnight-findings.md, CodeReview.md, AdditionalFeatures.md,
-// Feature-list.md, Roadmap-v1-Archive.md, fixes-to-v1.md, Meantime.md), and
+// (Roadmap.md, docs/archive/overnight-findings.md, docs/archive/CodeReview.md, docs/archive/AdditionalFeatures.md,
+// docs/archive/Feature-list.md, docs/archive/Roadmap-v1-Archive.md, docs/archive/fixes-to-v1.md, docs/archive/Meantime.md — all now
+// retired under docs/archive/), and
 // they drifted from each other and from the code repeatedly — this project's
 // single most-repeated failure mode (see Lessons.md). docs/roadmap/*.yaml is
 // now the one source; everything else in docs/ is generated and must never
@@ -63,7 +64,7 @@ type Option struct {
 }
 
 // Evidence links an item back to the commits that implemented it and the
-// numbered findings (overnight-findings.md's "### N." entries) that
+// numbered findings (docs/archive/overnight-findings.md's "### N." entries) that
 // motivated it.
 type Evidence struct {
 	Commits  []string `yaml:"commits,omitempty"`

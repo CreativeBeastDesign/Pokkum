@@ -2,7 +2,7 @@
 
 ## 1. Goal & Problem Statement
 
-Pokkum's `AdditionalFeatures.md` currently lists "Built-in Metrics Endpoint" and "OpenTelemetry
+Pokkum's `docs/archive/AdditionalFeatures.md` currently lists "Built-in Metrics Endpoint" and "OpenTelemetry
 Auto-Instrumentation" as two separate features with separate dependencies (a Prometheus client
 for metrics, a custom `--with-otel` SDK injection for traces). This concept replaces both with a
 single, unified observability feature built on SvelteKit's native OpenTelemetry support

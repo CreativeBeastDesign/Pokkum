@@ -25,7 +25,7 @@ Deleted the single hardcoded placeholder public key that silently backstopped si
 ## Evidence
 
 - Commits: `a149b28`
-- Findings: #8 (see overnight-findings.md)
+- Findings: #8 (see [overnight-findings.md](../archive/overnight-findings.md))
 
 ## Known Limitations
 

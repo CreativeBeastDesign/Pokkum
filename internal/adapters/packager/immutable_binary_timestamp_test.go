@@ -10,7 +10,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
-// This file is the regression test for Roadmap.md item 3f: the immutable
+// This file is the regression test for docs/archive/Roadmap.md item 3f: the immutable
 // third-party/embedded-binary layers (the Bun runtime, pokkum-init, and
 // pokkum-static) must produce a bit-identical diffID/digest for a given
 // (content x platform x compression), REGARDLESS of req.CreatedAt (the

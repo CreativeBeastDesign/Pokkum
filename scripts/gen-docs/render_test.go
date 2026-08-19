@@ -110,10 +110,10 @@ func TestRenderRoadmap_ExcludesShippedButListsNonGoals(t *testing.T) {
 	out := RenderRoadmap(areas)
 
 	if !strings.Contains(out, "open-item") {
-		t.Errorf("expected active item in Roadmap.md output, got:\n%s", out)
+		t.Errorf("expected active item in docs/Roadmap.md output, got:\n%s", out)
 	}
 	if strings.Contains(out, "shipped-item") {
-		t.Errorf("shipped item must not appear in Roadmap.md, got:\n%s", out)
+		t.Errorf("shipped item must not appear in docs/Roadmap.md, got:\n%s", out)
 	}
 
 	nonGoalsIdx := strings.Index(out, "## Non-goals")

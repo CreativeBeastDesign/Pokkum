@@ -34,7 +34,7 @@ func (e ValidationError) String() string {
 // Validate checks every loaded item against the schema's required fields,
 // enumerated values, cross-references, and on-disk impl paths. repoRoot is
 // used to resolve impl paths; findingsNumbers is the set of entry numbers
-// that genuinely exist in overnight-findings.md (see ParseFindingsNumbers).
+// that genuinely exist in docs/archive/overnight-findings.md (see ParseFindingsNumbers).
 //
 // Two full passes are used deliberately: pass one only collects every
 // item's id (to detect duplicates and to build the id->item lookup table
@@ -148,7 +148,7 @@ func validateItem(it Item, repoRoot string, allByID map[string]Item, findingsNum
 
 	for _, n := range it.Evidence.Findings {
 		if !findingsNumbers[n] {
-			add("evidence.findings references overnight-findings.md entry #%d, which does not exist", n)
+			add("evidence.findings references docs/archive/overnight-findings.md entry #%d, which does not exist", n)
 		}
 	}
 

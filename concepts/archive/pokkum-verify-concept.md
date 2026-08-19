@@ -1,6 +1,6 @@
 # Pokkum Verify Concept: `pokkum verify --rebuild`
 
-Status: PROPOSAL — most complex of the 2026-08 High-priority features (`AdditionalFeatures.md`)
+Status: PROPOSAL — most complex of the 2026-08 High-priority features (`docs/archive/AdditionalFeatures.md`)
 
 ## 1. What & Why
 

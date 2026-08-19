@@ -363,7 +363,8 @@ type PrepareRequest struct {
 	// only (see hermeticSandboxSupported); a Warn is logged and this is
 	// silently ignored on other platforms, matching Hermetic's own
 	// advisory-only fallback there. See internal/adapters/bunexec's
-	// hermetic_reexec_linux.go and Roadmap.md's residual-hermetic-gap item.
+	// hermetic_reexec_linux.go and docs/items/hermetic-build-mode.md's residual
+	// CAP_SYS_ADMIN limitation.
 	HermeticMountIsolation bool
 
 	// Platforms is the set of targets the subsequent Compile calls will use. It

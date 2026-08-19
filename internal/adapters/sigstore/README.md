@@ -171,7 +171,7 @@ client has no guaranteed-offline mode (`ForceCache`/`CacheValidity` can
 both still trigger a network refresh), so "hermetic" has to be a decision
 made before the client exists, not a flag passed into it. This mirrors
 `bunruntime`'s hermetic-cache-miss contract. Not yet wired to a CLI flag —
-see `Roadmap.md`'s Tier 2 tracking for `--sigstore-tuf-refresh`.
+see `docs/archive/Roadmap.md`'s Tier 2 tracking for `--sigstore-tuf-refresh`.
 
 ## Rekor-coverage diagnostic
 

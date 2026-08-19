@@ -67,7 +67,8 @@ func InstrumentationExists(projectDir string) bool {
 //     (`bun build --compile` produces two non-interoperable copies of the
 //     shared otlp-exporter-base module in the same binary). Tracing alone
 //     (this function's actual output) does not hit this, since it never
-//     imports the metrics exporter package at all. Tracked in Roadmap.md;
+//     imports the metrics exporter package at all. Tracked as a known
+//     limitation on docs/items/otel-sdk-bootstrap.md;
 //     --metrics-only is honestly non-functional until this is fixed
 //     upstream or worked around — the generated bootstrap warns at runtime
 //     rather than silently doing nothing.
@@ -115,7 +116,7 @@ const sampleRateInput = parseFloat(process.env.POKKUM_TRACE_SAMPLE_RATE ?? "%f")
 const sampleRate = isNaN(sampleRateInput) ? 1.0 : Math.max(0.0, Math.min(1.0, sampleRateInput));
 
 if (metricsOnly) {
-  console.error("[pokkum otel] --metrics-only requested, but OTLP metrics export is not currently functional under Bun (a real Bun bundler bug, not a Pokkum bug) — no metrics or traces will be exported. See Roadmap.md.");
+  console.error("[pokkum otel] --metrics-only requested, but OTLP metrics export is not currently functional under Bun (a real Bun bundler bug, not a Pokkum bug) — no metrics or traces will be exported. See Pokkum's --metrics-only documentation.");
 } else if (tracesEndpoint) {
   const traceSampler = new ParentBasedSampler({ root: new TraceIdRatioBasedSampler(sampleRate) });
 

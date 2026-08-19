@@ -1685,7 +1685,7 @@ func fanOut(
 				// serves /app/client too) but has its own packaging branch
 				// in internal/adapters/packager/packager.go that doesn't yet
 				// call appendAssetOverlayLayer; tracked as a scoped follow-up
-				// in Roadmap.md rather than folded into this same change.
+				// in docs/Roadmap.md rather than folded into this same change.
 				pkgReq.AssetOverlayDir = assetOverlayDir
 			case StrategyStatic:
 				// No server JS, vendor or native trees for a static site; the
