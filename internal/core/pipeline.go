@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -1943,6 +1944,60 @@ func checkCtx(ctx context.Context, stage string) error {
 //
 // stage names the log/error context (e.g. "pre-build source", "post-build
 // output") purely for operator-facing messages; it is not interpreted.
+// maxReportedSecretMatches caps how many locations a failure reports. A minified
+// bundle is one logical line, and every rule reports every match on it, so a
+// single inlined config object can produce hundreds — emitting all of them
+// buries the first, which is usually the only interesting one.
+const maxReportedSecretMatches = 10
+
+// logSecretMatches reports where the secrets are, which is the whole point of the
+// finding and used to be discarded: the failure carried only a count, so an
+// operator was told their build contained four secrets and given nothing to act
+// on. The skipped-files branch already listed paths, which made this an
+// inconsistency as much as a gap.
+//
+// The matched text is deliberately NOT emitted. ports.SecretMatch carries a
+// SecretSnippet and it is the matched substring — the secret itself. Echoing it
+// would copy the value into terminal scrollback, CI logs and anything scraping
+// build output, which is a poor trade for a tool whose purpose is stopping
+// secrets from spreading. file:line plus the rule name is enough to act on, and
+// the rule name describes the shape that matched without revealing the value.
+//
+// Order is file, then line, then rule, so the same project always reports the
+// same sequence instead of one reflecting filesystem walk order.
+func logSecretMatches(log *slog.Logger, stage string, matches []ports.SecretMatch) {
+	if log == nil {
+		return
+	}
+	sorted := make([]ports.SecretMatch, len(matches))
+	copy(sorted, matches)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].FilePath != sorted[j].FilePath {
+			return sorted[i].FilePath < sorted[j].FilePath
+		}
+		if sorted[i].LineNumber != sorted[j].LineNumber {
+			return sorted[i].LineNumber < sorted[j].LineNumber
+		}
+		return sorted[i].RuleName < sorted[j].RuleName
+	})
+
+	shown := sorted
+	if len(shown) > maxReportedSecretMatches {
+		shown = shown[:maxReportedSecretMatches]
+	}
+	for _, m := range shown {
+		log.Error("secret guard: hardcoded secret",
+			"stage", stage, "file", m.FilePath, "line", m.LineNumber, "rule", m.RuleName,
+			// Named explicitly so an operator who wonders why the value is
+			// absent can see that it was a decision, not an oversight.
+			"value", "redacted")
+	}
+	if remaining := len(sorted) - len(shown); remaining > 0 {
+		log.Error("secret guard: further hardcoded secrets not listed individually",
+			"stage", stage, "remaining", remaining, "listed", len(shown))
+	}
+}
+
 func runSecretScan(ctx context.Context, deps Deps, log *slog.Logger, stage, dir string, allowPatterns []string, scanSourcemaps bool) error {
 	if deps.SecretGuard == nil || dir == "" {
 		return nil
@@ -1964,7 +2019,14 @@ func runSecretScan(ctx context.Context, deps Deps, log *slog.Logger, stage, dir 
 			stage, len(res.Skipped), dir, strings.Join(names, ", "), ErrSecretScanIncomplete)
 	}
 	if !res.Passed {
-		return fmt.Errorf("secret guard (%s): detected %d hardcoded secret(s) in %s: %w", stage, len(res.Matches), dir, ErrSecretInlined)
+		// Logged as one structured line per finding rather than folded into the
+		// error string: slog quotes an error value, so embedded newlines arrive
+		// at the terminal as a literal \n and the list becomes less readable
+		// than the single line it replaced. Structured fields also let a log
+		// processor filter by file or rule.
+		logSecretMatches(log, stage, res.Matches)
+		return fmt.Errorf("secret guard (%s): detected %d hardcoded secret(s) in %s (locations logged above; exempt a false positive with --allow-secret-pattern=<regex>, repeatable): %w",
+			stage, len(res.Matches), dir, ErrSecretInlined)
 	}
 	log.Info("secret guard ok", "stage", stage, "checked", dir)
 	return nil
