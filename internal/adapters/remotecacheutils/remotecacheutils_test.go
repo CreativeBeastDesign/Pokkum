@@ -1,6 +1,7 @@
 package remotecacheutils_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -10,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -601,7 +603,7 @@ func TestCacher_Check_VerifiedCacheHit_StaticKey(t *testing.T) {
 // unset).
 //
 // This is the regression guard for the deleted cosign.DefaultPublicKeyPEM
-// fallback (Roadmap.md item 2h): a shared, unattributed placeholder public
+// fallback (docs/archive/Roadmap.md item 2h): a shared, unattributed placeholder public
 // key used to stand in here so verification always had *something* to check
 // against, but nothing ever signed with its (nonexistent) private half. The
 // setup is otherwise identical to TestCacher_Check_VerifiedCacheHit_StaticKey
@@ -689,6 +691,165 @@ func TestCacher_Check_NoKeyConfigured_FailsClosed(t *testing.T) {
 	if !strings.Contains(strictErr.Error(), "no key is configured") {
 		t.Errorf("error should distinguish 'no key configured' from a signature that was checked and found invalid, got: %v", strictErr)
 	}
+}
+
+// TestCacher_Check_SigningPublicKeyIsTheLastResortInTheKeyChain proves the
+// bottom of the static-key verification chain end-to-end, against a real
+// in-process registry and a real Cosign signature: with no
+// Verify.PublicKeyPEM and every POKKUM_*_PUBKEY unset, a build's own signing
+// public key (Verify.SigningPublicKeyPEM) is used, so a builder configured
+// with --signing-key alone can verify and reuse the cache entries it signed
+// itself.
+//
+// The two negative cases are the reason this field exists separately from
+// PublicKeyPEM rather than being written over it upstream: an explicitly
+// configured cache-verify key must always win, and the "nothing configured
+// anywhere" case must keep failing closed exactly as it did before.
+func TestCacher_Check_SigningPublicKeyIsTheLastResortInTheKeyChain(t *testing.T) {
+	// Two independent key pairs: A signs the cache entry, B stands in for an
+	// operator who deliberately configured a DIFFERENT cache-verification
+	// key. Two differing keys (not one) is what makes "explicit wins"
+	// falsifiable — with a single key every precedence order passes.
+	privA, pubA := generateTestKey(t)
+	_, pubB := generateTestKey(t)
+
+	// One env-var key too, so the "explicit sources win" claim is tested at
+	// the env layer and not only at the struct-field layer.
+	_, pubEnv := generateTestKey(t)
+
+	newCandidate := func(t *testing.T, repoSuffix string) (repo, inputHash string) {
+		t.Helper()
+		s := httptest.NewServer(registry.New())
+		t.Cleanup(s.Close)
+
+		host := strings.TrimPrefix(s.URL, "http://")
+		repo = host + "/acme/" + repoSuffix
+
+		img, err := random.Image(256, 1)
+		if err != nil {
+			t.Fatalf("random.Image: %v", err)
+		}
+		digest, err := img.Digest()
+		if err != nil {
+			t.Fatalf("img.Digest: %v", err)
+		}
+
+		inputHash = strings.Repeat("e", 64)
+		cacheRef, err := name.NewTag(repo+":"+remotecacheutils.CacheTag(inputHash), name.WeakValidation)
+		if err != nil {
+			t.Fatalf("NewTag(cache tag): %v", err)
+		}
+		if err := remote.Write(cacheRef, img); err != nil {
+			t.Fatalf("push cache entry: %v", err)
+		}
+		// Signed by key A — the builder's own signing key.
+		pushTestCosignSignature(t, repo, digest, privA, false)
+		return repo, inputHash
+	}
+
+	// check returns the result plus everything the cacher logged, so the
+	// derived-key disclosure can be asserted rather than assumed: an
+	// implicitly derived trust anchor that is never announced is exactly the
+	// silent-substitution shape mem:self_review_checklist rows 38/41 exist to
+	// catch.
+	check := func(t *testing.T, repo, inputHash string, verify ports.RemoteCacheVerifyOptions) (ports.RemoteCacheResult, string) {
+		t.Helper()
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		c := remotecacheutils.New(
+			remotecacheutils.WithCosignSigner(cosign.NewSigner(nil)),
+			remotecacheutils.WithLogger(logger),
+		)
+		res, err := c.Check(context.Background(), ports.RemoteCacheRequest{
+			Repo:      repo,
+			InputHash: inputHash,
+			Tags:      []string{"v1.0.0"},
+			Verify:    verify,
+		})
+		if err != nil {
+			t.Fatalf("Check returned a hard error on a non-strict check: %v", err)
+		}
+		return res, logs.String()
+	}
+
+	t.Run("used when nothing else in the chain is configured", func(t *testing.T) {
+		t.Setenv("POKKUM_CACHE_PUBKEY", "")
+		t.Setenv("POKKUM_SIGNING_PUBKEY", "")
+		t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", "")
+		repo, inputHash := newCandidate(t, "app-signingkey-fallback")
+
+		res, logs := check(t, repo, inputHash, ports.RemoteCacheVerifyOptions{
+			VerifySignature:     true,
+			VerifyMode:          ports.CacheVerifyStaticKey,
+			SigningPublicKeyPEM: pubA,
+		})
+		if !res.Hit || !res.Verified {
+			t.Fatalf("Check = {Hit:%v Verified:%v}, want a verified hit — with no cache-verify key configured, the build's own signing public key must be used so it can verify the entries it signed itself", res.Hit, res.Verified)
+		}
+		if res.SignerIdentity != "static-key" {
+			t.Errorf("SignerIdentity = %q, want %q", res.SignerIdentity, "static-key")
+		}
+		if !strings.Contains(logs, "signing key's public half") {
+			t.Errorf("engaging the derived-key fallback logged nothing naming it; an implicit trust derivation must be announced, not silent. logs:\n%s", logs)
+		}
+	})
+
+	t.Run("an explicit Verify.PublicKeyPEM is never overridden by it", func(t *testing.T) {
+		t.Setenv("POKKUM_CACHE_PUBKEY", "")
+		t.Setenv("POKKUM_SIGNING_PUBKEY", "")
+		t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", "")
+		repo, inputHash := newCandidate(t, "app-explicit-wins")
+
+		// The entry is signed by A, but the operator explicitly configured B.
+		// A hit here would prove the derived key silently replaced their
+		// choice.
+		res, logs := check(t, repo, inputHash, ports.RemoteCacheVerifyOptions{
+			VerifySignature:     true,
+			VerifyMode:          ports.CacheVerifyStaticKey,
+			PublicKeyPEM:        pubB,
+			SigningPublicKeyPEM: pubA,
+		})
+		if strings.Contains(logs, "signing key's public half") {
+			t.Errorf("the derived-key fallback announced itself even though an explicit key was configured; it must not have been consulted at all. logs:\n%s", logs)
+		}
+		if res.Hit {
+			t.Fatal("BUG: an explicitly configured --cache-verify-key was superseded by the signing key's public half; an explicit trust choice must always win over a derived one")
+		}
+	})
+
+	t.Run("an explicit POKKUM_CACHE_PUBKEY is never overridden by it", func(t *testing.T) {
+		t.Setenv("POKKUM_CACHE_PUBKEY", string(pubEnv))
+		t.Setenv("POKKUM_SIGNING_PUBKEY", "")
+		t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", "")
+		repo, inputHash := newCandidate(t, "app-env-wins")
+
+		res, _ := check(t, repo, inputHash, ports.RemoteCacheVerifyOptions{
+			VerifySignature:     true,
+			VerifyMode:          ports.CacheVerifyStaticKey,
+			SigningPublicKeyPEM: pubA,
+		})
+		if res.Hit {
+			t.Fatal("BUG: POKKUM_CACHE_PUBKEY sits ABOVE the derived signing key in the chain, but the candidate verified against the derived key instead")
+		}
+	})
+
+	t.Run("a signing key belonging to someone else still fails closed", func(t *testing.T) {
+		t.Setenv("POKKUM_CACHE_PUBKEY", "")
+		t.Setenv("POKKUM_SIGNING_PUBKEY", "")
+		t.Setenv("POKKUM_BASE_IMAGE_PUBKEY", "")
+		repo, inputHash := newCandidate(t, "app-foreign-signer")
+
+		// The fallback narrows trust to "entries I signed myself": an entry
+		// signed by A is not accepted by a builder whose own signing key is B.
+		res, _ := check(t, repo, inputHash, ports.RemoteCacheVerifyOptions{
+			VerifySignature:     true,
+			VerifyMode:          ports.CacheVerifyStaticKey,
+			SigningPublicKeyPEM: pubB,
+		})
+		if res.Hit {
+			t.Fatal("BUG: a cache entry signed by a key other than this builder's own signing key was accepted — the fallback must narrow trust to self-signed entries, never widen it")
+		}
+	})
 }
 
 // TestCacher_Check_PoisonedCacheEntry_UnsignedRejected verifies that an unsigned cache candidate

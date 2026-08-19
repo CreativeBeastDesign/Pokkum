@@ -512,6 +512,10 @@ func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Has
 	}
 
 	var errs []error
+	// One line per Check, not per signature layer: a signature image can
+	// carry several layers and the derived-key notice is a property of this
+	// build's configuration, not of any individual layer.
+	loggedSigningKeyFallback := false
 	for i, layer := range layers {
 		rc, rerr := layer.Uncompressed()
 		if rerr != nil {
@@ -620,18 +624,42 @@ func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Has
 			if len(pubKey) == 0 {
 				pubKey = []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
 			}
+			if len(pubKey) == 0 && len(req.Verify.SigningPublicKeyPEM) > 0 {
+				// Last resort, and deliberately last: every explicit source
+				// above wins, so an operator who configured a distinct
+				// cache-verification key (their CI builder's, say) never has
+				// it silently replaced by a locally derived one.
+				//
+				// This narrows trust rather than widening it — see
+				// ports.RemoteCacheVerifyOptions.SigningPublicKeyPEM for the
+				// full argument. In short: this arm accepts a candidate only
+				// when its signature verifies against this single key, so
+				// using the operator's own signing public key means "trust
+				// only cache entries I signed myself", and the alternative
+				// (no key at all) is to refuse every candidate outright.
+				//
+				// Logged, not silent: an implicitly derived trust anchor that
+				// nobody is told about is the shape mem:self_review_checklist
+				// rows 38/41 warn against, so say once, plainly, which key is
+				// actually being verified against.
+				pubKey = req.Verify.SigningPublicKeyPEM
+				if c.log != nil && !loggedSigningKeyFallback {
+					loggedSigningKeyFallback = true
+					c.log.InfoContext(ctx, "remote cache: no cache-verification key configured; verifying cache-hit signatures against the signing key's public half (--signing-key), so only cache entries signed by this builder's own key will be accepted; set --cache-verify-key or POKKUM_CACHE_PUBKEY to verify against a different key", "repo", repo, "digest", digest.String())
+				}
+			}
 			if len(pubKey) == 0 {
 				// No fallback key. A shared, unattributed placeholder public
 				// key used to live here (cosign.DefaultPublicKeyPEM) — no
 				// real signer ever held its private half, so it could never
-				// actually verify anything; it has been deleted (Roadmap.md
+				// actually verify anything; it has been deleted (docs/archive/Roadmap.md
 				// item 2h). Recorded as its own distinct failure — "nothing
 				// configured to check against" — rather than falling through
 				// to signer.Verify, which would report a generic "signature
 				// verification failed" indistinguishable from a genuinely
 				// wrong key or a tampered signature.
 				errs = append(errs, fmt.Errorf(
-					"layer %d: static-key verification requested but no key is configured; set --cache-verify-key, POKKUM_CACHE_PUBKEY, POKKUM_SIGNING_PUBKEY, or POKKUM_BASE_IMAGE_PUBKEY", i))
+					"layer %d: static-key verification requested but no key is configured; set --cache-verify-key, POKKUM_CACHE_PUBKEY, POKKUM_SIGNING_PUBKEY, or POKKUM_BASE_IMAGE_PUBKEY (a build's own --signing-key public half is used as a last resort, but this build has no signing key either)", i))
 				continue
 			}
 

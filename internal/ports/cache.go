@@ -126,6 +126,30 @@ type RemoteCacheVerifyOptions struct {
 	// PublicKeyPEM is the PEM-encoded public key bytes for static-key verification.
 	PublicKeyPEM []byte
 
+	// SigningPublicKeyPEM is the public half of THIS build's own signing key
+	// (--signing-key / POKKUM_SIGNING_KEY, derived at the composition root
+	// and threaded through by internal/core's pipeline). It is the
+	// LAST-RESORT entry in the static-key verification chain, consulted only
+	// after PublicKeyPEM and every POKKUM_*_PUBKEY env var have come up
+	// empty — an explicitly configured cache-verify key must never be
+	// overridden by an implicitly derived one.
+	//
+	// Why this is safe to derive implicitly, and why it is a narrowing
+	// rather than a widening of trust: the static-key arm accepts a
+	// candidate only if the signature over its Simple Signing payload
+	// verifies against exactly this one key, so falling back to the
+	// operator's own signing public key means "trust only cache entries I
+	// signed myself". Without it the chain has no key at all and every
+	// candidate is refused (fail-closed, full rebuild) — so the fallback can
+	// only ever admit entries produced by the private half the operator
+	// already holds, never a third party's. It cannot flip the mode either:
+	// keyless-vs-static-key selection keys on KeylessIdentity alone, not on
+	// any of these key fields.
+	//
+	// Empty when no signing key is configured, which leaves the chain
+	// behaving exactly as it did before this field existed.
+	SigningPublicKeyPEM []byte
+
 	// KeylessIdentity is the expected certificate identity for keyless Sigstore verification.
 	KeylessIdentity KeylessIdentity
 

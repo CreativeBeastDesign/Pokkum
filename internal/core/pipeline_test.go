@@ -466,6 +466,11 @@ type mockRemoteCacher struct {
 	hit                    bool
 	verified               bool
 	signerIdentity         string
+
+	// lastCheckReq captures the request the pipeline actually handed to
+	// Check, so tests can assert on the verification options the pipeline
+	// derived (rather than only on whether Check was reached at all).
+	lastCheckReq ports.RemoteCacheRequest
 }
 
 func (m *mockRemoteCacher) ComputeInputHash(context.Context, ports.RemoteCacheInputRequest) (string, error) {
@@ -473,8 +478,9 @@ func (m *mockRemoteCacher) ComputeInputHash(context.Context, ports.RemoteCacheIn
 	return "deadbeef", nil
 }
 
-func (m *mockRemoteCacher) Check(context.Context, ports.RemoteCacheRequest) (ports.RemoteCacheResult, error) {
+func (m *mockRemoteCacher) Check(_ context.Context, req ports.RemoteCacheRequest) (ports.RemoteCacheResult, error) {
 	m.checkCalled = true
+	m.lastCheckReq = req
 	if m.hit {
 		return ports.RemoteCacheResult{
 			Hit:            true,
@@ -939,6 +945,90 @@ func TestBuildPushSuccess_SignedBuildWithVerifiedCacheHitCanSkipBuild(t *testing
 	if !res.Cached {
 		t.Errorf("expected a cached build result for a signed build on verified cache hit")
 	}
+}
+
+// TestBuild_CacheVerifyKeyInheritsSigningPublicKey pins down the pipeline's
+// half of the cache-verify key chain: the composition root fills
+// req.CacheVerify.PublicKeyPEM from --cache-verify-key/POKKUM_CACHE_PUBKEY/
+// .pokkum.yaml, the cacher then walks POKKUM_*_PUBKEY, and this build's own
+// signing public key is offered as the LAST-RESORT entry via a dedicated
+// field. The whole point of the dedicated field (rather than pipeline.go
+// writing PublicKeyPEM directly) is that precedence stays in exactly one
+// place — so what this test guards is that the pipeline OFFERS the derived
+// key without ever overwriting an explicit one.
+func TestBuild_CacheVerifyKeyInheritsSigningPublicKey(t *testing.T) {
+	signingPub := []byte("-----BEGIN PUBLIC KEY-----\nSIGNING-KEY-PUBLIC-HALF\n-----END PUBLIC KEY-----\n")
+	explicitPub := []byte("-----BEGIN PUBLIC KEY-----\nEXPLICIT-CACHE-VERIFY-KEY\n-----END PUBLIC KEY-----\n")
+
+	buildWith := func(t *testing.T, signing core.SigningOptions, verify core.RemoteCacheVerifyOptions) *mockRemoteCacher {
+		t.Helper()
+		deps := newFullDeps(io.Discard)
+		cacher := &mockRemoteCacher{hit: true, verified: true, signerIdentity: "static-key"}
+		deps.RemoteCache = cacher
+
+		req := core.BuildRequest{
+			ProjectDir:  "/abs/project",
+			Repo:        "ghcr.io/example/app",
+			Platforms:   []core.Platform{core.LinuxAMD64},
+			Tags:        []string{"v1.0.0"},
+			Sign:        true,
+			Signing:     signing,
+			CacheVerify: verify,
+		}
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+		if !cacher.checkCalled {
+			t.Fatalf("expected RemoteCache.Check to be consulted")
+		}
+		return cacher
+	}
+
+	activeVerify := core.RemoteCacheVerifyOptions{
+		VerifySignature: true,
+		VerifyMode:      core.CacheVerifyStaticKey,
+	}
+
+	t.Run("signing public key is offered when nothing else in the chain is set", func(t *testing.T) {
+		cacher := buildWith(t,
+			core.SigningOptions{KeyPEM: []byte("PRIVATE"), PublicKeyPEM: signingPub},
+			activeVerify,
+		)
+		got := cacher.lastCheckReq.Verify
+		if !bytes.Equal(got.SigningPublicKeyPEM, signingPub) {
+			t.Errorf("Verify.SigningPublicKeyPEM = %q, want the signing key's public half %q — a build signed with --signing-key alone must be able to verify its own cache entries without a second key being configured", got.SigningPublicKeyPEM, signingPub)
+		}
+		if len(got.PublicKeyPEM) != 0 {
+			t.Errorf("Verify.PublicKeyPEM = %q, want it left empty — the derived key must arrive as the last-resort field, not by pre-empting the POKKUM_*_PUBKEY entries the cacher resolves after PublicKeyPEM", got.PublicKeyPEM)
+		}
+	})
+
+	t.Run("an explicitly configured cache-verify key is never overridden", func(t *testing.T) {
+		verify := activeVerify
+		verify.PublicKeyPEM = explicitPub
+		cacher := buildWith(t,
+			core.SigningOptions{KeyPEM: []byte("PRIVATE"), PublicKeyPEM: signingPub},
+			verify,
+		)
+		got := cacher.lastCheckReq.Verify
+		if !bytes.Equal(got.PublicKeyPEM, explicitPub) {
+			t.Errorf("Verify.PublicKeyPEM = %q, want the explicitly configured key %q preserved verbatim", got.PublicKeyPEM, explicitPub)
+		}
+		if bytes.Equal(got.PublicKeyPEM, signingPub) {
+			t.Errorf("BUG: an explicit --cache-verify-key was replaced by the signing key's public half; an explicit trust choice must always win")
+		}
+	})
+
+	t.Run("no signing key leaves the chain exactly as it was", func(t *testing.T) {
+		cacher := buildWith(t, core.SigningOptions{}, activeVerify)
+		got := cacher.lastCheckReq.Verify
+		if len(got.SigningPublicKeyPEM) != 0 {
+			t.Errorf("Verify.SigningPublicKeyPEM = %q, want empty when no signing key is configured (that case must not change behaviour)", got.SigningPublicKeyPEM)
+		}
+		if len(got.PublicKeyPEM) != 0 {
+			t.Errorf("Verify.PublicKeyPEM = %q, want empty", got.PublicKeyPEM)
+		}
+	})
 }
 
 // TestBuildPushSuccess_UnsignedBuildCanHitRemoteCache confirms that an unsigned build
@@ -2581,6 +2671,160 @@ func TestBuild_PostBuildSecretScan_TargetsExactStrategyDirs(t *testing.T) {
 
 		if len(guard.scannedDirs) < 2 || guard.scannedDirs[1] != outputDir {
 			t.Fatalf("post-build scannedDirs = %v, want the compile input tree %q scanned as a proxy (see the honest limitation documented at the Stage 5.5 call site: the final compiled binary itself is not scanned)", guard.scannedDirs, outputDir)
+		}
+	})
+}
+
+// TestBuild_PostBuildSecretScan_ExeCoversBundledJSOutsideOutputDir closes
+// the --strategy=exe scanning gap with the REAL secretguard adapter through
+// the real core.Build chain. exe is the only strategy whose shipped artifact
+// is compiled from an entrypoint rather than packaged from a directory:
+// `bun build --compile` bundles prep.EntrypointPath and its imports, and
+// that entrypoint is not always inside prep.OutputDir — with --telemetry,
+// sveltekitutils.PrepareVirtualTelemetryEntry rewrites it to
+// <projectDir>/.pokkum/telemetry-entry.ts alongside a generated
+// .pokkum/otel-bootstrap.ts. Both are written by Prepare, so they do not
+// exist yet at the pre-build source scan, and neither is reachable from
+// prep.OutputDir — so scanning only OutputDir left exactly the bundled JS
+// that gets compiled into the shipped binary uncovered at BOTH stages.
+//
+// The mirror cases matter as much as the positive one: --allow-secret-pattern
+// must still suppress on this path (a second, differently-behaving scan
+// surface would be its own bug), and an entrypoint that IS inside OutputDir
+// must not be scanned twice.
+func TestBuild_PostBuildSecretScan_ExeCoversBundledJSOutsideOutputDir(t *testing.T) {
+	// A real Google API key shape, matching the adapter's own rule set.
+	const bakedSecret = `const OTEL_HEADERS={token:"AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY"};`
+
+	// buildExe models the real exe layout: OutputDir is the adapter's
+	// staging tree, and the compile entrypoint lives in a sibling .pokkum/
+	// directory outside it (the --telemetry wrapper case).
+	buildExe := func(t *testing.T, allowPatterns []string) error {
+		t.Helper()
+		projectDir := t.TempDir()
+		outputDir := filepath.Join(projectDir, ".svelte-kit", "jesterkit-sveltekit")
+		if err := os.MkdirAll(filepath.Join(outputDir, "temp-server"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		// The staging tree itself is genuinely clean — this test must fail
+		// only because of the entrypoint tree, never because the
+		// already-covered OutputDir scan happened to catch something.
+		if err := os.WriteFile(filepath.Join(outputDir, "temp-server", "assets.generated.ts"), []byte("export const assets=[];"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		pokkumDir := filepath.Join(projectDir, ".pokkum")
+		if err := os.MkdirAll(pokkumDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(pokkumDir, "otel-bootstrap.ts"), []byte(bakedSecret), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		entrypoint := filepath.Join(pokkumDir, "telemetry-entry.ts")
+		if err := os.WriteFile(entrypoint, []byte(`import "./otel-bootstrap.ts";`), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		deps := newFullDeps(io.Discard)
+		deps.SecretGuard = secretguard.NewAdapter()
+		deps.Compiler = &mockCompiler{
+			prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+				return ports.PrepareResult{EntrypointPath: entrypoint, OutputDir: outputDir}, nil
+			},
+		}
+
+		req := postBuildScanTestRequest(t, projectDir)
+		req.Compile.Strategy = core.StrategyExe
+		req.AllowSecretPatterns = allowPatterns
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+		return err
+	}
+
+	t.Run("a secret in the bundled JS outside OutputDir fails the build", func(t *testing.T) {
+		err := buildExe(t, nil)
+		if err == nil {
+			t.Fatalf("expected the build to fail: the secret sits in the JS that `bun build --compile` bundles into the shipped binary")
+		}
+		if !errors.Is(err, core.ErrSecretInlined) {
+			t.Errorf("err = %v, want it to wrap core.ErrSecretInlined — exe must fail exactly the way layered/static do, not through a second, softer path", err)
+		}
+		if !strings.Contains(err.Error(), "post-build") {
+			t.Errorf("err = %v, want it to name the post-build stage", err)
+		}
+	})
+
+	t.Run("--allow-secret-pattern still suppresses on this path", func(t *testing.T) {
+		if err := buildExe(t, []string{`AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY`}); err != nil {
+			t.Errorf("expected --allow-secret-pattern to suppress the finding on exe's entrypoint tree exactly as it does on every other scanned tree, got: %v", err)
+		}
+	})
+
+	// Row 3/4 counterpart: exe now scans TWO trees, so the case above (a
+	// finding on the second) must not be the only one covered — a refactor
+	// that handled only the newly added directory would pass it while
+	// silently dropping the pre-existing OutputDir coverage.
+	t.Run("a secret in OutputDir (the first scanned tree) still fails the build", func(t *testing.T) {
+		projectDir := t.TempDir()
+		outputDir := filepath.Join(projectDir, ".svelte-kit", "jesterkit-sveltekit", "temp-server")
+		if err := os.MkdirAll(outputDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(outputDir, "index.ts"), []byte(bakedSecret), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		pokkumDir := filepath.Join(projectDir, ".pokkum")
+		if err := os.MkdirAll(pokkumDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		entrypoint := filepath.Join(pokkumDir, "telemetry-entry.ts")
+		if err := os.WriteFile(entrypoint, []byte(`import "../.svelte-kit/jesterkit-sveltekit/temp-server/index.ts";`), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		deps := newFullDeps(io.Discard)
+		deps.SecretGuard = secretguard.NewAdapter()
+		deps.Compiler = &mockCompiler{
+			prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+				return ports.PrepareResult{EntrypointPath: entrypoint, OutputDir: outputDir}, nil
+			},
+		}
+		req := postBuildScanTestRequest(t, projectDir)
+		req.Compile.Strategy = core.StrategyExe
+		_, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
+		if err == nil || !errors.Is(err, core.ErrSecretInlined) {
+			t.Errorf("expected a secret in exe's output tree to still fail with ErrSecretInlined, got: %v", err)
+		}
+	})
+
+	// Precision guard: when the entrypoint already lives inside OutputDir
+	// (the no-telemetry exe layout, and every layered build), the tree must
+	// be handed to the scanner ONCE — a duplicate scan doubles every finding
+	// an operator has to read and doubles the walk cost of the largest tree
+	// in the build.
+	t.Run("an entrypoint inside OutputDir is not scanned twice", func(t *testing.T) {
+		projectDir := t.TempDir()
+		outputDir := t.TempDir()
+		guard := &fakeSecretGuard{}
+		deps := newFullDeps(io.Discard)
+		deps.SecretGuard = guard
+		deps.Compiler = &mockCompiler{
+			prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+				return ports.PrepareResult{
+					EntrypointPath: filepath.Join(outputDir, "temp-server", "index.ts"),
+					OutputDir:      outputDir,
+				}, nil
+			},
+		}
+
+		req := postBuildScanTestRequest(t, projectDir)
+		req.Compile.Strategy = core.StrategyExe
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+
+		got := guard.scannedDirs[1:] // drop the pre-build source scan
+		if len(got) != 1 || got[0] != outputDir {
+			t.Fatalf("post-build scannedDirs = %v, want exactly [%q] — the entrypoint's own directory is already inside the output tree", got, outputDir)
 		}
 	})
 }

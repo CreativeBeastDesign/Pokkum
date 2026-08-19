@@ -764,6 +764,34 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		})
 		if err == nil && inputHash != "" {
 			compositeInputHash = inputHash
+			// Offer this build's own signing public key as the LAST-RESORT
+			// entry in the cache-verify key chain
+			// (--cache-verify-key / POKKUM_CACHE_PUBKEY /
+			// POKKUM_SIGNING_PUBKEY / POKKUM_BASE_IMAGE_PUBKEY, resolved in
+			// that order inside the cacher). It is offered, not imposed:
+			// every explicit source above wins, and the cacher only reaches
+			// this field once all of them are empty — so configuring
+			// --cache-verify-key with a deliberately different key is never
+			// silently overridden by a locally derived one.
+			//
+			// Why deriving it implicitly is sound: the static-key arm accepts
+			// a candidate only when its Simple Signing payload verifies
+			// against this one key, and the mode itself is chosen from
+			// KeylessIdentity, never from any key field. So falling back to
+			// the operator's OWN signing public key means "trust only cache
+			// entries I signed myself", which strictly NARROWS the accepted
+			// set relative to any third-party key and strictly cannot widen
+			// it: the status quo without this fallback is that no key exists,
+			// every candidate is refused, and the build falls through to a
+			// full rebuild. Verified against
+			// internal/adapters/remotecacheutils' static-key arm, which has
+			// no path accepting a signature from a key other than the one
+			// handed to it.
+			//
+			// Empty whenever no signing key is configured, which leaves that
+			// case behaving exactly as it did before.
+			cacheVerify := req.CacheVerify
+			cacheVerify.SigningPublicKeyPEM = req.Signing.PublicKeyPEM
 			cacheRes, err := deps.RemoteCache.Check(ctx, ports.RemoteCacheRequest{
 				Repo:               req.Repo,
 				InputHash:          inputHash,
@@ -771,7 +799,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				Insecure:           req.Insecure,
 				UserAgent:          deps.UserAgent,
 				RegistryConfigPath: req.RegistryConfigPath,
-				Verify:             req.CacheVerify,
+				Verify:             cacheVerify,
 			})
 			if err == nil && cacheRes.Hit {
 				if cacheRes.Verified {
@@ -950,21 +978,31 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	//     just those two avoids false "coverage" of files this strategy
 	//     never packages.
 	//   - StrategyExe's ACTUAL shipped artifact is the single native
-	//     executable Compile produces below, by bundling prep.OutputDir
-	//     via `bun build --compile`. Scanning prep.OutputDir here is a
-	//     deliberate best-effort PROXY, not exact coverage of the final
-	//     compiled binary: it catches everything already baked into the
-	//     JS by Prepare — which is every example in this feature's bug
+	//     executable Compile produces below, by bundling
+	//     prep.EntrypointPath via `bun build --compile`. Its full
+	//     pre-compile bundled-JS input is therefore prep.OutputDir AND
+	//     the entrypoint's own directory, which is NOT always inside
+	//     prep.OutputDir: with --telemetry it is
+	//     <projectDir>/.pokkum/telemetry-entry.ts plus the generated
+	//     .pokkum/otel-bootstrap.ts it imports, both written by Prepare
+	//     (so absent at the pre-build source scan above) and both bundled
+	//     into the shipped binary. postBuildScanDirs returns both trees;
+	//     scanning only prep.OutputDir used to leave that bundled JS
+	//     uncovered at both stages.
+	//
+	//     Scanning that input remains a deliberate best-effort PROXY, not
+	//     parity with layered/static: it catches everything already baked
+	//     into the JS by Prepare — every example in this feature's bug
 	//     report (env baking, Vite define, a malicious dependency's
 	//     chunk) — but NOT anything a bunfig.toml preload plugin or a
 	//     `with { type: "macro" }` import could inject only during the
-	//     Compile step itself. There is no practical way to text-scan the
-	//     final compiled executable with acceptable false-positive/
-	//     negative behavior (it is a single, non-line-oriented,
-	//     size-unbounded binary blob, and secret text inside it is not
-	//     guaranteed to survive byte-for-byte). That residual gap for
-	//     StrategyExe is accepted and reported honestly, not silently
-	//     implied covered.
+	//     Compile step itself. Scanning the compiled executable instead
+	//     was considered and rejected: it is a single, non-line-oriented,
+	//     size-unbounded binary blob whose embedded string constants may
+	//     be transformed or split, so it risks both false negatives and
+	//     the kind of noisy false positives that get a secret scanner
+	//     switched off entirely. That residual gap for StrategyExe is
+	//     accepted and reported honestly, not silently implied covered.
 	//
 	// --asset-overlay's merged prior-generation content (assetOverlayDir,
 	// StrategyLayered only today) is pulled from a registry — either this
@@ -976,7 +1014,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	if err := checkCtx(ctx, "post-build secret scan"); err != nil {
 		return BuildResult{}, err
 	}
-	for _, dir := range postBuildScanDirs(req.Compile.Strategy, prep.OutputDir) {
+	for _, dir := range postBuildScanDirs(req.Compile.Strategy, prep.OutputDir, prep.EntrypointPath) {
 		if err := runSecretScan(ctx, deps, log, "post-build output", dir, req.AllowSecretPatterns, req.Compile.Sourcemap); err != nil {
 			return BuildResult{}, err
 		}
@@ -1940,7 +1978,11 @@ func runSecretScan(ctx context.Context, deps Deps, log *slog.Logger, stage, dir 
 // ship, so if fanOut's wiring changes, this should be revisited alongside
 // it. Returns nil when outputDir is empty (nothing Prepare produced yet, or
 // a test double that never sets it).
-func postBuildScanDirs(strategy BuildStrategy, outputDir string) []string {
+//
+// entrypointPath is Prepare's EntrypointPath — needed only by StrategyExe,
+// whose shipped artifact is compiled FROM that file rather than packaged
+// from a directory (see the StrategyExe case).
+func postBuildScanDirs(strategy BuildStrategy, outputDir, entrypointPath string) []string {
 	if outputDir == "" {
 		return nil
 	}
@@ -1959,16 +2001,53 @@ func postBuildScanDirs(strategy BuildStrategy, outputDir string) []string {
 		// directory rather than a subdirectory.
 		return []string{outputDir}
 	case StrategyExe:
-		// Best-effort proxy only — see the Stage 5.5 comment at the call
-		// site for the honest limitation (Compile's own bundling step is
-		// not covered).
-		return []string{outputDir}
+		// Two trees, not one, because exe is the only strategy whose
+		// shipped artifact is COMPILED from an entrypoint rather than
+		// packaged from a directory: `bun build --compile` bundles
+		// prep.EntrypointPath and everything it imports, and that
+		// entrypoint is not always inside outputDir. With --telemetry,
+		// sveltekitutils.PrepareVirtualTelemetryEntry rewrites it to
+		// <projectDir>/.pokkum/telemetry-entry.ts, which imports a
+		// generated .pokkum/otel-bootstrap.ts — both bundled into the
+		// shipped binary, both created by Prepare (so they do not exist
+		// yet at the pre-build source scan), and neither reachable from
+		// outputDir. Scanning only outputDir left exactly that bundled JS
+		// uncovered.
+		//
+		// Still a PROXY for the compiled binary, not parity with
+		// layered/static — see the Stage 5.5 comment at the call site for
+		// the honest residual limitation (a secret injected by the Compile
+		// step itself, e.g. via a bunfig.toml preload plugin or a
+		// `with { type: "macro" }` import, is present in neither tree).
+		dirs := []string{outputDir}
+		if entrypointDir := filepath.Dir(entrypointPath); entrypointPath != "" && !dirWithin(outputDir, entrypointDir) {
+			dirs = append(dirs, entrypointDir)
+		}
+		return dirs
 	default:
 		// An unrecognized strategy: scan the whole tree rather than skip
 		// silently, matching this file's other strategy switches' new
 		// fail-into-safety default arms.
 		return []string{outputDir}
 	}
+}
+
+// dirWithin reports whether candidate is dir itself or a directory beneath
+// it. Used to avoid handing the secret scanner the same tree twice (which
+// would double every finding an operator has to read) while still catching
+// the case where a compile entrypoint genuinely lives outside the build
+// output tree.
+//
+// An unresolvable relative path (mismatched absolute/relative inputs, which
+// Prepare never produces but a test double could) resolves to false — i.e.
+// "scan it as well". The conservative direction for a security gate is more
+// coverage, never less.
+func dirWithin(dir, candidate string) bool {
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // payloadDigest returns the digest of whichever of the payload's two members
