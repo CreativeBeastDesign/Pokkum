@@ -18,6 +18,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/keymaterialutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -272,10 +273,18 @@ func (r *Resolver) ResolveProvenance(ctx context.Context, req ports.ProvenanceRe
 
 	pubKeyPEM := req.PublicKeyPEM
 	if len(pubKeyPEM) == 0 {
-		pubKeyPEM = []byte(os.Getenv("POKKUM_SIGNING_PUBKEY"))
-	}
-	if len(pubKeyPEM) == 0 {
-		pubKeyPEM = []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
+		// Either variable may hold PEM text or a path to a PEM file, resolved
+		// through the shared helper so the same value means the same thing here
+		// as at the composition root. A set-but-unresolvable value is an error,
+		// not a reason to fall through to the next variable.
+		resolved, _, rerr := keymaterialutils.ResolveFirst(
+			keymaterialutils.Candidate{Source: "POKKUM_SIGNING_PUBKEY", Setting: os.Getenv("POKKUM_SIGNING_PUBKEY")},
+			keymaterialutils.Candidate{Source: "POKKUM_BASE_IMAGE_PUBKEY", Setting: os.Getenv("POKKUM_BASE_IMAGE_PUBKEY")},
+		)
+		if rerr != nil {
+			return summary, rerr
+		}
+		pubKeyPEM = resolved
 	}
 	// No fallback key beyond this. A shared, unattributed placeholder public
 	// key used to live here (cosign.DefaultPublicKeyPEM) — no real signer

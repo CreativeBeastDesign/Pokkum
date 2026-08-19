@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -806,5 +807,85 @@ func TestBannedImportsAreAbsent(t *testing.T) {
 	if scanned == 0 {
 		t.Fatal("[TEST SETUP] scanned 0 Go files — the search roots no longer match the repository layout, " +
 			"so this test has gone blind rather than legitimately found nothing")
+	}
+}
+
+// TestPublicKeyEnvVarsGoThroughTheSharedResolver stops the POKKUM_*_PUBKEY
+// divergence from growing back.
+//
+// The bug: cmd/pokkum resolved POKKUM_CACHE_PUBKEY as "a path, or PEM text if
+// the path will not read", while remotecacheutils, provenance and baseimage each
+// did a bare []byte(os.Getenv(...)) and accepted literal PEM only. One variable,
+// two meanings, decided by which code path happened to consume it — checklist
+// row 41's shape, and the same class as the --sigstore-trusted-root fail-open.
+//
+// A comment saying "use keymaterialutils" would not have prevented the next
+// bare conversion, so this asserts it instead: the byte-conversion shape is
+// banned outright, and every consumer must go through the shared resolver.
+func TestPublicKeyEnvVarsGoThroughTheSharedResolver(t *testing.T) {
+	rootPath, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("Failed to resolve current directory: %v", err)
+	}
+	repoRoot := rootPath
+	if filepath.Base(rootPath) == "internal" {
+		repoRoot = filepath.Dir(rootPath)
+	}
+
+	// Matches []byte(os.Getenv("POKKUM_...PUBKEY")) with any spacing: reading
+	// key material straight into bytes is precisely the shape that skips the
+	// path/PEM decision and so reintroduces the divergence.
+	bareConversion := regexp.MustCompile(`\[\]byte\(\s*os\.Getenv\(\s*"POKKUM_[A-Z_]*PUBKEY"\s*\)\s*\)`)
+
+	var scanned, found int
+	for _, dir := range []string{"internal", "cmd", "pkg", "supervisor"} {
+		root := filepath.Join(repoRoot, dir)
+		if _, statErr := os.Stat(root); statErr != nil {
+			continue
+		}
+		walkErr := filepath.Walk(root, func(path string, fi os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if fi.IsDir() {
+				if n := fi.Name(); n == "testdata" || n == "node_modules" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			body, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			scanned++
+			for _, m := range bareConversion.FindAllString(string(body), -1) {
+				rel, relErr := filepath.Rel(repoRoot, path)
+				if relErr != nil {
+					rel = path
+				}
+				found++
+				t.Errorf("[KEY-MATERIAL VIOLATION] %s contains %s — a POKKUM_*_PUBKEY value may be PEM text "+
+					"or a path to a PEM file, and reading it straight into bytes accepts only the former. "+
+					"That is how the same variable came to mean two different things in cmd/pokkum and in the "+
+					"adapters. Resolve it through keymaterialutils.Resolve/ResolveFirst instead.", rel, m)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			t.Fatalf("walking %s: %v", root, walkErr)
+		}
+	}
+
+	if scanned == 0 {
+		t.Fatal("[TEST SETUP] scanned 0 Go files — the search roots no longer match the repository layout, " +
+			"so this test has gone blind rather than legitimately found nothing")
+	}
+	// Sanity-check the pattern itself against a known-bad string, so a regex
+	// that silently stopped matching cannot make this test pass by vacuity.
+	if !bareConversion.MatchString(`[]byte(os.Getenv("POKKUM_CACHE_PUBKEY"))`) {
+		t.Error("[TEST SETUP] the banned-shape pattern no longer matches the shape it exists to ban")
 	}
 }

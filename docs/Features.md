@@ -343,6 +343,18 @@ Deleted the single hardcoded placeholder public key that silently backstopped si
   - [internal/adapters/cosign/signer.go](../internal/adapters/cosign/signer.go)
   - [internal/adapters/baseimage/resolver.go](../internal/adapters/baseimage/resolver.go)
 
+### [POKKUM_*_PUBKEY meant two different things](items/pubkey-env-var-divergence.md)
+
+The same public-key environment variable was resolved as a file path in one place and as literal PEM in another, so its meaning depended on which code path read it.
+
+- Flags: `--cache-verify-key`, `POKKUM_CACHE_PUBKEY`, `POKKUM_SIGNING_PUBKEY`, `POKKUM_BASE_IMAGE_PUBKEY`
+- Implementation:
+  - [internal/adapters/keymaterialutils/keymaterialutils.go](../internal/adapters/keymaterialutils/keymaterialutils.go)
+  - [cmd/pokkum/build.go](../cmd/pokkum/build.go)
+  - [internal/adapters/remotecacheutils/remotecacheutils.go](../internal/adapters/remotecacheutils/remotecacheutils.go)
+  - [internal/adapters/provenance/resolver.go](../internal/adapters/provenance/resolver.go)
+  - [internal/adapters/baseimage/resolver.go](../internal/adapters/baseimage/resolver.go)
+
 ### [Remote-cache verify key should inherit the signing key](items/remote-cache-verify-key-inheritance.md)
 
 A build signed via --signing-key alone doesn't automatically make its own remote-cache entries verifiable, since the cache-verify key chain never reads the signing public key.

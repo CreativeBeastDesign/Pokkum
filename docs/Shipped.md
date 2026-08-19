@@ -42,7 +42,14 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | Title | Summary | Kind | Status | Commits |
 | --- | --- | --- | --- | --- |
 | [Per-ref pokkum.lock slot for custom --base images](items/custom-base-lock-slot.md) | Give every custom --base reference its own pokkum.lock slot instead of sharing one, since two custom bases in a project still evict each other today. | hardening | shipped | `69914ac` |
+| [POKKUM_*_PUBKEY meant two different things](items/pubkey-env-var-divergence.md) | The same public-key environment variable was resolved as a file path in one place and as literal PEM in another, so its meaning depended on which code path read it. | hardening | shipped |  |
 | [TrustedRootPath should take bytes, not a file path](items/trusted-root-bytes.md) | Change the base-image trusted-root field from a file path to bytes so all three Sigstore trust-root consumers take the same shape. | hardening | shipped |  |
+
+### Testing & Infrastructure
+
+| Title | Summary | Kind | Status | Commits |
+| --- | --- | --- | --- | --- |
+| [Multi-command CLI workflow tests](items/cli-workflow-tests.md) | Run the real binary through command sequences in one project directory, covering whether commands work together rather than only in isolation. | infra | shipped |  |
 
 ## Unscheduled
 

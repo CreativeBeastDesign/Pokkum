@@ -26,6 +26,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/dsse"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/envbake"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/keymaterialutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/provenance"
@@ -1069,11 +1070,17 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 		verifyKeySetting = projCfg.Cache.Pubkey
 	}
 	if verifyKeySetting != "" {
-		if data, err := os.ReadFile(verifyKeySetting); err == nil {
-			req.CacheVerify.PublicKeyPEM = data
-		} else {
-			req.CacheVerify.PublicKeyPEM = []byte(verifyKeySetting)
+		// Resolved through the shared helper so --cache-verify-key,
+		// POKKUM_CACHE_PUBKEY and .pokkum.yaml's cache.pubkey mean exactly
+		// what the same values mean inside the adapters. This used to be a
+		// local "try ReadFile, else treat the string as PEM", which turned a
+		// mistyped path into nonsense key bytes and surfaced it as "signature
+		// verification failed" rather than as a missing file.
+		data, err := keymaterialutils.Resolve(verifyKeySetting, "--cache-verify-key/POKKUM_CACHE_PUBKEY")
+		if err != nil {
+			return nil, err
 		}
+		req.CacheVerify.PublicKeyPEM = data
 	}
 
 	keylessSANSetting := flags.cacheKeylessIdentity

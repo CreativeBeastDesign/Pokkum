@@ -512,7 +512,24 @@ items:
         description: "Own default ref, own lock key — eliminates the collision entirely, mirroring how distroless-node got its own preset."
         tradeoffs: "One new CLI-visible preset name, plus a self-healing orphaned-lockfile-entry migration note for existing --static users."
     recommendation: "Add a dedicated BaseImageChainguardStatic preset — small, well-precedented change."
-    related: ["custom-base-lock-slot"]
+    decision: |
+      Deferred 2026-08-19, deliberately left in `backlog` rather than promoted to a numbered
+      stage: unscheduled is the honest status, and v1.1/v1.2/v2.0 would each imply a commitment
+      that has not been made.
+
+      What changed is that this stopped being a user-visible defect. `pokkum init`'s prompt used
+      to offer `chainguard-static` as base-image option 3, so anyone picking it got a
+      `.pokkum.yaml` that `pokkum build` refused — the preset was advertised before it existed.
+      That prompt now lists only the presets that are real (`distroless`, `chainguard`,
+      `distroless-node`), so the gap is no longer reachable by accident; see
+      [pokkum init wrote a config pokkum build refused](item:init-generates-invalid-config).
+
+      What remains is the original narrow issue only: an explicit
+      `--base cgr.dev/chainguard/glibc-dynamic` build and a `--strategy=static` build in the
+      same project still share one `pokkum.lock` slot. That is a stable-pin annoyance rather
+      than a correctness hole — the identity guard shipped with the per-ref lock work means
+      neither build can be served the other's image content.
+    related: ["custom-base-lock-slot", "init-generates-invalid-config"]
 
   - id: verify-base-on-cache-hit
     title: "Verify base image on cache hit"
@@ -596,3 +613,55 @@ items:
     evidence:
       commits: ["e5dd73c"]
       findings: [8]
+
+  - id: pubkey-env-var-divergence
+    title: "POKKUM_*_PUBKEY meant two different things"
+    stage: v1.1
+    status: shipped
+    kind: hardening
+    tier: foundation
+    summary: "The same public-key environment variable was resolved as a file path in one place and as literal PEM in another, so its meaning depended on which code path read it."
+    problem: |
+      `cmd/pokkum/build.go` resolved `POKKUM_CACHE_PUBKEY` as "try it as a path, and if
+      `os.ReadFile` fails treat the string itself as PEM", while every adapter reading the same
+      variable — `remotecacheutils`, `provenance`, `baseimage` — did a bare
+      `[]byte(os.Getenv(...))` and so accepted literal PEM only. A path therefore worked for
+      `pokkum build` and would have been handed to a Cosign verifier verbatim by any other
+      construction of those adapters.
+
+      Latent rather than exploitable, because `build.go` populates the request field before the
+      adapter fallback is reached — but it is checklist row 41's shape (one input read in
+      several places, error handling drifting between them) and the same class as the
+      `--sigstore-trusted-root` fail-open fixed alongside it.
+
+      The old shape carried a second, user-visible defect: "try ReadFile, fall back to literal
+      on any error" silently turned a mistyped filename into nonsense key bytes, which surfaced
+      later as "signature verification failed" — a message that sends the reader hunting for a
+      tampered artifact when the real problem is a typo.
+    decision: |
+      Shipped 2026-08-19. A new shared `keymaterialutils` helper resolves a key setting to PEM
+      bytes and is used at all six read sites. It classifies by *content* rather than by whether
+      a file happens to exist: anything containing a PEM preamble is literal key material, and
+      anything else is a path that must be readable — so a bad path now fails as a bad path,
+      wrapping `fs.ErrNotExist` and naming the variable at fault. A readable file with no PEM
+      marker is rejected here rather than left to produce an opaque verifier error.
+
+      A set-but-unresolvable candidate fails the chain instead of falling through to the next
+      variable: continuing would verify against a different key than the operator named, which
+      is the substitution they set the value to prevent.
+
+      Enforced, not just documented: `internal/architecture_test.go`'s
+      `TestPublicKeyEnvVarsGoThroughTheSharedResolver` bans the
+      `[]byte(os.Getenv("POKKUM_*_PUBKEY"))` shape across every first-party source root, since a
+      comment would not have stopped the next bare conversion. The pattern is self-checked
+      against a known-bad string so a regex that stopped matching cannot make the test pass by
+      vacuity.
+    flags: ["--cache-verify-key", "POKKUM_CACHE_PUBKEY", "POKKUM_SIGNING_PUBKEY", "POKKUM_BASE_IMAGE_PUBKEY"]
+    impl:
+      - internal/adapters/keymaterialutils/keymaterialutils.go
+      - cmd/pokkum/build.go
+      - internal/adapters/remotecacheutils/remotecacheutils.go
+      - internal/adapters/provenance/resolver.go
+      - internal/adapters/baseimage/resolver.go
+    related: ["remote-cache-verify-key-inheritance", "trusted-root-bytes"]
+

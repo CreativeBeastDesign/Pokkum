@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/ignoreutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/keymaterialutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/poolutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/transportutils"
@@ -616,13 +617,32 @@ func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Has
 			}
 			pubKey := req.Verify.PublicKeyPEM
 			if len(pubKey) == 0 {
-				pubKey = []byte(os.Getenv("POKKUM_CACHE_PUBKEY"))
-			}
-			if len(pubKey) == 0 {
-				pubKey = []byte(os.Getenv("POKKUM_SIGNING_PUBKEY"))
-			}
-			if len(pubKey) == 0 {
-				pubKey = []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
+				// Each variable may hold PEM text or a path to a PEM file, and
+				// resolution goes through the shared helper so it means the same
+				// here as it does at the composition root. These used to be bare
+				// []byte(os.Getenv(...)) conversions, accepting literal PEM
+				// only, while cmd/pokkum resolved a path for the same variable —
+				// so POKKUM_CACHE_PUBKEY meant two different things depending on
+				// which path consumed it (checklist row 41).
+				//
+				// A value that is set but unresolvable is an error rather than a
+				// reason to try the next variable: continuing would verify
+				// against a different key than the operator named.
+				resolved, source, rerr := keymaterialutils.ResolveFirst(
+					keymaterialutils.Candidate{Source: "POKKUM_CACHE_PUBKEY", Setting: os.Getenv("POKKUM_CACHE_PUBKEY")},
+					keymaterialutils.Candidate{Source: "POKKUM_SIGNING_PUBKEY", Setting: os.Getenv("POKKUM_SIGNING_PUBKEY")},
+					keymaterialutils.Candidate{Source: "POKKUM_BASE_IMAGE_PUBKEY", Setting: os.Getenv("POKKUM_BASE_IMAGE_PUBKEY")},
+				)
+				if rerr != nil {
+					errs = append(errs, fmt.Errorf("layer %d: %w", i, rerr))
+					continue
+				}
+				if len(resolved) > 0 {
+					pubKey = resolved
+					if c.log != nil {
+						c.log.DebugContext(ctx, "remote cache: resolved cache-verification key", "source", source, "repo", repo)
+					}
+				}
 			}
 			if len(pubKey) == 0 && len(req.Verify.SigningPublicKeyPEM) > 0 {
 				// Last resort, and deliberately last: every explicit source

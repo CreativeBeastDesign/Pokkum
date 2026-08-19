@@ -123,6 +123,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/keymaterialutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/transportutils"
@@ -1052,7 +1053,14 @@ func (r *Resolver) verifyBaseImage(ctx context.Context, ref, upstreamRef string,
 					"(pass baseimage.WithCosignSigner from the composition root); refusing to treat the image as verified: %w",
 				ref, core.ErrBaseSignatureInvalid)
 		}
-		pubKeyPEM = []byte(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"))
+		// May hold PEM text or a path to a PEM file, resolved through the shared
+		// helper so it means the same thing here as at the composition root and
+		// in every other consumer of this variable.
+		var envErr error
+		pubKeyPEM, envErr = keymaterialutils.Resolve(os.Getenv("POKKUM_BASE_IMAGE_PUBKEY"), "POKKUM_BASE_IMAGE_PUBKEY")
+		if envErr != nil {
+			return fmt.Errorf("baseimage: %s: %w: %w", ref, envErr, core.ErrBaseSignatureInvalid)
+		}
 		if len(pubKeyPEM) == 0 {
 			// There is no fallback key. A shared, unattributed placeholder
 			// public key used to live here (DefaultBaseImagePublicKeyPEM) —
