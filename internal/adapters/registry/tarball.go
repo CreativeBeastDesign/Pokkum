@@ -93,6 +93,13 @@ func (a *Adapter) Write(ctx context.Context, req ports.TarballRequest) (ports.Pu
 		a.logger().Debug("tarball: could not compute size", "path", req.Path, "err", err)
 	}
 
+	// tagToImage's values are exactly what tarball.MultiWriteToFile just
+	// wrote, one manifest.json entry per image — and, per the docker-save
+	// format, with no annotations field at all. Warn here, once per distinct
+	// image actually written, naming precisely which annotation keys were
+	// just dropped.
+	warnDroppedAnnotations(a.logger(), "tarball", imagesOf(tagToImage)...)
+
 	a.logger().Info("wrote tarball", "path", req.Path, "repo", req.Repo, "digest", digest.String(), "tags", written)
 
 	return ports.PublishResult{
@@ -120,6 +127,20 @@ func reserveTempFile(dir, base string) (string, error) {
 		return "", cerr
 	}
 	return path, nil
+}
+
+// imagesOf returns the v1.Image values of m. A single-image write maps every
+// tag to the same v1.Image; a flattened index maps distinct tags to distinct
+// per-platform images. Either way this is exactly the set of manifests
+// tarball.MultiWriteToFile writes, so it is the correct input for
+// warnDroppedAnnotations: nothing more (a tag actually written), nothing
+// less (every platform, not just one).
+func imagesOf(m map[name.Tag]v1.Image) []v1.Image {
+	out := make([]v1.Image, 0, len(m))
+	for _, img := range m {
+		out = append(out, img)
+	}
+	return out
 }
 
 // flattenIndexTags expands a multi-platform index into one tar entry per

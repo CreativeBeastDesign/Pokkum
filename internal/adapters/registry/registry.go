@@ -48,6 +48,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -267,6 +269,99 @@ func manifestSize(img v1.Image) (int64, error) {
 		total += l.Size
 	}
 	return total, nil
+}
+
+// annotationKeys returns the sorted, de-duplicated set of every manifest
+// annotation key carried by any of imgs. Sorting matters here beyond
+// cosmetics: the result feeds straight into a warning message
+// (warnDroppedAnnotations below), and Go's map iteration order is randomized
+// per-process, so an unsorted result would make that message's wording
+// non-deterministic across otherwise-identical runs.
+func annotationKeys(imgs ...v1.Image) ([]string, error) {
+	set := make(map[string]struct{})
+	for _, img := range imgs {
+		m, err := img.Manifest()
+		if err != nil {
+			return nil, fmt.Errorf("read manifest: %w", err)
+		}
+		for k := range m.Annotations {
+			set[k] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return nil, nil
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// warnDroppedAnnotations logs an operator-facing warning naming every
+// manifest annotation key that dest (a human-readable output-mode label,
+// e.g. "tarball" or "docker daemon load") is about to silently discard.
+//
+// Both the legacy docker-save tarball format (tarball.MultiWriteToFile, used
+// by Write in tarball.go) and the classic Docker daemon image store
+// (daemon.Write, used by Load in daemon.go) have no annotations field at
+// all — confirmed against go-containerregistry v0.21.9's own writer struct,
+// see docs/items/tarball-output-drops-annotations.md. Every annotation
+// Pokkum stamps (pokkum.dev/predecessor, pokkum.dev/asset-overlay-sources,
+// pokkum.dev/vex-exemptions, pokkum.dev/env-baked, the
+// org.opencontainers.image.* set, ...) is therefore lost the instant an
+// image carrying any of them is written through one of these two paths.
+//
+// It is a deliberate no-op when none of imgs carries an annotation: an
+// ordinary build without any of the above has nothing to warn about, and a
+// line that fired on every build would train operators to ignore it. This is
+// informational only — dropping annotations is a property of a format the
+// operator explicitly chose (`--output=tarball`/`--local`), not a build
+// defect, so it never escalates past Warn and never affects the outcome
+// (the caller decides pass/fail on its own, independent of this call).
+//
+// A failure to read one of imgs' own manifest is logged at Debug rather than
+// escalated: the caller either just wrote (tarball.go) or is about to write
+// (daemon.go) the very same manifest through its real path, which will
+// surface any genuine problem on its own — guessing at annotations that
+// could not be read would add noise, not signal.
+func warnDroppedAnnotations(log *slog.Logger, dest string, imgs ...v1.Image) {
+	keys, err := annotationKeys(imgs...)
+	if err != nil {
+		log.Debug("could not check for dropped annotations", "dest", dest, "err", err)
+		return
+	}
+	if len(keys) == 0 {
+		return
+	}
+	// Severity has to scale with what is actually lost, or this warning fires
+	// on effectively every tarball build and stops being read. An
+	// org.opencontainers.image.* key is descriptive metadata; Pokkum sets
+	// base.name whenever a base ref exists, so that alone is close to
+	// unconditional. A pokkum.dev/* key is different in kind: those carry build
+	// semantics other Pokkum commands consume, and losing one silently changes
+	// what a later command can conclude — pokkum verify reconstructs the
+	// asset-overlay layer from pokkum.dev/asset-overlay-sources, so an image
+	// whose only output was a tarball cannot be verified that way at all.
+	semantic := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if strings.HasPrefix(k, "pokkum.dev/") {
+			semantic = append(semantic, k)
+		}
+	}
+
+	msg := fmt.Sprintf(
+		"%s output drops OCI annotations: %s (annotations survive a registry push — use --output=push to keep them)",
+		dest, strings.Join(keys, ", "),
+	)
+	if len(semantic) > 0 {
+		msg += fmt.Sprintf(
+			" — %s carry build metadata other pokkum commands read back, so commands depending on them cannot work against this output",
+			strings.Join(semantic, ", "),
+		)
+	}
+	log.Warn(msg, "dest", dest, "dropped_annotations", keys, "dropped_pokkum_annotations", semantic)
 }
 
 // validatePayload reports an error if p does not carry exactly one of Image

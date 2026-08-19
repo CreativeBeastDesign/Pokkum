@@ -1,7 +1,9 @@
 package registry
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +13,8 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -194,4 +198,262 @@ type brokenImage struct{ v1.Image }
 
 func (brokenImage) Layers() ([]v1.Layer, error) {
 	return nil, errors.New("brokenImage: injected failure")
+}
+
+// --- dropped-annotations warning ---------------------------------------------
+//
+// The legacy docker-save tarball format Write emits has no annotations field
+// at all (go-containerregistry v0.21.9's writer struct carries only Config,
+// RepoTags, Layers and LayerSources), so every annotation Pokkum stamps —
+// pokkum.dev/predecessor, pokkum.dev/asset-overlay-sources,
+// org.opencontainers.image.*, etc. — is silently discarded for
+// --output=tarball. See docs/items/tarball-output-drops-annotations.md.
+// These tests prove the fix: a clear, deterministic, Warn-level line that
+// names the exact keys, fired only when the image actually carries any.
+
+// annotatedImage returns img with anns set as manifest-level OCI annotations,
+// the same mechanism internal/adapters/packager uses to stamp
+// pokkum.dev/predecessor and friends onto a real build (mutate.Annotations).
+func annotatedImage(t *testing.T, img v1.Image, anns map[string]string) v1.Image {
+	t.Helper()
+	out, ok := mutate.Annotations(img, anns).(v1.Image)
+	if !ok {
+		t.Fatalf("mutate.Annotations: result is not a v1.Image")
+	}
+	return out
+}
+
+// warnLogMessages decodes every JSON log line in buf and returns the "msg"
+// field of every record logged at WARN level, in the order they were
+// written.
+// captureTarballWarn writes a tarball for an image carrying the given
+// annotations and returns the single Warn-level message produced.
+func captureTarballWarn(t *testing.T, annotations map[string]string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "out.tar")
+	img := annotatedImage(t, randomImage(t), annotations)
+	a, buf := newLoggingAdapter()
+	if _, err := a.Write(context.Background(), ports.TarballRequest{
+		Path:    path,
+		Repo:    "pokkum.local/app",
+		Payload: ports.Payload{Image: img},
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	warnings := warnLogMessages(t, buf)
+	if len(warnings) != 1 {
+		t.Fatalf("warn-level log lines = %d, want exactly 1: %v", len(warnings), warnings)
+	}
+	return warnings[0]
+}
+
+func warnLogMessages(t *testing.T, buf *bytes.Buffer) []string {
+	t.Helper()
+	var msgs []string
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		if rec["level"] == "WARN" {
+			if msg, ok := rec["msg"].(string); ok {
+				msgs = append(msgs, msg)
+			}
+		}
+	}
+	return msgs
+}
+
+// TestTarballWrite_WarnsOnDroppedAnnotations_NamesTheKeys is the core
+// regression test: an image carrying annotations must produce a Warn-level
+// line that names each dropped key by name, not a generic "annotations may
+// be lost" message. The three keys are chosen so that alphabetical order
+// differs from map/insertion order — org.opencontainers.image.revision <
+// pokkum.dev/env-baked < pokkum.dev/predecessor — so a test that only checked
+// "message contains each key" could pass even if the implementation forgot
+// to sort. Asserting the exact string catches that.
+func TestTarballWrite_WarnsOnDroppedAnnotations_NamesTheKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.tar")
+	img := annotatedImage(t, randomImage(t), map[string]string{
+		ports.AnnotationPredecessor:         "sha256:" + strings.Repeat("a", 64),
+		ports.AnnotationEnvBaked:            "PUBLIC_API_URL",
+		"org.opencontainers.image.revision": "abc123",
+	})
+
+	a, buf := newLoggingAdapter()
+	if _, err := a.Write(context.Background(), ports.TarballRequest{
+		Path:    path,
+		Repo:    "pokkum.local/app",
+		Payload: ports.Payload{Image: img},
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	warnings := warnLogMessages(t, buf)
+	if len(warnings) != 1 {
+		t.Fatalf("warn-level log lines = %d, want exactly 1: %v", len(warnings), warnings)
+	}
+	want := "tarball output drops OCI annotations: org.opencontainers.image.revision, pokkum.dev/env-baked, pokkum.dev/predecessor" +
+		" (annotations survive a registry push — use --output=push to keep them)" +
+		" — pokkum.dev/env-baked, pokkum.dev/predecessor carry build metadata other pokkum commands read back," +
+		" so commands depending on them cannot work against this output"
+	if warnings[0] != want {
+		t.Errorf("warning = %q, want %q", warnings[0], want)
+	}
+}
+
+// TestTarballWrite_NoAnnotations_NoWarning proves the flip side: an ordinary
+// image with no annotations at all must not trigger any Warn-level line. A
+// warning that fires on every routine build is noise that trains operators
+// to ignore it — the defect this fixes is silence on the annotated case, not
+// an excuse to add noise to the unannotated one.
+func TestTarballWrite_NoAnnotations_NoWarning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.tar")
+	img := randomImage(t)
+
+	a, buf := newLoggingAdapter()
+	if _, err := a.Write(context.Background(), ports.TarballRequest{
+		Path:    path,
+		Repo:    "pokkum.local/app",
+		Payload: ports.Payload{Image: img},
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if warnings := warnLogMessages(t, buf); len(warnings) != 0 {
+		t.Errorf("warn-level log lines = %v, want none for an unannotated image", warnings)
+	}
+}
+
+// TestTarballWrite_DroppedAnnotationsWarning_Deterministic runs the same
+// annotated write several times over and asserts byte-identical warning
+// text every time. Go's map iteration order is randomized per-process, so
+// this specifically guards against a regression that lists annotation keys
+// in map order instead of sorting them first.
+func TestTarballWrite_DroppedAnnotationsWarning_Deterministic(t *testing.T) {
+	anns := map[string]string{
+		ports.AnnotationVEXExemptions:       "CVE-2024-0001",
+		ports.AnnotationAssetOverlaySources: "sha256:" + strings.Repeat("b", 64),
+		"org.opencontainers.image.source":   "https://example.com/repo",
+	}
+
+	var messages []string
+	for i := 0; i < 5; i++ {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "out.tar")
+		img := annotatedImage(t, randomImage(t), anns)
+
+		a, buf := newLoggingAdapter()
+		if _, err := a.Write(context.Background(), ports.TarballRequest{
+			Path:    path,
+			Repo:    "pokkum.local/app",
+			Payload: ports.Payload{Image: img},
+		}); err != nil {
+			t.Fatalf("Write (run %d): %v", i, err)
+		}
+		warnings := warnLogMessages(t, buf)
+		if len(warnings) != 1 {
+			t.Fatalf("run %d: warn-level log lines = %d, want exactly 1: %v", i, len(warnings), warnings)
+		}
+		messages = append(messages, warnings[0])
+	}
+
+	for i := 1; i < len(messages); i++ {
+		if messages[i] != messages[0] {
+			t.Errorf("run %d warning = %q, want identical to run 0's %q", i, messages[i], messages[0])
+		}
+	}
+	wantSorted := "org.opencontainers.image.source, pokkum.dev/asset-overlay-sources, pokkum.dev/vex-exemptions"
+	if !strings.Contains(messages[0], wantSorted) {
+		t.Errorf("warning = %q, want it to contain sorted key list %q", messages[0], wantSorted)
+	}
+}
+
+// TestTarballWrite_WarnsOnDroppedAnnotations_IndexFlattening proves the
+// index/multi-platform path: tagToImage flattens each platform to its own
+// tar entry (see flattenIndexTags), and each child's own manifest
+// annotations are what is actually discarded — so the warning must name
+// every key present on any child, not just the outer index's own
+// (nonexistent, in this codepath) annotations.
+func TestTarballWrite_WarnsOnDroppedAnnotations_IndexFlattening(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.tar")
+
+	amd64 := annotatedImage(t, imageWithPlatform(t, "linux", "amd64"), map[string]string{
+		ports.AnnotationPredecessor: "sha256:" + strings.Repeat("c", 64),
+	})
+	arm64 := annotatedImage(t, imageWithPlatform(t, "linux", "arm64"), map[string]string{
+		ports.AnnotationEnvBaked: "PUBLIC_API_URL",
+	})
+	idx := mutate.AppendManifests(
+		empty.Index,
+		mutate.IndexAddendum{Add: amd64, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "amd64"}}},
+		mutate.IndexAddendum{Add: arm64, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "arm64"}}},
+	)
+
+	a, buf := newLoggingAdapter()
+	if _, err := a.Write(context.Background(), ports.TarballRequest{
+		Path:    path,
+		Repo:    "pokkum.local/app",
+		Payload: ports.Payload{Index: idx},
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	warnings := warnLogMessages(t, buf)
+	if len(warnings) != 1 {
+		t.Fatalf("warn-level log lines = %d, want exactly 1: %v", len(warnings), warnings)
+	}
+	want := "tarball output drops OCI annotations: pokkum.dev/env-baked, pokkum.dev/predecessor" +
+		" (annotations survive a registry push — use --output=push to keep them)" +
+		" — pokkum.dev/env-baked, pokkum.dev/predecessor carry build metadata other pokkum commands read back," +
+		" so commands depending on them cannot work against this output"
+	if warnings[0] != want {
+		t.Errorf("warning = %q, want %q", warnings[0], want)
+	}
+}
+
+// TestTarballWrite_DroppedAnnotationsWarning_CallsOutPokkumSemantics pins the
+// distinction that keeps this warning worth reading. Pokkum sets
+// org.opencontainers.image.base.name whenever a base ref exists, so a warning
+// listing only descriptive keys fires on close to every tarball build. Losing a
+// pokkum.dev/* key is a different kind of loss: those are read back by other
+// pokkum commands (verify reconstructs the asset-overlay layer from
+// pokkum.dev/asset-overlay-sources), so that case must be called out
+// specifically rather than blended into the same sentence.
+func TestTarballWrite_DroppedAnnotationsWarning_CallsOutPokkumSemantics(t *testing.T) {
+	t.Run("descriptive only: no semantics clause", func(t *testing.T) {
+		msg := captureTarballWarn(t, map[string]string{
+			"org.opencontainers.image.base.name": "gcr.io/distroless/cc-debian12:nonroot",
+		})
+		if strings.Contains(msg, "other pokkum commands read back") {
+			t.Errorf("descriptive-only annotations must not trigger the build-metadata clause, got:\n%s", msg)
+		}
+		if !strings.Contains(msg, "org.opencontainers.image.base.name") {
+			t.Errorf("expected the dropped key to still be named, got:\n%s", msg)
+		}
+	})
+
+	t.Run("pokkum.dev key: names it in the semantics clause", func(t *testing.T) {
+		msg := captureTarballWarn(t, map[string]string{
+			"org.opencontainers.image.base.name": "gcr.io/distroless/cc-debian12:nonroot",
+			"pokkum.dev/asset-overlay-sources":   "sha256:aaaa",
+		})
+		if !strings.Contains(msg, "other pokkum commands read back") {
+			t.Errorf("a dropped pokkum.dev/* annotation must trigger the build-metadata clause, got:\n%s", msg)
+		}
+		// The clause must name the semantic key specifically, not just repeat
+		// the full list — otherwise it adds no information over the first half.
+		idx := strings.Index(msg, "other pokkum commands read back")
+		clause := msg[:idx]
+		lastSep := strings.LastIndex(clause, " — ")
+		if lastSep < 0 || !strings.Contains(clause[lastSep:], "pokkum.dev/asset-overlay-sources") {
+			t.Errorf("expected the semantics clause to name pokkum.dev/asset-overlay-sources, got:\n%s", msg)
+		}
+	})
 }

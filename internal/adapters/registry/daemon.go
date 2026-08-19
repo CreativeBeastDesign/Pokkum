@@ -86,6 +86,11 @@ func (a *Adapter) Load(ctx context.Context, req ports.LoadRequest) (ports.Publis
 		a.logger().Debug("load: could not compute size", "repo", req.Repo, "err", err)
 	}
 
+	// daemon.Write above just streamed img through the same docker-save
+	// tarball format as Write in tarball.go, which has no annotations field
+	// at all — see warnDroppedAnnotations' doc comment.
+	warnDroppedAnnotations(a.logger(), "docker daemon load", img)
+
 	a.logger().Info("loaded image into docker daemon", "repo", req.Repo, "tag", primary.String(), "digest", digest.String())
 
 	return ports.PublishResult{

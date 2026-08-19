@@ -153,3 +153,38 @@ func TestLoad_DaemonIntegration(t *testing.T) {
 		t.Errorf("Ref is empty")
 	}
 }
+
+// TestLoad_DaemonIntegration_WarnsOnDroppedAnnotations proves the `--local`
+// half of docs/items/tarball-output-drops-annotations.md: daemon.Write
+// streams img through the same annotations-less docker-save format as
+// tarball.go's Write, so Load must warn the same way. Gated on a real
+// daemon, like TestLoad_DaemonIntegration above, since selectForDaemon's
+// caller path is only reachable past a live Ping.
+func TestLoad_DaemonIntegration_WarnsOnDroppedAnnotations(t *testing.T) {
+	if !dockerAvailable(t) {
+		t.Skip("no docker daemon reachable, skipping daemon integration test")
+	}
+
+	img := annotatedImage(t, randomImage(t), map[string]string{
+		ports.AnnotationPredecessor: "sha256:" + strings.Repeat("a", 64),
+	})
+
+	a, buf := newLoggingAdapter()
+	if _, err := a.Load(context.Background(), ports.LoadRequest{
+		Repo:    "pokkum-w11-test/load-warn",
+		Tags:    []string{"itest"},
+		Payload: ports.Payload{Image: img},
+	}); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	warnings := warnLogMessages(t, buf)
+	if len(warnings) != 1 {
+		t.Fatalf("warn-level log lines = %d, want exactly 1: %v", len(warnings), warnings)
+	}
+	want := "docker daemon load output drops OCI annotations: pokkum.dev/predecessor" +
+		" (annotations survive a registry push — use --output=push to keep them)"
+	if warnings[0] != want {
+		t.Errorf("warning = %q, want %q", warnings[0], want)
+	}
+}
