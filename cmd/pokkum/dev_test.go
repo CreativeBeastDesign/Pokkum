@@ -28,6 +28,11 @@ func TestNewDevCommand_Flags(t *testing.T) {
 	if watchFlag == nil || watchFlag.DefValue != "true" {
 		t.Fatalf("--watch flag default = %v, want 'true'", watchFlag)
 	}
+
+	noContainerFlag := cmd.Flags().Lookup("no-container")
+	if noContainerFlag == nil || noContainerFlag.DefValue != "false" {
+		t.Fatalf("--no-container flag default = %v, want 'false'", noContainerFlag)
+	}
 }
 
 func TestGetLatestModTime(t *testing.T) {
