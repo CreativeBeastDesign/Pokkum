@@ -49,6 +49,9 @@ import (
 // TestFixtureDrivenE2E and friends) uses testdata/fixtures/sveltekit-basic,
 // whose adapter is Pokkum's own fake @jesterkit/exe-sveltekit test double and
 // which drives StrategyExe — neither of those two things is true here.
+// ProjectDir is a copyFixtureProject scratch copy of this fixture, not the
+// fixture directory itself (see the isolation note at this function's first
+// use of copyFixtureProject, below).
 //
 // BaseImages and the supervisor provider are faked, matching
 // TestRealBuildIsReproducibleAcrossRuns: resolving a real base image needs
@@ -75,6 +78,16 @@ func TestRealBuild_StrategyLayered_PrerenderedRoute(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(fixtureDir, "node_modules")); statErr != nil {
 		t.Skipf("fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, statErr)
 	}
+	// This drives the real bunexec.Compiler (bun run build + adapter-node)
+	// against ProjectDir. copyFixtureProject gives it an isolated scratch
+	// copy — with node_modules symlinked back to fixtureDir, not copied —
+	// instead of building against testdata/fixtures/sveltekit-adapter-node
+	// directly, per mem:self_review_checklist and Lessons.md's
+	// shared-fixture-mutation entry: this file's own doc comment above used
+	// to name this as one of the tests that built against the fixture
+	// in-place. Skip messages below still name the original fixtureDir (the
+	// directory a human would actually run `bun install` in), not the copy.
+	projectDir := copyFixtureProject(t, fixtureDir)
 
 	tarballPath := filepath.Join(t.TempDir(), "image.tar")
 	deps := core.Deps{
@@ -90,7 +103,7 @@ func TestRealBuild_StrategyLayered_PrerenderedRoute(t *testing.T) {
 	}
 
 	req := core.BuildRequest{
-		ProjectDir: fixtureDir,
+		ProjectDir: projectDir,
 		Platforms:  []ports.Platform{ports.LinuxAMD64},
 		Compile:    core.CompileOptions{Strategy: core.StrategyLayered},
 		Output: core.OutputOptions{

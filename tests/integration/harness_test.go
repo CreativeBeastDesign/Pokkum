@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -368,6 +369,92 @@ var (
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// skipDirNames are top-level entries copyFixtureProject never copies:
+// build tool output that a real build regenerates fresh in the scratch
+// project directory, plus node_modules, which is symlinked back to the
+// original fixture instead (dozens of MB of real installed dependencies —
+// copying it would make every run of an isolated test slow for no benefit,
+// since nothing any of these tests exist to guard touches dependency
+// *installation*).
+var skipDirNames = map[string]bool{
+	"node_modules": true,
+	".svelte-kit":  true,
+	".pokkum":      true,
+	"build":        true,
+	".git":         true,
+}
+
+// copyFixtureProject copies fixtureDir's real source tree (package.json,
+// bun.lock, src/, static/, vite.config.ts, etc.) into a fresh t.TempDir(),
+// symlinking node_modules back to the original rather than copying it, and
+// returns the copy's path.
+//
+// Every test in this package that drives a real build (bunexec.Compiler,
+// core.Build, or a Compiler double that writes fixture files) against a
+// testdata/fixtures/* project MUST call this first and use its return value
+// as ProjectDir, rather than the checked-out fixture path directly. Building
+// in place leaves .svelte-kit/, .pokkum/, build/, and (for a real
+// BaseImageResolver) pokkum.lock behind in a directory this package's other
+// tests — and other test packages/agents working this codebase — also read
+// from, making results depend on what a previous test or run left behind
+// (see Lessons.md's 2026-08-19 "shared fixture mutation" entry and
+// mem:self_review_checklist). copyFixtureProject was originally local to
+// TestRuntimeSmoke_LayeredStrategy_BootsAndServes (runtime_smoke_test.go),
+// the first test in this package to need it; it moved here once
+// TestFixtureDrivenE2E_Static, TestFixtureDrivenE2E_Static_SPAFallback,
+// TestFixtureDrivenE2E_AllStrategies, TestRealBuildIsReproducibleAcrossRuns,
+// and TestRealBuild_StrategyLayered_PrerenderedRoute all needed the same
+// copy-and-symlink shape.
+func copyFixtureProject(t *testing.T, fixtureDir string) string {
+	t.Helper()
+	dst := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("copyFixtureProject: mkdir %q: %v", dst, err)
+	}
+
+	walkErr := filepath.WalkDir(fixtureDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(fixtureDir, path)
+		if relErr != nil {
+			return relErr
+		}
+		if rel == "." {
+			return nil
+		}
+		if d.IsDir() {
+			if skipDirNames[d.Name()] {
+				return filepath.SkipDir
+			}
+			return os.MkdirAll(filepath.Join(dst, rel), 0o755)
+		}
+		if !d.Type().IsRegular() {
+			// The fixture is not expected to contain symlinks of its own
+			// (node_modules' internal symlinks are never visited, since the
+			// whole directory is skipped above); skip anything unexpected
+			// rather than mishandling it.
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		return os.WriteFile(filepath.Join(dst, rel), data, 0o644)
+	})
+	if walkErr != nil {
+		t.Fatalf("copyFixtureProject: copy %q to %q: %v", fixtureDir, dst, walkErr)
+	}
+
+	srcNodeModules := filepath.Join(fixtureDir, "node_modules")
+	if _, statErr := os.Stat(srcNodeModules); statErr == nil {
+		if err := os.Symlink(srcNodeModules, filepath.Join(dst, "node_modules")); err != nil {
+			t.Fatalf("copyFixtureProject: symlink node_modules: %v", err)
+		}
+	}
+	return dst
 }
 
 func writeTempBinary(t *testing.T, name string, content []byte) string {

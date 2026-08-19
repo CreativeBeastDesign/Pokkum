@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -248,80 +247,16 @@ func isNetworkError(err error) bool {
 	return false
 }
 
-// skipDirNames are top-level entries copyFixtureProject never copies:
-// build tool output that a real build regenerates fresh in the scratch
-// project directory, plus node_modules, which is symlinked back to the
-// original fixture instead (74MB of real installed dependencies — copying
-// it would make every run of this test slow for no benefit, since nothing
-// about this test's regression target touches dependency *installation*).
-var skipDirNames = map[string]bool{
-	"node_modules": true,
-	".svelte-kit":  true,
-	".pokkum":      true,
-	"build":        true,
-	".git":         true,
-}
-
-// copyFixtureProject copies fixtureDir's real source tree (package.json,
-// bun.lock, src/, static/, vite.config.ts, etc.) into a fresh t.TempDir(),
-// symlinking node_modules back to the original rather than copying it, and
-// returns the copy's path.
-//
-// This exists so a real BaseImageResolver's pokkum.lock write (see this
-// test's own doc comment) — and the .svelte-kit/.pokkum/build scratch a real
-// bun build produces — land in a directory this test's own t.TempDir()
-// cleanup owns, not in testdata/fixtures/sveltekit-adapter-node, which three
-// other tests/agents in this codebase also read from and (in
-// layered_prerendered_e2e_test.go's case) build against directly.
-func copyFixtureProject(t *testing.T, fixtureDir string) string {
-	t.Helper()
-	dst := filepath.Join(t.TempDir(), "project")
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		t.Fatalf("copyFixtureProject: mkdir %q: %v", dst, err)
-	}
-
-	walkErr := filepath.WalkDir(fixtureDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, relErr := filepath.Rel(fixtureDir, path)
-		if relErr != nil {
-			return relErr
-		}
-		if rel == "." {
-			return nil
-		}
-		if d.IsDir() {
-			if skipDirNames[d.Name()] {
-				return filepath.SkipDir
-			}
-			return os.MkdirAll(filepath.Join(dst, rel), 0o755)
-		}
-		if !d.Type().IsRegular() {
-			// The fixture is not expected to contain symlinks of its own
-			// (node_modules' internal symlinks are never visited, since the
-			// whole directory is skipped above); skip anything unexpected
-			// rather than mishandling it.
-			return nil
-		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		return os.WriteFile(filepath.Join(dst, rel), data, 0o644)
-	})
-	if walkErr != nil {
-		t.Fatalf("copyFixtureProject: copy %q to %q: %v", fixtureDir, dst, walkErr)
-	}
-
-	srcNodeModules := filepath.Join(fixtureDir, "node_modules")
-	if _, statErr := os.Stat(srcNodeModules); statErr == nil {
-		if err := os.Symlink(srcNodeModules, filepath.Join(dst, "node_modules")); err != nil {
-			t.Fatalf("copyFixtureProject: symlink node_modules: %v", err)
-		}
-	}
-	return dst
-}
+// copyFixtureProject and its skipDirNames table used to live here, since this
+// was the first test in the package to need them. They moved to
+// harness_test.go (2026-08-19, the "isolate every real-build test from the
+// shared testdata/fixtures tree" pass) once TestFixtureDrivenE2E_Static,
+// TestFixtureDrivenE2E_Static_SPAFallback, TestFixtureDrivenE2E_AllStrategies,
+// TestRealBuildIsReproducibleAcrossRuns, and
+// TestRealBuild_StrategyLayered_PrerenderedRoute all needed the same helper —
+// see harness_test.go's doc comment on copyFixtureProject for why an isolated
+// scratch copy per test, rather than building against the fixture in place,
+// is required at all.
 
 // uniqueName returns a name unique enough that parallel or repeated
 // invocations of this test (or a stale leftover from a previous crashed

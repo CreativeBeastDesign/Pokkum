@@ -77,6 +77,16 @@ func TestFixtureDrivenE2E_AllStrategies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Abs fixture path: %v", err)
 	}
+	// mockCompiler.Prepare (e2e_test.go) writes real files into
+	// <ProjectDir>/build (StrategyLayered) and <ProjectDir>/.svelte-kit/output
+	// (StrategyStatic) for every subtest below — an isolated scratch copy per
+	// mem:self_review_checklist and Lessons.md's shared-fixture-mutation entry,
+	// not the checked-out fixture directly, since three subtests share this
+	// one ProjectDir sequentially and other tests/packages read the same
+	// fixture. One copy for the whole table is enough: the three subtests
+	// write to disjoint subpaths (build/, .svelte-kit/jesterkit-sveltekit/,
+	// .svelte-kit/output) and run in fixed, non-parallel table order.
+	fixtureDir = copyFixtureProject(t, fixtureDir)
 
 	type wantLayer struct {
 		// index is the layer's position in img.Layers(), where index 0 is

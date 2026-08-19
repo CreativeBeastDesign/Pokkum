@@ -62,6 +62,14 @@ func TestRealBuildIsReproducibleAcrossRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Abs fixture path: %v", err)
 	}
+	// This runs a real bunexec.Compiler (bun run build + bun build --compile)
+	// five times below. An isolated scratch copy, not the checked-out fixture
+	// directly, per mem:self_review_checklist and Lessons.md's
+	// shared-fixture-mutation entry — copied once and reused for all 5 runs,
+	// preserving "same input, run repeatedly" while not leaving build
+	// scratch (.svelte-kit/, .pokkum/) behind in a directory other
+	// tests/packages also read from.
+	fixtureDir = copyFixtureProject(t, fixtureDir)
 
 	// The bug this test guards against was intermittent — 2 of 5 consecutive
 	// `bun run build` runs diverged when it was measured — so fewer than 5

@@ -34,12 +34,22 @@ runtime.
   unreachable on its documented ports until this fix. Undetected for as long
   as it was because every existing test used `httptest`'s own substitute
   listener, never the real `ListenAndServe` bind path. See `Lessons.md`.
-- **Single-port mode (`PORT == POKKUM_PROBE_PORT`) has no working probes at
-  all — known, decided, not yet implemented.** The `if cfg.Port !=
-  cfg.ProbePort` guard skips the second listener on the assumption the content
-  mux covers probes too; it doesn't. Decision: reject the collapsed
-  configuration outright rather than merge mux handlers or silently document
-  it. Tracked in `Roadmap.md`.
+- **Single-port mode (`PORT == POKKUM_PROBE_PORT`) is now rejected outright at
+  startup (fixed 2026-08-19).** `config.go`'s `validate()` returns an error
+  naming both `PORT` and `POKKUM_PROBE_PORT` when they collide (exit code
+  `exitUsage`=2, the same convention as every other config-shape error in this
+  binary), reached from every entry point — env, flags, and their defaults
+  colliding (e.g. `PORT=8081` against `defaultProbePort=8081`). With the
+  collapsed case now structurally unreachable past config parsing, `main.go`'s
+  `if cfg.Port != cfg.ProbePort` guard around the probe listener was dead code
+  and was removed — both `http.Server`s now start unconditionally. Confirmed
+  build-time: `internal/core/model.go`'s `validateRuntime` (called
+  unconditionally from `pipeline.go`'s `Build()` for every strategy including
+  static) already rejects `rc.Port == rc.ProbePort` before packaging, so
+  `pokkum build` could never have produced a collapsed static image in the
+  first place — the runtime check in `pokkum-static` is defense-in-depth for
+  configs assembled outside `pokkum build` (hand-written manifests, `.pokkum.yaml`
+  edited directly, etc.), not a build-time gap.
 - **Opt-in SPA fallback (implemented 2026-08-17):** `POKKUM_STATIC_FALLBACK` / `-fallback`,
   default empty = plain 404 (honest 404s preserved). When set to an in-image file path,
   unmatched GET/HEAD routes serve that file with 200 via the SAME `serveFile` negotiation

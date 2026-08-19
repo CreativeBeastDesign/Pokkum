@@ -86,17 +86,18 @@ func (m *staticFixtureCompiler) Prepare(_ context.Context, req ports.PrepareRequ
 	// SvelteKit static staging tree.
 	outputDir := filepath.Join(req.ProjectDir, ".svelte-kit", "output")
 
-	// req.ProjectDir is a real, on-disk fixture directory shared across every
-	// test in this file (and across repeated runs) — not a fresh t.TempDir()
-	// per call. A real SvelteKit build always starts from a clean output
-	// directory (adapter-static's own adapt() hook calls builder.rimraf
-	// before writing), so this fixture must too: without this reset, a
-	// second Prepare call on the same fixtureDir (e.g.
-	// TestFixtureDrivenE2E_Static_SPAFallback running after
-	// TestFixtureDrivenE2E_Static) would find the PRIOR run's already-
-	// flattened prerendered/index.html still on disk, then collide with it
-	// when writing this run's fresh prerendered/pages/index.html and
-	// flattening again.
+	// req.ProjectDir is now an isolated per-test scratch copy (see
+	// copyFixtureProject, called by both callers of staticFixtureCompiler in
+	// this file) rather than the shared, checked-out fixture directory
+	// directly, so a stale output dir from a genuinely PRIOR test run can no
+	// longer reach this call. This reset is kept anyway, as defense in depth
+	// and because it mirrors a real SvelteKit build's own behavior (adapter-
+	// static's adapt() hook calls builder.rimraf before writing): if this
+	// mock's Prepare or a future caller is ever invoked twice against the
+	// same ProjectDir (e.g. a copy shared across subtests, the way
+	// strategy_e2e_test.go's TestFixtureDrivenE2E_AllStrategies reuses one
+	// copy), a second call must not collide with the first run's already-
+	// flattened prerendered/index.html.
 	if err := os.RemoveAll(outputDir); err != nil {
 		return ports.PrepareResult{}, fmt.Errorf("staticFixtureCompiler: prepare: reset output dir: %w", err)
 	}
@@ -266,6 +267,11 @@ func TestFixtureDrivenE2E_Static(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Abs fixture path: %v", err)
 	}
+	// staticFixtureCompiler.Prepare writes real files into
+	// <ProjectDir>/.svelte-kit/output — an isolated scratch copy, not the
+	// checked-out fixture directly, per mem:self_review_checklist and
+	// Lessons.md's shared-fixture-mutation entry.
+	fixtureDir = copyFixtureProject(t, fixtureDir)
 
 	repoName := harness.Repo("sveltekit-static-app")
 
@@ -559,6 +565,9 @@ func TestFixtureDrivenE2E_Static_SPAFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Abs fixture path: %v", err)
 	}
+	// See TestFixtureDrivenE2E_Static's identical note: staticFixtureCompiler
+	// writes into ProjectDir, so this needs its own isolated scratch copy.
+	fixtureDir = copyFixtureProject(t, fixtureDir)
 
 	repoName := harness.Repo("sveltekit-static-spa-app")
 
