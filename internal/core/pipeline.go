@@ -1944,6 +1944,40 @@ func checkCtx(ctx context.Context, stage string) error {
 //
 // stage names the log/error context (e.g. "pre-build source", "post-build
 // output") purely for operator-facing messages; it is not interpreted.
+// generatedOutputDirs are directory names that conventionally hold build output
+// for this ecosystem. Used only to phrase a suggestion — nothing is skipped on
+// the strength of a name, because these are conventions and a project may keep
+// real source in any of them.
+var generatedOutputDirs = []string{"build", "dist", "out", ".output", ".vercel", ".netlify", ".next"}
+
+// generatedDirsAmong returns, sorted and deduplicated, the conventional
+// output-directory prefixes present in the findings.
+func generatedDirsAmong(matches []ports.SecretMatch) []string {
+	seen := map[string]bool{}
+	for _, m := range matches {
+		// Compare the first path segment only: a "build" anywhere deeper is far
+		// more likely to be a real source directory than generated output.
+		first := m.FilePath
+		if i := strings.IndexAny(first, "/\\"); i >= 0 {
+			first = first[:i]
+		}
+		for _, d := range generatedOutputDirs {
+			if first == d {
+				seen[d] = true
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for d := range seen {
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // maxReportedSecretMatches caps how many locations a failure reports. A minified
 // bundle is one logical line, and every rule reports every match on it, so a
 // single inlined config object can produce hundreds — emitting all of them
@@ -2018,6 +2052,19 @@ func logSecretMatches(log *slog.Logger, stage string, matches []ports.SecretMatc
 	// secret, that is the secret, in a log and then in a committed config file.
 	// The file:line above is enough to write a pattern from after looking, and
 	// looking is the step that distinguishes a false positive from a real leak.
+	// Pre-build findings inside a conventional output directory are almost always
+	// a previous run's artifacts rather than source. pokkum init's default
+	// .pokkumignore excludes build/, but init never rewrites an existing file, so
+	// a project initialised before that default landed keeps scanning its own
+	// output and has no way to guess why. Naming the directory is what turns that
+	// into a one-line fix.
+	if dirs := generatedDirsAmong(sorted); len(dirs) > 0 {
+		log.Warn("secret guard: some findings are in directories that usually hold generated build output, "+
+			"not source; if that is the case here, add them to .pokkumignore (pokkum init's default now excludes build/, "+
+			"but it never rewrites an existing .pokkumignore)",
+			"stage", stage, "directories", strings.Join(dirs, ", "))
+	}
+
 	log.Info("secret guard: to accept a finding, mark the line with a comment containing "+
 		ports.AllowSecretMarker+" (on the line or the one above), or add a regex to "+
 		"security.allow_secret_patterns in .pokkum.yaml / pass --allow-secret-pattern. "+

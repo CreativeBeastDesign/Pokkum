@@ -54,8 +54,23 @@ var defaultSecretRules = []rule{
 		Pattern: regexp.MustCompile(`\bAIzaSy[a-zA-Z0-9_-]{33}\b`),
 	},
 	{
-		Name:    "Generic Hardcoded Password Assignment",
-		Pattern: regexp.MustCompile(`(?i)\b(?:password|secret|api_key|token)\s*[:=]\s*["']([^"'\s]{8,})["']`),
+		Name: "Generic Hardcoded Password Assignment",
+		// The value class deliberately excludes JS structural punctuation —
+		// ( ) { } [ ] ; — on top of quotes and whitespace.
+		//
+		// Without that exclusion this rule fired on minified bundles constantly:
+		// a reported false positive captured `,!!_),!_){this.error=` after a
+		// `token:` key, which is code, not a credential. Any 8+ run of
+		// non-quote, non-space bytes qualified, and minified output is full of
+		// such runs.
+		//
+		// Brackets and semicolons are the discriminator rather than a stricter
+		// alphanumeric class, because a real password legitimately contains
+		// punctuation: `p@ss,w0rd!` must still match, while `){this.error=`
+		// must not. Restricting the value to [A-Za-z0-9...] would trade this
+		// false positive for false negatives on exactly the passwords the rule
+		// exists to catch, which is the worse error for a secret scanner.
+		Pattern: regexp.MustCompile(`(?i)\b(?:password|secret|api_key|token)\s*[:=]\s*["']([^"'\s(){}\[\];]{8,})["']`),
 	},
 }
 

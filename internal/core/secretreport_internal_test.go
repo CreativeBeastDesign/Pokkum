@@ -146,3 +146,35 @@ func TestLogSecretMatches_ShowValuesIsOptIn(t *testing.T) {
 		}
 	})
 }
+
+// TestGeneratedDirsAmong pins the hint that turns a confusing pre-build finding
+// into a one-line fix. init's default .pokkumignore excludes build/, but init
+// never rewrites an existing file, so a project initialised earlier keeps
+// scanning its own output with no way to guess why.
+func TestGeneratedDirsAmong(t *testing.T) {
+	t.Run("names conventional output directories", func(t *testing.T) {
+		got := generatedDirsAmong([]ports.SecretMatch{
+			{FilePath: "build/client/_app/immutable/chunks/lZKtnC6z.js"},
+			{FilePath: "src/lib/debugging.ts"},
+			{FilePath: ".output/server/index.mjs"},
+		})
+		if len(got) != 2 || got[0] != ".output" || got[1] != "build" {
+			t.Errorf("got %v, want sorted [.output build]", got)
+		}
+	})
+
+	t.Run("only the first path segment counts", func(t *testing.T) {
+		// A "build" nested deeper is far more likely to be real source — a
+		// build-scripts directory, a fixture — than generated output, and
+		// suggesting it be ignored would be actively bad advice.
+		if got := generatedDirsAmong([]ports.SecretMatch{{FilePath: "src/build/helper.ts"}}); len(got) != 0 {
+			t.Errorf("a nested build/ must not be suggested for ignoring, got %v", got)
+		}
+	})
+
+	t.Run("source-only findings produce no suggestion", func(t *testing.T) {
+		if got := generatedDirsAmong([]ports.SecretMatch{{FilePath: "src/lib/a.ts"}}); got != nil {
+			t.Errorf("no hint expected for source-only findings, got %v", got)
+		}
+	})
+}

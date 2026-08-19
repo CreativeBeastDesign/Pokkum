@@ -51,6 +51,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | Title | Summary | Kind | Status | Commits |
 | --- | --- | --- | --- | --- |
 | [Per-ref pokkum.lock slot for custom --base images](items/custom-base-lock-slot.md) | Give every custom --base reference its own pokkum.lock slot instead of sharing one, since two custom bases in a project still evict each other today. | hardening | shipped | `69914ac` |
+| [The generic secret rule fired on minified code](items/generic-secret-rule-matched-minified-code.md) | Any 8+ run of non-quote, non-space bytes after a password/token/secret key counted as a credential, so minified bundles produced constant false positives. | fix | shipped |  |
 | [POKKUM_*_PUBKEY meant two different things](items/pubkey-env-var-divergence.md) | The same public-key environment variable was resolved as a file path in one place and as literal PEM in another, so its meaning depended on which code path read it. | hardening | shipped |  |
 | [Secret findings gave no usable location in minified output, and build artifacts were scanned as source](items/secret-findings-navigable-in-minified-output.md) | A finding in a 44 KB single-line chunk reported only line 3, and that chunk was a generated build artifact being scanned during the pre-build source stage. | fix | shipped |  |
 | [Secret-guard findings reported a count with no locations](items/secretguard-reports-locations.md) | A failing build said how many secrets it found and nothing about where, so the finding could not be acted on. | fix | shipped |  |
