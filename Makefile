@@ -1,8 +1,26 @@
-.PHONY: help build supervisor static-server test test-short test-integration test-race coverage check-coverage fuzz-smoke check-arch check-embedded-blobs lint fmt verify clean e2e-runtime-smoke
+.PHONY: help build supervisor static-server test test-short test-integration test-race coverage check-coverage fuzz-smoke check-arch check-embedded-blobs lint fmt verify clean e2e-runtime-smoke docs check-docs-freshness
 
 check-arch:  ##  Run hexagonal architecture purity test suite
 	@echo "Checking hexagonal architecture purity..."
 	@go test -v ./internal/architecture_test.go
+
+# docs/roadmap/*.yaml is the single machine-readable source of truth for
+# "what's done / what's next" (see scripts/gen-docs's doc comment for why —
+# eight hand-maintained markdown files drifting from each other and from the
+# code was this project's single most-repeated failure mode, per
+# Lessons.md). `make docs` regenerates every derived file from it.
+docs:  ##  Regenerate docs/Roadmap.md, Shipped.md, Features.md, and docs/items/*.md from docs/roadmap/*.yaml
+	@echo "Regenerating docs from docs/roadmap/*.yaml..."
+	@go run ./scripts/gen-docs
+
+# Regression guard: docs/Roadmap.md, docs/Shipped.md, docs/Features.md, and
+# docs/items/*.md must always be exactly what regenerating from
+# docs/roadmap/*.yaml produces right now — see scripts/check-docs-freshness.sh
+# for the full rationale (same "regeneration must be a no-op" pattern as
+# check-embedded-blobs, applied to generated markdown instead of embedded
+# binaries). Wired into `verify` below; also run in CI (see ci.yml).
+check-docs-freshness:  ##  Verify docs/Roadmap.md/Shipped.md/Features.md/items match docs/roadmap/*.yaml (fails on hand-edits or missed regeneration)
+	@bash scripts/check-docs-freshness.sh
 
 # Guards against the exact incident logged in Lessons.md's 2026-08-19 "no CI
 # job built them" entry recurring in its second half: CI now always rebuilds
@@ -180,6 +198,11 @@ verify:  ##  Full agent verification suite: fmt+vet, lint, adapter tests, CLI bu
 	@echo "  Run with -count=1 deliberately: see check-embedded-blobs' comment for why a plain"
 	@echo "  'go test' cannot be trusted to catch a stale local blob here."
 	@$(MAKE) check-embedded-blobs
+	@echo ""
+	@echo "Extra (beyond the 5 canonical steps) - Roadmap docs freshness guard..."
+	@echo "  Regenerates docs/Roadmap.md/Shipped.md/Features.md/items from docs/roadmap/*.yaml"
+	@echo "  and fails if that changes anything -- see scripts/check-docs-freshness.sh."
+	@$(MAKE) check-docs-freshness
 
 clean:  ##  Clean build artifacts
 	@echo "Cleaning build artifacts..."

@@ -1,0 +1,28 @@
+area: "Developer Experience"
+items:
+  - id: cluster-dev-loop-latency
+    title: "Sub-second cluster dev loop"
+    stage: v1.1
+    status: awaiting-decision
+    kind: dx
+    tier: moat
+    summary: "Decide which of the remaining cluster dev-loop options to build next now that --no-container ships the cheap local-process half."
+    problem: |
+      `pokkum dev` used to go through full image construction and a Docker/Podman daemon on every
+      change — table stakes, not a differentiator, and both external reviews independently flagged
+      the dev loop as the weakest part of the day-to-day experience. `--no-container` (see
+      docs/steps/SubSecondClusterDevLoop.md) already shipped the cheap first option: a
+      hot-reloading local Bun process with no image build at all. What's still undecided is which
+      of the two remaining, more ambitious options to pursue next.
+    options:
+      - title: "pokkum dev --cluster"
+        description: "Watch, rebuild, and sync /app/server + /app/client directly into a running pod via the Kubernetes API, then restart the Bun process — no registry round-trip."
+        tradeoffs: "The actual differentiator (SvelteKit analog of hot-swapping a Go binary), but a materially larger implementation: needs a Kubernetes client, pod exec/copy, and a narrower reimplementation of what Skaffold/Tilt already do generically."
+      - title: "--to-oci-layout=<path> + direct kind/k3d/minikube load"
+        description: "Emit an OCI layout on disk and load it directly into a local cluster, for contributors and CI environments with no daemon at all."
+        tradeoffs: "Cheap and adjacent to existing build code, but doesn't address the actual latency complaint — it's a hermetic-CI nicety, not a faster inner loop."
+    recommendation: ""
+    decision: ""
+    flags: ["--cluster", "--to-oci-layout"]
+    evidence:
+      commits: ["18f056c"]

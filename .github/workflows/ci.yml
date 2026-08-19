@@ -42,6 +42,16 @@ jobs:
       - name: Compiler Build Flags Regression Guard
         run: bash scripts/check-build-flags.sh
 
+      # docs/roadmap/*.yaml is the single machine-readable source of truth
+      # for "what's done / what's next" (see scripts/gen-docs's doc
+      # comment). This regenerates docs/Roadmap.md/Shipped.md/Features.md/
+      # items/*.md from it and fails the build if that changes anything —
+      # same "make verify" step as check-docs-freshness, run here too since
+      # CI runs its own steps rather than `make verify` (same rationale as
+      # the compiler build flags guard above).
+      - name: Roadmap Docs Freshness Guard
+        run: bash scripts/check-docs-freshness.sh
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:

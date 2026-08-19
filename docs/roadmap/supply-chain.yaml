@@ -1,0 +1,39 @@
+area: "Supply Chain & Attestation"
+items:
+  - id: image-signing
+    title: "Image signing with Cosign/DSSE"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Builds are signed via Cosign static-key or DSSE, with a fetch-back-and-reverify step before the build is allowed to report `Signed: true`."
+    flags: ["--sign", "--signing-key", "POKKUM_SIGNING_KEY"]
+    impl:
+      - internal/adapters/cosign/signer.go
+      - internal/core/pipeline.go
+    limitations:
+      - "The placeholder trust-anchor fallback was removed; an unconfigured key now hard-fails instead of silently no-op signing (a breaking change for anyone who relied on the old default)."
+    evidence:
+      commits: ["2f03609"]
+      findings: [14]
+
+  - id: kms-signing
+    title: "KMS-backed signing"
+    stage: v1.2
+    status: open
+    kind: feature
+    tier: foundation
+    summary: "Sign builds using a cloud KMS key instead of a local static key file."
+    problem: |
+      Static-key signing (see [[items/image-signing|Image signing with Cosign/DSSE]]) requires
+      operators to manage a private key file directly, which is a poor fit for teams already
+      using AWS KMS, GCP KMS, or HashiCorp Vault for key custody.
+    options:
+      - title: "Pluggable KMS signer interface"
+        description: "Add a ports.KMSSigner interface with AWS/GCP/Vault adapters, following the existing ports.CosignSigner shape."
+        tradeoffs: "More adapters to maintain long-term; each cloud SDK adds dependency weight the zero-dependency invariant has to account for."
+      - title: "Delegate to cosign's built-in KMS support"
+        description: "Shell out to `cosign sign --key awskms://...` for the KMS case instead of implementing our own client."
+        tradeoffs: "Much less code to write, but couples pokkum to the cosign CLI being installed on PATH — directly contradicts the zero-dependency invariant."
+    recommendation: "Pluggable KMS signer interface, using each cloud's lightweight signing API directly rather than shelling out, to stay dependency-free."
+    flags: ["--signing-key"]
+    related: ["image-signing"]

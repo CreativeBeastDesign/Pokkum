@@ -11,6 +11,10 @@
 # Stray root-level static server build artifact
 /pokkum-static
 
+# Stray root-level artifact from `go build ./scripts/gen-docs/...` (no -o
+# flag defaults the output binary's name to the package directory name).
+/gen-docs
+
 # Generated supervisor binaries
 internal/adapters/supervisor/bin/pokkum-init-*
 
