@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -21,11 +23,21 @@ func escapeCell(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// wikiLink renders a doc-to-doc link in the IDE-resolved wiki-link
-// convention: [[items/<id>|<title>]]. The title is escaped the same as any
-// other table cell content, since wiki links appear inside tables here.
-func wikiLink(id, title string) string {
-	return fmt.Sprintf("[[items/%s|%s]]", id, escapeCell(title))
+// itemLink renders a doc-to-doc link to an item page as a standard markdown
+// link, which resolves in both an IDE and on GitHub (a [[wiki]] link resolves
+// only in the former).
+//
+// fromDir is the repo-relative directory the *linking* document lives in, so
+// the path is correct from both places item links appear: "docs" (Roadmap,
+// Shipped, Features) yields items/<id>.md, while "docs/items" (an item page's
+// own Related section) yields the sibling <id>.md. Hardcoding the items/
+// prefix produced docs/items/items/<id>.md from item pages — a dead link.
+//
+// The title is escaped like any other table cell, since these links appear
+// inside tables.
+func itemLink(fromDir, id, title string) string {
+	target := path.Join(itemsFromDir, id+".md")
+	return fmt.Sprintf("[%s](%s)", escapeCell(title), relLink(fromDir, target))
 }
 
 // relLink computes the relative markdown link from a generated doc file to
@@ -33,9 +45,8 @@ func wikiLink(id, title string) string {
 // "../internal/x/y.go", and relLink("docs/items", "internal/x/y.go") ->
 // "../../internal/x/y.go". fromDir is the repo-relative directory the
 // *linking* document lives in; targetRepoRelPath is the repo-relative path
-// being linked to. Wiki links do not resolve to source files (only to other
-// docs), so every doc->code link in this generator must go through this
-// function instead.
+// being linked to. Every doc->code link in this generator goes through this
+// function, since the depth differs between docs/*.md and docs/items/*.md.
 func relLink(fromDir, targetRepoRelPath string) string {
 	rel, err := filepath.Rel(fromDir, targetRepoRelPath)
 	if err != nil {
@@ -88,4 +99,87 @@ func formatFlags(flags []string) string {
 		parts = append(parts, "`"+f+"`")
 	}
 	return strings.Join(parts, ", ")
+}
+
+// itemRefRe matches a depth-agnostic item reference in authored YAML prose:
+// [some title](item:<id>). The item: scheme exists because the same authored
+// string (a summary, a limitation, an option's trade-offs) is rendered into
+// two directories at different depths — docs/*.md and docs/items/*.md — so no
+// literal relative path in the source can be correct in both. The renderer
+// resolves the scheme per output location instead.
+var itemRefRe = regexp.MustCompile(`\[([^\]]*)\]\(item:([A-Za-z0-9._-]+)\)`)
+
+// resolveItemRefs rewrites every [title](item:<id>) reference in text into a
+// real relative markdown link correct for a document living in fromDir.
+// Unmatched text is returned untouched. The title is not escaped here: this
+// runs on prose, and table cells are escaped separately by escapeCell, which
+// leaves the resolved link alone since it contains no "|".
+func resolveItemRefs(fromDir, text string) string {
+	return itemRefRe.ReplaceAllStringFunc(text, func(m string) string {
+		sub := itemRefRe.FindStringSubmatch(m)
+		title, id := sub[1], sub[2]
+		return fmt.Sprintf("[%s](%s)", title, relLink(fromDir, path.Join(itemsFromDir, id+".md")))
+	})
+}
+
+// itemRefIDs returns every item id referenced via the item: scheme in text,
+// so validation can reject a reference to an id that does not exist (a typo
+// in a hand-authored ref would otherwise ship as a dead link).
+func itemRefIDs(text string) []string {
+	matches := itemRefRe.FindAllStringSubmatch(text, -1)
+	ids := make([]string, 0, len(matches))
+	for _, m := range matches {
+		ids = append(ids, m[2])
+	}
+	return ids
+}
+
+// freeTextFields returns every authored prose field of an item that may carry
+// item: references, so resolution and validation both cover the same set and
+// cannot drift apart as the schema grows.
+func freeTextFields(it Item) []string {
+	fields := []string{it.Summary, it.Problem, it.Recommendation, it.Decision}
+	fields = append(fields, it.Limitations...)
+	for _, o := range it.Options {
+		fields = append(fields, o.Description, o.Tradeoffs)
+	}
+	return fields
+}
+
+// resolveRefsInItem returns a copy of it with every free-text field's item:
+// references resolved for a document living in fromDir.
+func resolveRefsInItem(fromDir string, it Item) Item {
+	it.Summary = resolveItemRefs(fromDir, it.Summary)
+	it.Problem = resolveItemRefs(fromDir, it.Problem)
+	it.Recommendation = resolveItemRefs(fromDir, it.Recommendation)
+	it.Decision = resolveItemRefs(fromDir, it.Decision)
+	lims := make([]string, len(it.Limitations))
+	for i, l := range it.Limitations {
+		lims[i] = resolveItemRefs(fromDir, l)
+	}
+	it.Limitations = lims
+	opts := make([]Option, len(it.Options))
+	for i, o := range it.Options {
+		o.Description = resolveItemRefs(fromDir, o.Description)
+		o.Tradeoffs = resolveItemRefs(fromDir, o.Tradeoffs)
+		opts[i] = o
+	}
+	it.Options = opts
+	return it
+}
+
+// resolveRefsInAreas returns a deep-enough copy of areas with every item's
+// item: references resolved for fromDir. The originals are left untouched so
+// the same parsed areas can be rendered at more than one depth.
+func resolveRefsInAreas(fromDir string, areas []Area) []Area {
+	out := make([]Area, len(areas))
+	for i, a := range areas {
+		items := make([]Item, len(a.Items))
+		for j, it := range a.Items {
+			items[j] = resolveRefsInItem(fromDir, it)
+		}
+		a.Items = items
+		out[i] = a
+	}
+	return out
 }

@@ -59,8 +59,8 @@ func TestWriteItemTable_MultiItemDifferingContent(t *testing.T) {
 	out := b.String()
 
 	for _, want := range []string{
-		"[[items/a|Alpha]]", "first summary", "feature", "open",
-		"[[items/b|Beta]]", "second summary", "fix", "shipped",
+		"[Alpha](items/a.md)", "first summary", "feature", "open",
+		"[Beta](items/b.md)", "second summary", "fix", "shipped",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected table output to contain %q, got:\n%s", want, out)
@@ -70,9 +70,7 @@ func TestWriteItemTable_MultiItemDifferingContent(t *testing.T) {
 
 func TestWriteItemTable_EscapesPipeInSummary(t *testing.T) {
 	// Title deliberately has no "|" so the row's column count can be
-	// checked unambiguously (a wiki link like [[items/a|A]] legitimately
-	// contains an un-escaped "|" of its own, which is not a column
-	// delimiter and would otherwise confuse a naive pipe count).
+	// checked unambiguously.
 	items := []Item{{ID: "a", Title: "Alpha", Summary: "before | after", Kind: "feature", Status: "open"}}
 	var b strings.Builder
 	writeItemTable(&b, items, false)
@@ -82,36 +80,65 @@ func TestWriteItemTable_EscapesPipeInSummary(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	dataLine := lines[len(lines)-1]
-	// Splitting on an escaped-pipe-aware basis: replace the escaped form
-	// with a placeholder first, so the remaining "|" count reflects only
-	// real, un-escaped pipes. Expect 6: 5 column delimiters (4 columns)
-	// plus the wiki link's own "[[items/a|Alpha]]" separator pipe, which
-	// is real markdown syntax, not a table delimiter, and must NOT have
-	// been escaped by escapeCell (only the summary's pipe should be).
+	// Strip the escaped form first, so the remaining "|" count reflects
+	// only real, un-escaped pipes. Expect exactly 5 column delimiters for
+	// 4 columns: a markdown link "[Alpha](items/a.md)" contributes no pipe
+	// of its own, so any 6th pipe means the summary's pipe leaked through
+	// escapeCell and split the row into a phantom extra column.
 	withoutEscaped := strings.ReplaceAll(dataLine, "\\|", "")
-	if got := strings.Count(withoutEscaped, "|"); got != 6 {
-		t.Errorf("expected 6 real pipes (5 column delimiters + 1 wiki-link separator) in %q, got %d", dataLine, got)
+	if got := strings.Count(withoutEscaped, "|"); got != 5 {
+		t.Errorf("expected 5 column delimiters in %q, got %d", dataLine, got)
 	}
 }
 
-func TestRenderRoadmap_ExcludesShippedAndWontDo(t *testing.T) {
+// TestRenderRoadmap_ExcludesShippedButListsNonGoals pins the board's membership
+// contract. Shipped items leave the board entirely (they belong to Shipped.md
+// and, if they are capabilities, Features.md). wont-do items are deliberately
+// the exception: they are excluded from the stage sections but listed under
+// their own Non-goals heading, because a non-goal reachable only from its own
+// item page is invisible to anyone asking "why isn't Pokkum doing X" — which
+// defeats the reason for writing it down.
+func TestRenderRoadmap_ExcludesShippedButListsNonGoals(t *testing.T) {
 	areas := []Area{{
 		Name: "Area",
 		Items: []Item{
-			{ID: "open-item", Title: "Open", Summary: "s", Status: "open", AreaName: "Area"},
+			{ID: "open-item", Title: "Open", Summary: "s", Status: "open", Stage: "v1.1", AreaName: "Area"},
 			{ID: "shipped-item", Title: "Shipped", Summary: "s", Status: "shipped", AreaName: "Area"},
 			{ID: "wontdo-item", Title: "WontDo", Summary: "s", Status: "wont-do", AreaName: "Area"},
 		},
 	}}
 	out := RenderRoadmap(areas)
+
 	if !strings.Contains(out, "open-item") {
 		t.Errorf("expected active item in Roadmap.md output, got:\n%s", out)
 	}
 	if strings.Contains(out, "shipped-item") {
 		t.Errorf("shipped item must not appear in Roadmap.md, got:\n%s", out)
 	}
-	if strings.Contains(out, "wontdo-item") {
-		t.Errorf("wont-do item must not appear in Roadmap.md, got:\n%s", out)
+
+	nonGoalsIdx := strings.Index(out, "## Non-goals")
+	if nonGoalsIdx < 0 {
+		t.Fatalf("expected a Non-goals section when a wont-do item exists, got:\n%s", out)
+	}
+	wontDoIdx := strings.Index(out, "wontdo-item")
+	if wontDoIdx < 0 {
+		t.Fatalf("wont-do item must be listed under Non-goals, got:\n%s", out)
+	}
+	if wontDoIdx < nonGoalsIdx {
+		t.Errorf("wont-do item appeared before the Non-goals heading, i.e. inside a stage section:\n%s", out)
+	}
+}
+
+// TestRenderRoadmap_NoNonGoalsSectionWhenNone keeps the heading from appearing
+// empty, which would read as "there are no non-goals" rather than "none are
+// recorded in this source".
+func TestRenderRoadmap_NoNonGoalsSectionWhenNone(t *testing.T) {
+	areas := []Area{{
+		Name:  "Area",
+		Items: []Item{{ID: "open-item", Title: "Open", Summary: "s", Status: "open", Stage: "v1.1", AreaName: "Area"}},
+	}}
+	if out := RenderRoadmap(areas); strings.Contains(out, "## Non-goals") {
+		t.Errorf("Non-goals heading must be omitted when no wont-do items exist, got:\n%s", out)
 	}
 }
 
@@ -200,7 +227,7 @@ func TestRenderItemPage_RelatedShowsTargetTitle(t *testing.T) {
 	src := Item{ID: "src", Title: "Src", Summary: "s", Status: "open", Related: []string{"target-id"}}
 	allByID := map[string]Item{"target-id": target}
 	out := RenderItemPage(src, allByID)
-	if !strings.Contains(out, "[[items/target-id|Target Title]]") {
+	if !strings.Contains(out, "[Target Title](target-id.md)") {
 		t.Errorf("expected related section to link to target's real title, got:\n%s", out)
 	}
 }

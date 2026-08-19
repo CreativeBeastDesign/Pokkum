@@ -34,10 +34,21 @@ func filterStatus(items []Item, status string) []Item {
 	return out
 }
 
+// filterShippedFeatures selects what a reader would call a capability:
+// shipped items of kind "feature" or "hardening". Hardening is included
+// deliberately — a shipped security capability (trust-root refresh, a
+// fail-closed verification path) is something a user chooses Pokkum for, and
+// filtering it out left real shipped work visible only in Shipped.md, which
+// two independent readers flagged as surprising. Kinds "fix" and "infra" stay
+// out: a bug fix or a CI guard is history, not a capability, and belongs in
+// Shipped.md alone.
 func filterShippedFeatures(items []Item) []Item {
 	out := make([]Item, 0, len(items))
 	for _, it := range items {
-		if it.Status == "shipped" && it.Kind == "feature" {
+		if it.Status != "shipped" {
+			continue
+		}
+		if it.Kind == "feature" || it.Kind == "hardening" {
 			out = append(out, it)
 		}
 	}
@@ -119,7 +130,7 @@ func writeItemTable(b *strings.Builder, items []Item, withCommits bool) {
 	}
 	for _, it := range items {
 		cols := []string{
-			wikiLink(it.ID, it.Title),
+			itemLink(docsFromDir, it.ID, it.Title),
 			escapeCell(it.Summary),
 			escapeCell(it.Kind),
 			escapeCell(it.Status),
@@ -139,6 +150,8 @@ func writeItemTable(b *strings.Builder, items []Item, withCommits bool) {
 // first, then the complete active set grouped by stage and, within each
 // stage, by area.
 func RenderRoadmap(areas []Area) string {
+	// docs/*.md sit one level below the repo root; resolve item: refs to that depth.
+	areas = resolveRefsInAreas(docsFromDir, areas)
 	items := filterActive(allItems(areas))
 
 	var b strings.Builder
@@ -166,6 +179,20 @@ func RenderRoadmap(areas []Area) string {
 		}
 	}
 
+	// Non-goals are listed on the board deliberately. filterActive excludes
+	// wont-do, which left them reachable only via their own item page — and
+	// nobody lands there without already knowing the id. The whole point of
+	// writing a non-goal down is that it reads as a decision rather than an
+	// omission, which requires it being visible where someone looks for
+	// "why isn't Pokkum doing X".
+	nonGoals := filterStatus(allItems(areas), "wont-do")
+	if len(nonGoals) > 0 {
+		sortByID(nonGoals)
+		b.WriteString("## Non-goals\n\n")
+		b.WriteString("Deliberate decisions, not gaps. Each item page states the reasoning.\n\n")
+		writeItemTable(&b, nonGoals, false)
+	}
+
 	return b.String()
 }
 
@@ -175,6 +202,8 @@ func RenderRoadmap(areas []Area) string {
 // (stageOrder walked in reverse), grouped by area within each stage, with
 // an added Commits column.
 func RenderShipped(areas []Area) string {
+	// docs/*.md sit one level below the repo root; resolve item: refs to that depth.
+	areas = resolveRefsInAreas(docsFromDir, areas)
 	items := filterStatus(allItems(areas), "shipped")
 
 	var b strings.Builder
@@ -208,6 +237,8 @@ func RenderShipped(areas []Area) string {
 // be worth surfacing even before or after a feature's "shipped feature"
 // window), each attributed to its item.
 func RenderFeatures(areas []Area) string {
+	// docs/*.md sit one level below the repo root; resolve item: refs to that depth.
+	areas = resolveRefsInAreas(docsFromDir, areas)
 	items := filterShippedFeatures(allItems(areas))
 
 	var b strings.Builder
@@ -223,7 +254,7 @@ func RenderFeatures(areas []Area) string {
 		areaItems := byArea[areaName]
 		sortByID(areaItems)
 		for _, it := range areaItems {
-			b.WriteString(fmt.Sprintf("### %s\n\n", wikiLink(it.ID, it.Title)))
+			b.WriteString(fmt.Sprintf("### %s\n\n", itemLink(docsFromDir, it.ID, it.Title)))
 			b.WriteString(it.Summary + "\n\n")
 			if len(it.Flags) > 0 {
 				b.WriteString(fmt.Sprintf("- Flags: %s\n", formatFlags(it.Flags)))
@@ -238,24 +269,40 @@ func RenderFeatures(areas []Area) string {
 		}
 	}
 
+	// Grouped by area rather than one flat list: a single global list was
+	// readable with three items and becomes unusable as areas land content,
+	// which is the state this document is heading into.
 	b.WriteString("## Known Limitations\n\n")
 	limitations := collectLimitations(areas)
 	if len(limitations) == 0 {
 		b.WriteString("_None recorded._\n\n")
 	} else {
+		byLimArea := make(map[string][]limitationEntry)
 		for _, l := range limitations {
-			b.WriteString(fmt.Sprintf("- %s (%s)\n", l.Text, wikiLink(l.ItemID, l.Title)))
+			byLimArea[l.AreaName] = append(byLimArea[l.AreaName], l)
 		}
-		b.WriteString("\n")
+		names := make([]string, 0, len(byLimArea))
+		for name := range byLimArea {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			b.WriteString(fmt.Sprintf("### %s\n\n", name))
+			for _, l := range byLimArea[name] {
+				b.WriteString(fmt.Sprintf("- %s (%s)\n", l.Text, itemLink(docsFromDir, l.ItemID, l.Title)))
+			}
+			b.WriteString("\n")
+		}
 	}
 
 	return b.String()
 }
 
 type limitationEntry struct {
-	ItemID string
-	Title  string
-	Text   string
+	ItemID   string
+	Title    string
+	Text     string
+	AreaName string
 }
 
 // collectLimitations aggregates every item's limitations across every
@@ -267,7 +314,7 @@ func collectLimitations(areas []Area) []limitationEntry {
 	var out []limitationEntry
 	for _, it := range allItems(areas) {
 		for _, lim := range it.Limitations {
-			out = append(out, limitationEntry{ItemID: it.ID, Title: it.Title, Text: lim})
+			out = append(out, limitationEntry{ItemID: it.ID, Title: it.Title, Text: lim, AreaName: it.AreaName})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -286,6 +333,8 @@ func collectLimitations(areas []Area) []limitationEntry {
 // related references) so Related links can show the target item's real
 // title instead of just repeating its id.
 func RenderItemPage(it Item, allByID map[string]Item) string {
+	// An item page sits in docs/items/, two levels below the repo root.
+	it = resolveRefsInItem(itemsFromDir, it)
 	var b strings.Builder
 	b.WriteString(generatedHeader(fmt.Sprintf("%s (item id: %s)", roadmapSourceGlob, it.ID)))
 	b.WriteString(fmt.Sprintf("# %s\n\n", it.Title))
@@ -374,7 +423,7 @@ func RenderItemPage(it Item, allByID map[string]Item) string {
 			if target, ok := allByID[rel]; ok {
 				title = target.Title
 			}
-			b.WriteString(fmt.Sprintf("- %s\n", wikiLink(rel, title)))
+			b.WriteString(fmt.Sprintf("- %s\n", itemLink(itemsFromDir, rel, title)))
 		}
 		b.WriteString("\n")
 	}

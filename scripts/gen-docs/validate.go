@@ -129,6 +129,17 @@ func validateItem(it Item, repoRoot string, allByID map[string]Item, findingsNum
 		}
 	}
 
+	// A [title](item:<id>) reference in authored prose is resolved to a real
+	// relative path at render time, so a typo'd id would ship as a dead link
+	// with nothing else to catch it.
+	for _, text := range freeTextFields(it) {
+		for _, ref := range itemRefIDs(text) {
+			if _, ok := allByID[ref]; !ok {
+				add("item: reference to unknown id %q", ref)
+			}
+		}
+	}
+
 	for _, rel := range it.Related {
 		if _, ok := allByID[rel]; !ok {
 			add("related references unknown item id %q", rel)

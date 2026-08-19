@@ -26,21 +26,32 @@ func TestEscapeCell(t *testing.T) {
 	}
 }
 
-func TestWikiLink(t *testing.T) {
-	got := wikiLink("kms-signing", "KMS-backed signing")
-	want := "[[items/kms-signing|KMS-backed signing]]"
+func TestItemLink_FromDocsDir(t *testing.T) {
+	got := itemLink(docsFromDir, "kms-signing", "KMS-backed signing")
+	want := "[KMS-backed signing](items/kms-signing.md)"
 	if got != want {
-		t.Errorf("wikiLink() = %q, want %q", got, want)
+		t.Errorf("itemLink() = %q, want %q", got, want)
 	}
 }
 
-func TestWikiLink_EscapesPipeInTitle(t *testing.T) {
-	// A title containing a literal pipe must not be allowed to break the
-	// enclosing table row the wiki link is rendered inside.
-	got := wikiLink("x", "A | B")
-	want := "[[items/x|A \\| B]]"
+// TestItemLink_FromItemsDir pins the depth fix: an item page's own Related
+// section links to a *sibling* file, so it must not carry the items/ prefix
+// that would resolve to docs/items/items/<id>.md.
+func TestItemLink_FromItemsDir(t *testing.T) {
+	got := itemLink(itemsFromDir, "kms-signing", "KMS-backed signing")
+	want := "[KMS-backed signing](kms-signing.md)"
 	if got != want {
-		t.Errorf("wikiLink() = %q, want %q", got, want)
+		t.Errorf("itemLink() = %q, want %q", got, want)
+	}
+}
+
+func TestItemLink_EscapesPipeInTitle(t *testing.T) {
+	// A title containing a literal pipe must not be allowed to break the
+	// enclosing table row the link is rendered inside.
+	got := itemLink(docsFromDir, "x", "A | B")
+	want := "[A \\| B](items/x.md)"
+	if got != want {
+		t.Errorf("itemLink() = %q, want %q", got, want)
 	}
 }
 
