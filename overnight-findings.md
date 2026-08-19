@@ -32,14 +32,14 @@ Sigstore TUF root refresh.
 **What:** with no `Addr`, Go's `ListenAndServe` falls back to `:http`, i.e. port 80. Both servers therefore try to bind port 80, ignoring the configured ports completely: one wins the race and the other dies with "address already in use". Confirmed directly — the real binary was built and run with `PORT=3000 POKKUM_PROBE_PORT=8081`, `lsof` showed it bound to `*:80`, curl to 3000 and 8081 failed, curl to 80 returned 200.
 **Severity:** High. Every image built with `--strategy=static` is non-functional through its documented ports, independent of the other two findings. A Kubernetes readiness probe on 8081 or a Service targeting 3000 never succeeds.
 **Why it survived:** `main_test.go` and `integration_test.go` only exercise handlers through `httptest`; nothing ever called the real `ListenAndServe` path. This is the exact gap the runtime smoke test was built to close, and it found a live bug on its first outing.
-**Status:** fix dispatched, with a test that binds a real listener rather than an `httptest` handler.
+**Status:** ✅ **Fixed** in `8306d37`. `Addr` is set on both servers from the parsed config; the test binds a real listener and makes a real TCP request rather than using an `httptest` handler, and neutering the assignment makes it fail. Confirmed against the built binary with `lsof` (`*:3000`, `*:8081`, nothing on 80). Note the fix did not reach produced images until the embedded blob was regenerated — see finding 6.
 
 ### 3. `Preflight` is not strategy-aware and rejects every real `adapter-static` project
 
 **Where:** `internal/adapters/bunexec/compiler.go`'s `Preflight`; `ports.PreflightRequest` has no `Strategy` field.
 **What:** `Preflight` hard-codes a requirement for `@jesterkit/exe-sveltekit` or `@sveltejs/adapter-node`. A correctly-configured `adapter-static`-only project is rejected before `Prepare`'s own adapter check — which _is_ strategy-aware — ever runs. So the static strategy cannot build a real static project at all.
 **Severity:** High. Same class as `Lessons.md`'s earlier entry where a well-tested fix to `Prepare`'s adapter detection left every project unbuildable because `Preflight` made an independent, untested assumption about the same input (checklist row 13: grep the fixed function's callers).
-**Status:** fix dispatched.
+**Status:** ✅ **Fixed** in `1c33509`. `ports.PreflightRequest` gained `Strategy`, threaded from the pipeline, and `Preflight` selects its target adapter with the same positive switch `Prepare` uses.
 
 ### 4. Real prerendered output nests under `pages/`; production assumes it is flat
 
@@ -47,7 +47,7 @@ Sigstore TUF root refresh.
 **What:** a real build emits `prerendered/pages/index.html` and `prerendered/pages/about.html` — there is no top-level `prerendered/index.html`. The existence check therefore passes (the directory is there) while every prerendered route 404s at runtime.
 **Compounding:** `staticFixtureCompiler` in `tests/integration/static_e2e_test.go` fabricates a _flat_ `prerendered/index.html`, matching the production assumption rather than reality. So the synthetic fixture has been validating a fiction, and `TestFixtureDrivenE2E_Static` passed throughout — exactly checklist row 12's failure mode, and the same shape as the missing-layered-entrypoint bug in `Lessons.md`.
 **Severity:** High, and the most instructive of the three: a mock encoding the same wrong assumption as the code it tests cannot ever detect the mismatch.
-**Status:** fix dispatched, including correcting the synthetic fixture so it stops agreeing with the bug.
+**Status:** ✅ **Fixed** in `1c33509` via `bunexec.FlattenPrerenderedOutput`, which reproduces SvelteKit's own flattening of all three prerendered categories (`pages`, `dependencies`, `data`) and treats a cross-category path collision as a hard error rather than a silent overwrite. `staticFixtureCompiler` now models the real nested shape and calls that production code rather than reimplementing it, so it cannot drift back into agreeing with the bug.
 
 ### 5. Single-port mode silently has no probe endpoints
 
@@ -55,7 +55,9 @@ Sigstore TUF root refresh.
 **Where:** `supervisor/cmd/pokkum-static/main.go`'s `if cfg.Port != cfg.ProbePort` guard.
 **What:** the guard reads as "skip the redundant second listener because the content server covers probes in single-port mode" — but there is no mux merge anywhere in the package. When `PORT == POKKUM_PROBE_PORT`, the probe listener is skipped and `/healthz` and `/readyz` are served by _nothing_. A single-port deployment therefore has no working probes at all.
 **Severity:** Medium. Pre-existing and independent of the bind bug; not introduced or touched by that fix. Only bites operators who deliberately collapse the two ports, which is why it has gone unnoticed.
-**Status:** logged, not fixed — outside F1's stated scope, and it needs a deliberate decision (merge the probe handlers into the content mux vs. reject the collapsed configuration vs. document it) rather than a reflex patch. Tracked for the roadmap.
+**Status:** ✅ **Fixed.** The maintainer chose to reject the collapsed configuration outright rather than merge the probe handlers or document it — a container that serves pages while its probes are silently dead is worse than one that refuses to start, because Kubernetes routes traffic to it and the operator gets no signal. `Config.validate()` now rejects `PORT == POKKUM_PROBE_PORT` with an error naming both env vars, exiting `exitUsage` (2) alongside the other static configuration errors. `main.go`'s `if cfg.Port != cfg.ProbePort` guard became permanently true and was removed, with a comment recording the invariant that makes the two unconditional listeners safe — a guard that cannot fail misleads the next reader.
+**Severity revised down on new evidence:** `pokkum build` could never have produced a collapsed config. `internal/core/model.go:1115` already rejects `Port == ProbePort` unconditionally for every build request, before the packager writes any env. So this only ever affected configs assembled outside `pokkum build` (hand-edited pod specs, a manually-run binary), and the new check is defence-in-depth rather than closing a build-time hole. Verified by tracing `--port`/`--probe-port` end to end — `pokkum build` has no such flags at all; only `.pokkum.yaml`'s `image.port`/`image.probe_port` feed them.
+**Embedded blob regenerated** as part of the fix, per finding 6's lesson.
 **Decision by André:** Reject the collapsed configuration.
 
 ### 6. Embedded PID-1 binaries are gitignored local artifacts, absent from CI and (for pokkum-static) from releases
@@ -80,7 +82,7 @@ Sigstore TUF root refresh.
 **What:** candidate resolution handles exactly two cases — an exact file at the request path, or a directory containing `index.html`. There is no extensionless fallback. `@sveltejs/adapter-static` with its default `trailingSlash: 'never'` prerenders route `/about` to `about.html`, so a request for `/about` finds neither a file named `about` nor a directory, and 404s. `/` worked only incidentally, via the directory→`index.html` branch.
 **Severity:** High. Every prerendered route except the root is unreachable at its canonical URL in every `--strategy=static` image. The server even logs a misleading hint suggesting the operator configure an SPA fallback, when the file is present and simply not being looked for.
 **Why it survived:** the synthetic fixture only ever fabricated a root `index.html` (finding 4), so no test exercised a non-root prerendered route.
-**Status:** fix dispatched, with the traversal guards preserved and the embedded blob regenerated afterwards.
+**Status:** ✅ **Fixed** in `5693980`. Candidate order is exact file → `<rel>.html` → directory index, all three routed through one shared containment helper so the `EvalSymlinks`/`withinRoot` checks are identical for each. Proven with a symlinked `escape.html`, asserting the outside content never appears in the response rather than only that an error was returned. The misleading SPA-fallback hint now fires only for extensionless paths. Embedded blob regenerated.
 
 ### 8. Two latent fail-opens in `provenance`, reachable only once a default was deleted
 
@@ -109,7 +111,7 @@ Sigstore TUF root refresh.
 **Severity:** High. A verification path that reports "forgery" when it means "my anchor list is out of date" trains operators to distrust the tool or to bypass the check.
 **Fixed:** hybrid. The snapshot is regenerated from the raw, TUF-signature-verified `trusted_root.json` target (reproducible: two independent fetches produced identical bytes), an opt-in TUF client can refresh it live, and three guards stop it rotting again — an always-on age/expiry test that *fails*, a network divergence test against the live repository, and a digest tripwire against the new provenance sidecar. The refresh path is the same test run with an env var, on Go's golden-file convention, so detection and repair cannot drift apart. Verification itself remains fully offline; the only network function refuses before constructing a client when hermetic, wrapping `core.ErrHermeticViolation` like `bunruntime` does.
 **Also fixed, and the part that matters most operationally:** an unknown Rekor log ID still fails closed with the same verdict, but the error now says it is most likely a trust-root coverage gap rather than a bad signature, and names the covered logs. The verdict was deliberately not relaxed — only the diagnosis was added, proven by reverting the check and watching the four message assertions fail while the verdict stayed identical.
-**Note on the refresh instructions:** `internal/adapters/sigstore/README.md` currently says to refresh by copying `sigstore-go`'s `examples/trusted-root-public-good.json`. That file *is* the stale pre-2023 snapshot, so following the documented procedure would reinstall the bug. Correcting that doc is queued.
+**Note on the refresh instructions:** `internal/adapters/sigstore/README.md` currently says to refresh by copying `sigstore-go`'s `examples/trusted-root-public-good.json`. That file *is* the stale pre-2023 snapshot, so following the documented procedure would reinstall the bug. ✅ **Corrected** in `7f2a4cc`: the README now names the real TUF origin and refresh command, and keeps an explicit "**Do not do that**" warning against the old instruction so nobody reverts to it from memory.
 
 ### 11. Tests mutate a shared checked-in fixture, making results order- and history-dependent
 

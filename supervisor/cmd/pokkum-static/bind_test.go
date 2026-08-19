@@ -140,12 +140,16 @@ func TestNewContentServer_BindsConfiguredPort_TwoPortMode(t *testing.T) {
 	}
 }
 
-// TestNewContentServer_BindsConfiguredPort_SinglePortMode covers the
-// single-port case: PORT == POKKUM_PROBE_PORT. main.go's
-// `if cfg.Port != cfg.ProbePort` guard means only the content server is
-// started in this configuration (mirrored below) — this test proves that
-// lone content server still binds the one configured port correctly, rather
-// than falling back to port 80.
+// TestNewContentServer_BindsConfiguredPort_SinglePortMode exercises
+// newContentServer directly with an equal-port Config (PORT ==
+// POKKUM_PROBE_PORT), bypassing parseConfig/validate() — which now rejects
+// that combination outright before main() ever constructs a server (see
+// config.go's validate() and config_test.go's
+// TestParseConfig_RejectsEqualPorts). This test still earns its keep at the
+// lower level: it proves the Addr-binding fix (newContentServer's explicit
+// net.JoinHostPort) holds for any Config value, independent of whatever the
+// config layer does or doesn't allow above it, rather than silently falling
+// back to port 80.
 func TestNewContentServer_BindsConfiguredPort_SinglePortMode(t *testing.T) {
 	port := freeTCPPort(t)
 	cfg := Config{Port: port, ProbePort: port}

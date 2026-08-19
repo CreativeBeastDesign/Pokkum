@@ -168,9 +168,6 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 	if err := cfg.validate(); err != nil {
 		return cfg, warnings, err
 	}
-	if cfg.Port == cfg.ProbePort {
-		warnf("serve port and probe port are both %d; the probe server will fail to bind", cfg.Port)
-	}
 	return cfg, warnings, nil
 }
 
@@ -180,6 +177,16 @@ func (c Config) validate() error {
 	}
 	if c.ProbePort < 1 || c.ProbePort > 65535 {
 		return fmt.Errorf("probe port %d out of range", c.ProbePort)
+	}
+	// The content and probe servers are two independent listeners (see
+	// main.go) — there is no mux merge that lets one cover the other. If
+	// PORT and POKKUM_PROBE_PORT collapse to the same value, the second
+	// listener never starts and /healthz and /readyz are served by nothing,
+	// so a Kubernetes probe against a "running" container fails forever
+	// without a single log line pointing at the cause. Reject at startup
+	// instead, where the misconfiguration lands in the pod's very first log.
+	if c.Port == c.ProbePort {
+		return fmt.Errorf("%s and %s must not both be %d: set %s to a different port so probes have their own listener", envPort, envProbePort, c.Port, envProbePort)
 	}
 	if len(c.Roots) == 0 {
 		return errors.New("at least one static root is required")

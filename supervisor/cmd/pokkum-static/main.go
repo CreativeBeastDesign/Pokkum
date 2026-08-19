@@ -116,20 +116,21 @@ func main() {
 
 	var shuttingDown atomic.Bool
 
-	if cfg.Port != cfg.ProbePort {
-		probe := newProbeServer(cfg, &shuttingDown)
-		go func() {
-			log.Info("probe server listening", "addr", probe.Addr)
-			if err := probe.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Warn("probe server failed", "addr", probe.Addr, "error", err)
-			}
-		}()
-		defer func() {
-			if err := probe.Shutdown(context.Background()); err != nil {
-				log.Warn("probe server did not shut down cleanly", "error", err)
-			}
-		}()
-	}
+	// cfg.Port != cfg.ProbePort is guaranteed by config.go's validate(): a
+	// collapsed configuration is rejected at startup (exitUsage) before this
+	// point is ever reached, so the two listeners below are unconditional.
+	probe := newProbeServer(cfg, &shuttingDown)
+	go func() {
+		log.Info("probe server listening", "addr", probe.Addr)
+		if err := probe.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Warn("probe server failed", "addr", probe.Addr, "error", err)
+		}
+	}()
+	defer func() {
+		if err := probe.Shutdown(context.Background()); err != nil {
+			log.Warn("probe server did not shut down cleanly", "error", err)
+		}
+	}()
 
 	// SIGTERM is the container runtime's way of asking for a graceful stop;
 	// SIGINT is the interactive equivalent. Serve and wait, then shut down.
