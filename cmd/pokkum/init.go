@@ -229,11 +229,11 @@ func suggestedNextCommand(cfg *ports.ProjectConfig) (string, string) {
 	if _, ok := cfg.Profiles["local"]; ok {
 		return "pokkum build --local",
 			"No registry is configured, so --local builds into your container runtime instead of pushing. " +
-				"Set docker.repo in " + ports.ConfigFilename + " (or pass --repo) when you want to push."
+				"Set docker.repo in " + ports.ConfigFilename + " (or POKKUM_DOCKER_REPO) when you want to push."
 	}
 	return "pokkum build --local",
 		"No registry is configured, so plain `pokkum build` (which pushes) will refuse to start. " +
-			"Set docker.repo in " + ports.ConfigFilename + " or pass --repo to push instead."
+			"Set docker.repo in " + ports.ConfigFilename + " or POKKUM_DOCKER_REPO to push instead."
 }
 
 func promptChoice(scanner *bufio.Scanner, number int, label string, allowed []string, def string) string {
