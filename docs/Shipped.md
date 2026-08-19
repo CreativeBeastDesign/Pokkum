@@ -45,6 +45,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | [Human-readable console output for build logs](items/console-log-rendering.md) | Build progress rendered with level glyphs and aligned attribute blocks on a terminal, while piped and CI output stays byte-identical logfmt. | dx | shipped |  |
 | [pokkum init wrote a config pokkum build refused](items/init-generates-invalid-config.md) | Every generated .pokkum.yaml carried an invalid sbom.attach value, so the first two commands a new user runs did not work together. | fix | shipped |  |
 | [pokkum init recommended a command it had guaranteed could not work](items/init-recommends-a-failing-command.md) | init always ended with "you can now run pokkum build", which fails immediately for the local-only setup its own first prompt invites. | fix | shipped |  |
+| [Adapter injection silently discarded the project's whole SvelteKit config](items/injection-discarded-svelte-config.md) | Rewriting a bare sveltekit() to inject an adapter makes SvelteKit ignore svelte.config.js entirely, so aliases, csp, prerender settings and kit.experimental flags were all lost. | fix | shipped |  |
 | [Zero-config adapter injection declined silently, with undocumented preconditions](items/injection-preconditions-undocumented.md) | Injection is advertised as automatic but engages only under two conditions, and when it declined it said nothing, so the failure read as the feature being broken. | fix | shipped |  |
 
 ### Supply Chain & Attestation

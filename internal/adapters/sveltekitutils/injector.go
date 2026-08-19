@@ -25,6 +25,22 @@ type InjectorOptions struct {
 
 	// EnableTelemetry enables kit.experimental.tracing & instrumentation in svelte.config.js.
 	EnableTelemetry bool
+
+	// UserSvelteConfigFile is the project's own svelte config filename
+	// ("svelte.config.js", "svelte.config.ts") or "" when it has none.
+	//
+	// It exists because passing ANY options to sveltekit() makes SvelteKit skip
+	// svelte.config.js entirely — it only calls load_svelte_config() when the
+	// argument is undefined (verified in @sveltejs/kit's
+	// src/exports/vite/index.js). So rewriting a bare sveltekit() into
+	// sveltekit({ adapter: adapter() }) to inject an adapter silently discarded
+	// the project's whole SvelteKit configuration: aliases, csp, prerender
+	// settings, and kit.experimental flags such as remoteFunctions — which fails
+	// the build outright with "Could not load virtual:env/dynamic/private".
+	//
+	// When set, the injected config imports that file and merges it, so only the
+	// adapter is replaced.
+	UserSvelteConfigFile string
 }
 
 // VirtualConfigResult holds the result of preparing a virtual svelte.config.js.
@@ -381,20 +397,53 @@ func TransformViteConfig(source string, opts InjectorOptions) (string, error) {
 	trimmedArgs := strings.TrimSpace(args)
 
 	var newArgs string
-	if trimmedArgs == "" {
+	var prelude string
+	switch {
+	case trimmedArgs == "" && opts.UserSvelteConfigFile != "":
+		// A bare sveltekit() means the project keeps its configuration in
+		// svelte.config.js, and SvelteKit loads that file only while the plugin
+		// receives no arguments. Injecting an adapter necessarily supplies an
+		// argument, so the file must be merged in by hand or everything in it is
+		// lost.
+		//
+		// The two shapes differ and the conversion is the point: svelte.config.js
+		// nests SvelteKit's own options under `kit`, while the Vite-config form is
+		// flat — split_config() destructures extensions/compilerOptions/vitePlugin/
+		// preprocess, routes every other recognised key into kit, and passes the
+		// rest to vite-plugin-svelte. A literal `kit` key is not one of those
+		// recognised options, so spreading the file unflattened would hand `kit`
+		// to vite-plugin-svelte as an unknown option and still lose the contents.
+		//
+		// Hence: spread the non-kit remainder, then the flattened kit options,
+		// then the adapter last so it always wins.
+		prelude = fmt.Sprintf(
+			"import __pokkumUserSvelteConfig from './%s';\n"+
+				"const { kit: __pokkumKitOptions = {}, ...__pokkumSvelteRest } = __pokkumUserSvelteConfig ?? {};\n",
+			opts.UserSvelteConfigFile)
+		newArgs = "{ ...__pokkumSvelteRest, ...__pokkumKitOptions, adapter: adapter() }"
+	case trimmedArgs == "":
+		// No svelte config to preserve, so there is nothing to merge.
 		newArgs = "{ adapter: adapter() }"
-	} else if strings.HasPrefix(trimmedArgs, "{") && strings.HasSuffix(trimmedArgs, "}") {
+	case strings.HasPrefix(trimmedArgs, "{") && strings.HasSuffix(trimmedArgs, "}"):
+		// The project already passes options, so it has itself opted out of
+		// svelte.config.js and there is nothing to preserve beyond what is here.
 		if start, end, found := findLiveAdapterProp(args); found {
 			newArgs = args[:start] + "adapter: adapter()" + args[end:]
 		} else {
 			firstBrace := strings.Index(args, "{")
 			newArgs = args[:firstBrace+1] + "\n\t\t\tadapter: adapter()," + args[firstBrace+1:]
 		}
-	} else {
+	default:
 		newArgs = "{ adapter: adapter() }"
 	}
 
 	result = result[:openParen+1] + newArgs + result[closeParen:]
+	if prelude != "" {
+		// Prepended rather than inserted after the imports: ESM import
+		// declarations are hoisted and bound before any module body runs, so the
+		// destructuring const may precede them textually and still see the value.
+		result = prelude + result
+	}
 	return result, nil
 }
 
@@ -415,7 +464,12 @@ var relativeImportSpecifierRegex = regexp.MustCompile(`(from\s+|import\(\s*|requ
 // project whose vite.config.ts imports a relative/workspace-local module
 // fails to resolve it once copied into the sandbox.
 func rewriteRelativeImportSpecifiers(source string) string {
-	return relativeImportSpecifierRegex.ReplaceAllString(source, "${1}${2}../${3}")
+	out := relativeImportSpecifierRegex.ReplaceAllString(source, "${1}${2}../${3}")
+	// Collapse the ".././" this produces for a "./x" specifier into "../x".
+	// Purely cosmetic — the two resolve identically — but the generated config is
+	// something a user reads when diagnosing a build, and ".././" invites the
+	// suspicion that the rewrite is buggy.
+	return strings.ReplaceAll(out, ".././", "../")
 }
 
 // importMetaURLRegex matches the literal token import.meta.url wherever it

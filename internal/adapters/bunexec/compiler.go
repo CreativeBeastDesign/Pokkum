@@ -340,6 +340,12 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 
 		viteSource, viteName := readViteConfigSource(req.ProjectDir)
 		opts := sveltekitutils.DefaultInjectorOptions()
+		// Tell the injector which svelte config to merge, if any. Without this it
+		// would rewrite a bare sveltekit() into sveltekit({ adapter: adapter() }),
+		// and SvelteKit skips svelte.config.js the moment the plugin receives any
+		// argument — silently discarding the project's aliases, csp, prerender
+		// settings and kit.experimental flags.
+		opts.UserSvelteConfigFile = findUserSvelteConfig(req.ProjectDir)
 		opts.TargetAdapter = targetAdapter
 		opts.SourceEpoch = req.SourceDateEpoch.Format("20060102150405")
 		if req.SourceDateEpoch.IsZero() {
@@ -706,6 +712,23 @@ var viteConfigNames = []string{
 // project's Vite config, or ("", "") when it has none. It mirrors
 // readConfigSource: a non-mutating read whose failure simply means "no Vite
 // config governs here".
+// findUserSvelteConfig returns the project's svelte config filename, or "" when
+// it has none.
+//
+// Both extensions are checked because SvelteKit itself accepts either — its
+// load_svelte_config() looks for svelte.config.js and svelte.config.ts, and the
+// same pair is what triggers its "is ignored when options are passed via your
+// Vite config" warning. A project on the .ts form would otherwise have its whole
+// configuration dropped exactly as the .js form did.
+func findUserSvelteConfig(projectDir string) string {
+	for _, name := range []string{"svelte.config.js", "svelte.config.ts"} {
+		if info, err := os.Stat(filepath.Join(projectDir, name)); err == nil && !info.IsDir() {
+			return name
+		}
+	}
+	return ""
+}
+
 func readViteConfigSource(projectDir string) (source, name string) {
 	for _, candidate := range viteConfigNames {
 		data, err := os.ReadFile(filepath.Join(projectDir, candidate))
