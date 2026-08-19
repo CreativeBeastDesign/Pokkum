@@ -323,15 +323,28 @@ func signatureImage(bundle ports.CosignSignatureBundle) (v1.Image, error) {
 
 // attestationImage wraps a DSSE envelope as a single-layer image: the
 // serialized envelope as one uncompressed layer, media-typed per cosign's
-// attestation convention. No layer annotation is needed — the signature
-// lives inside the envelope itself.
+// attestation convention. The signature itself lives inside the envelope,
+// not in the dev.cosignproject.cosign/signature layer annotation — but
+// cosign's own oci.Signature model (pkg/oci/internal/signature.Base64Signature)
+// treats attestations and signatures identically when read back from a
+// tag-convention attachment: it errors with "missing ... annotation" if the
+// annotation key is absent at all, regardless of whether the value is ever
+// used. Cosign's own attestation-push path (pkg/oci/static.staticLayer.
+// Annotations) always sets this key to an empty string for attestations for
+// exactly this reason. Match that convention so `cosign verify-attestation`
+// accepts our tag-fallback attachment the same way it accepts cosign's own.
 func attestationImage(env ports.DSSEEnvelope) (v1.Image, error) {
 	data, err := json.Marshal(env)
 	if err != nil {
 		return nil, fmt.Errorf("marshal DSSE envelope: %w", err)
 	}
 	layer := static.NewLayer(data, types.MediaType(ports.MediaTypeDSSEEnvelope))
-	img, err := mutate.AppendLayers(empty.Image, layer)
+	img, err := mutate.Append(empty.Image, mutate.Addendum{
+		Layer: layer,
+		Annotations: map[string]string{
+			ports.CosignSignatureLayerAnnotation: "",
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("append attestation layer: %w", err)
 	}
