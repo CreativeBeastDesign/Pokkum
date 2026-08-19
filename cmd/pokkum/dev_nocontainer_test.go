@@ -286,7 +286,7 @@ func TestRunDevWithDeps_NoContainer_CleanShutdownOnContextCancel(t *testing.T) {
 		doneCh <- runDevWithDeps(ctx, discardLogger(), flags, []string{tempDir}, containerRunner, containerBuilder, localRunner)
 	}()
 
-	waitForCondition(t, time.Second, func() bool {
+	waitForCondition(t, 15*time.Second, func() bool {
 		return localRunner.calls.Load() == 1
 	}, "local dev server to start")
 
@@ -463,7 +463,7 @@ func TestRunLocalDevProcess_CleanShutdownOnContextCancel(t *testing.T) {
 		doneCh <- runLocalDevProcess(ctx, discardLogger(), flags, projectDir)
 	}()
 
-	waitForCondition(t, 2*time.Second, func() bool {
+	waitForCondition(t, 15*time.Second, func() bool {
 		_, err := os.Stat(startedFile)
 		return err == nil
 	}, "fake dev server to start")

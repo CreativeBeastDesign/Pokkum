@@ -78,6 +78,7 @@ supervisor:  ##  Cross-compile + zstd-compress supervisor binaries for Linux amd
 	for arch in amd64 arm64; do \
 		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build \
 			-trimpath \
+			-buildvcs=false \
 			-ldflags "-s -w" \
 			-o $$stage/pokkum-init-linux-$$arch \
 			./supervisor/cmd/pokkum-init || { rm -rf $$stage; exit 1; }; \
@@ -103,6 +104,7 @@ static-server:  ##  Cross-compile + zstd-compress static server binaries for Lin
 	for arch in amd64 arm64; do \
 		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build \
 			-trimpath \
+			-buildvcs=false \
 			-ldflags "-s -w" \
 			-o $$stage/pokkum-static-linux-$$arch \
 			./supervisor/cmd/pokkum-static || { rm -rf $$stage; exit 1; }; \

@@ -15,13 +15,13 @@ package staticserver
 // could not produce.
 //
 // Mechanism: for every platform with an embedded blob, rebuild the PID-1
-// binary fresh from source (go build -trimpath -ldflags "-s -w", identical
+// binary fresh from source (go build -trimpath -buildvcs=false -ldflags "-s -w", identical
 // to the Makefile's supervisor/static-server targets) and compare it against
 // what is actually embedded, byte-for-byte.
 //
 // Decompressed bytes are compared, not the raw .zst bytes. Empirically
 // verified before choosing (see Lessons.md): two consecutive `go build
-// -trimpath -ldflags "-s -w"` runs of the same source produced identical
+// -trimpath -buildvcs=false -ldflags "-s -w"` runs of the same source produced identical
 // SHA256 raw ELF output, and scripts/compress-zstd.go's single-shot
 // zstd.EncodeAll(SpeedBestCompression) is likewise bit-for-bit reproducible
 // across repeated runs on this toolchain — so a raw compressed-bytes
@@ -178,7 +178,7 @@ func pid1ModuleRoot(t *testing.T) string {
 }
 
 // pid1BuildFresh cross-compiles sourcePkg for linux/arch with the exact flags
-// the Makefile's supervisor/static-server targets use (-trimpath -ldflags
+// the Makefile's supervisor/static-server targets use (-trimpath -buildvcs=false -ldflags
 // "-s -w", CGO_ENABLED=0) and returns the resulting binary's bytes. A build
 // failure is a genuine finding (the source does not even compile for this
 // platform) and fails the test rather than skipping — unlike a missing
@@ -192,7 +192,7 @@ func pid1BuildFresh(t *testing.T, root, sourcePkg, arch string) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-ldflags", "-s -w", "-o", outPath, sourcePkg)
+	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w", "-o", outPath, sourcePkg)
 	cmd.Dir = root
 	cmd.Env = pid1BuildEnv("linux", arch)
 

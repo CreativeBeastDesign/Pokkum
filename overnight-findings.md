@@ -163,4 +163,21 @@ Sigstore TUF root refresh.
 **Recommended proper fix, not done:** give custom refs their own slot — e.g. `"custom:" + sha256(ref)[:12]` — mirroring how `distroless-node` was made its own preset for exactly this reason (`f5229c3`), and what Roadmap Tier 2 already notes for `chainguard-static`. That changes lock keying and needs a migration story, so it is recorded rather than rushed.
 **Related doc correction:** `Vocabulary.md` already claimed `--base` accepted "a custom image reference". That was false when written and is true now — an overclaim that closed itself by accident.
 
+### 17. Go's VCS stamping made the embedded PID-1 binaries change on every commit
+
+**Found by:** the blob-freshness guard from finding 6 failing immediately after being committed — including for `pokkum-init`, which has **zero** dependencies under `internal/`, so no source change could possibly have affected it. The decompressed byte *counts* matched exactly while the content differed, which ruled out a source change and pointed at metadata.
+**Cause:** `go build` stamps VCS information into every binary by default. Confirmed with `go version -m`: `vcs.revision=<commit>`, `vcs.time`, `vcs.modified=true`. So a binary built at one commit never matches a binary built at the next, even from byte-identical source, and a dirty tree differs from a clean one.
+**Two consequences, the second worse than the first:**
+1. The guard was unusable — it would have failed after every single commit, and would have been dismissed as noise within a day.
+2. **It partially negated the Roadmap 3f fix.** Commit `1675d4c` pinned the immutable-binary layers' tar `ModTime` so their digests would stop churning per commit and a fleet would pull them once. But the supervisor and static-server layers contain these binaries, and their *content* was still changing every commit — so those two layers kept churning regardless of the timestamp fix. The Bun layer was unaffected, being a downloaded third-party artifact rather than one built here.
+**Same class as the bug it undermined:** build metadata leaking into content that is supposed to be content-addressed. `SOURCE_DATE_EPOCH` was the first instance; VCS stamping is the second, in the same layers.
+**Fixed:** `-buildvcs=false` on the two embedded-binary build targets in the `Makefile` (which `.goreleaser.yaml`'s before-hooks also use, so releases are covered) and on the guard's own build invocation, so both sides compare the same thing. Verified: `go version -m` now reports no VCS stamps, the guard passes, and the binaries are determined purely by their source. The main CLI build is deliberately untouched — it *wants* version stamping.
+**Why the original reproducibility check missed it:** the implementing agent built twice and compared, which passes, because both builds happened at the same commit with the same dirty state. Reproducibility across *commits* is the property that actually mattered and was not the thing tested.
+
+### 18. A new subprocess-start wait was too tight under full-suite load
+
+**Observed:** `TestRunLocalDevProcess_CleanShutdownOnContextCancel` passed in isolation and failed in a full `go test ./...` at exactly 2.01s — its `waitForCondition` bound was 2s, waiting for a real subprocess to start while the rest of the suite (including three Docker-backed smoke tests) competed for the machine.
+**Severity:** Low, but the failure mode is corrosive: a test that only fails under load gets re-run until green and then ignored, and it trains people to distrust the suite.
+**Fixed:** both subprocess-start waits in that file widened to 15s. `waitForCondition` polls every 5ms and returns on first success, so a wider deadline costs nothing on the happy path and only buys headroom under contention. Confirmed with three consecutive clean full-suite runs rather than one.
+
 _(appended as work proceeds)_
