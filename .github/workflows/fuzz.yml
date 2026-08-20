@@ -34,7 +34,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          # Read the version from go.mod rather than pinning a floating minor.
+          # setup-go v6+ sets GOTOOLCHAIN=local, so Go will NOT fetch a newer
+          # toolchain to satisfy go.mod — it fails instead. `go-version: '1.26'`
+          # resolved to 1.26.5 on the macOS runner against a go.mod requiring
+          # >= 1.26.6 and broke the build; the resolved patch is per-platform, so
+          # reasoning about what a floating minor "should" give is unreliable.
+          # go-version-file keeps this correct automatically on every Go bump.
+          go-version-file: 'go.mod'
           cache: true
 
       - name: Run Discovered Fuzz Targets
