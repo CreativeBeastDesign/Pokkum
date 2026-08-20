@@ -186,7 +186,7 @@ func runRollback(ctx context.Context, logger *slog.Logger, flags *rollbackFlags)
 				if len(parts) >= 2 {
 					var buf bytes.Buffer
 					buf.Write(parts[1])
-					buf.WriteString(fmt.Sprintf("%q", displacedRef))
+					fmt.Fprintf(&buf, "%q", displacedRef)
 					return buf.Bytes()
 				}
 				return match
@@ -204,7 +204,7 @@ func runRollback(ctx context.Context, logger *slog.Logger, flags *rollbackFlags)
 				if len(parts) >= 2 {
 					var buf bytes.Buffer
 					buf.Write(parts[1])
-					buf.WriteString(fmt.Sprintf("%q", histVal))
+					fmt.Fprintf(&buf, "%q", histVal)
 					return buf.Bytes()
 				}
 				return match

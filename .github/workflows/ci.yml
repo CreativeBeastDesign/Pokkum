@@ -52,25 +52,20 @@ jobs:
       - name: Roadmap Docs Freshness Guard
         run: bash scripts/check-docs-freshness.sh
 
-      # install-mode: goinstall builds golangci-lint from source with THIS
-      # job's Go toolchain. The prebuilt release binaries are compiled with
-      # whatever Go was current at their release, and golangci-lint refuses to
-      # load a config whose target Go version is newer than its own build
-      # version: v1.62.2's binary is built with go1.23, so against go.mod's
-      # 1.26.6 it exited 3 with "can't load config" — never linting anything.
-      # Because it failed at the *step* level, every later step in this job
-      # (govulncheck, architecture purity, race detector, the full test suite,
-      # the coverage floor, the CLI build) was skipped, so a dead linter had
-      # silently disabled the entire gate. Building from source keeps the
-      # linter's Go version equal to the module's by construction, so this
-      # cannot recur on the next Go bump. Version tracks .golangci.yml's
-      # documented ">= 1.64.0" assumption; do not lower go.mod to satisfy a
-      # linter (see CLAUDE.md's toolchain-stability rule).
+      # Run FROM SOURCE via `go run`, not via golangci-lint-action's prebuilt
+      # binary. A prebuilt binary carries the Go version it was compiled with,
+      # and golangci-lint refuses to load a config whose target Go version is
+      # newer than its own: the previous v1.62.2 pin (built with go1.23) exited 3
+      # with "can't load config" against go.mod's 1.26.6, so it linted nothing —
+      # and because that failed at the step level, GitHub skipped every
+      # verification step behind it. `go run` uses this job's toolchain, making
+      # the linter's Go version equal the module's by construction, so no future
+      # Go bump can reintroduce that. Keep this version identical to the
+      # Makefile's GOLANGCI_LINT and release.yml's; cmd/pokkum/lintversion_test.go
+      # fails if they drift.
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.64.8
-          install-mode: goinstall
+        if: ${{ !cancelled() }}
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
 
       - name: Run govulncheck
         if: ${{ !cancelled() }}

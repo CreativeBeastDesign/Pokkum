@@ -23,10 +23,11 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      # Source-built and version-locked with ci.yml and the Makefile — see the
+      # long comment in ci.yml for why a prebuilt binary broke here too (this
+      # workflow carried the identical dead v1.62.2 pin).
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.62.2
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
 
       - name: Run Unit & Integration Tests
         run: go test ./...

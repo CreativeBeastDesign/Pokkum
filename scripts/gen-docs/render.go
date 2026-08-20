@@ -173,10 +173,10 @@ func RenderRoadmap(areas []Area) string {
 
 	byStage := groupByStage(items)
 	for _, stage := range orderedStages(byStage, false) {
-		b.WriteString(fmt.Sprintf("## %s\n\n", stageHeading(stage)))
+		fmt.Fprintf(&b, "## %s\n\n", stageHeading(stage))
 		byArea := groupByArea(byStage[stage])
 		for _, areaName := range sortedAreaNames(byArea) {
-			b.WriteString(fmt.Sprintf("### %s\n\n", areaName))
+			fmt.Fprintf(&b, "### %s\n\n", areaName)
 			areaItems := byArea[areaName]
 			sortByID(areaItems)
 			writeItemTable(&b, areaItems, false)
@@ -216,10 +216,10 @@ func RenderShipped(areas []Area) string {
 
 	byStage := groupByStage(items)
 	for _, stage := range orderedStages(byStage, true) {
-		b.WriteString(fmt.Sprintf("## %s\n\n", stageHeading(stage)))
+		fmt.Fprintf(&b, "## %s\n\n", stageHeading(stage))
 		byArea := groupByArea(byStage[stage])
 		for _, areaName := range sortedAreaNames(byArea) {
-			b.WriteString(fmt.Sprintf("### %s\n\n", areaName))
+			fmt.Fprintf(&b, "### %s\n\n", areaName)
 			areaItems := byArea[areaName]
 			sortByID(areaItems)
 			writeItemTable(&b, areaItems, true)
@@ -254,19 +254,19 @@ func RenderFeatures(areas []Area) string {
 		b.WriteString("_No shipped features yet._\n\n")
 	}
 	for _, areaName := range sortedAreaNames(byArea) {
-		b.WriteString(fmt.Sprintf("## %s\n\n", areaName))
+		fmt.Fprintf(&b, "## %s\n\n", areaName)
 		areaItems := byArea[areaName]
 		sortByID(areaItems)
 		for _, it := range areaItems {
-			b.WriteString(fmt.Sprintf("### %s\n\n", itemLink(docsFromDir, it.ID, it.Title)))
+			fmt.Fprintf(&b, "### %s\n\n", itemLink(docsFromDir, it.ID, it.Title))
 			b.WriteString(it.Summary + "\n\n")
 			if len(it.Flags) > 0 {
-				b.WriteString(fmt.Sprintf("- Flags: %s\n", formatFlags(it.Flags)))
+				fmt.Fprintf(&b, "- Flags: %s\n", formatFlags(it.Flags))
 			}
 			if len(it.Impl) > 0 {
 				b.WriteString("- Implementation:\n")
 				for _, path := range it.Impl {
-					b.WriteString(fmt.Sprintf("  - [%s](%s)\n", path, relLink(docsFromDir, path)))
+					fmt.Fprintf(&b, "  - [%s](%s)\n", path, relLink(docsFromDir, path))
 				}
 			}
 			b.WriteString("\n")
@@ -291,9 +291,9 @@ func RenderFeatures(areas []Area) string {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			b.WriteString(fmt.Sprintf("### %s\n\n", name))
+			fmt.Fprintf(&b, "### %s\n\n", name)
 			for _, l := range byLimArea[name] {
-				b.WriteString(fmt.Sprintf("- %s (%s)\n", l.Text, itemLink(docsFromDir, l.ItemID, l.Title)))
+				fmt.Fprintf(&b, "- %s (%s)\n", l.Text, itemLink(docsFromDir, l.ItemID, l.Title))
 			}
 			b.WriteString("\n")
 		}
@@ -341,21 +341,21 @@ func RenderItemPage(it Item, allByID map[string]Item) string {
 	it = resolveRefsInItem(itemsFromDir, it)
 	var b strings.Builder
 	b.WriteString(generatedHeader(fmt.Sprintf("%s (item id: %s)", roadmapSourceGlob, it.ID)))
-	b.WriteString(fmt.Sprintf("# %s\n\n", it.Title))
+	fmt.Fprintf(&b, "# %s\n\n", it.Title)
 
 	b.WriteString("| Field | Value |\n| --- | --- |\n")
-	b.WriteString(fmt.Sprintf("| Status | %s |\n", escapeCell(it.Status)))
+	fmt.Fprintf(&b, "| Status | %s |\n", escapeCell(it.Status))
 	if it.Stage != "" {
-		b.WriteString(fmt.Sprintf("| Stage | %s |\n", escapeCell(it.Stage)))
+		fmt.Fprintf(&b, "| Stage | %s |\n", escapeCell(it.Stage))
 	}
 	if it.Kind != "" {
-		b.WriteString(fmt.Sprintf("| Kind | %s |\n", escapeCell(it.Kind)))
+		fmt.Fprintf(&b, "| Kind | %s |\n", escapeCell(it.Kind))
 	}
 	if it.Tier != "" {
-		b.WriteString(fmt.Sprintf("| Tier | %s |\n", escapeCell(it.Tier)))
+		fmt.Fprintf(&b, "| Tier | %s |\n", escapeCell(it.Tier))
 	}
 	if it.AreaName != "" {
-		b.WriteString(fmt.Sprintf("| Area | %s |\n", escapeCell(it.AreaName)))
+		fmt.Fprintf(&b, "| Area | %s |\n", escapeCell(it.AreaName))
 	}
 	b.WriteString("\n")
 
@@ -371,8 +371,8 @@ func RenderItemPage(it Item, allByID map[string]Item) string {
 		b.WriteString("## Options\n\n")
 		b.WriteString("| Option | Description | Tradeoffs |\n| --- | --- | --- |\n")
 		for _, opt := range it.Options {
-			b.WriteString(fmt.Sprintf("| %s | %s | %s |\n",
-				escapeCell(opt.Title), escapeCell(opt.Description), escapeCell(opt.Tradeoffs)))
+			fmt.Fprintf(&b, "| %s | %s | %s |\n",
+				escapeCell(opt.Title), escapeCell(opt.Description), escapeCell(opt.Tradeoffs))
 		}
 		b.WriteString("\n")
 	}
@@ -390,7 +390,7 @@ func RenderItemPage(it Item, allByID map[string]Item) string {
 	if len(it.Flags) > 0 {
 		b.WriteString("## Flags\n\n")
 		for _, f := range it.Flags {
-			b.WriteString(fmt.Sprintf("- `%s`\n", f))
+			fmt.Fprintf(&b, "- `%s`\n", f)
 		}
 		b.WriteString("\n")
 	}
@@ -404,10 +404,10 @@ func RenderItemPage(it Item, allByID map[string]Item) string {
 	if len(it.Evidence.Commits) > 0 || len(it.Evidence.Findings) > 0 {
 		b.WriteString("## Evidence\n\n")
 		if len(it.Evidence.Commits) > 0 {
-			b.WriteString(fmt.Sprintf("- Commits: %s\n", formatCommits(it.Evidence.Commits)))
+			fmt.Fprintf(&b, "- Commits: %s\n", formatCommits(it.Evidence.Commits))
 		}
 		if len(it.Evidence.Findings) > 0 {
-			b.WriteString(fmt.Sprintf("- Findings: %s (see [overnight-findings.md](%s))\n", formatFindings(it.Evidence.Findings), relLink(itemsFromDir, findingsFromPath)))
+			fmt.Fprintf(&b, "- Findings: %s (see [overnight-findings.md](%s))\n", formatFindings(it.Evidence.Findings), relLink(itemsFromDir, findingsFromPath))
 		}
 		b.WriteString("\n")
 	}
@@ -415,7 +415,7 @@ func RenderItemPage(it Item, allByID map[string]Item) string {
 	if len(it.Limitations) > 0 {
 		b.WriteString("## Known Limitations\n\n")
 		for _, l := range it.Limitations {
-			b.WriteString(fmt.Sprintf("- %s\n", l))
+			fmt.Fprintf(&b, "- %s\n", l)
 		}
 		b.WriteString("\n")
 	}
@@ -427,7 +427,7 @@ func RenderItemPage(it Item, allByID map[string]Item) string {
 			if target, ok := allByID[rel]; ok {
 				title = target.Title
 			}
-			b.WriteString(fmt.Sprintf("- %s\n", itemLink(itemsFromDir, rel, title)))
+			fmt.Fprintf(&b, "- %s\n", itemLink(itemsFromDir, rel, title))
 		}
 		b.WriteString("\n")
 	}

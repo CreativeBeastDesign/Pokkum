@@ -1020,7 +1020,7 @@ func generateNetworkPolicyDocument(docName string, portsList []int, workloadLabe
 	sb.WriteString("  ingress:\n")
 	sb.WriteString("    - ports:\n")
 	for _, p := range portsList {
-		sb.WriteString(fmt.Sprintf("        - protocol: TCP\n          port: %d\n", p))
+		fmt.Fprintf(&sb, "        - protocol: TCP\n          port: %d\n", p)
 	}
 	sb.WriteString("  egress:\n")
 	sb.WriteString("    - ports:\n")

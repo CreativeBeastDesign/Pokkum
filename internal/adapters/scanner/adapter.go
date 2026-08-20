@@ -490,6 +490,10 @@ func (s *Adapter) queryOSVBatch(ctx context.Context, queries []osvQueryItem) ([]
 			if qIdx >= len(chunk) {
 				break
 			}
+			//nolint:gosec // G602 false positive: the `qIdx >= len(chunk)` guard
+			// directly above bounds this index, which gosec's taint analysis does
+			// not follow. Excluded at this site rather than disabling G602
+			// repo-wide, where it could catch a genuine unguarded index.
 			query := chunk[qIdx]
 			for _, v := range res.Vulns {
 				sev := parseOSVSeverity(v)

@@ -64,7 +64,7 @@ func relLink(fromDir, targetRepoRelPath string) string {
 func implLinks(fromDir string, impl []string) string {
 	var b strings.Builder
 	for _, path := range impl {
-		b.WriteString(fmt.Sprintf("- [%s](%s)\n", path, relLink(fromDir, path)))
+		fmt.Fprintf(&b, "- [%s](%s)\n", path, relLink(fromDir, path))
 	}
 	return b.String()
 }

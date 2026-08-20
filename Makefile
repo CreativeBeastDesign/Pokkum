@@ -167,9 +167,18 @@ check-coverage:  ##  Enforce the coverage floor against an existing coverage.out
 fuzz-smoke:  ##  Run every FuzzXxx target briefly (30s each); see scripts/run-fuzz.sh
 	@bash scripts/run-fuzz.sh
 
+# Pinned and run FROM SOURCE via `go run`, deliberately. A prebuilt
+# golangci-lint binary carries the Go version it was compiled with, and
+# golangci-lint refuses a config whose target Go version is newer than that — a
+# v1.62.2 binary built with go1.23 silently linted nothing against go.mod's
+# 1.26.6 for weeks. Building with the local toolchain makes the two equal by
+# construction. Keep this version identical to the one in .github/workflows/
+# ci.yml and release.yml; cmd/pokkum/lintversion_test.go fails if they drift.
+GOLANGCI_LINT := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+
 lint:  ##  Run golangci-lint
 	@echo "Running linters..."
-	@golangci-lint run ./...
+	@go run $(GOLANGCI_LINT) run ./...
 
 fmt:  ##  Format code with gofmt and goimports
 	@echo "Formatting code..."
@@ -186,7 +195,7 @@ verify:  ##  Full agent verification suite: fmt+vet, lint, adapter tests, CLI bu
 	@echo "Step 1/5 - Formatting & static analysis..."
 	@gofmt -s -w . && go vet ./...
 	@echo "Step 2/5 - golangci-lint (catches findings gofmt/vet/test don't, e.g. errcheck, staticcheck)..."
-	@golangci-lint run ./...
+	@go run $(GOLANGCI_LINT) run ./...
 	@echo "Step 3/5 - Adapter unit tests..."
 	@go test ./internal/adapters/...
 	@echo "Step 4/5 - CLI compilation check..."
