@@ -56,11 +56,13 @@ negatives and the noisy false positives that get a scanner switched off entirely
 
 - [internal/adapters/secretguard/guard.go](../../internal/adapters/secretguard/guard.go)
 - [internal/core/pipeline.go](../../internal/core/pipeline.go)
+- [tests/integration/exe_secret_scan_real_bun_test.go](../../tests/integration/exe_secret_scan_real_bun_test.go)
 
 ## Known Limitations
 
 - exe is **not** at parity with layered/static: a secret injected by the `bun build --compile` step itself — a `bunfig.toml` preload plugin, a `with { type: "macro" }` import — is present in neither scanned tree.
-- Covered by unit-level tests through real `core.Build` with the real secretguard adapter, but not yet by a real `bun build --compile` run; that empirical test class has caught nearly every severe bug in Lessons.md and remains the highest-value follow-up here.
+- The `bun build --compile` gap in this list is now closed: `tests/integration/exe_secret_scan_real_bun_test.go` runs a real exe-strategy `core.Build` with the real compiler and the real secretguard adapter — a combination no prior test wired together — planting the secret via a Vite `define` so the source tree on disk is genuinely clean and only the bun-produced bundle carries it. A precision mirror proves an unmodified fixture still publishes.
+- The rejection of scanning the compiled binary is now empirically confirmed rather than assumed: a third test drives the real `bun build --compile`, verifies the secret's literal bytes DO survive into the 94MB binary, then runs `ScanDirectory` against it and gets `Passed=true, findings=0` — the NUL-byte sniff skips binary content, so that approach is a silent no-op, exactly as the decision above predicted.
 
 ## Related
 
