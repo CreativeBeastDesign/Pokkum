@@ -118,35 +118,78 @@ func walkAttestTree() ([]attestRecord, error) {
 		// baseRel is root relative to /app without the leading slash, e.g.
 		// "server" for "/app/server".
 		baseRel := strings.TrimPrefix(root, attestAppDir+"/")
-		err = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				return nil
-			}
-			info, ierr := d.Info()
-			if ierr != nil || !info.Mode().IsRegular() {
-				return nil // skip non-regular entries, matching the packager
-			}
-			sub, rerr := filepath.Rel(dir, p)
-			if rerr != nil {
-				return rerr
-			}
-			rel := filepath.ToSlash(filepath.Join(baseRel, sub))
-			data, rerr := os.ReadFile(p)
-			if rerr != nil {
-				return rerr
-			}
-			sum := sha256.Sum256(data)
-			records = append(records, attestRecord{rel: rel, sha: hex.EncodeToString(sum[:])})
-			return nil
-		})
+		rootRecords, err := walkAttestRoot(dir, baseRel)
 		if err != nil {
 			return nil, err
 		}
+		records = append(records, rootRecords...)
 	}
 	return records, nil
+}
+
+// walkAttestRoot walks one attestation root and returns its records. It is a
+// separate function purely so the os.Root handle below can be closed by defer
+// on every return path rather than by hand inside walkAttestTree's loop.
+//
+// The walk itself is unchanged: filepath.WalkDir does not follow symlinks, and
+// the d.Info().Mode().IsRegular() filter already excludes any symlink the walk
+// reports, so no statically-present symlink is ever hashed. What os.Root adds
+// is closing the TOCTOU window that filter cannot: between the lstat behind
+// d.Info() and the read, the entry can be replaced by a symlink pointing out
+// of /app. readAttestFile resolves against the root handle, so such a
+// replacement is refused instead of silently hashing foreign bytes into the
+// digest the container's startup gate trusts. See gosec G122.
+func walkAttestRoot(dir, baseRel string) ([]attestRecord, error) {
+	// A directory that os.Stat reported as a directory but that cannot be
+	// opened would fail the walk below with the same error, since WalkDir has
+	// to open it to read its entries — so this is not a new way for a
+	// container to refuse to boot, just an earlier report of the same one.
+	rootHandle, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rootHandle.Close() }()
+
+	var records []attestRecord
+	err = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil || !info.Mode().IsRegular() {
+			return nil // skip non-regular entries, matching the packager
+		}
+		sub, rerr := filepath.Rel(dir, p)
+		if rerr != nil {
+			return rerr
+		}
+		rel := filepath.ToSlash(filepath.Join(baseRel, sub))
+		data, rerr := readAttestFile(rootHandle, sub)
+		if rerr != nil {
+			return rerr
+		}
+		sum := sha256.Sum256(data)
+		records = append(records, attestRecord{rel: rel, sha: hex.EncodeToString(sum[:])})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// readAttestFile reads one attested file's bytes through root, where sub is the
+// file's path relative to root. Resolution cannot leave root: a component (or
+// the final element) that is a symlink whose target escapes the attestation
+// root is an error, not a followed link, while a symlink resolving back inside
+// the root is followed exactly as os.ReadFile would follow it. Kept as its own
+// function so the containment property has a direct, testable seam — see
+// TestReadAttestFile_RefusesEscapingSymlink.
+func readAttestFile(root *os.Root, sub string) ([]byte, error) {
+	return root.ReadFile(sub)
 }
 
 // attestRootDigest mirrors attestutils.RootDigest: the deterministic SHA-256

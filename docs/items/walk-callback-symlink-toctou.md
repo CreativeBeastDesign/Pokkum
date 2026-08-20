@@ -8,7 +8,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
+| Status | shipped |
 | Kind | infra |
 | Tier | polish |
 | Area | Testing & Infrastructure |
@@ -49,4 +49,36 @@ the check. See mem:self_review_checklist row 22 on containment checks.
 Take the first option, but as its own change rather than folded into unrelated work: the
 diff is mechanical yet spans a security-sensitive PID-1 binary, and the payoff is
 re-arming G122 so it guards future walk callbacks instead of being permanently muted.
+
+## Decision
+
+Option one shipped 2026-08-20. All five findings converted to `os.Root`, and G122 removed
+from `.golangci.yml`'s gosec excludes so it now guards new walk callbacks: lint is 0 issues
+with the check armed, and reverting any one site makes it fire again (proven for the sbom
+site: 3 findings).
+
+The reachable escape was more than theoretical at one site. `prerendered_flatten` moves
+files up one level, and while the walked relative path cannot contain `..`, a symlinked
+*destination* parent had `os.Rename` deposit a prerendered file outside the staging tree
+and return nil. Containment tests assert on canary bytes outside the tree, not on error
+values, because the old code returned no error at all.
+
+For the PID-1 attest site the escape is not statically reachable through the walk —
+`WalkDir` never follows symlinks and the `IsRegular` filter drops every symlink it
+reports — so old and new code produce identical digests for any static tree. The
+vulnerable window is one syscall wide and not reproducible on demand, so the observable
+was moved to the read primitive, where old and new genuinely differ, and the walk-level
+test asserts the invariant the design maintains instead. That choice is written into the
+test file so it is not "fixed" later by re-adding a test for a guarantee deliberately not
+made.
+
+Verified beyond the standard suite because this binary ships inside the image: a real
+container booted with the rebuilt `pokkum-init`, and the `os.Root` walk re-derived a
+startup digest matching the packager's build-time manifest over 79 files.
+
+## Known Limitations
+
+- One deliberate behaviour change: `os.Root` refuses an **absolute** symlink target even when it names a path inside the root, because openat-based resolution cannot prove it. Relative in-root symlinks are unaffected. Impact is nil for the attest site (symlinks are filtered before the read) and negligible for the other two, and it is pinned by a test rather than left to be rediscovered as a bug.
+- Second, smaller change: `sbom.scanProject` now errors when `ProjectDir` is not a directory (`OpenRoot` returns ENOTDIR) where it previously produced an empty package list. Unreachable from `pokkum build`.
+- **G122's analysis is intraprocedural, so "armed and 0 issues" means no walk callback performs a direct unscoped filesystem operation — not that no walk callback can be TOCTOU'd.** All 15 Walk/WalkDir callbacks were enumerated; the 12 unflagged ones hand the walked path to a helper (`striputils.StripELFFile`, `precompressutils.PrecompressFile`, `sveltekitutils.ReadPackageJSON`) which performs the operation internally. Same class, structurally invisible to the linter — tracked as [Helper-delegated walk callbacks are outside G122's reach](walk-callback-helper-delegation-toctou.md).
 

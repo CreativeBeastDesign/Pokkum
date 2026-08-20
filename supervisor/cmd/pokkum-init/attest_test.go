@@ -207,3 +207,155 @@ func TestAttestRootDigest_OrderIndependent(t *testing.T) {
 		t.Fatalf("unexpected digest %q", a)
 	}
 }
+
+// TestReadAttestFile_RefusesEscapingSymlink proves the attestation's file reads
+// are contained to the attestation root structurally (gosec G122, roadmap item
+// walk-callback-symlink-toctou).
+//
+// This is the direct containment seam. The walk itself cannot be made to
+// exhibit the escape statically: filepath.WalkDir never follows symlinks, and
+// walkAttestRoot's d.Info().Mode().IsRegular() filter drops every symlink the
+// walk reports (proved by TestWalkAttestTree_SymlinkEntriesContributeNothing
+// below), so a symlink sitting in the tree is never read on either the old or
+// the new code. What os.Root closes is the window BETWEEN that lstat and the
+// read, which is one syscall wide and not reproducible on demand
+// (mem:self_review_checklist row 45: test the invariant the design maintains,
+// not the absence of the interleaving). So the property is asserted where the
+// read happens: readAttestFile must refuse a path resolving out of the root,
+// and must still read a path inside it.
+//
+// Reverting readAttestFile's body to os.ReadFile(filepath.Join(root.Name(),
+// sub)) — what the callback did before — makes this test fail: it returns the
+// outside file's bytes, which would then be hashed into the digest the
+// container's startup gate trusts.
+func TestReadAttestFile_RefusesEscapingSymlink(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("outside-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	appRoot := filepath.Join(base, "app", "server")
+	if err := os.MkdirAll(appRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appRoot, "index.js"), []byte("in-root-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(appRoot, "escape.js")); err != nil {
+		t.Fatalf("creating the test symlink failed; this containment test must never be silently skipped (checklist rows 39/47): %v", err)
+	}
+
+	root, err := os.OpenRoot(appRoot)
+	if err != nil {
+		t.Fatalf("OpenRoot(%s): %v", appRoot, err)
+	}
+	defer func() { _ = root.Close() }()
+
+	// A legitimate in-root file still reads, byte for byte.
+	got, err := readAttestFile(root, "index.js")
+	if err != nil {
+		t.Fatalf("readAttestFile(index.js) error = %v, want nil", err)
+	}
+	if string(got) != "in-root-bytes" {
+		t.Errorf("readAttestFile(index.js) = %q, want %q", got, "in-root-bytes")
+	}
+
+	// The escaping symlink must not deliver the outside file's bytes.
+	escaped, err := readAttestFile(root, "escape.js")
+	if string(escaped) == "outside-bytes" {
+		t.Fatalf("readAttestFile read through a symlink leaving the attestation root and returned %q; those bytes would be hashed into the startup digest", escaped)
+	}
+	if err == nil {
+		t.Errorf("readAttestFile(escape.js) error = nil (returned %q), want a refusal", escaped)
+	}
+}
+
+// TestReadAttestFile_FollowsRelativeSymlinkInsideRoot pins the preserved half
+// of the semantics: a relative symlink resolving back inside the attestation
+// root is still followed, as os.ReadFile did. The walk never hands such a path
+// to readAttestFile today (symlinks are filtered out before the read), so this
+// guards the read primitive itself, not a live code path.
+func TestReadAttestFile_FollowsRelativeSymlinkInsideRoot(t *testing.T) {
+	appRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(appRoot, "real.js"), []byte("real-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real.js", filepath.Join(appRoot, "alias.js")); err != nil {
+		t.Fatalf("creating the test symlink failed; this containment test must never be silently skipped (checklist rows 39/47): %v", err)
+	}
+	root, err := os.OpenRoot(appRoot)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	got, err := readAttestFile(root, "alias.js")
+	if err != nil {
+		t.Fatalf("readAttestFile(alias.js) error = %v, want nil", err)
+	}
+	if string(got) != "real-bytes" {
+		t.Errorf("readAttestFile(alias.js) = %q, want %q", got, "real-bytes")
+	}
+}
+
+// TestWalkAttestTree_SymlinkEntriesContributeNothing is the walk-level half of
+// the containment story, and the reason the escape above is not statically
+// reachable through walkAttestTree: a symlink sitting in an attestation root —
+// escaping or not — is filtered out by the IsRegular check and contributes no
+// record, so the digest is identical to the same tree without it.
+//
+// This is also the behaviour a container depends on: adding a symlink to /app
+// must not make the attestation read foreign bytes, and it must not make the
+// digest depend on anything but the regular files the packager archived.
+func TestWalkAttestTree_SymlinkEntriesContributeNothing(t *testing.T) {
+	// Baseline: regular files only.
+	baseA := writeTree(t, t.TempDir(), map[string]string{
+		"app/server/index.js":    "server",
+		"app/client/_app/a.js":   "client",
+		"app/prerendered/i.html": "<h1>i</h1>",
+		"outside/secret":         "outside-bytes",
+	})
+	withRoots(t, baseA)
+	baseline, err := expectedDigestFor()
+	if err != nil {
+		t.Fatalf("baseline digest: %v", err)
+	}
+
+	// Same tree plus two symlinks in an attested root: one escaping to a file
+	// outside the app dir, one relative and resolving inside it.
+	baseB := writeTree(t, t.TempDir(), map[string]string{
+		"app/server/index.js":    "server",
+		"app/client/_app/a.js":   "client",
+		"app/prerendered/i.html": "<h1>i</h1>",
+		"outside/secret":         "outside-bytes",
+	})
+	if err := os.Symlink(filepath.Join(baseB, "outside", "secret"), filepath.Join(baseB, "app", "server", "escape.js")); err != nil {
+		t.Fatalf("creating the test symlink failed; this containment test must never be silently skipped (checklist rows 39/47): %v", err)
+	}
+	if err := os.Symlink("index.js", filepath.Join(baseB, "app", "server", "alias.js")); err != nil {
+		t.Fatal(err)
+	}
+	withRoots(t, baseB)
+	withSymlinks, err := expectedDigestFor()
+	if err != nil {
+		t.Fatalf("digest with symlinks: %v", err)
+	}
+
+	if withSymlinks != baseline {
+		t.Errorf("symlink entries changed the attestation digest: baseline %s, with symlinks %s — the walk must hash only regular files", baseline, withSymlinks)
+	}
+
+	// And the walk must still cover the real files, so the comparison above is
+	// not two empty digests agreeing with each other (row 47: "did nothing"
+	// must be distinguishable from "found nothing").
+	recs, err := walkAttestTree()
+	if err != nil {
+		t.Fatalf("walkAttestTree: %v", err)
+	}
+	if len(recs) != 3 {
+		t.Fatalf("walkAttestTree() returned %d records, want 3 regular files: %+v", len(recs), recs)
+	}
+}

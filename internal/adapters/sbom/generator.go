@@ -149,7 +149,25 @@ func (g *Generator) Generate(ctx context.Context, req ports.SBOMRequest) (*ports
 func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils.Matcher) ([]scannerutils.CatalogPackage, error) {
 	seen := make(map[string]scannerutils.CatalogPackage)
 
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
+	// Lockfile reads inside the walk callback below go through a root handle
+	// scoped to the project directory instead of through the walked path
+	// directly, so a lockfile-named symlink pointing out of the project tree
+	// is refused rather than followed — the project is the user's own
+	// directory, but a dependency's postinstall script can write into it, so
+	// the containment needs to be structural rather than incidental. Relative
+	// symlinks that stay inside the project are still followed, exactly as
+	// os.ReadFile would; an absolute target is refused, since openat-based
+	// resolution cannot prove it stays inside. Either way the read error is
+	// swallowed exactly as before, so an unreadable lockfile contributes no
+	// packages instead of failing the scan. See gosec G122 and
+	// mem:self_review_checklist row 22.
+	projectRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, fmt.Errorf("opening project dir %s: %w", root, err)
+	}
+	defer func() { _ = projectRoot.Close() }()
+
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -160,13 +178,17 @@ func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils
 			return err
 		}
 
+		// rel stays in native separator form because it doubles as the
+		// root-relative path handed to projectRoot below; relSlash is the
+		// slash-separated form the ignore matcher's gitignore-style patterns
+		// are written against.
 		rel, err := filepath.Rel(root, p)
 		if err != nil {
 			return err
 		}
-		rel = filepath.ToSlash(rel)
+		relSlash := filepath.ToSlash(rel)
 
-		if m.Match(rel, d.IsDir()) {
+		if m.Match(relSlash, d.IsDir()) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -182,7 +204,7 @@ func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils
 
 		switch filename {
 		case "bun.lock":
-			data, rErr := os.ReadFile(p)
+			data, rErr := projectRoot.ReadFile(rel)
 			if rErr == nil {
 				if pkgs, pErr := scannerutils.ParseBunLock(data); pErr == nil {
 					for _, pkg := range pkgs {
@@ -191,7 +213,7 @@ func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils
 				}
 			}
 		case "package-lock.json":
-			data, rErr := os.ReadFile(p)
+			data, rErr := projectRoot.ReadFile(rel)
 			if rErr == nil {
 				if pkgs, pErr := scannerutils.ParsePackageLock(data); pErr == nil {
 					for _, pkg := range pkgs {
@@ -202,7 +224,7 @@ func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils
 				}
 			}
 		case "pnpm-lock.yaml":
-			data, rErr := os.ReadFile(p)
+			data, rErr := projectRoot.ReadFile(rel)
 			if rErr == nil {
 				if pkgs, pErr := scannerutils.ParsePnpmLock(data); pErr == nil {
 					for _, pkg := range pkgs {

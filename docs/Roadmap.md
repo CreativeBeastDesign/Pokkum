@@ -108,7 +108,7 @@ _None._
 
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
-| [Root-scoped filesystem APIs in filepath.Walk callbacks (gosec G122)](items/walk-callback-symlink-toctou.md) | Five filepath.Walk/WalkDir callbacks operate on the walked path directly, which gosec G122 flags as symlink-TOCTOU-prone; os.Root would make the containment structural rather than incidental. | infra | open |
+| [Helper-delegated walk callbacks are outside G122's reach](items/walk-callback-helper-delegation-toctou.md) | 12 of the repo's 15 Walk/WalkDir callbacks pass the walked path to a helper that opens it internally, so the symlink-TOCTOU class survives in a form gosec G122 structurally cannot see. | infra | open |
 
 ## Non-goals
 

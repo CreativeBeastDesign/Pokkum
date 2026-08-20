@@ -23,8 +23,8 @@ linters:
     - revive
   settings:
     gosec:
-      # Three checks new in this gosec generation, all excluded after reading the
-      # flagged sites rather than on principle:
+      # Two taint-analysis checks new in this gosec generation, both excluded
+      # after reading the flagged sites rather than on principle:
       #   G703 (path traversal, taint analysis) — 16 sites. gosec has no
       #     interprocedural view, so it cannot see the containment these paths
       #     already pass through: pokkum-static resolves every candidate via
@@ -34,15 +34,21 @@ linters:
       #   G702 (command injection, taint analysis) — 1 site: pokkum-init's PID-1
       #     os.StartProcess runs the operator-configured command. That IS the
       #     feature.
-      #   G122 (filepath.Walk callback symlink TOCTOU) — 5 sites. Unlike the
-      #     other two this is a legitimate hardening suggestion (os.Root), not a
-      #     false positive, but it is a real refactor across three packages and is
-      #     tracked as its own roadmap item rather than rushed in beside a linter
-      #     upgrade.
+      # G122 (filepath.Walk callback symlink TOCTOU) is deliberately NOT in this
+      # list. It was excluded for exactly as long as the roadmap item
+      # walk-callback-symlink-toctou took to land: its five findings were a real
+      # hardening suggestion, not a false positive, and all five are now converted
+      # to os.Root-scoped operations (bunexec/prerendered_flatten.go,
+      # sbom/generator.go, supervisor/cmd/pokkum-init/attest.go). The check is
+      # armed so it guards the next walk callback somebody writes.
+      # Both entries verified still load-bearing on 2026-08-20 by removing each
+      # in turn and re-running: G703 -> 16 findings, G702 -> 1. An exclusion that
+      # has quietly stopped matching is a pre-authorised blind spot, so re-run
+      # that check when this list is next touched (mem:self_review_checklist
+      # row 46).
       excludes:
         - G703
         - G702
-        - G122
   exclusions:
     generated: lax
     presets:

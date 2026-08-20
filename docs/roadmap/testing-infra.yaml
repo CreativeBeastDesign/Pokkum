@@ -115,9 +115,46 @@ items:
       commits: ["0ef9dd0", "1c33509"]
       findings: [4, 6, 7]
 
+  - id: walk-callback-helper-delegation-toctou
+    title: "Helper-delegated walk callbacks are outside G122's reach"
+    status: open
+    kind: infra
+    tier: polish
+    summary: "12 of the repo's 15 Walk/WalkDir callbacks pass the walked path to a helper that opens it internally, so the symlink-TOCTOU class survives in a form gosec G122 structurally cannot see."
+    problem: |
+      [Root-scoped filesystem APIs in filepath.Walk callbacks (gosec G122)](item:walk-callback-symlink-toctou)
+      converted the five callbacks that called `os.*` on the walked path directly, and re-armed
+      G122. That check is intraprocedural: it sees `os.ReadFile(p)` inside the callback, and does
+      not see `helper(p)` where the helper does the same thing one frame down.
+
+      Enumerating all 15 Walk/WalkDir callbacks found 12 in the second shape — the walked path is
+      handed to `striputils.StripELFFile`, `precompressutils.PrecompressFile` (which stats and
+      reads it internally), or `sveltekitutils.ReadPackageJSON`/`ResolveVersion` on
+      `filepath.Dir(p)`. The exposure is the same class as the converted sites, and the linter
+      reports zero issues on all of them.
+
+      This is not an argument that the conversion was pointless: the converted sites are now
+      structurally contained, and the armed check does prevent the *direct* shape from returning.
+      It is a statement of what "G122 armed, 0 issues" actually buys, so nobody reads it as
+      "walk callbacks in this repo cannot be TOCTOU'd".
+    options:
+      - title: "Thread an os.Root through the helper APIs"
+        description: "Change the shared helpers to accept an *os.Root plus a root-relative path instead of an absolute path, so containment is a property of the signature."
+        tradeoffs: "Eliminates the class and makes it unrepresentable, but changes a shared API used by many callers across ~10 packages, including internal/adapters/secretguard, and is a genuinely large diff."
+      - title: "Convert only the walks over trees an attacker could plausibly influence"
+        description: "Triage the 12 by what they traverse — a dependency-writable node_modules tree is interesting, the image's own layers at boot much less so — and convert that subset."
+        tradeoffs: "Much smaller and targets real exposure, but leaves the class present and the linter still blind to it, so the next such callback is unguarded."
+      - title: "Accept and document"
+        description: "Record that these walks traverse trees the build already trusts, and leave them."
+        tradeoffs: "Zero cost; relies on every future walk callback author knowing the distinction, which is what row 22 exists because people do not."
+    recommendation: |
+      Second option first: triage by what is actually traversed, and convert the build-time walks
+      over dependency-writable trees. The first option is the real fix but should not ride along
+      with anything else — it is a shared-API change, and the fact that it touches secretguard
+      means it needs the same care the PID-1 conversion just got.
   - id: walk-callback-symlink-toctou
     title: "Root-scoped filesystem APIs in filepath.Walk callbacks (gosec G122)"
-    status: open
+    status: shipped
     kind: infra
     tier: polish
     summary: "Five filepath.Walk/WalkDir callbacks operate on the walked path directly, which gosec G122 flags as symlink-TOCTOU-prone; os.Root would make the containment structural rather than incidental."
@@ -139,6 +176,10 @@ items:
       `os.Root` (Go 1.24+) makes this structural: operations resolve against a root handle and
       cannot escape it, so the guarantee no longer depends on every future caller remembering
       the check. See mem:self_review_checklist row 22 on containment checks.
+    limitations:
+      - "One deliberate behaviour change: `os.Root` refuses an **absolute** symlink target even when it names a path inside the root, because openat-based resolution cannot prove it. Relative in-root symlinks are unaffected. Impact is nil for the attest site (symlinks are filtered before the read) and negligible for the other two, and it is pinned by a test rather than left to be rediscovered as a bug."
+      - "Second, smaller change: `sbom.scanProject` now errors when `ProjectDir` is not a directory (`OpenRoot` returns ENOTDIR) where it previously produced an empty package list. Unreachable from `pokkum build`."
+      - "**G122's analysis is intraprocedural, so \"armed and 0 issues\" means no walk callback performs a direct unscoped filesystem operation — not that no walk callback can be TOCTOU'd.** All 15 Walk/WalkDir callbacks were enumerated; the 12 unflagged ones hand the walked path to a helper (`striputils.StripELFFile`, `precompressutils.PrecompressFile`, `sveltekitutils.ReadPackageJSON`) which performs the operation internally. Same class, structurally invisible to the linter — tracked as [Helper-delegated walk callbacks are outside G122's reach](item:walk-callback-helper-delegation-toctou)."
     options:
       - title: "Convert the five sites to os.Root"
         description: "Open an os.Root for the walk base and use root-relative operations inside each callback, then drop the G122 exclusion from .golangci.yml so the check guards new code."
@@ -150,6 +191,30 @@ items:
       Take the first option, but as its own change rather than folded into unrelated work: the
       diff is mechanical yet spans a security-sensitive PID-1 binary, and the payoff is
       re-arming G122 so it guards future walk callbacks instead of being permanently muted.
+    decision: |
+      Option one shipped 2026-08-20. All five findings converted to `os.Root`, and G122 removed
+      from `.golangci.yml`'s gosec excludes so it now guards new walk callbacks: lint is 0 issues
+      with the check armed, and reverting any one site makes it fire again (proven for the sbom
+      site: 3 findings).
+
+      The reachable escape was more than theoretical at one site. `prerendered_flatten` moves
+      files up one level, and while the walked relative path cannot contain `..`, a symlinked
+      *destination* parent had `os.Rename` deposit a prerendered file outside the staging tree
+      and return nil. Containment tests assert on canary bytes outside the tree, not on error
+      values, because the old code returned no error at all.
+
+      For the PID-1 attest site the escape is not statically reachable through the walk —
+      `WalkDir` never follows symlinks and the `IsRegular` filter drops every symlink it
+      reports — so old and new code produce identical digests for any static tree. The
+      vulnerable window is one syscall wide and not reproducible on demand, so the observable
+      was moved to the read primitive, where old and new genuinely differ, and the walk-level
+      test asserts the invariant the design maintains instead. That choice is written into the
+      test file so it is not "fixed" later by re-adding a test for a guarantee deliberately not
+      made.
+
+      Verified beyond the standard suite because this binary ships inside the image: a real
+      container booted with the rebuilt `pokkum-init`, and the `os.Root` walk re-derived a
+      startup digest matching the packager's build-time manifest over 79 files.
   - id: hermetic-privileged-ci-step
     title: "Hermetic Mount Isolation tests in privileged CI container"
     status: shipped
