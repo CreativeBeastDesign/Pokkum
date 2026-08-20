@@ -83,7 +83,7 @@ func TestReadmeActionRefsResolve(t *testing.T) {
 		t.Skip("README references no GitHub Action from this repo; nothing to check")
 	}
 
-	tags := gitRefNames(t)
+	tags, heads := gitRefNames(t)
 
 	for _, m := range matches {
 		path, ref := m[1], m[2]
@@ -93,10 +93,15 @@ func TestReadmeActionRefsResolve(t *testing.T) {
 					readmeRepoSlug, path, ref, path)
 			}
 		}
-		if tags == nil {
-			continue // no git metadata available; the path check above still ran
+		// Only enforce ref resolution when tags are actually present. A CI
+		// checkout (actions/checkout) fetches no tags by default, so refs/heads
+		// is populated while refs/tags is empty — treating "some refs exist" as
+		// "tags are available" made this test fail on a perfectly good ref, which
+		// is how this distinction was found. The path check above still runs.
+		if len(tags) == 0 {
+			continue
 		}
-		if !tags[ref] {
+		if !tags[ref] && !heads[ref] {
 			t.Errorf("README documents `uses: %s/%s@%s`, but %q is not a tag or branch in this repo, so the ref cannot resolve.\n"+
 				"\tPin a released version (there is no moving major tag unless one is actually published and re-pointed on each release).",
 				readmeRepoSlug, path, ref, ref)
@@ -104,26 +109,33 @@ func TestReadmeActionRefsResolve(t *testing.T) {
 	}
 }
 
-// gitRefNames returns every local tag and branch name, or nil when git metadata
-// is unavailable (a source archive rather than a checkout).
-func gitRefNames(t *testing.T) map[string]bool {
+// gitRefNames returns local tag names and branch names separately.
+//
+// They must stay separate: a shallow CI checkout has branches but no tags, and
+// conflating the two turns "we cannot check tags here" into "this tag does not
+// exist" — a false failure on a correct README. Either map may be empty.
+func gitRefNames(t *testing.T) (tags, heads map[string]bool) {
 	t.Helper()
-	out, err := exec.Command("git", "-C", repoRootPath(), "for-each-ref",
-		"--format=%(refname:short)", "refs/tags", "refs/heads").Output()
-	if err != nil {
-		t.Logf("git refs unavailable (%v); skipping ref-resolution half of this check", err)
-		return nil
-	}
-	refs := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line != "" {
-			refs[line] = true
+	read := func(namespace string) map[string]bool {
+		out, err := exec.Command("git", "-C", repoRootPath(), "for-each-ref",
+			"--format=%(refname:short)", namespace).Output()
+		if err != nil {
+			t.Logf("git %s unavailable (%v)", namespace, err)
+			return nil
 		}
+		refs := map[string]bool{}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if line != "" {
+				refs[line] = true
+			}
+		}
+		return refs
 	}
-	if len(refs) == 0 {
-		return nil
+	tags, heads = read("refs/tags"), read("refs/heads")
+	if len(tags) == 0 {
+		t.Logf("no tags present (a CI checkout fetches none by default); ref-resolution half of this check is skipped, path checks still ran")
 	}
-	return refs
+	return tags, heads
 }
 
 // TestReadmeDoesNotPresentUnpublishedNpmPackageAsWorking covers the third case.
