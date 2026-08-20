@@ -47,7 +47,10 @@ This runs five steps in order:
 1. **Formatting & Static Analysis** — `gofmt -s -w . && go vet ./...`
    - Ensures consistent code style and catches obvious errors
 
-2. **golangci-lint** — `golangci-lint run ./...`
+2. **golangci-lint** — `make lint`
+   Use `make lint` rather than a `golangci-lint` you already have installed. The config uses the v2 schema and the version is pinned and
+   built from source via `go run`, so it always matches the Go version in `go.mod`. An older binary will refuse the config and exit without
+   linting anything, which looks like a tooling error rather than the silent no-op it is.
    - Runs extended linters (`errcheck`, `staticcheck`, etc.) that `gofmt`/`go vet` miss
    - This step alone has caught multiple real bugs in this codebase; skipping it is not safe
 

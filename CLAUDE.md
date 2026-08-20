@@ -102,7 +102,8 @@ The verification protocol applies **ONLY when Go source code (`.go` files, build
 When code changes have occurred, agents **MUST** execute the following 5-step verification suite before declaring completion (`make verify` runs all five in order):
 
 1. **Formatting & Static Analysis**: `gofmt -s -w . && go vet ./...`
-2. **golangci-lint**: `golangci-lint run ./...` — `gofmt`/`go vet`/`go test` alone miss findings this catches (`errcheck`, `staticcheck`, ...); see `Lessons.md`'s "4-step verification suite does not run golangci-lint" entry.
+2. **golangci-lint**: `make lint` — `gofmt`/`go vet`/`go test` alone miss findings this catches (`errcheck`, `staticcheck`, ...); see `Lessons.md`'s "4-step verification suite does not run golangci-lint" entry.
+   **Do not run a bare `golangci-lint` from PATH.** `.golangci.yml` is v2 schema, which a v1 binary cannot load, and any binary built with an older Go than `go.mod` targets refuses the config and exits non-zero *without linting anything* — the failure mode that left CI running zero tests for six consecutive runs. `make lint` invokes the pinned version through `go run`, so the linter is built with this module's toolchain. Confirm the output reports an issue count; a non-zero exit with no findings listed means it never linted.
 3. **Adapter Unit Tests**: `go test ./internal/adapters/...`
 4. **CLI Compilation Check**: `go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test`
 5. **Full Internal Test Suite** (includes Architecture Purity Verification `internal/architecture_test.go`): `go test ./internal/...`
