@@ -104,19 +104,10 @@ brew install CreativeBeastDesign/pokkum/pokkum
 
 ---
 
-### 2. NPM / NPX (Zero-Install One-Liner)
+### 2. NPM / NPX — *not yet published*
 
-Run directly via `npx` or `bunx` without manual installation:
-
-```bash
-npx @pokkum/cli build ./my-app
-```
-
-Or install globally:
-
-```bash
-npm install -g @pokkum/cli
-```
+> [!NOTE]
+> `@pokkum/cli` is **not on npm yet**, so `npx @pokkum/cli` and `npm install -g @pokkum/cli` do not work today. The package name is reserved in the release pipeline and this section will describe the real commands once the first publish succeeds. Until then use Homebrew, the installer script, or a release binary below.
 
 ---
 
@@ -126,15 +117,24 @@ npm install -g @pokkum/cli
 curl -fsSL https://raw.githubusercontent.com/CreativeBeastDesign/pokkum/main/install.sh | sh
 ```
 
+Detects your OS and architecture, downloads the matching release archive, and **verifies its SHA-256 against the release's `checksums.txt` before installing** — a mismatch aborts without installing anything. Override the destination with `POKKUM_INSTALL_DIR` (default `/usr/local/bin`) or pick a version with `POKKUM_VERSION`:
+
+```bash
+POKKUM_VERSION=v1.0.1 POKKUM_INSTALL_DIR="$HOME/.local/bin" \
+  sh -c "$(curl -fsSL https://raw.githubusercontent.com/CreativeBeastDesign/pokkum/main/install.sh)"
+```
+
 ---
 
 ### 4. GitHub Action for CI/CD Pipelines (`.github/workflows/ci.yml`)
 
 ```yaml
 - name: Setup Pokkum
-  uses: CreativeBeastDesign/pokkum/.github/actions/setup-pokkum@v1
+  # Pin a released tag. There is no moving `v1` tag — only full versions are
+  # published — so `@v1` cannot resolve. Bump this when you upgrade.
+  uses: CreativeBeastDesign/pokkum/.github/actions/setup-pokkum@v1.0.1
   with:
-    version: 'latest'
+    version: 'v1.0.1' # or 'latest' to track the newest release
 
 - name: Build & Push SvelteKit Container
   env:
