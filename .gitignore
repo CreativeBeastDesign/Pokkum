@@ -45,3 +45,10 @@ testdata/fixtures/*/.pokkum/
 # should not appear -- it is ignored as belt-and-suspenders so an in-place write
 # can never be committed the way the .pokkum/ handlers once were.
 testdata/fixtures/*/pokkum.lock
+
+# npm auth lives here. Never commit it: an .npmrc in the repo root is one
+# `git add -A` away from publishing a write-scoped token with 2FA bypass, and
+# pokkum's own secretguard will not catch it — .npmrc's format is unquoted
+# (//registry.npmjs.org/:_authToken=npm_xxx) and the generic secret rule
+# requires a quoted value.
+.npmrc
