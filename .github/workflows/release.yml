@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
   packages: write
+  # Required for npm provenance / trusted publishing. Harmless while unused:
+  # it grants the job the ability to mint an OIDC token, nothing more.
+  id-token: write
 
 jobs:
   lint-and-test:
@@ -58,7 +61,10 @@ jobs:
       - name: Set up Node.js (for NPM Publisher)
         uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          # Node 24 ships npm 11.x. npm >= 11.5.1 is what trusted publishing
+          # (OIDC) requires, so this is also the prerequisite for retiring
+          # NPM_TOKEN later — see the note on the publish step.
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Set up Cosign
@@ -76,7 +82,73 @@ jobs:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
-      - name: Publish NPM Package (goreleaser-npm-publisher)
-        run: npx goreleaser-npm-publisher --name @pokkum/cli --bin pokkum
+      # The npm side publishes FIVE packages, not one: goreleaser-npm-publisher
+      # emits the optionalDependencies layout that esbuild and swc use — a tiny
+      # launcher package whose index.js resolves a per-platform package, plus one
+      # package per platform carrying the actual binary (~28MB packed each).
+      #
+      # This previously ran `--name @pokkum/cli --bin pokkum`. Neither flag
+      # exists: `build --help` offers only --project/--builder/--clear/--prefix/
+      # --description/--files/--keywords/--license/--verbose. The package name is
+      # always prefix + binary name, so the published name could never have been
+      # @pokkum/cli, and the release step failed on both v1.0.0 and v1.0.1.
+      - name: Build NPM Packages
+        run: |
+          npx -y goreleaser-npm-publisher build --clear --prefix @pokkum --license Apache-2.0
+
+          # The generated launcher is named @pokkum/pokkum (prefix + binary).
+          # README.md documents @pokkum/cli and there is no flag for it, so patch
+          # the manifest. Verified safe: index.js resolves the platform packages
+          # by their own names and never refers to its own.
+          npm pkg set name=@pokkum/cli --prefix dist/npm/pokkum
+
+          # repository is required for `npm publish --provenance` and makes the
+          # npm page link back here. Set on every package, launcher included.
+          for d in dist/npm/*/; do
+            npm pkg set repository.type=git \
+              repository.url=git+https://github.com/${{ github.repository }}.git \
+              --prefix "$d"
+          done
+
+      # Fail before publishing rather than after: publishing is irreversible
+      # (npm forbids reusing a version), so a wrong name or a version that does
+      # not match the tag must stop here. This is the check that would have made
+      # the phantom-flag bug obvious on the first failed release instead of the
+      # third.
+      - name: Verify NPM Packages Before Publishing
+        run: |
+          tag='${{ github.ref_name }}'
+          want_version="${tag#v}"
+          name=$(npm pkg get name --prefix dist/npm/pokkum | tr -d '"')
+          version=$(npm pkg get version --prefix dist/npm/pokkum | tr -d '"')
+
+          [ "$name" = "@pokkum/cli" ] || { echo "::error::launcher package is named '$name', expected @pokkum/cli"; exit 1; }
+          [ "$version" = "$want_version" ] || { echo "::error::launcher version '$version' does not match tag '$tag'"; exit 1; }
+
+          count=$(find dist/npm -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+          [ "$count" -eq 5 ] || { echo "::error::expected 5 packages (1 launcher + 4 platforms), found $count"; exit 1; }
+
+          echo "publishing $name@$version plus $((count - 1)) platform packages"
+
+      # Platform packages first: the launcher lists them in optionalDependencies,
+      # so publishing the launcher first leaves a window where `npm i @pokkum/cli`
+      # resolves nothing runnable.
+      #
+      # --access public is required on every one of them. A scoped package's first
+      # publish defaults to restricted, and a free org cannot host restricted
+      # packages, so omitting it fails.
+      #
+      # To retire NPM_TOKEN later: configure a trusted publisher for each package
+      # (npmjs.com -> package -> Settings -> Trusted publishing), then add
+      # `--provenance` below and delete the NODE_AUTH_TOKEN env. Everything else
+      # it needs — npm 11.x, id-token: write, the repository field — is already
+      # in place above.
+      - name: Publish NPM Packages
+        run: |
+          for d in dist/npm/pokkum-*/; do
+            echo "publishing $d"
+            npm publish "$d" --access public
+          done
+          npm publish dist/npm/pokkum --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
