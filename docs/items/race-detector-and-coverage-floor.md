@@ -15,7 +15,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 ## Summary
 
-go test -race now runs in CI over the packages where concurrency actually lives, and coverage is measured and enforced at a 73% floor as a ratchet off the real baseline, not an aspirational number.
+go test -race now runs in CI over the packages where concurrency actually lives, and coverage is measured and enforced at a 75% floor as a ratchet off the real baseline (77.8% measured 2026-08-20), not an aspirational number.
 
 ## Implementation
 

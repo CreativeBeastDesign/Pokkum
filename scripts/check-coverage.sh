@@ -21,9 +21,16 @@
 set -uo pipefail
 
 # Baseline: `go test -short -covermode=atomic -coverpkg=./... ./...` measured
-# 75.5% total statements on 2026-08-18 (see CI hardening task). Floor is set
-# ~2.5 points below that measured number.
-FLOOR="${COVERAGE_FLOOR:-73.0}"
+# 77.8% total statements on 2026-08-20, up from 75.5% on 2026-08-18. Floor is
+# set ~2.8 points below the measured number.
+#
+# The 2026-08-20 re-measurement matters for a reason beyond the number: between
+# those two dates this guard was not measuring anything. A dead golangci-lint
+# step failed early in the same CI job, and GitHub skipped every step behind it —
+# including the coverage run and this check — for six consecutive runs on main.
+# The floor stayed at 73.0 while nothing evaluated it. Treat a floor that has not
+# failed in a long time as a claim to re-verify, not as evidence of headroom.
+FLOOR="${COVERAGE_FLOOR:-75.0}"
 PROFILE="${1:-coverage.out}"
 
 if [ ! -f "$PROFILE" ]; then
