@@ -13,7 +13,9 @@ make verify
 
 `make verify` executes in order (with `BypassSandbox: true` if socket binding / network access fails in standard sandbox):
 1. **Formatting & Static Analysis**: `gofmt -s -w . && go vet ./...`
-2. **golangci-lint**: `golangci-lint run ./...` — catches findings `gofmt`/`go vet`/`go test` alone miss (`errcheck`, `staticcheck`, ...); see `Lessons.md`'s "4-step verification suite does not run golangci-lint" entry for why this step exists.
+2. **golangci-lint**: `make lint` (or `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...`) — catches findings `gofmt`/`go vet`/`go test` alone miss (`errcheck`, `staticcheck`, ...); see `Lessons.md`'s "4-step verification suite does not run golangci-lint" entry for why this step exists.
+   - **Do NOT invoke a bare `golangci-lint` from PATH.** As of 2026-08-20 the config is v2 schema (`version: "2"`), which a v1 binary cannot load, and a locally-installed binary may be built with an older Go than `go.mod` targets — golangci-lint then refuses the config and exits non-zero *without linting anything*. This is why the pin is invoked through `go run <module>@<version>`: it builds with the caller's toolchain, so the linter's Go version equals the module's by construction. The same pin appears in the Makefile, `.github/workflows/ci.yml` and `release.yml`; `cmd/pokkum/lintversion_test.go` fails if they drift or if one is downgraded to v1.
+   - Both issue caps are set to 0 in `.golangci.yml` on purpose. The defaults (`max-issues-per-linter: 50`, `max-same-issues: 3`) reported 15 findings when there were 57, and varied which ones between runs — never re-enable them.
 3. **Adapter Unit Tests**: `go test ./internal/adapters/...`
 4. **CLI Compilation Check**: `go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test`
 5. **Full Internal Test Suite (includes AST Architecture Purity Check)**: `go test ./internal/...`
