@@ -102,6 +102,14 @@ _None._
 | --- | --- | --- | --- |
 | [make verify's five steps don't cover supervisor/ or the integration/golden test suites](items/verify-suite-scope-gaps.md) | supervisor/ (pokkum-init, pokkum-static) shares the root go.mod but needs its own explicit go build/go test, and tests/integration's golden-manifest and runtime-smoke suites also sit outside make verify's canonical five steps. | infra | open |
 
+## Unscheduled
+
+### Testing & Infrastructure
+
+| Title | Summary | Kind | Status |
+| --- | --- | --- | --- |
+| [Root-scoped filesystem APIs in filepath.Walk callbacks (gosec G122)](items/walk-callback-symlink-toctou.md) | Five filepath.Walk/WalkDir callbacks operate on the walked path directly, which gosec G122 flags as symlink-TOCTOU-prone; os.Root would make the containment structural rather than incidental. | infra | open |
+
 ## Non-goals
 
 Deliberate decisions, not gaps. Each item page states the reasoning.
