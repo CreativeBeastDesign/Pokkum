@@ -70,7 +70,31 @@ var defaultSecretRules = []rule{
 		// must not. Restricting the value to [A-Za-z0-9...] would trade this
 		// false positive for false negatives on exactly the passwords the rule
 		// exists to catch, which is the worse error for a secret scanner.
-		Pattern: regexp.MustCompile(`(?i)\b(?:password|secret|api_key|token)\s*[:=]\s*["']([^"'\s(){}\[\];]{8,})["']`),
+		//
+		// The key side is suffix-anchored rather than exact-word: the old
+		// `\b(?:password|secret|api_key|token)` required the key to START
+		// with one of those words, so `fallbackPassword`, `apiToken`,
+		// `DB_PASSWORD` and `stripeSecret` — the dominant camelCase / snake_case
+		// / SCREAMING_SNAKE naming conventions in real JS/TS — never matched at
+		// all (roadmap: generic-secret-rule-key-coverage). `[a-z0-9_]*` (folded
+		// case-insensitive by the leading `(?i)`) absorbs any prefix, so the
+		// keyword only has to appear at the END of the identifier, immediately
+		// before the `[:=]`. That end-anchoring is also what keeps this safe
+		// against the "stop word" false positives a naive `contains` match
+		// would invite (`tokenizer`, `secretary`, `keyboard`, `monkey`): none
+		// of those identifiers END in `token`/`secret`/`api_key`/`apikey`
+		// immediately before an assignment operator, so a trailing-boundary
+		// check is unnecessary — the `\s*[:=]` anchor IS the boundary. A key
+		// where the keyword is a PREFIX rather than a suffix (`passwordHash`)
+		// is deliberately still excluded: this rule only ever claimed to catch
+		// identifiers that ARE a password/secret/token/api key, not every
+		// identifier that mentions one.
+		//
+		// `api_?key` folds `api_key` and `apikey` into one alternative — `(?i)`
+		// only case-folds letters, not the literal underscore, so the two
+		// spellings need the explicit optional `_` rather than relying on the
+		// flag.
+		Pattern: regexp.MustCompile(`(?i)\b[a-z0-9_]*(?:password|secret|token|api_?key)\s*[:=]\s*["']([^"'\s(){}\[\];]{8,})["']`),
 	},
 }
 
