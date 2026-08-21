@@ -104,6 +104,12 @@ _None._
 
 ## Unscheduled
 
+### Build & Packaging
+
+| Title | Summary | Kind | Status |
+| --- | --- | --- | --- |
+| [Exclude routes from the production build](items/route-exclusion-filter.md) | Dev-only routes are bundle entry points, so tree-shaking cannot remove them; a build-time filter would keep them out of the image entirely. | feature | open |
+
 ### Testing & Infrastructure
 
 | Title | Summary | Kind | Status |
