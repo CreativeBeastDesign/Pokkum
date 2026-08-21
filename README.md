@@ -100,10 +100,16 @@ Choose your preferred installation method:
 
 ```bash
 brew tap CreativeBeastDesign/pokkum
+brew trust CreativeBeastDesign/pokkum
 brew install pokkum
 ```
 
-Homebrew no longer auto-taps third-party taps, so the `brew tap` line is required — `brew install CreativeBeastDesign/pokkum/pokkum` on its own fails with "No available formula or cask".
+All three lines are required on current Homebrew, which added two gates for third-party taps:
+
+- it no longer auto-taps, so `brew install CreativeBeastDesign/pokkum/pokkum` alone fails with *"No available formula or cask"*;
+- it refuses to load formulae from an untrusted tap until you run `brew trust`.
+
+`brew trust` is a deliberate security decision — it tells Homebrew you accept running code from this tap. If you would rather not, the [installer script](#3-standalone-installer-script-linux--macos) verifies a SHA-256 against the release checksums and needs no trust grant.
 
 ---
 
