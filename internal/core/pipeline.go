@@ -433,15 +433,18 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	// happens later, gated on a confirmed cache miss (or synchronously for
 	// dry-run), never on a cache hit.
 	baseReq := ports.BaseImageRequest{
-		Preset:          req.BaseImage.Preset,
-		Ref:             req.BaseImage.Ref,
-		Platforms:       req.Platforms,
-		Insecure:        req.Insecure,
-		LockfilePath:    lockPath,
-		UpdateBase:      req.BaseImage.UpdateBase,
-		Offline:         req.BaseImage.Offline,
-		VerifySignature: false,
-		VerifyMode:      req.BaseImage.VerifyMode,
+		Preset:       req.BaseImage.Preset,
+		Ref:          req.BaseImage.Ref,
+		Platforms:    req.Platforms,
+		Insecure:     req.Insecure,
+		LockfilePath: lockPath,
+		// --dry-run reads the lockfile for pinning but must not write it back;
+		// see BaseImageRequest.LockfileReadOnly.
+		LockfileReadOnly: opts.DryRun,
+		UpdateBase:       req.BaseImage.UpdateBase,
+		Offline:          req.BaseImage.Offline,
+		VerifySignature:  false,
+		VerifyMode:       req.BaseImage.VerifyMode,
 		KeylessIdentity: ports.KeylessIdentity{
 			SAN:    req.BaseImage.KeylessSAN,
 			Issuer: req.BaseImage.KeylessIssuer,
@@ -547,8 +550,11 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				Now: time.Now(),
 			})
 
-			// Record scan result in pokkum.lock if lockfile tracking is available
-			if deps.BaseImages != nil {
+			// Record scan result in pokkum.lock if lockfile tracking is available.
+			// Never on a dry run: this write is what created pokkum.lock in a
+			// project that had none, from a command documented to perform no
+			// writes.
+			if deps.BaseImages != nil && !opts.DryRun {
 				// req.BaseImage.Ref is passed alongside the preset because a
 				// custom base's lockfile entry is keyed per reference, not per
 				// preset — the same raw Ref handed to Resolve above.
@@ -1215,7 +1221,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			log.Warn("IMAGE NOT SIGNED: signing is enabled but no signing key is available — the pushed image carries no signature or provenance attestation; set POKKUM_SIGNING_KEY or --signing-key, or pass --require-signed to make this an error", "ref", pub.Ref)
 			result.Signing = &SigningResult{Signed: false, Reason: "no signing key available"}
 		} else {
-			sigRes, err := signAndSelfVerify(ctx, deps, req, base, toolchain, bunToolchain, pub, built, multi)
+			sigRes, err := signAndSelfVerify(ctx, deps, req, base, toolchain, bunToolchain, pub, built, multi, doc)
 			if err != nil {
 				// The image itself was pushed; the build still fails —
 				// success would claim a signed image that isn't.
@@ -1349,6 +1355,55 @@ func slsaGeneratorRequest(deps Deps, req BuildRequest, base *ports.BaseImage, to
 // failed build is a recoverable state, while a "successful" build with a
 // silently missing signature is the exact defect this stage exists to
 // prevent.
+// signSBOMStatement wraps the generated SBOM document in an in-toto Statement
+// whose subject is the image digest, and DSSE-signs it with the build's
+// signing key.
+//
+// Binding the subject is the whole point: the SBOM used to be attached as a
+// bare blob under the .sbom tag with nothing tying it to the image, so it
+// could be replaced wholesale without any verification path noticing. A signed
+// statement naming the digest cannot be swapped for another image's SBOM, and
+// cannot be edited at all without breaking the signature.
+func signSBOMStatement(
+	ctx context.Context,
+	deps Deps,
+	req BuildRequest,
+	subject v1.Hash,
+	doc *ports.SBOMDocument,
+) (ports.DSSEEnvelope, error) {
+	if !json.Valid(doc.Content) {
+		// Embedding non-JSON as a predicate would produce a statement no
+		// verifier can parse, and it would be signed — an authentic-looking
+		// artifact carrying garbage is worse than no artifact.
+		return ports.DSSEEnvelope{}, fmt.Errorf("core: SBOM document for %s is not valid JSON, refusing to sign it as an attestation: %w", subject, ErrSigningFailed)
+	}
+
+	stmt := ports.SBOMStatement{
+		Type: ports.InTotoStatementTypeV1,
+		Subject: []ports.ResourceDescriptor{{
+			Name:   req.Repo,
+			Digest: map[string]string{"sha256": subject.Hex},
+		}},
+		PredicateType: ports.SBOMPredicateType(doc.Format),
+		Predicate:     json.RawMessage(doc.Content),
+	}
+	stmtJSON, err := json.Marshal(stmt)
+	if err != nil {
+		return ports.DSSEEnvelope{}, fmt.Errorf("core: marshal SBOM statement for %s: %w: %w", subject, err, ErrSigningFailed)
+	}
+	env, err := deps.DSSESigner.Sign(ctx, ports.DSSESignRequest{
+		PayloadBytes: stmtJSON,
+		PayloadType:  ports.InTotoPayloadType,
+		KeyPEM:       req.Signing.KeyPEM,
+	})
+	if err != nil {
+		return ports.DSSEEnvelope{}, fmt.Errorf("core: DSSE-sign SBOM statement for %s: %w: %w", subject, err, ErrSigningFailed)
+	}
+	deps.logger().Info("sbom attestation signed",
+		"subject", subject.String(), "predicateType", stmt.PredicateType, "packages", doc.PackageCount)
+	return env, nil
+}
+
 func signAndSelfVerify(
 	ctx context.Context,
 	deps Deps,
@@ -1359,6 +1414,7 @@ func signAndSelfVerify(
 	pub ports.PublishResult,
 	built []platformBuild,
 	multi bool,
+	sbomDoc *ports.SBOMDocument,
 ) (*SigningResult, error) {
 	log := deps.logger()
 
@@ -1391,12 +1447,27 @@ func signAndSelfVerify(
 		if err != nil {
 			return nil, fmt.Errorf("core: DSSE-sign SLSA statement for %s: %w: %w", subject, err, ErrSigningFailed)
 		}
+		// Sign the SBOM as a second in-toto attestation bound to this same
+		// subject digest. It rides in the same .att attachment as an extra
+		// layer, which is cosign's convention for multiple attestations, so
+		// `cosign verify-attestation --type spdxjson` resolves it without
+		// Pokkum in the loop. The provenance envelope stays layer 0.
+		var extraEnvelopes []ports.DSSEEnvelope
+		if sbomDoc != nil && len(sbomDoc.Content) > 0 {
+			sbomEnv, serr := signSBOMStatement(ctx, deps, req, subject, sbomDoc)
+			if serr != nil {
+				return nil, serr
+			}
+			extraEnvelopes = append(extraEnvelopes, sbomEnv)
+		}
+
 		attRes, err := deps.Registry.AttachAttestation(ctx, ports.AttachAttestationRequest{
-			Repo:               req.Repo,
-			Subject:            subject,
-			Envelope:           env,
-			Insecure:           req.Insecure,
-			RegistryConfigPath: req.RegistryConfigPath,
+			Repo:                req.Repo,
+			Subject:             subject,
+			Envelope:            env,
+			AdditionalEnvelopes: extraEnvelopes,
+			Insecure:            req.Insecure,
+			RegistryConfigPath:  req.RegistryConfigPath,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("core: attach attestation for %s (the image itself was pushed but is NOT fully signed): %w", subject, err)

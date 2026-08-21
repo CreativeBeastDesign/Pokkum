@@ -2,10 +2,15 @@ package ports
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
+
+// InTotoStatementTypeV1 is the in-toto v1 Statement type URI, the pairing every
+// attestation Pokkum emits today uses alongside a v1 predicateType.
+const InTotoStatementTypeV1 = "https://in-toto.io/Statement/v1"
 
 // InTotoStatementType is the in-toto spec statement type URI.
 const InTotoStatementType = "https://in-toto.io/Statement/v0.1"
@@ -65,6 +70,39 @@ type SLSAStatement struct {
 	Subject       []ResourceDescriptor `json:"subject"`
 	PredicateType string               `json:"predicateType"`
 	Predicate     SLSAPredicate        `json:"predicate"`
+}
+
+// SBOMStatement is an in-toto Statement carrying an SBOM document as its
+// predicate, so an SBOM can be DSSE-signed and bound to the image digest the
+// same way SLSA provenance is.
+//
+// Without this the SBOM was attached as a bare, unsigned blob under the .sbom
+// tag: its manifest carried no subject, the SPDX document never named the
+// image digest, and nothing in the signed provenance referenced it. Anyone
+// with push access to the repository could replace the SBOM of a signed image
+// and every verification path — pokkum verify, cosign verify,
+// cosign verify-attestation — still reported success. A supply-chain document
+// that can be swapped without detection describes whatever an attacker wants
+// it to describe.
+//
+// Predicate is held as raw JSON because the document is produced by the SBOM
+// generator in its own format (SPDX or CycloneDX) and is embedded verbatim:
+// re-marshalling through a Go type here would risk changing the bytes that
+// were hashed and attached elsewhere.
+type SBOMStatement struct {
+	Type          string               `json:"_type"`
+	Subject       []ResourceDescriptor `json:"subject"`
+	PredicateType string               `json:"predicateType"`
+	Predicate     json.RawMessage      `json:"predicate"`
+}
+
+// SBOMPredicateType returns the in-toto predicateType for an SBOM in this
+// format, matching the value cosign uses so third-party verifiers resolve it.
+func SBOMPredicateType(f SBOMFormat) string {
+	if f == SBOMFormatCycloneDXJSON {
+		return CycloneDXPredicateType
+	}
+	return SPDXPredicateType
 }
 
 // SLSAToolchain records the tool versions involved in the build for SLSA provenance.
@@ -285,6 +323,16 @@ type CosignSigner interface {
 	// Verify validates a CosignSignatureBundle against a public key PEM, expected repo, and expected digest.
 	Verify(ctx context.Context, bundle CosignSignatureBundle, pubKeyPEM []byte, expectedRepo string, expectedDigest v1.Hash) error
 }
+
+// SPDXPredicateType is the in-toto predicateType for an SPDX SBOM carried as
+// an attestation predicate. It matches the value cosign writes for
+// `--type spdxjson`, so `cosign verify-attestation --type spdxjson` resolves
+// a Pokkum-attached SBOM attestation without Pokkum in the loop.
+const SPDXPredicateType = "https://spdx.dev/Document"
+
+// CycloneDXPredicateType is the in-toto predicateType for a CycloneDX SBOM,
+// matching cosign's `--type cyclonedx`.
+const CycloneDXPredicateType = "https://cyclonedx.org/bom"
 
 // InTotoPayloadType is the DSSE payloadType for in-toto statements (SLSA provenance & SBOM attestations).
 const InTotoPayloadType = "application/vnd.in-toto+json"

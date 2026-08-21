@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1604,8 +1605,49 @@ func TestPipeline_BaseImageCVE_Gating(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected build error: %v", err)
 		}
+		// A dry run must NOT persist the scan result. This assertion used to
+		// require the opposite — it pinned the behaviour that made
+		// `pokkum build --dry-run`, documented as "perform no writes", create
+		// pokkum.lock in a project that had none. An assertion that pins
+		// current behaviour is not a test of intended behaviour.
+		if recorded {
+			t.Errorf("RecordScanResult was invoked during a --dry-run build, which is documented to perform no writes "+
+				"(it persists scan findings and timestamps into pokkum.lock, creating the file if absent); recorded scan = %+v", recordedScan)
+		}
+	})
+
+	t.Run("Non-dry-run build records the scan result in the lockfile", func(t *testing.T) {
+		// The positive half of the pair above: the recording still has to
+		// happen on a real build, or "dry run does not write" would be
+		// satisfied by a resolver that never writes at all.
+		deps := newFullDeps(io.Discard)
+		deps.Scanner = &mockScanner{
+			scanFn: func(_ context.Context, _ ports.ScanRequest) (ports.ScanResult, error) {
+				return ports.ScanResult{
+					Passed:           true,
+					MaxSeverityFound: ports.SeverityMedium,
+					Vulnerabilities: []ports.Vulnerability{
+						{ID: "CVE-2026-9999", Severity: ports.SeverityMedium, Package: "libxyz"},
+					},
+				}, nil
+			},
+		}
+
+		recorded := false
+		var recordedScan ports.ScanResult
+		deps.BaseImages = &mockBaseImageResolver{
+			recordScanResultFn: func(_ context.Context, _ string, _ ports.BaseImagePreset, scan ports.ScanResult) error {
+				recorded = true
+				recordedScan = scan
+				return nil
+			},
+		}
+
+		if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{PrintManifest: true}); err != nil {
+			t.Fatalf("unexpected build error: %v", err)
+		}
 		if !recorded {
-			t.Errorf("expected RecordScanResult to be invoked on BaseImages resolver")
+			t.Fatal("expected RecordScanResult to be invoked on a non-dry-run build")
 		}
 		if recordedScan.MaxSeverityFound != ports.SeverityMedium {
 			t.Errorf("recorded max severity = %v, want medium", recordedScan.MaxSeverityFound)
@@ -2404,11 +2446,43 @@ func TestBuild_SignReachesSignersAndSelfVerifies(t *testing.T) {
 	if len(cosignMock.signCalls[0].KeyPEM) == 0 {
 		t.Errorf("CosignSigner.Sign received no key material")
 	}
-	if len(dsseMock.signCalls) != 1 {
-		t.Fatalf("DSSESigner.Sign calls = %d, want 1", len(dsseMock.signCalls))
+	// Two in-toto statements are signed per subject: the SLSA provenance and
+	// the SBOM. Asserting WHICH ones, by predicateType, rather than just the
+	// count — a bare count passes just as happily if the same statement were
+	// signed twice, and it was the SBOM's absence from any signature that let
+	// a pushed SBOM be swapped undetected.
+	if len(dsseMock.signCalls) != 2 {
+		t.Fatalf("DSSESigner.Sign calls = %d, want 2 (SLSA provenance + SBOM attestation)", len(dsseMock.signCalls))
 	}
-	if dsseMock.signCalls[0].PayloadType != ports.InTotoPayloadType {
-		t.Errorf("DSSE payload type = %q, want %q", dsseMock.signCalls[0].PayloadType, ports.InTotoPayloadType)
+	seenPredicates := map[string]bool{}
+	for i, call := range dsseMock.signCalls {
+		if call.PayloadType != ports.InTotoPayloadType {
+			t.Errorf("DSSE payload type[%d] = %q, want %q", i, call.PayloadType, ports.InTotoPayloadType)
+		}
+		var stmt struct {
+			Type          string `json:"_type"`
+			PredicateType string `json:"predicateType"`
+			Subject       []struct {
+				Digest map[string]string `json:"digest"`
+			} `json:"subject"`
+		}
+		if err := json.Unmarshal(call.PayloadBytes, &stmt); err != nil {
+			t.Fatalf("DSSE payload[%d] is not a JSON in-toto statement: %v", i, err)
+		}
+		seenPredicates[stmt.PredicateType] = true
+		// Every signed statement must name the digest actually pushed, or it
+		// authenticates a claim about some other image.
+		if len(stmt.Subject) == 0 || stmt.Subject[0].Digest["sha256"] != wantDigest.Hex {
+			t.Errorf("signed statement[%d] (%s) subject = %+v, want the pushed digest %s",
+				i, stmt.PredicateType, stmt.Subject, wantDigest.Hex)
+		}
+	}
+	if !seenPredicates[ports.SLSAProvenancePredicateType] {
+		t.Errorf("no SLSA provenance statement was signed; predicates seen: %v", seenPredicates)
+	}
+	if !seenPredicates[ports.SPDXPredicateType] {
+		t.Errorf("no SBOM statement was signed, so the attached SBOM is unauthenticated and can be replaced "+
+			"without any verification path noticing; predicates seen: %v", seenPredicates)
 	}
 
 	if _, ok := regMock.attachedSignatures[wantDigest.String()]; !ok {

@@ -77,7 +77,7 @@ func (a *Adapter) AttachAttestation(ctx context.Context, req ports.AttachAttesta
 		return ports.PublishResult{}, fmt.Errorf("registry: attach attestation %s: envelope has no payload or signatures: %w", req.Repo, core.ErrSigningFailed)
 	}
 
-	img, err := attestationImage(req.Envelope)
+	img, err := attestationImage(req.Envelope, req.AdditionalEnvelopes...)
 	if err != nil {
 		return ports.PublishResult{}, fmt.Errorf("registry: attach attestation %s: build attestation image: %w: %w", req.Repo, err, core.ErrSigningFailed)
 	}
@@ -333,20 +333,27 @@ func signatureImage(bundle ports.CosignSignatureBundle) (v1.Image, error) {
 // Annotations) always sets this key to an empty string for attestations for
 // exactly this reason. Match that convention so `cosign verify-attestation`
 // accepts our tag-fallback attachment the same way it accepts cosign's own.
-func attestationImage(env ports.DSSEEnvelope) (v1.Image, error) {
-	data, err := json.Marshal(env)
-	if err != nil {
-		return nil, fmt.Errorf("marshal DSSE envelope: %w", err)
-	}
-	layer := static.NewLayer(data, types.MediaType(ports.MediaTypeDSSEEnvelope))
-	img, err := mutate.Append(empty.Image, mutate.Addendum{
-		Layer: layer,
-		Annotations: map[string]string{
-			ports.CosignSignatureLayerAnnotation: "",
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("append attestation layer: %w", err)
+func attestationImage(env ports.DSSEEnvelope, additional ...ports.DSSEEnvelope) (v1.Image, error) {
+	img := empty.Image
+	// Order is load-bearing: env is layer 0 because FetchAttestation reads
+	// layers[0] and the self-verification stage verifies that envelope.
+	// Appending in a different order would silently move the provenance out
+	// from under both.
+	for i, e := range append([]ports.DSSEEnvelope{env}, additional...) {
+		data, err := json.Marshal(e)
+		if err != nil {
+			return nil, fmt.Errorf("marshal DSSE envelope %d: %w", i, err)
+		}
+		layer := static.NewLayer(data, types.MediaType(ports.MediaTypeDSSEEnvelope))
+		img, err = mutate.Append(img, mutate.Addendum{
+			Layer: layer,
+			Annotations: map[string]string{
+				ports.CosignSignatureLayerAnnotation: "",
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("append attestation layer %d: %w", i, err)
+		}
 	}
 	return img, nil
 }

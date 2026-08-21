@@ -217,7 +217,23 @@ type AttachAttestationRequest struct {
 	Subject v1.Hash
 
 	// Envelope is the signed DSSE envelope to attach. Required.
+	//
+	// It becomes layer 0 of the attachment image, and that position is a
+	// contract, not an accident: FetchAttestation reads layers[0], and the
+	// post-push self-verification stage verifies exactly that envelope. The
+	// SLSA provenance statement therefore always goes here.
 	Envelope DSSEEnvelope
+
+	// AdditionalEnvelopes are further signed DSSE envelopes to attach in the
+	// same attachment image, after Envelope, one layer each.
+	//
+	// Cosign's convention is that an image's attestations all live as layers
+	// of a single .att attachment, distinguished by their statements'
+	// predicateType rather than by separate tags — so a second attestation
+	// must be appended here rather than attached under its own tag, or it
+	// would overwrite the first. Optional; nil attaches exactly one layer,
+	// which is byte-identical to the pre-existing single-envelope behaviour.
+	AdditionalEnvelopes []DSSEEnvelope
 
 	// Insecure permits plain HTTP and skips TLS verification.
 	Insecure bool
