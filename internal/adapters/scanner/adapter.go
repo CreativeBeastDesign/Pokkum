@@ -97,6 +97,13 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 		toolchainAdvisories []ports.Vulnerability
 		incomplete          bool
 		warnings            []string
+		// toolchainResolved records whether a real toolchain check actually
+		// ran against a resolved version — as opposed to producing no
+		// advisories because it never got to look. "Found nothing" and "could
+		// not check" are different answers and must not share a representation;
+		// conflating them (via len(toolchainAdvisories) == 0) is what made the
+		// scanner report a placeholder advisory for a healthy project.
+		toolchainResolved bool
 	)
 
 	target := strings.TrimSpace(req.Target)
@@ -113,6 +120,15 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 		tAdvisories, toolchainIncomplete, err := s.scanProjectToolchain(ctx, req.AppRuntime, target, req.Offline)
 		if err == nil {
 			toolchainAdvisories = append(toolchainAdvisories, tAdvisories...)
+			// A real @sveltejs/kit version was resolved and checked against the
+			// embedded advisories. Whatever that produced — including nothing —
+			// is the true answer for this project.
+			toolchainResolved = true
+		} else {
+			// The toolchain version could not be resolved (no readable
+			// package.json). That is reduced coverage, and it is reported as
+			// such below rather than papered over with a placeholder finding.
+			s.logger.WarnContext(ctx, "scanner: could not resolve the project's toolchain version; toolchain advisories were not checked", "target", target, "err", err)
 		}
 		if toolchainIncomplete {
 			incomplete = true
@@ -161,22 +177,38 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 		}
 		vulnerabilities = append(vulnerabilities, imgVulns...)
 		toolchainAdvisories = append(toolchainAdvisories, imgToolchain...)
+		if err == nil {
+			// The image/tarball scan ran; its toolchain result (including an
+			// empty one) is the real answer for this artifact.
+			toolchainResolved = true
+		}
 	}
 
-	// Always ensure embedded toolchain advisories are checked as fallback if none found
-	// (e.g. no readable package.json, so scanProjectToolchain couldn't resolve a real
-	// @sveltejs/kit version). "2.2.0" is a placeholder that is deliberately OLDER than
-	// embeddedAdvisories' "@sveltejs/kit" FixedVersion ("2.3.0"), so this fallback
-	// path deterministically still has something to report/fail on.
+	// An unresolvable toolchain version is reduced coverage, not a finding.
 	//
-	// This was previously "2.15.0" — a genuinely newer, non-vulnerable version — which
-	// only appeared vulnerable because isVersionOlderThan did a plain lexicographic
-	// string compare ("2.15.0" < "2.3.0" byte-wise, since '1' < '3') instead of a
-	// numeric one. Fixing that comparator bug (see isVersionOlderThan/compareVersions)
-	// made this literal correctly evaluate as NOT older/vulnerable, which silently
-	// broke the "there's always a fallback advisory" contract this code comments on.
-	if len(toolchainAdvisories) == 0 {
-		toolchainAdvisories = append(toolchainAdvisories, s.checkEmbeddedAdvisories(req.AppRuntime, ports.DefaultBunVersion, "2.2.0")...)
+	// This used to append checkEmbeddedAdvisories(..., "2.2.0") — a hardcoded
+	// version literal chosen to be older than the embedded kit advisory's
+	// FixedVersion — whenever no toolchain advisory had been produced, so that
+	// "there's always a fallback advisory". Two things were wrong with it.
+	//
+	// First the condition: it fired on len(toolchainAdvisories) == 0, which is
+	// also what a perfectly successful scan of an up-to-date project looks
+	// like. A real field test on a project running @sveltejs/kit 2.68.0 got
+	// back a medium advisory against "@sveltejs/kit 2.2.0" — a version that
+	// project has never had — because the genuine check correctly found
+	// nothing. Online the real OSV results masked it; offline it was the only
+	// advisory reported, so `scan --offline` was simultaneously honest about
+	// coverage (incomplete: true) and wrong about findings.
+	//
+	// Second the substance: emitting a placeholder version as a real finding in
+	// a security report is fabricated data in a success path, which this
+	// codebase forbids outright. When the toolchain version cannot be resolved
+	// the honest answer is "not checked" — the scanner already has machinery
+	// for exactly that, so use it and let the existing fail-closed rules decide
+	// what an incomplete scan means for the caller.
+	if !toolchainResolved {
+		incomplete = true
+		warnings = append(warnings, "toolchain (@sveltejs/kit) version could not be resolved, coverage reduced: no toolchain advisories were checked")
 	}
 
 	allFound := append([]ports.Vulnerability{}, vulnerabilities...)

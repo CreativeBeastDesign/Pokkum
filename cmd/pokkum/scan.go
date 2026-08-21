@@ -40,7 +40,7 @@ and threshold enforcement via --fail-on.`,
 	cmd.Flags().BoolVar(&flags.toolchain, "toolchain", false, "Restrict scan to embedded runtime & toolchain advisories")
 	cmd.Flags().StringVar(&flags.output, "output", "text", "Output format (text or json)")
 	cmd.Flags().BoolVar(&flags.offline, "offline", false, "Disable remote vulnerability database queries")
-	cmd.Flags().BoolVar(&flags.allowIncomplete, "allow-incomplete", false, "Report success even if a vulnerability database lookup failed (default: fail closed on reduced coverage)")
+	cmd.Flags().BoolVar(&flags.allowIncomplete, "allow-incomplete", false, "Report success even if a vulnerability database lookup FAILED (default: fail closed on reduced coverage). Does not apply to --offline, which skips lookups by design: an offline scan is always reported as incomplete but still exits 0, so read the 'incomplete' field rather than the exit code to gate on coverage there")
 
 	return cmd
 }

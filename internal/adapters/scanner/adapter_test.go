@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,10 +16,33 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+// vulnerableProjectDir writes a minimal project declaring an @sveltejs/kit
+// version genuinely older than the embedded advisory's FixedVersion (2.3.0),
+// so the toolchain advisory these tests rely on is produced by the real
+// resolve-and-compare path from a real declared version.
+//
+// The tests below used to pass no Target at all, defaulting to "." — a
+// directory with no package.json — and depended on a fallback that fabricated
+// an advisory against a hardcoded version whenever none had been found. That
+// fallback has been removed (it also fired for healthy projects, reporting a
+// finding they did not have), so a test needing a real advisory must now
+// declare a real vulnerable version. This is the same distinction the fix
+// itself draws: "found nothing" and "could not check" are different answers.
+func vulnerableProjectDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	pkg := `{"name":"app","devDependencies":{"@sveltejs/kit":"2.2.0"}}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestScanner_EmbeddedAdvisories(t *testing.T) {
 	adapter := NewAdapter(nil)
 
 	res, err := adapter.Scan(context.Background(), ports.ScanRequest{
+		Target:  vulnerableProjectDir(t),
 		FailOn:  ports.SeverityCritical,
 		Offline: true,
 	})
@@ -35,6 +59,7 @@ func TestScanner_FailsWhenThresholdExceeded(t *testing.T) {
 	adapter := NewAdapter(nil)
 
 	_, err := adapter.Scan(context.Background(), ports.ScanRequest{
+		Target:  vulnerableProjectDir(t),
 		FailOn:  ports.SeverityLow,
 		Offline: true,
 	})
@@ -92,7 +117,9 @@ func TestScanner_VEXExemptionExcludesFromThreshold(t *testing.T) {
 	adapter := NewAdapter(nil)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
+	dir := vulnerableProjectDir(t)
 	baseline, err := adapter.Scan(context.Background(), ports.ScanRequest{
+		Target:  dir,
 		FailOn:  ports.SeverityLow,
 		Offline: true,
 		Now:     now,
@@ -111,6 +138,10 @@ func TestScanner_VEXExemptionExcludesFromThreshold(t *testing.T) {
 	}
 
 	exempted, err := adapter.Scan(context.Background(), ports.ScanRequest{
+		// Same fixture as the baseline: exempting a CVE discovered in one
+		// project and re-scanning a different one would compare two unrelated
+		// results and could pass for the wrong reason.
+		Target:  dir,
 		FailOn:  ports.SeverityLow,
 		Offline: true,
 		Now:     now,
@@ -426,5 +457,70 @@ func TestCheckEmbeddedAdvisories_RuntimeKeysBunAdvisories(t *testing.T) {
 	}
 	if got["@sveltejs/kit"] != 1 {
 		t.Errorf("runtime node: kit advisories = %d, want 1 (kit is runtime-independent)", got["@sveltejs/kit"])
+	}
+}
+
+// TestScan_NoFabricatedAdvisoryForHealthyProject is the regression guard for a
+// scanner that invented a finding.
+//
+// A project on a current @sveltejs/kit correctly produces zero embedded
+// toolchain advisories. The old fallback fired on len(toolchainAdvisories)==0
+// — indistinguishable from "could not check" — and appended an advisory
+// against a hardcoded "2.2.0". A real field test on @sveltejs/kit 2.68.0 was
+// told it had a medium CSRF advisory against a version it has never used.
+//
+// --offline is used here because it isolates the embedded-advisory path from
+// live OSV results, which is exactly the configuration in which the fabricated
+// advisory was the ONLY finding reported.
+func TestScan_NoFabricatedAdvisoryForHealthyProject(t *testing.T) {
+	dir := t.TempDir()
+	// A version far newer than the embedded advisory's FixedVersion (2.3.0),
+	// so the honest answer is "no toolchain advisories".
+	pkg := `{"name":"app","devDependencies":{"@sveltejs/kit":"2.68.0"}}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := NewAdapter(nil).Scan(context.Background(), ports.ScanRequest{
+		Target:  dir,
+		Offline: true,
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	for _, a := range res.ToolchainAdvisories {
+		if a.Package == "@sveltejs/kit" {
+			t.Errorf("fabricated toolchain advisory reported for a project on 2.68.0: "+
+				"%s against %s %s — the scanner invented a version this project does not use",
+				a.ID, a.Package, a.Version)
+		}
+	}
+}
+
+// TestScan_UnresolvableToolchainIsIncompleteNotAFinding pins the other half of
+// the same change: when the toolchain version genuinely cannot be resolved,
+// the scan must say its coverage was reduced rather than substitute a
+// placeholder advisory. "Could not check" and "checked, found nothing" must
+// stay distinguishable — collapsing them is what produced the fabrication.
+func TestScan_UnresolvableToolchainIsIncompleteNotAFinding(t *testing.T) {
+	dir := t.TempDir() // no package.json at all
+
+	res, err := NewAdapter(nil).Scan(context.Background(), ports.ScanRequest{
+		Target:  dir,
+		Offline: true,
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	if !res.Incomplete {
+		t.Error("a scan that could not resolve the toolchain version reported complete coverage")
+	}
+	for _, a := range res.ToolchainAdvisories {
+		if a.Package == "@sveltejs/kit" {
+			t.Errorf("placeholder advisory %s reported for an unresolvable toolchain version; "+
+				"expected reduced-coverage reporting instead", a.ID)
+		}
 	}
 }
