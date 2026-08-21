@@ -59,6 +59,10 @@ jobs:
     name: GoReleaser & NPM Publish
     needs: lint-and-test
     runs-on: ubuntu-latest
+    outputs:
+      # Base64 of dist/checksums.txt, consumed by the provenance job below as
+      # SLSA subjects. Set only if GoReleaser got far enough to write it.
+      hashes: ${{ steps.slsa-subjects.outputs.hashes }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v7
@@ -116,6 +120,26 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+
+      # SLSA subjects for the provenance job. dist/checksums.txt is GoReleaser's
+      # own checksum listing, in `<sha256>  <filename>` form, covering exactly
+      # the archives it just published — so the attestation names the files
+      # people actually download.
+      #
+      # The previous slsa-builder.yml workflow did none of this. It compiled its
+      # OWN copy of the binaries on every tag (raw `pokkum-linux-amd64` files,
+      # stamped `main.version=v1.0.1` from git describe, against GoReleaser's
+      # `1.0.1` from {{ .Version }}), so it attested bytes that were never
+      # released — and its subject was `sha256sum checksums.txt`, making the
+      # single subject its own unpublished checksums file, a chain that
+      # dead-ends. It also ran on tag push independently of this workflow, which
+      # is why four failed releases still left empty "Latest" releases behind and
+      # repeatedly broke install.sh.
+      - name: Compute SLSA Subjects From Published Artifacts
+        id: slsa-subjects
+        run: |
+          test -s dist/checksums.txt || { echo "::error::dist/checksums.txt missing; GoReleaser did not publish"; exit 1; }
+          echo "hashes=$(base64 -w0 < dist/checksums.txt)" >> "$GITHUB_OUTPUT"
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
       # The npm side publishes FIVE packages, not one: goreleaser-npm-publisher
@@ -198,3 +222,24 @@ jobs:
           npm publish dist/npm/pokkum --access public --tag "$npm_tag"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Attaches SLSA L3 provenance to the release GoReleaser just published.
+  #
+  # `always() && hashes != ''` deliberately, rather than a plain needs-success:
+  # the binaries are public the moment GoReleaser uploads them, so they deserve
+  # provenance even if a later step in that job (the npm publish) failed. If
+  # GoReleaser itself never got to writing checksums.txt, hashes is empty and
+  # this is skipped — which is what stops a failed release from creating an empty
+  # GitHub release, the behaviour that broke install.sh four times.
+  provenance:
+    name: Generate SLSA L3 Provenance
+    needs: [release]
+    if: ${{ always() && needs.release.outputs.hashes != '' }}
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.release.outputs.hashes }}"
+      upload-assets: true
