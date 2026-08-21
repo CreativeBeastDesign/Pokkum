@@ -89,8 +89,11 @@ func TestTransformViteConfig_NoSvelteConfigKeepsTheSimpleForm(t *testing.T) {
 	if strings.Contains(out, "__pokkumUserSvelteConfig") {
 		t.Errorf("no svelte config exists, so nothing should be imported:\n%s", out)
 	}
-	if !strings.Contains(out, "sveltekit({ adapter: adapter() })") {
-		t.Errorf("expected the plain injected form:\n%s", out)
+	if !strings.Contains(out, "adapter: adapter()") {
+		t.Errorf("expected the adapter injected into the plain form:\n%s", out)
+	}
+	if !strings.Contains(out, "SOURCE_DATE_EPOCH") {
+		t.Errorf("expected kit.version.name pinned even in the plain form:\n%s", out)
 	}
 }
 

@@ -210,8 +210,15 @@ export default defineConfig({
 	if !strings.Contains(transformed, "import adapter from '@sveltejs/adapter-node';") {
 		t.Errorf("expected adapter import injected, got:\n%s", transformed)
 	}
-	if !strings.Contains(transformed, "sveltekit({ adapter: adapter() })") {
-		t.Errorf("expected sveltekit({ adapter: adapter() }), got:\n%s", transformed)
+	if !strings.Contains(transformed, "adapter: adapter()") {
+		t.Errorf("expected the adapter injected into the sveltekit() call, got:\n%s", transformed)
+	}
+	// The version pin is asserted alongside the adapter, not instead of it:
+	// this path silently omitted it for as long as it existed, which made
+	// every vite-config project's build unreproducible while this test passed.
+	if !strings.Contains(transformed, "SOURCE_DATE_EPOCH") {
+		t.Errorf("expected kit.version.name pinned to SOURCE_DATE_EPOCH (without it SvelteKit "+
+			"defaults to Date.now() and the build is not reproducible), got:\n%s", transformed)
 	}
 }
 

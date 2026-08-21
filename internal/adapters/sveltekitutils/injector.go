@@ -437,6 +437,26 @@ func TransformViteConfig(source string, opts InjectorOptions) (string, error) {
 		newArgs = "{ adapter: adapter() }"
 	}
 
+	// Pin kit.version.name, exactly as TransformConfig step 2 does for a
+	// svelte.config.js project.
+	//
+	// Without this, SvelteKit falls back to its default version name of
+	// Date.now(), which lands in the client bundle as
+	// _app/version.json's {"version":"1787339446040"} and cascades into every
+	// downstream Vite chunk hash — roughly fifty renamed .js/.gz/.br files and
+	// two differing OCI layers between two builds of identical committed
+	// source. That makes the image non-reproducible, which is the property
+	// this tool exists to provide.
+	//
+	// This path was missed when vite-config injection was added: the
+	// svelte.config.js path pinned the version and this one did not, so any
+	// project whose vite.config.ts calls sveltekit() directly — the officially
+	// supported pattern, and the one Vitest's `projects:` config requires —
+	// silently produced unreproducible builds while the README promised
+	// bit-for-bit reproducibility. Found by a real two-build byte diff, not by
+	// any test: every fixture used the svelte.config.js path.
+	newArgs = injectViteVersionPin(newArgs)
+
 	result = result[:openParen+1] + newArgs + result[closeParen:]
 	if prelude != "" {
 		// Prepended rather than inserted after the imports: ESM import
@@ -552,6 +572,30 @@ func PrepareVirtualViteConfig(projectDir, viteConfigName, viteConfigSource strin
 }
 
 var kitBlockRegex = regexp.MustCompile(`kit\s*:\s*\{`)
+
+// injectViteVersionPin inserts a pinned kit.version.name into the flat options
+// object passed to sveltekit().
+//
+// The flat Vite form routes every recognised SvelteKit option into kit, so a
+// top-level `version` here becomes kit.version — the same setting
+// injectVersionPin writes into a svelte.config.js `kit` block.
+//
+// It is inserted FIRST, ahead of any spread, so that a project which sets its
+// own version (directly, or via a spread of its svelte.config.js) still wins:
+// later keys and later spreads override earlier ones in a JS object literal.
+// And if the args already mention version at all, this leaves them completely
+// alone rather than emitting a duplicate key.
+func injectViteVersionPin(args string) string {
+	if strings.Contains(args, "SOURCE_DATE_EPOCH") || strings.Contains(args, "version") {
+		return args
+	}
+	firstBrace := strings.Index(args, "{")
+	if firstBrace < 0 {
+		return args
+	}
+	const versionProp = "\n\t\t\tversion: { name: process.env.SOURCE_DATE_EPOCH || 'pokkum-reproducible-build' },"
+	return args[:firstBrace+1] + versionProp + args[firstBrace+1:]
+}
 
 func injectVersionPin(source string) string {
 	versionCode := `
