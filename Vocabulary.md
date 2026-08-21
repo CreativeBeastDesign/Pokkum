@@ -284,7 +284,7 @@ Subcommand group to inspect and validate project configuration files (`.pokkum.y
 | `--toolchain` | `false` | Restrict scan to embedded Bun and SvelteKit toolchain advisories. |
 | `--output` | `text` | Output serialization format (`text` or `json`). |
 | `--offline` | `false` | Disable remote vulnerability database queries and use embedded advisories. |
-| `--allow-incomplete` | `false` | Report success even if a vulnerability database lookup fails (default: fail closed on reduced coverage). |
+| `--allow-incomplete` | `false` | Report success even if a vulnerability database lookup **fails** (default: fail closed on reduced coverage). Does not apply to `--offline`, which skips lookups by design: an offline scan is always reported as incomplete but still exits 0, so gate on the `incomplete` field rather than the exit code there. |
 
 ---
 
@@ -371,13 +371,16 @@ Migration codemod that inspects an existing SvelteKit repository (configured for
 
 ## 17. `pokkum history <image>`
 
-Inspects build provenance timeline and CI metadata for an image reference, verifying SLSA v1.0 attestations, Cosign signatures, builder environment, and extracting links back to GitHub Actions CI workflow runs, Pull Requests, and commits.
+Reads a published image's real OCI annotations — the git commit, repository, build timestamp and base image baked into that specific image — and reports which manifest they were read from. It does **not** verify signatures or SLSA attestations; use `pokkum verify <ref>` for a cryptographic verdict.
+
+Both output formats show the complete annotation set and its source. (`--expect-source` and `--allow-unverified-source` were previously listed here in error; they are `pokkum verify` flags and `history` has never accepted them.)
 
 | Flag | Default | Description |
 |---|---|---|
-| `--expect-source` | (none) | Expected git repository and commit (e.g. `github.com/org/repo@<sha>`). Requires verified SLSA source provenance; see the `pokkum verify` section. |
-| `--allow-unverified-source` | `false` | Let `--expect-source` fall back to unsigned image annotations, marking the result unverified. |
+| `--registry-config` | (none) | Path to a docker `config.json`-style auth file for private registries. |
 | `--output` | `text` | Output format (`text` or `json`). |
+
+For a multi-platform image the ref `pokkum build` prints is the *index* digest, whose own manifest carries only a subset of the annotations; `history` descends into a child manifest to recover the rest and always discloses that it did, via `annotations_source` (`manifest`, `index+child-manifest`, or `index-only`).
 
 ---
 
