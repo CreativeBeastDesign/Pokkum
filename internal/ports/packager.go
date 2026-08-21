@@ -44,7 +44,24 @@ const (
 	AppClientDirPrefix = "/app/client"
 
 	// AppVendorDirPrefix is the in-image mount point for split vendor JS modules.
+	//
+	// Note this is NOT where production dependencies go — see
+	// AppNodeModulesDirPrefix. Node and Bun resolve a bare import by walking up
+	// from the importing file looking for node_modules directories, and nothing
+	// ever consults /app/vendor, so a dependency tree placed here would be
+	// invisible to resolution.
 	AppVendorDirPrefix = "/app/vendor"
+
+	// AppNodeModulesDirPrefix is the in-image mount point for the project's
+	// production dependencies.
+	//
+	// The path is load-bearing rather than cosmetic. Resolution walks upward
+	// from the importing file, so /app/server/index.js consults
+	// /app/server/node_modules, then /app/node_modules, then /node_modules.
+	// Mounting at /app/node_modules covers importers under both /app/server and
+	// /app/client without needing NODE_PATH, which Bun does not honour the same
+	// way Node does.
+	AppNodeModulesDirPrefix = "/app/node_modules"
 
 	// AppNativeDirPrefix is the in-image mount point for native .node binaries and dynamic .so libraries.
 	AppNativeDirPrefix = "/app/native"
@@ -514,6 +531,16 @@ type PackageRequest struct {
 
 	// AppNativeDir is the host directory containing native .node modules and dynamic .so libraries to package at /app/native (StrategyLayered).
 	AppNativeDir string
+
+	// AppNodeModulesDir is the host directory containing the project's installed
+	// production dependencies, packaged at AppNodeModulesDirPrefix
+	// (StrategyLayered). Empty when the project has no production dependencies.
+	//
+	// Without this layer the image is not self-contained: Vite externalises
+	// dependencies during the SSR build, so the server bundle keeps bare imports
+	// that resolve to nothing in the image. Bun's runtime auto-install used to
+	// mask that by fetching them from npm inside the running container.
+	AppNodeModulesDir string
 
 	// AppPrerenderedDir is the host directory containing prerendered pages to
 	// package at /app/prerendered (StrategyLayered and StrategyStatic). The

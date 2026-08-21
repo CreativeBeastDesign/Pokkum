@@ -183,7 +183,8 @@ The same rule now covers *material*, not only constructors. `ports.BaseImageRequ
    - Resolves the requested base image (`gcr.io/distroless/cc-debian12:nonroot` or Chainguard).
    - Employs **Single-Pass Layer Hashing & Streaming** (`buildSinglePassLayer`): Simultaneously calculates uncompressed `DiffID` and compressed `Digest` while streaming tar archives into compressed temporary layers, eliminating multiple disk passes and answering `v1.Layer` queries in `O(1)` time.
    - Appends **Supervisor Layer**: Adds `/pokkum/init` executable with pinned USTAR tar headers (`uid=65532`, `gid=65532`, `mode=0555`), leveraging `layercacheutils` on-disk caching.
-   - Appends **Application Layers**: Adds `/app/server`, `/app/client`, `/app/vendor` (with `pruneutils` junk stripping), `/app/native`, and `/usr/local/bin/bun`.
+   - Appends **Application Layers**: Adds `/app/server`, `/app/client`, `/app/node_modules`, `/app/vendor` (both with `pruneutils` junk stripping), `/app/native`, and `/usr/local/bin/bun`.
+   - `/app/node_modules` carries the project's **production dependencies**, installed from its lockfile by `bunexec`'s vendor step into a staging tree under `.pokkum/`. The mount point is load-bearing: Node and Bun resolve a bare import by walking *up* from the importing file, so `/app/server/index.js` consults `/app/server/node_modules`, then `/app/node_modules` — and never `/app/vendor`. Without this layer the image is not self-contained, because Vite externalises dependencies during the SSR build and the server bundle keeps bare imports; Bun's runtime auto-install then fetched them from npm inside the running container, executing code that was in neither the SBOM, the signature, nor the provenance.
 7. **OCI Manifest & Index Generation**:
    - Generates OCI Schema 1 Manifest for each architecture.
    - Combines single-arch manifests into a multi-arch OCI Image Index.

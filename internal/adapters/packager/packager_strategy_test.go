@@ -569,3 +569,56 @@ func TestBuild_LayeredClientEnvSetWithoutPrerendered(t *testing.T) {
 		t.Errorf("%s must not be set when there is no prerendered tree", ports.EnvPrerenderedDir)
 	}
 }
+
+// TestBuild_LayeredPackagesNodeModulesWhereResolutionLooks is the regression
+// guard for images that were not self-contained.
+//
+// Two things must hold, and the second is the one that was subtly wrong before:
+// the dependency tree has to be IN the image, and it has to be at a path module
+// resolution actually consults. Node and Bun walk upward from the importing
+// file, so /app/server/index.js finds /app/server/node_modules, then
+// /app/node_modules, then /node_modules — and never /app/vendor, which is where
+// the (never-populated) vendor layer pointed.
+func TestBuild_LayeredPackagesNodeModulesWhereResolutionLooks(t *testing.T) {
+	req := newRequest(t, ports.LinuxAMD64)
+	req.Strategy = ports.StrategyLayered
+	req.BunRuntime = ports.BunResolverResult{
+		BinaryPath: writeBinary(t, "bun", []byte("#!/bin/sh\necho bun")),
+	}
+	req.AppServerDir = writeStrategyDir(t, map[string]string{"index.js": "import 'valibot'"})
+	req.AppClientDir = writeStrategyDir(t, map[string]string{"app.js": "client asset"})
+	req.AppNodeModulesDir = writeStrategyDir(t, map[string]string{
+		"valibot-package.json": `{"name":"valibot","version":"1.4.2"}`,
+		"valibot-index.js":     "export const x = 1",
+	})
+
+	img, err := NewPackager(testLogger()).Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	cfg, err := img.ConfigFile()
+	if err != nil {
+		t.Fatalf("ConfigFile: %v", err)
+	}
+
+	var found bool
+	for _, h := range cfg.History {
+		if h.CreatedBy == "pokkum: add "+ports.AppNodeModulesDirPrefix {
+			found = true
+		}
+	}
+	if !found {
+		var got []string
+		for _, h := range cfg.History {
+			got = append(got, h.CreatedBy)
+		}
+		t.Errorf("no %s layer in the image; the server bundle's bare imports resolve to nothing and Bun would fetch them from npm at runtime.\nlayers: %v",
+			ports.AppNodeModulesDirPrefix, got)
+	}
+
+	// The mount point is the load-bearing part: /app/vendor would package the
+	// same bytes somewhere resolution never looks.
+	if ports.AppNodeModulesDirPrefix != "/app/node_modules" {
+		t.Errorf("dependencies must mount at /app/node_modules for upward resolution to find them, got %q", ports.AppNodeModulesDirPrefix)
+	}
+}

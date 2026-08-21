@@ -425,6 +425,13 @@ type PrepareResult struct {
 	// Required in a successful result; Compile compiles exactly this file.
 	EntrypointPath string
 
+	// NodeModulesDir is the absolute path of the staged production dependency
+	// tree (a node_modules directory under .pokkum/), or empty when the project
+	// has no production dependencies. The packager mounts it at
+	// AppNodeModulesDirPrefix so the server bundle's externalised bare imports
+	// resolve inside the image instead of being fetched from npm at runtime.
+	NodeModulesDir string
+
 	// OutputDir is the absolute path of the adapter's output directory,
 	// conventionally <ProjectDir>/.svelte-kit/jesterkit-sveltekit. It also
 	// contains manifest.js, server/ and the generated assets.generated.ts that

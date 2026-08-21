@@ -397,6 +397,38 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 			}
 		}
 
+		if req.AppNodeModulesDir != "" {
+			if info, err := os.Stat(req.AppNodeModulesDir); err == nil && info.IsDir() {
+				// The project's production dependencies, mounted where module
+				// resolution actually looks. Pruned like the vendor layer —
+				// a node_modules tree carries a lot of files no runtime reads
+				// (docs, tests, sourcemaps) — but never stripped, since these
+				// are third-party artifacts whose bytes should stay as the
+				// lockfile pinned them.
+				pruneOpts := pruneutils.PruneOptions{
+					NoPrune:       req.NoPrune,
+					KeepSourcemap: req.Sourcemap,
+					KeepPatterns:  req.KeepVendor,
+				}
+				nmLayer, pruned, nmRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppNodeModulesDir, ports.AppNodeModulesDirPrefix, ts, req.Compression, pruneOpts)
+				if err != nil {
+					return nil, fmt.Errorf("packager: build %s: node_modules layer: %w", req.Platform, err)
+				}
+				attestRecords = append(attestRecords, nmRecs...)
+				if pruned.FilesPruned > 0 {
+					p.logger().Info("pruned node_modules layer junk files",
+						"platform", req.Platform.String(),
+						"files_pruned", pruned.FilesPruned,
+						"bytes_saved", pruned.BytesSaved)
+				}
+				addenda = append(addenda, mutate.Addendum{
+					Layer:     nmLayer,
+					MediaType: layerMediaType,
+					History:   v1.History{Created: v1.Time{Time: ts}, CreatedBy: "pokkum: add " + ports.AppNodeModulesDirPrefix},
+				})
+			}
+		}
+
 		if req.AppNativeDir != "" {
 			if info, err := os.Stat(req.AppNativeDir); err == nil && info.IsDir() {
 				if !req.NoStrip {

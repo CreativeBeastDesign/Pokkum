@@ -52,6 +52,12 @@ var foreignFlags = map[string]string{
 	"--target":  "bun build",
 	"--preload": "bun run / bunfig preload",
 
+	// bun install — internal/adapters/bunexec/vendor_install.go stages the
+	// project's production dependencies into the image.
+	"--production":      "bun install",
+	"--no-save":         "bun install",
+	"--frozen-lockfile": "bun install",
+
 	// git — gitutils, slsa/gitdiscovery, config source-date discovery
 	"--always":    "git describe",
 	"--dirty":     "git describe",

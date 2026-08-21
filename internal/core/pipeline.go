@@ -1710,6 +1710,10 @@ func fanOut(
 				pkgReq.AppClientDir = filepath.Join(prep.OutputDir, "client")
 				pkgReq.AppVendorDir = filepath.Join(prep.OutputDir, "vendor")
 				pkgReq.AppNativeDir = filepath.Join(prep.OutputDir, "native")
+				// Production dependencies staged by Prepare, mounted where module
+				// resolution looks (/app/node_modules) rather than /app/vendor,
+				// which nothing consults.
+				pkgReq.AppNodeModulesDir = prep.NodeModulesDir
 				// Prerendered pages now live in their own /app/prerendered layer
 				// instead of being dropped; POKKUM_PRERENDERED_DIR points the
 				// patched handler at it.

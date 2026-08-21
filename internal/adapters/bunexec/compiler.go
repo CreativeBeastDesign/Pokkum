@@ -382,6 +382,23 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	// testdata/fixtures/sveltekit-basic's convention) — this is not the same
 	// as the .pokkum/svelte.config.js virtual-config write PrepareVirtualConfig
 	// used to also perform here: that output is never read by either build
+	// Vendor the project's production dependencies for layered builds, before
+	// the build rather than after: Vite externalises dependencies during the SSR
+	// build, so the server bundle keeps bare imports that resolve to nothing
+	// inside the image unless the tree ships alongside it — and if the install
+	// is going to fail, failing here costs seconds instead of a full build.
+	//
+	// Only layered needs it. exe compiles a single self-contained binary, and
+	// static serves files with no JS runtime at all.
+	var nodeModulesDir string
+	if req.Strategy == ports.StrategyLayered {
+		staged, vendErr := stageProductionDependencies(ctx, req.ProjectDir, req.Hermetic, log)
+		if vendErr != nil {
+			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, vendErr)
+		}
+		nodeModulesDir = staged
+	}
+
 	// path (bun run build reads the real svelte.config.js; the Option B
 	// wrapper points Vite at .pokkum/vite.config.ts instead), so it's dropped.
 	baseEnv := buildEnvWithEpoch(req.Env, req.SourceDateEpoch)
@@ -675,10 +692,11 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		}
 	}
 
-	log.Info("bunexec: prepare complete", "entrypoint", entrypoint, "outputDir", outputDir, "staticFallback", staticFallbackRel)
+	log.Info("bunexec: prepare complete", "entrypoint", entrypoint, "outputDir", outputDir, "staticFallback", staticFallbackRel, "nodeModules", nodeModulesDir)
 	return ports.PrepareResult{
 		EntrypointPath:          entrypoint,
 		OutputDir:               outputDir,
+		NodeModulesDir:          nodeModulesDir,
 		StaticFallbackRelPath:   staticFallbackRel,
 		TelemetryPreloadRelPath: telemetryPreloadRelPath,
 	}, nil
