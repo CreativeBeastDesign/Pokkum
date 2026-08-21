@@ -137,7 +137,7 @@ func TestFixtureDrivenE2E_AllStrategies(t *testing.T) {
 			// mirroring the static branch's own unconditional overwrite. This
 			// now asserts the CORRECT entrypoint: {SupervisorPath, "--",
 			// BunBinaryPath, AppServerIndexPath} (exec "bun /app/server/index.js").
-			wantEntrypoint: []string{ports.SupervisorPath, "--", ports.BunBinaryPath, ports.AppServerIndexPath},
+			wantEntrypoint: []string{ports.SupervisorPath, "--", ports.BunBinaryPath, ports.BunNoInstallFlag, ports.AppServerIndexPath},
 			wantLayerCount: 8, // base + bun + supervisor + server + client + vendor + native + prerendered
 			wantLayers: []wantLayer{
 				{index: 1, member: "usr/local/bin/bun"},
