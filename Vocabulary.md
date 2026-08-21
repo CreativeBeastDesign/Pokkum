@@ -332,7 +332,7 @@ Without `--check`, `pokkum upgrade` refuses to install anything if it cannot ver
 | `--sigstore-trusted-root` | (none) | Path to a Sigstore trusted-root JSON snapshot to verify keyless material against, instead of the embedded public-good snapshot. An unreadable path fails closed rather than silently falling back to the embedded root. |
 | `pokkum repro doctor [dir]` | — | Stage-level non-determinism bisection diagnostic wizard. |
 | `--fast` | `false` | Run fast static reproducibility checks. |
-| `--perturb` | `false` | Inject environmental perturbations to detect hidden non-determinism. |
+| `--perturb` | `false` | **Not implemented — refuses.** It was intended to inject environmental perturbations and run dual builds to bisect stage-level non-determinism, but no build was ever performed: the flag was echoed into the output and never read, so it reported the same `preflight passed` as every other mode. It now returns an error rather than claiming a pass it did not earn. To compare real rebuilds, use `pokkum verify` (rebuilds by default; opt out with `--no-rebuild`). |
 
 **Fixed 2026-08-18 — keyless verification used to derive its expected identity from the certificate it was verifying** (`Issuer.CommonName`, the CA's own name, compared against itself in every real case), making the keyless path dead code that failed identically for genuine and forged signatures. The expected identity now comes exclusively from `--keyless-identity`/`--keyless-issuer`, never from the artifact under verification — see `Lessons.md`'s 2026-08-18 entry for why the seemingly-obvious fix (reading the *correct* certificate field instead) would have been worse than the original bug.
 
