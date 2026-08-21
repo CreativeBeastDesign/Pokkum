@@ -44,6 +44,16 @@ type CatalogPackage struct {
 	Architecture string      `json:"architecture,omitempty"`
 	License      string      `json:"license,omitempty"`
 	Source       string      `json:"source,omitempty"`
+	// Resolved reports whether Version is a concrete, pinned version (from a
+	// lockfile entry, an installed node_modules/<pkg>/package.json, or an OS
+	// package database, all of which only ever record what is actually
+	// present) rather than an unresolved package.json semver range/wildcard
+	// ("^10.9.1", "~5.0.0", "*") that a consumer cannot match against a CVE
+	// database. Every constructor in this file must set this explicitly —
+	// the zero value (false) is only correct for genuinely unresolved
+	// entries, so an omitted assignment here silently misreports a resolved
+	// package as unresolved instead of failing loudly.
+	Resolved bool `json:"resolved"`
 }
 
 // DistroInfo records basic Linux distribution identification parsed from os-release.
@@ -112,6 +122,7 @@ func ParseDPKGStatus(r io.Reader) ([]CatalogPackage, error) {
 					Type:         PkgTypeDeb,
 					Architecture: arch,
 					Source:       source,
+					Resolved:     true,
 				})
 			}
 		}
@@ -191,6 +202,7 @@ func ParseAPKInstalled(r io.Reader) ([]CatalogPackage, error) {
 				Architecture: arch,
 				License:      license,
 				Source:       origin,
+				Resolved:     true,
 			})
 		}
 		pkgName = ""
@@ -238,11 +250,22 @@ func ParseAPKInstalled(r io.Reader) ([]CatalogPackage, error) {
 }
 
 // ParseBunLock parses bun.lock v1 JSON format.
+//
+// Real bun.lock files are JSONC, not strict JSON: `bun install` always
+// writes a trailing comma before the closing '}' of "packages" (and
+// routinely elsewhere), which encoding/json's strict parser rejects
+// outright ("invalid character '}' looking for beginning of object key
+// string"). Without stripJSONTrailingCommas here, json.Unmarshal fails on
+// essentially every real-world bun.lock and this function silently returns
+// zero packages to every caller that swallows its error (both
+// ExtractProjectDependencies and sbom.Generator.scanProject do) — the
+// project's dependency versions then fall back to whatever a
+// package.json-only path can resolve instead (F6 field-test bug).
 func ParseBunLock(data []byte) ([]CatalogPackage, error) {
 	var parsed struct {
 		Packages map[string]any `json:"packages"`
 	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
+	if err := json.Unmarshal(stripJSONTrailingCommas(data), &parsed); err != nil {
 		return nil, err
 	}
 
@@ -258,11 +281,86 @@ func ParseBunLock(data []byte) ([]CatalogPackage, error) {
 				Version:   version,
 				Type:      PkgTypeNpm,
 				Ecosystem: "npm",
+				// A bun.lock "packages" entry always records the version bun
+				// actually resolved and installed, never a range.
+				Resolved: true,
 			})
 		}
 	}
 
 	return packages, nil
+}
+
+// stripJSONTrailingCommas returns a copy of data with any comma removed
+// when the next non-whitespace byte is a closing '}' or ']', tolerating the
+// trailing commas that JSONC-flavored formats (like Bun's bun.lock) allow
+// but encoding/json does not. Commas inside quoted strings are left alone —
+// tracked via an in-string flag that itself respects backslash escapes —
+// so nothing inside a string value (a sha512 integrity hash, say) is ever
+// mistaken for structural JSON.
+func stripJSONTrailingCommas(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); i++ {
+		b := data[i]
+		if inString {
+			out = append(out, b)
+			switch {
+			case escaped:
+				escaped = false
+			case b == '\\':
+				escaped = true
+			case b == '"':
+				inString = false
+			}
+			continue
+		}
+		if b == '"' {
+			inString = true
+			out = append(out, b)
+			continue
+		}
+		if b == ',' {
+			j := i + 1
+			for j < len(data) && isJSONSpace(data[j]) {
+				j++
+			}
+			if j < len(data) && (data[j] == '}' || data[j] == ']') {
+				continue // drop the trailing comma
+			}
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+func isJSONSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
+// IsConcreteVersion reports whether v looks like a single pinned version
+// (e.g. "10.9.6") rather than a semver range or wildcard a package manager
+// would still need to resolve (e.g. "^10.9.1", "~5.0.0", "*", ">=1.2.0",
+// "1.x", "1.2.3 || 2.0.0"). It is a heuristic, not a full semver-range
+// parser — false negatives (an exact version misclassified as a range) are
+// the safe failure direction here, since callers use this to decide whether
+// a version is trustworthy for CVE matching, and treating an ambiguous
+// value as unresolved is always safer than trusting a range as if it were
+// pinned.
+func IsConcreteVersion(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" || v == "*" {
+		return false
+	}
+	if strings.ContainsAny(v, "^~<>=| ") {
+		return false
+	}
+	lower := strings.ToLower(v)
+	if lower == "x" || strings.Contains(lower, ".x") {
+		return false
+	}
+	return true
 }
 
 func parseBunPackageEntry(key string, entry any) (name, version string) {
@@ -321,6 +419,9 @@ func ParsePackageLock(data []byte) ([]CatalogPackage, error) {
 			Version:   ver,
 			Type:      PkgTypeNpm,
 			Ecosystem: "npm",
+			// package-lock.json only ever records the version npm actually
+			// installed, never a range.
+			Resolved: true,
 		})
 	}
 
@@ -358,6 +459,9 @@ func ParsePnpmLock(data []byte) ([]CatalogPackage, error) {
 				Version:   version,
 				Type:      PkgTypeNpm,
 				Ecosystem: "npm",
+				// pnpm-lock.yaml keys only ever encode the resolved version,
+				// never a range.
+				Resolved: true,
 			})
 		}
 	}
@@ -431,6 +535,7 @@ func ExtractProjectDependencies(projectDir string) ([]CatalogPackage, error) {
 					Version:   resolved,
 					Type:      PkgTypeNpm,
 					Ecosystem: "npm",
+					Resolved:  IsConcreteVersion(resolved),
 				}
 			}
 		}
@@ -445,6 +550,7 @@ func ExtractProjectDependencies(projectDir string) ([]CatalogPackage, error) {
 					Version:   resolved,
 					Type:      PkgTypeNpm,
 					Ecosystem: "npm",
+					Resolved:  IsConcreteVersion(resolved),
 				}
 			}
 		}
@@ -593,10 +699,10 @@ func ExtractImagePackages(ctx context.Context, img v1.Image) ([]CatalogPackage, 
 						// itself (e.g. app/vendor/express/package.json) — its
 						// own name+version is the actual installed identity,
 						// not just a range someone else declared.
-						vendorPackages[p.Name] = CatalogPackage{Name: p.Name, Version: p.Version, Type: PkgTypeNpm, Ecosystem: "npm"}
+						vendorPackages[p.Name] = CatalogPackage{Name: p.Name, Version: p.Version, Type: PkgTypeNpm, Ecosystem: "npm", Resolved: true}
 					} else {
 						for k, v := range p.Dependencies {
-							otherAppPackages = append(otherAppPackages, CatalogPackage{Name: k, Version: v, Type: PkgTypeNpm, Ecosystem: "npm"})
+							otherAppPackages = append(otherAppPackages, CatalogPackage{Name: k, Version: v, Type: PkgTypeNpm, Ecosystem: "npm", Resolved: IsConcreteVersion(v)})
 						}
 					}
 				}

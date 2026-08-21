@@ -186,6 +186,71 @@ func TestParseBunLock(t *testing.T) {
 	}
 }
 
+// TestParseBunLock_TrailingComma is a regression test for F6's root cause:
+// every real bun.lock a `bun install` writes is JSONC-flavored, with a
+// trailing comma before the closing '}' of "packages" (and commonly
+// elsewhere too). encoding/json's strict parser rejects that outright, so
+// without stripJSONTrailingCommas this returns an error and zero packages
+// against literally any real-world bun.lock, even though the handwritten,
+// comma-free fixtures elsewhere in this test file (e.g. TestParseBunLock
+// above) pass just fine — that gap is exactly what let the bug ship
+// unnoticed.
+func TestParseBunLock_TrailingComma(t *testing.T) {
+	data := []byte(`{
+  "lockfileVersion": 1,
+  "packages": {
+    "mermaid": ["mermaid@10.9.6", "", {}, "sha512-x"],
+    "bcryptjs": ["bcryptjs@3.0.3", "", {}, "sha512-x"],
+  }
+}`)
+
+	pkgs, err := ParseBunLock(data)
+	if err != nil {
+		t.Fatalf("ParseBunLock() on a real-shaped (trailing-comma) bun.lock returned an error: %v", err)
+	}
+	if len(pkgs) != 2 {
+		t.Fatalf("expected 2 packages, got %d: %+v", len(pkgs), pkgs)
+	}
+
+	seen := make(map[string]CatalogPackage)
+	for _, p := range pkgs {
+		seen[p.Name] = p
+	}
+	if seen["mermaid"].Version != "10.9.6" {
+		t.Errorf("expected mermaid@10.9.6, got %s", seen["mermaid"].Version)
+	}
+	if !seen["mermaid"].Resolved {
+		t.Error("expected mermaid to be marked Resolved (it came from the lockfile)")
+	}
+	if seen["bcryptjs"].Version != "3.0.3" {
+		t.Errorf("expected bcryptjs@3.0.3, got %s", seen["bcryptjs"].Version)
+	}
+}
+
+func TestIsConcreteVersion(t *testing.T) {
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"10.9.6", true},
+		{"0.1.7", true},
+		{"2.68.0", true},
+		{"^10.9.1", false},
+		{"~5.0.0", false},
+		{"*", false},
+		{">1.0.0", false},
+		{">=1.2.0", false},
+		{"1.2.x", false},
+		{"1.2.3 || 2.0.0", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := IsConcreteVersion(tt.version); got != tt.want {
+			t.Errorf("IsConcreteVersion(%q) = %v, want %v", tt.version, got, tt.want)
+		}
+	}
+}
+
 func TestParsePackageLock(t *testing.T) {
 	data := []byte(`{
   "name": "app",
@@ -360,8 +425,8 @@ func TestExtractImagePackages_VendoredPackageJSON(t *testing.T) {
 	}
 
 	want := []CatalogPackage{
-		{Name: "express", Version: "4.18.2", Type: PkgTypeNpm, Ecosystem: "npm"},
-		{Name: "lodash", Version: "4.17.21", Type: PkgTypeNpm, Ecosystem: "npm"},
+		{Name: "express", Version: "4.18.2", Type: PkgTypeNpm, Ecosystem: "npm", Resolved: true},
+		{Name: "lodash", Version: "4.17.21", Type: PkgTypeNpm, Ecosystem: "npm", Resolved: true},
 	}
 
 	if len(pkgs) != len(want) {

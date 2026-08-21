@@ -108,6 +108,12 @@ func (g *Generator) Generate(ctx context.Context, req ports.SBOMRequest) (*ports
 		return nil, err
 	}
 
+	if unresolved := countUnresolved(packages); unresolved > 0 {
+		g.log.WarnContext(ctx, "sbom: some packages could not be resolved to an installed version; "+
+			"recording their declared package.json range instead, marked as unresolved",
+			"unresolved", unresolved, "total", len(packages))
+	}
+
 	id := contentIdentityUUID(name, version, packages, req.BunVersion, req.BunSHA256)
 	created := req.CreatedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
 
@@ -195,6 +201,23 @@ func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils
 			return nil
 		}
 
+		// node_modules is never descended into. A nested package's own
+		// package.json only carries the package's OWN declared dependency
+		// ranges (its own "dependencies"/"devDependencies" fields), not
+		// evidence of what version of THAT package got installed -- walking
+		// into it let an unrelated, deeply nested package's declared range
+		// for some name (e.g. a peerDependency range) win a race against the
+		// project's own lockfile/root package.json for that same name,
+		// whenever node_modules was visited first (it sorts before the root
+		// package.json lexically: "node_modules" < "package.json"). The
+		// project's own node_modules is still consulted -- directly, by path
+		// -- via sveltekitutils.ResolveVersion below; this only stops the
+		// walk from treating every dependency's transitive dependency
+		// declarations as if they resolved something (F6 field-test bug).
+		if d.IsDir() && d.Name() == "node_modules" {
+			return filepath.SkipDir
+		}
+
 		if d.IsDir() {
 			return nil
 		}
@@ -248,6 +271,7 @@ func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils
 							Version:   resolved,
 							Type:      scannerutils.PkgTypeNpm,
 							Ecosystem: "npm",
+							Resolved:  scannerutils.IsConcreteVersion(resolved),
 						}
 					}
 				}
@@ -262,6 +286,7 @@ func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils
 							Version:   resolved,
 							Type:      scannerutils.PkgTypeNpm,
 							Ecosystem: "npm",
+							Resolved:  scannerutils.IsConcreteVersion(resolved),
 						}
 					}
 				}
@@ -289,6 +314,27 @@ func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils
 
 	return results, nil
 }
+
+// countUnresolved returns how many packages carry an unresolved
+// package.json range instead of a concrete, installed version.
+func countUnresolved(packages []scannerutils.CatalogPackage) int {
+	n := 0
+	for _, p := range packages {
+		if !p.Resolved {
+			n++
+		}
+	}
+	return n
+}
+
+// unresolvedVersionComment is the SPDX package "comment" and CycloneDX
+// "pokkum:versionResolved" property value explaining why a package's
+// version looks like a range rather than a pinned release -- a consumer
+// diffing SBOMs or matching against a CVE database needs to be able to tell
+// this apart from a genuinely resolved version at a glance, not infer it
+// from the presence of "^"/"~"/"*" in the string.
+const unresolvedVersionComment = "versionInfo is an unresolved package.json range, not an installed version: " +
+	"no lockfile entry or installed copy in node_modules was found for this package"
 
 func (g *Generator) buildMatcher(req ports.SBOMRequest) (*ignoreutils.Matcher, error) {
 	patterns := ignoreutils.DefaultPatterns()
@@ -375,7 +421,7 @@ func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages
 		pkgSPDXID := fmt.Sprintf("SPDXRef-Package-%s-%s", sanitizeSPDXID(p.Name), sanitizeSPDXID(p.Version))
 		purl := fmt.Sprintf("pkg:npm/%s@%s", p.Name, p.Version)
 
-		spdxPackages = append(spdxPackages, map[string]any{
+		pkgMap := map[string]any{
 			"SPDXID":           pkgSPDXID,
 			"name":             p.Name,
 			"versionInfo":      p.Version,
@@ -391,7 +437,11 @@ func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages
 					"referenceType":     "purl",
 				},
 			},
-		})
+		}
+		if !p.Resolved {
+			pkgMap["comment"] = unresolvedVersionComment
+		}
+		spdxPackages = append(spdxPackages, pkgMap)
 
 		relationships = append(relationships, map[string]any{
 			"spdxElementId":      rootSPDXID,
@@ -443,12 +493,18 @@ func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, pac
 
 	for _, p := range packages {
 		purl := fmt.Sprintf("pkg:npm/%s@%s", p.Name, p.Version)
-		components = append(components, map[string]any{
+		comp := map[string]any{
 			"type":    "library",
 			"name":    p.Name,
 			"version": p.Version,
 			"purl":    purl,
-		})
+		}
+		if !p.Resolved {
+			comp["properties"] = []map[string]any{
+				{"name": "pokkum:versionResolved", "value": "false"},
+			}
+		}
+		components = append(components, comp)
 	}
 
 	doc := map[string]any{
@@ -479,7 +535,7 @@ func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, pac
 func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string) uuid.UUID {
 	ids := make([]string, 0, len(packages))
 	for _, p := range packages {
-		ids = append(ids, fmt.Sprintf("%s@%s@%s", p.Name, p.Version, p.Type))
+		ids = append(ids, fmt.Sprintf("%s@%s@%s@resolved=%v", p.Name, p.Version, p.Type, p.Resolved))
 	}
 	sort.Strings(ids)
 
