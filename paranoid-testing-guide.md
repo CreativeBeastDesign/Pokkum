@@ -232,7 +232,7 @@ test when reverted — but don't take that on faith either; cross-check with
 summary alone for this step.
 
 ```bash
-cosign verify-attestation --type slsaprovenance \
+cosign verify-attestation --type slsaprovenance1 \
   --certificate-identity-regexp '.*' --certificate-oidc-issuer-regexp '.*' \
   "$POKKUM_DOCKER_REPO@$DIGEST" 2>/dev/null | jq '.payload | @base64d | fromjson'
 ```
@@ -249,30 +249,29 @@ instead of the certificate-identity flags.)
 toolchain versions recorded match reality — not just that the attestation
 exists and cosign didn't error.
 
-**A real interoperability gap worth knowing about in advance, so you don't
-file it as a bug:** Pokkum attaches its SLSA attestation as a raw
-DSSE-envelope layer (`attestationImage` in
-`internal/adapters/registry/attestation.go`), deliberately without a
-`dev.cosignproject.cosign/signature` layer annotation — the doc comment's
-reasoning is "the signature lives inside the envelope itself," which is
-true for anything that decodes the DSSE envelope directly (including
-Pokkum's own resolver above). Confirmed against a real local registry
-without OCI 1.1 Referrers API support — the same tag-fallback path
-ECR/older Harbor/Artifactory hit, per `--sbom-attach`'s own doc comment —
-`cosign verify-attestation` (tested against cosign v3.1.3) refuses to even
-recognize that attestation, with:
+**Use `--type slsaprovenance1`, not `--type slsaprovenance`.** They are
+different predicate types: `slsaprovenance` means SLSA **v0.2**, while Pokkum
+emits **v1**. Passing the wrong one produces an error that reads like a broken
+attestation but is really a type mismatch:
 ```
-Error: no matching attestations: signature layer sha256:... is missing
-"dev.cosignproject.cosign/signature" annotation
+$ cosign verify-attestation --type slsaprovenance …
+Error: none of the attestations matched the predicate type: slsaprovenance,
+       found: https://slsa.dev/provenance/v1
+
+$ cosign verify-attestation --type slsaprovenance1 …
+The signatures were verified against the specified public key
 ```
-This is Pokkum's DSSE layer shape not matching what cosign's own tag-mode
-client expects — not a broken signature. `pokkum verify --no-rebuild`
-reads the identical bytes correctly (confirmed: `signature_valid: true`,
-`has_provenance: true` against the same image). This may not reproduce on
-a registry with genuine OCI 1.1 Referrers support (GHCR has it). If
-`cosign verify-attestation` fails against a real Pokkum-pushed image,
-check whether the registry actually served a referrer or fell back to the
-legacy `.att` tag before concluding the attestation itself is broken:
+
+**Previously-documented gap, now closed — do not go hunting for it.** Earlier
+revisions of this guide recorded cosign refusing Pokkum's DSSE layer for want of
+a `dev.cosignproject.cosign/signature` annotation. That annotation is now written
+(`signatureImage` in `internal/adapters/registry/attestation.go`), and an
+adversarial field test confirmed cosign v3.1.3 verifies the attestation cleanly
+against a tag-mode registry with **no** OCI 1.1 Referrers support — the same
+fallback path ECR and older Harbor/Artifactory take. If `cosign
+verify-attestation` fails for you now, check the `--type` above before
+suspecting the attestation, and only then check whether the registry served a
+referrer or fell back to the legacy `.att` tag:
 ```bash
 crane manifest "$POKKUM_DOCKER_REPO:sha256-${DIGEST#sha256:}.att" >/dev/null && echo "tag-mode fallback was used"
 ```
