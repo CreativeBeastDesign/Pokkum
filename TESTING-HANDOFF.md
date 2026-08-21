@@ -33,12 +33,49 @@ something went wrong.
 
 ---
 
-## 1. Environment inventory (do this first, report it)
+## 1. Get a `pokkum` binary — `make build`, not `go build`
+
+**This step is load-bearing and easy to get wrong.** Read it before running anything.
+
+You will be working in the user's SvelteKit project, not in the Pokkum repo, so build
+once and then invoke the binary by absolute path:
+
+```bash
+cd /path/to/Pokkum
+make build                       # produces ./pokkum in the repo root
+export POKKUM=/path/to/Pokkum/pokkum
+cd /path/to/the/sveltekit/project
+"$POKKUM" --version
+```
+
+Two traps:
+
+1. **Never `go build ./cmd/pokkum` on its own.** `internal/adapters/supervisor/bin` and
+   `internal/adapters/staticserver/bin` hold zstd-compressed PID-1 binaries pulled in with
+   `//go:embed all:bin`, and both directories are **gitignored** — a fresh clone has only
+   `.gitkeep`. Embedding a near-empty directory is legal Go, so the build succeeds and the
+   failure only appears at container runtime, as a missing blob. This has happened: every
+   release for a period shipped without a static-server binary, so `--strategy=static`
+   could not have worked at all. `make build` depends on the `supervisor` and
+   `static-server` targets, which is the whole point of using it.
+2. **Do not test the released v1.0.1 binary if the goal is testing current code.** It
+   predates a week of fixes (secret-guard reporting, the precompression race, the
+   svelte.config.js merge, six static-strategy bugs). You would spend the session
+   rediscovering things already fixed. Conversely, if the user asks "what do people
+   actually get today", then the release *is* the right target — decide which question you
+   are answering and say so in the report.
+
+If `make build` fails or the blob-freshness test complains, run `make supervisor
+static-server` explicitly and try again.
+
+---
+
+## 2. Environment inventory (do this next, report it)
 
 Findings are only interpretable against a known environment.
 
 ```bash
-pokkum --version            # or: go build -o /tmp/pk ./cmd/pokkum
+"$POKKUM" --version
 node --version; bun --version
 docker version --format '{{.Server.Version}}'   # needed only for --local and Kind
 kind get clusters; kubectl config current-context
@@ -51,7 +88,7 @@ adapter, and whether it prerenders. `--runtime=node` supports `--strategy=layere
 
 ---
 
-## 2. Drive the existing guide
+## 3. Drive the existing guide
 
 `paranoid-testing-guide.md` covers, with independent verification steps:
 preflight, first build, image inspection, OCI annotations, SBOM, SLSA provenance, cosign
@@ -66,17 +103,17 @@ guide itself.
 
 ---
 
-## 3. Gaps the guide does not cover
+## 4. Gaps the guide does not cover
 
 Each item below is untested territory. Commands use flags verified against
 `pokkum build --help`.
 
-### 3.1 `--local` (the only path needing a Docker daemon)
+### 4.1 `--local` (the only path needing a Docker daemon)
 
 Pokkum's pitch is "no daemon"; `--local` is the documented exception, and nothing tests it.
 
 ```bash
-pokkum build --local -t local-test .
+"$POKKUM" build --local -t local-test .
 docker images | grep local-test
 docker run --rm -p 3000:3000 -e POKKUM_PROBE_PORT=8081 <image>   # then curl /healthz, /readyz
 ```
@@ -84,11 +121,11 @@ docker run --rm -p 3000:3000 -e POKKUM_PROBE_PORT=8081 <image>   # then curl /he
 Expect a warning that daemon load drops OCI annotations, naming the dropped
 `pokkum.dev/*` keys. Confirm the warning names them rather than saying "some".
 
-### 3.2 Secret guard (new, and security-relevant)
+### 4.2 Secret guard (new, and security-relevant)
 
 ```bash
-pokkum build --local .                       # on a project containing a fake secret
-pokkum build --local --show-secret-values .  # values revealed instead of redacted
+"$POKKUM" build --local .                       # on a project containing a fake secret
+"$POKKUM" build --local --show-secret-values .  # values revealed instead of redacted
 ```
 
 Check: each finding reports **file, line and column**; values are redacted by default;
@@ -100,26 +137,26 @@ alone disappears while others remain.
 Known gap, do not re-report: unquoted assignments (`.env` style `KEY=value`, `.npmrc`
 `_authToken=`) are **not** matched — only quoted values are.
 
-### 3.3 Hermetic builds
+### 4.3 Hermetic builds
 
 ```bash
-pokkum build --hermetic --local .
-pokkum build --hermetic --hermetic-mount-isolation --local .   # Linux only
+"$POKKUM" build --hermetic --local .
+"$POKKUM" build --hermetic --hermetic-mount-isolation --local .   # Linux only
 ```
 
 Mount isolation needs privileges most machines withhold; on macOS it is unavailable
 entirely. If it refuses, that is expected — report the message, not a failure.
 
-### 3.4 Asset overlay and precompression
+### 4.4 Asset overlay and precompression
 
 `--asset-overlay-from` with explicit refs; check precompressed sidecars
 (`.br`/`.gz`) appear beside assets and that a second build does not rewrite them.
 
-### 3.5 `pokkum upgrade`
+### 4.5 `pokkum upgrade`
 
 ```bash
-pokkum upgrade --check          # must not modify anything
-pokkum upgrade --offline        # must fail closed, not silently no-op
+"$POKKUM" upgrade --check          # must not modify anything
+"$POKKUM" upgrade --offline        # must fail closed, not silently no-op
 ```
 
 This path verifies a cosign signature over the release binary. Confirm an unsigned or
@@ -127,16 +164,16 @@ tampered payload is refused, and that "no signature" and "bad signature" read di
 
 ---
 
-## 4. Live Kubernetes with Kind
+## 5. Live Kubernetes with Kind
 
 The guide stops at `kubectl --dry-run`. With a Kind cluster the whole path is testable.
 
 ```bash
 kind create cluster --name pokkum-test
-pokkum build --local -t k8s-test .
+"$POKKUM" build --local -t k8s-test .
 kind load docker-image <image> --name pokkum-test        # no registry needed
-pokkum resolve -f deployment.yaml --security-context --network-policy --resource-defaults
-pokkum apply -f deployment.yaml
+"$POKKUM" resolve -f deployment.yaml --security-context --network-policy --resource-defaults
+"$POKKUM" apply -f deployment.yaml
 kubectl get pods,networkpolicy,poddisruptionbudget
 ```
 
@@ -149,7 +186,7 @@ kubectl logs deploy/<name> -c <container>            # PID 1 supervisor output
 kubectl exec deploy/<name> -- /pokkum/init --version 2>/dev/null || true
 ```
 
-Then `pokkum rollback` and confirm the cluster returns to the previous revision — checked
+Then `"$POKKUM" rollback` and confirm the cluster returns to the previous revision — checked
 with `kubectl rollout history`, not Pokkum's own claim.
 
 Expect `runAsNonRoot: true`, `seccompProfile: RuntimeDefault`,
@@ -158,7 +195,7 @@ PodDisruptionBudget.
 
 ---
 
-## 5. Reporting
+## 6. Reporting
 
 For each finding:
 
@@ -173,7 +210,7 @@ not a useful report, because it hides which of the 25+ areas actually ran.
 
 ---
 
-## 6. Cleanup
+## 7. Cleanup
 
 ```bash
 kind delete cluster --name pokkum-test
