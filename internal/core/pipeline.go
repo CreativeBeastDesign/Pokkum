@@ -1066,7 +1066,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 
 	// Stage 6: the parallel section.
-	built, doc, err := fanOut(ctx, deps, req, base, prep, workDir, imageLabels(req, baseInfo, toolchain), bunToolchain, predecessorDigest, assetOverlayDigests, assetOverlayDir)
+	built, doc, err := fanOut(ctx, deps, req, base, prep, workDir, imageLabels(req, baseInfo, toolchain, bunToolchain), bunToolchain, predecessorDigest, assetOverlayDigests, assetOverlayDir)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -1895,7 +1895,7 @@ func prepareWorkDir(dir string) (string, func(), error) {
 // reference as written, and the three tool versions.
 //
 // The user's own labels are applied last and win, per PackageRequest.Labels.
-func imageLabels(req BuildRequest, base BaseImageInfo, tc Toolchain) map[string]string {
+func imageLabels(req BuildRequest, base BaseImageInfo, tc Toolchain, bunToolchain ports.BunResolverResult) map[string]string {
 	out := make(map[string]string, len(req.Labels)+4)
 	if base.Ref != "" {
 		out[ports.LabelBaseName] = base.Ref
@@ -1903,8 +1903,31 @@ func imageLabels(req BuildRequest, base BaseImageInfo, tc Toolchain) map[string]
 	if tc.PokkumVersion != "" {
 		out[ports.LabelPokkumVersion] = tc.PokkumVersion
 	}
-	if tc.BunVersion != "" {
-		out[ports.LabelBunVersion] = tc.BunVersion
+	// Stamped only when Bun is actually embedded in the image: RuntimeBun
+	// (the default — an empty AppRuntime normalizes to it too; see the
+	// LabelRuntime comment just below for the absence convention) AND a
+	// strategy that ships a Bun runtime at all. ApplyStatic strategies
+	// (static) are explicitly documented (BuildStrategy.ApplyStatic) as
+	// shipping "no Bun runtime and no supervisor layer" — pokkum-static
+	// serves prerendered files directly — so there is no embedded Bun for
+	// the label to name, and it must be omitted there too, not just for
+	// --runtime=node.
+	//
+	// The VALUE must be the runtime actually embedded, not the host's
+	// build-tool bun: bunToolchain is the same resolved
+	// ports.BunResolverResult that the SBOM and SLSA provenance requests
+	// are built from (see slsaGeneratorRequest's identical firstNonEmpty
+	// fallback) — reusing it here, rather than re-deriving a version, is
+	// what keeps the label from drifting away from those other three
+	// records again. For a strategy with no separate resolve (exe),
+	// bunToolchain is zero and this falls back to tc.BunVersion, which is
+	// correct there: `bun build --compile` bakes that exact host bun's
+	// runtime directly into the artifact, so the host compiler bun IS the
+	// embedded runtime.
+	if (req.AppRuntime == "" || req.AppRuntime == ports.RuntimeBun) && !req.Compile.Strategy.ApplyStatic() {
+		if v := firstNonEmpty(bunToolchain.Version, tc.BunVersion); v != "" {
+			out[ports.LabelBunVersion] = v
+		}
 	}
 	if tc.SupervisorVersion != "" {
 		out[ports.LabelSupervisor] = tc.SupervisorVersion

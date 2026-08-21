@@ -369,3 +369,44 @@ func TestBuildPush_NodeRuntime_WiresRuntimeDimensionEverywhere(t *testing.T) {
 		t.Errorf("RemoteCacheInputRequest.AppRuntime = %q, want %q — the composite input hash MUST key the runtime dimension", cacher.inputReq.AppRuntime, ports.RuntimeNode)
 	}
 }
+
+// TestBuildPush_NodeRuntime_OmitsBunVersionLabel is F5's node-image half: a
+// --runtime=node image embeds no Bun runtime at all (Node comes from the
+// base image itself, see ports.RuntimeNode's doc comment), so
+// dev.pokkum.bun.version must be ABSENT from the image labels entirely —
+// exactly like dev.pokkum.runtime is absent for the default (bun) runtime,
+// per imageLabels' "stamped only for the non-default runtime" comment.
+// Before the fix, imageLabels stamped this label from the HOST's compiler
+// bun (mockCompiler's Preflight, "1.2.18") unconditionally, so a node image
+// — with no Bun anywhere in it — still carried a Bun version label.
+func TestBuildPush_NodeRuntime_OmitsBunVersionLabel(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+
+	var pkgReqs []ports.PackageRequest
+	basePackager := &mockPackager{}
+	deps.Packager = &mockPackager{
+		buildFn: func(ctx context.Context, req ports.PackageRequest) (v1.Image, error) {
+			pkgReqs = append(pkgReqs, req)
+			return basePackager.Build(ctx, req)
+		},
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+		AppRuntime: core.RuntimeNode,
+	}
+
+	if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+		t.Fatalf("node build failed: %v", err)
+	}
+	if len(pkgReqs) == 0 {
+		t.Fatalf("packager was never invoked")
+	}
+
+	if v, ok := pkgReqs[0].Labels[ports.LabelBunVersion]; ok {
+		t.Errorf("image label %s = %q, want ABSENT for a --runtime=node image (no Bun is embedded in it)", ports.LabelBunVersion, v)
+	}
+}

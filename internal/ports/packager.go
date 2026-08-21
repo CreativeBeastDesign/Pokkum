@@ -248,7 +248,16 @@ const (
 	LabelVersion       = "org.opencontainers.image.version"
 	LabelPokkumVersion = "dev.pokkum.version"
 	LabelSupervisor    = "dev.pokkum.supervisor.version"
-	LabelBunVersion    = "dev.pokkum.bun.version"
+
+	// LabelBunVersion records the Bun runtime actually embedded in the
+	// image — the same resolved BunResolverResult the SBOM and SLSA
+	// provenance already name — never the host build-tool bun that
+	// compiled the app. Stamped only when a Bun runtime is genuinely
+	// present: the default runtime (RuntimeBun) on a non-static strategy.
+	// Omitted for --runtime=node (no Bun anywhere in the image) and for
+	// BuildStrategy.ApplyStatic strategies (no Bun runtime or supervisor
+	// layer at all), exactly like LabelRuntime's absence convention below.
+	LabelBunVersion = "dev.pokkum.bun.version"
 
 	// LabelRuntime records the image's application runtime (AppRuntime).
 	// Stamped only when the runtime is NOT the default (i.e. only for

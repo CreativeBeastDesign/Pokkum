@@ -770,6 +770,95 @@ func TestBuildPushSuccess_SLSAAndSBOMCarryResolvedBunRuntime(t *testing.T) {
 	}
 }
 
+// TestBuildPushSuccess_ImageLabelUsesResolvedBunRuntimeNotHostToolchain is
+// F5's regression guard: the dev.pokkum.bun.version IMAGE LABEL must report
+// the Bun runtime actually embedded in the image — the same resolved
+// ports.BunResolverResult that SBOM, SLSA provenance and `pokkum verify`
+// already agree on ("1.2.2", per mockBunRuntimeResolver's default) — never
+// the HOST's build-tool bun that compiled the app (mockCompiler's Preflight,
+// "1.2.18"). The two fixtures are deliberately distinct so a regression
+// back to the host value is provable, not just plausible.
+func TestBuildPushSuccess_ImageLabelUsesResolvedBunRuntimeNotHostToolchain(t *testing.T) {
+	deps := newFullDeps(io.Discard)
+
+	var pkgReqs []ports.PackageRequest
+	basePackager := &mockPackager{}
+	deps.Packager = &mockPackager{
+		buildFn: func(ctx context.Context, req ports.PackageRequest) (v1.Image, error) {
+			pkgReqs = append(pkgReqs, req)
+			return basePackager.Build(ctx, req)
+		},
+	}
+
+	req := core.BuildRequest{
+		ProjectDir: "/abs/project",
+		Repo:       "ghcr.io/example/app",
+		Platforms:  []core.Platform{core.LinuxAMD64},
+		Tags:       []string{"v1.0.0"},
+	}
+
+	if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if len(pkgReqs) == 0 {
+		t.Fatalf("packager was never invoked")
+	}
+
+	got, ok := pkgReqs[0].Labels[ports.LabelBunVersion]
+	if !ok {
+		t.Fatalf("image labels missing %s entirely, want %q", ports.LabelBunVersion, "1.2.2")
+	}
+	if got != "1.2.2" {
+		t.Errorf("image label %s = %q, want %q (the resolved embedded runtime, not the host compiler bun %q)",
+			ports.LabelBunVersion, got, "1.2.2", "1.2.18")
+	}
+}
+
+// TestBuildPushSuccess_StaticStrategyOmitsBunVersionLabel is a second half
+// of F5 found during self-review, not in the original bug report: a static
+// -strategy image ships "no Bun runtime and no supervisor layer" at all
+// (see ports.BuildStrategy.ApplyStatic's doc comment — pokkum-static serves
+// prerendered files directly), so dev.pokkum.bun.version must be absent
+// there too, exactly like the --runtime=node case, rather than falling back
+// to the host compiler bun the way the exe strategy legitimately does
+// (exe's `bun build --compile` actually bakes that bun into the artifact;
+// static never touches Bun at runtime at all).
+func TestBuildPushSuccess_StaticStrategyOmitsBunVersionLabel(t *testing.T) {
+	projectDir := t.TempDir()
+	outputDir := t.TempDir()
+
+	deps := newFullDeps(io.Discard)
+	deps.StaticServer = &mockStaticServerProvider{}
+	deps.Compiler = &mockCompiler{
+		prepareFn: func(context.Context, ports.PrepareRequest) (ports.PrepareResult, error) {
+			return ports.PrepareResult{EntrypointPath: filepath.Join(outputDir, "index.js"), OutputDir: outputDir}, nil
+		},
+	}
+
+	var pkgReqs []ports.PackageRequest
+	basePackager := &mockPackager{}
+	deps.Packager = &mockPackager{
+		buildFn: func(ctx context.Context, req ports.PackageRequest) (v1.Image, error) {
+			pkgReqs = append(pkgReqs, req)
+			return basePackager.Build(ctx, req)
+		},
+	}
+
+	req := postBuildScanTestRequest(t, projectDir)
+	req.Compile.Strategy = core.StrategyStatic
+
+	if _, err := core.Build(context.Background(), deps, req, core.BuildOptions{}); err != nil {
+		t.Fatalf("static build failed: %v", err)
+	}
+	if len(pkgReqs) == 0 {
+		t.Fatalf("packager was never invoked")
+	}
+
+	if v, ok := pkgReqs[0].Labels[ports.LabelBunVersion]; ok {
+		t.Errorf("image label %s = %q, want ABSENT for a static-strategy image (no Bun is embedded in it)", ports.LabelBunVersion, v)
+	}
+}
+
 // TestBuild_HermeticThreadsIntoBunResolverAndSLSAProvenance is PR-2's
 // pipeline-wiring regression guard (security review findings F5/F6): a
 // --hermetic build must (a) tell the Bun runtime resolver not to reach the
