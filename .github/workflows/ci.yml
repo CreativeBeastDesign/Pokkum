@@ -39,6 +39,7 @@ jobs:
         run: make supervisor static-server
 
       - name: Check Code Formatting
+        if: ${{ !cancelled() }}
         run: test -z "$(gofmt -s -l .)"
 
       # Release-flag regression guard (Roadmap #132): asserts -trimpath,
@@ -47,6 +48,7 @@ jobs:
       # 0 of `make verify` but wasn't previously enforced on PRs because CI
       # runs its own steps rather than `make verify`.
       - name: Compiler Build Flags Regression Guard
+        if: ${{ !cancelled() }}
         run: bash scripts/check-build-flags.sh
 
       # docs/roadmap/*.yaml is the single machine-readable source of truth
@@ -57,6 +59,7 @@ jobs:
       # CI runs its own steps rather than `make verify` (same rationale as
       # the compiler build flags guard above).
       - name: Roadmap Docs Freshness Guard
+        if: ${{ !cancelled() }}
         run: bash scripts/check-docs-freshness.sh
 
       # Run FROM SOURCE via `go run`, not via golangci-lint-action's prebuilt
@@ -212,6 +215,7 @@ jobs:
       # t.Skipf, so without this flag the step passes green while testing nothing
       # — the same shape of silent hole this whole CI repair is about.
       - name: Hermetic Sandbox Tests (privileged container)
+        if: ${{ !cancelled() }}
         run: |
           docker run --rm --privileged \
             -v "$PWD":/src -w /src \
@@ -219,9 +223,53 @@ jobs:
             golang:1.26 \
             go test -count=1 -run 'Hermetic' -v ./internal/adapters/bunexec/
 
-      - name: Run Real-Build E2E Tests
+      # The runtime smoke tests get their own step, ahead of the rest of the
+      # e2e suite, for one reason: they are the only tests in this repo that
+      # boot a produced image, and every one of their preconditions (bun, the
+      # fixture deps, a reachable Docker daemon, a network path to gcr.io) is
+      # GUARANTEED in this job — installed by the steps above, or shipped by
+      # ubuntu-latest. A SKIP here therefore does not mean "not applicable", it
+      # means this repo's only boot coverage silently stopped running while the
+      # step still printed ok. That is exactly the hole that let commit b439e6b's
+      # bug ship: every layered image exited 125 with "startup attestation
+      # mismatch" while `go test ./...` reported 49/49 packages ok.
+      #
+      # Two independent floors, because a green `go test` is a claim about what
+      # RAN (mem:self_review_checklist row 47):
+      #   - POKKUM_REQUIRE_RUNTIME_SMOKE=1 turns every environmental t.Skip
+      #     inside the smoke tests into a hard failure naming the precondition
+      #     that was not met (see tests/integration/runtime_smoke_gate_test.go,
+      #     which tests that predicate in both directions).
+      #   - the output is then scanned anyway: any SKIP line fails the step, and
+      #     fewer than the expected number of PASSes fails it too — that catches
+      #     the skips no env var can reach (a `-run` pattern matching nothing, a
+      #     test renamed or deleted, `-short` creeping into the command line).
+      - name: Runtime Smoke Tests (boot a produced image; must not skip)
+        if: ${{ !cancelled() }}
+        env:
+          POKKUM_REQUIRE_RUNTIME_SMOKE: '1'
         run: |
-          go test -timeout=20m -v \
+          set -euo pipefail
+          go test -timeout=20m -count=1 -v -run 'TestRuntimeSmoke' ./tests/integration 2>&1 | tee runtime-smoke.log
+          if grep -q -- '--- SKIP' runtime-smoke.log; then
+            echo "::error::a runtime smoke test SKIPPED where every precondition is guaranteed: that is the loss of all boot coverage, not a clean pass"
+            exit 1
+          fi
+          passed="$(grep -c -- '--- PASS: TestRuntimeSmoke' runtime-smoke.log || true)"
+          # Layered (bun), static, and --runtime=node. Raise this floor when a
+          # smoke test is added; never lower it to make a red run green.
+          if [ "$passed" -lt 3 ]; then
+            echo "::error::only $passed runtime smoke tests passed, expected at least 3"
+            exit 1
+          fi
+          echo "runtime smoke tests passed: $passed"
+
+      # -skip keeps the smoke tests from running a second time here; the step
+      # above is their home, and it is the one with the no-skip floor.
+      - name: Run Real-Build E2E Tests
+        if: ${{ !cancelled() }}
+        run: |
+          go test -timeout=20m -v -skip 'TestRuntimeSmoke' \
             ./tests/integration/... \
             ./internal/adapters/bunexec/... \
             ./internal/adapters/sveltekitutils/...
@@ -257,9 +305,11 @@ jobs:
         run: make supervisor static-server
 
       - name: Verify CLI Builds Natively on macOS
+        if: ${{ !cancelled() }}
         run: go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test
 
       - name: Run Platform-Sensitive Package Tests (-short)
+        if: ${{ !cancelled() }}
         run: |
           go test -short -v \
             ./cmd/pokkum/... \

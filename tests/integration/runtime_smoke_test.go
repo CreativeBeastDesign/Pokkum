@@ -96,12 +96,20 @@ import (
 //     only once core.Build actually runs: skipped, matching
 //     TestRealBuild_StrategyLayered_PrerenderedRoute's existing tolerance for
 //     both, since neither is this test's own regression target.
+//
+// Every one of those gates goes through smokeGateSkipf, not t.Skip directly:
+// where the environment guarantees the preconditions (CI on ubuntu-latest, which
+// ships Docker and installs Bun and the fixture deps in the same job), setting
+// POKKUM_REQUIRE_RUNTIME_SMOKE=1 turns each of them into a hard failure naming
+// the precondition. A SKIP there is not "not applicable", it is the silent loss
+// of this repo's only boot coverage while the step still reports ok — see
+// runtime_smoke_gate_test.go and mem:self_review_checklist rows 39 and 47.
 func TestRuntimeSmoke_LayeredStrategy_BootsAndServes(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping real bun+docker runtime smoke test in short mode")
+		smokeGateSkipf(t, "skipping real bun+docker runtime smoke test in short mode")
 	}
 	if _, err := exec.LookPath("bun"); err != nil {
-		t.Skip("bun not found on PATH; skipping runtime smoke test")
+		smokeGateSkipf(t, "bun not found on PATH: %v", err)
 	}
 
 	fixtureDir, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fixtures", "sveltekit-adapter-node"))
@@ -109,17 +117,23 @@ func TestRuntimeSmoke_LayeredStrategy_BootsAndServes(t *testing.T) {
 		t.Fatalf("Abs fixture path: %v", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(fixtureDir, "node_modules")); statErr != nil {
-		t.Skipf("fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, statErr)
+		smokeGateSkipf(t, "fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, statErr)
 	}
 
 	runtimeBin, ok := requireContainerRuntime(t)
 	if !ok {
-		return // requireContainerRuntime already called t.Skip.
+		return // requireContainerRuntime already called smokeGateSkipf.
 	}
 
 	requireNetworkPathTo(t, "gcr.io:443")
 
 	projectDir := copyFixtureProject(t, fixtureDir)
+	// The fixture has no production dependencies of its own, so without this
+	// the image ships no /app/node_modules at all and this test cannot say
+	// anything about whether that root is attested — see
+	// runtime_smoke_nodemodules_test.go's package note and the b439e6b
+	// post-mortem in Lessons.md.
+	injectProductionDependency(t, projectDir)
 
 	tarballPath := filepath.Join(t.TempDir(), "runtime-smoke.tar")
 	repo := "pokkum.local/runtime-smoke"
@@ -165,7 +179,7 @@ func TestRuntimeSmoke_LayeredStrategy_BootsAndServes(t *testing.T) {
 	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") && strings.Contains(err.Error(), "node_modules") {
-			t.Skipf("fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, err)
+			smokeGateSkipf(t, "fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, err)
 		}
 		if strings.Contains(err.Error(), "bunruntime:") && strings.Contains(err.Error(), "checksum mismatch") {
 			// See TestRealBuild_StrategyLayered_PrerenderedRoute's identical
@@ -173,10 +187,10 @@ func TestRuntimeSmoke_LayeredStrategy_BootsAndServes(t *testing.T) {
 			// pre-existing, unrelated supply-chain pin issue, not something
 			// this test's own regression guard (does the packaged image
 			// boot?) should be judged on.
-			t.Skipf("bun runtime checksum pin appears stale, unrelated to this test's regression guard: %v", err)
+			smokeGateSkipf(t, "bun runtime checksum pin appears stale, unrelated to this test's regression guard: %v", err)
 		}
 		if isNetworkError(err) {
-			t.Skipf("base image resolution could not reach the network: %v", err)
+			smokeGateSkipf(t, "base image resolution could not reach the network: %v", err)
 		}
 		t.Fatalf("core.Build failed for a real --strategy=layered build: %v", err)
 	}
@@ -185,11 +199,15 @@ func TestRuntimeSmoke_LayeredStrategy_BootsAndServes(t *testing.T) {
 	}
 
 	loadImageIntoRuntime(t, runtimeBin, tarballPath, imageRef)
-	runContainerAndAssertServes(t, runtimeBin, imageRef)
+	containerName := runContainerAndAssertServes(t, runtimeBin, imageRef)
+	// Serving is necessary but not sufficient: build time and runtime also
+	// agree when neither side sees any node_modules. Assert what was actually
+	// covered.
+	assertNodeModulesAttestedAtRuntime(t, tarballPath, containerLogs(t, runtimeBin, containerName))
 }
 
 // requireContainerRuntime finds a usable container runtime CLI (docker,
-// falling back to podman) with a reachable daemon/service, or calls t.Skip
+// falling back to podman) with a reachable daemon/service, or calls smokeGateSkipf
 // with a clear reason and returns ("", false). Callers must return
 // immediately when ok is false.
 func requireContainerRuntime(t *testing.T) (string, bool) {
@@ -206,7 +224,7 @@ func requireContainerRuntime(t *testing.T) (string, bool) {
 		}
 		return bin, true
 	}
-	t.Skip("no reachable container runtime (docker or podman) found; skipping runtime smoke test")
+	smokeGateSkipf(t, "no reachable container runtime (docker or podman) found")
 	return "", false
 }
 
@@ -220,7 +238,7 @@ func requireNetworkPathTo(t *testing.T, addr string) {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
-		t.Skipf("no network path to %s (needed to resolve the real base image); skipping runtime smoke test: %v", addr, err)
+		smokeGateSkipf(t, "no network path to %s (needed to resolve the real base image): %v", addr, err)
 		return
 	}
 	_ = conn.Close()
@@ -342,6 +360,13 @@ func runContainerAndAssertServes(t *testing.T, runtimeBin, imageRef string) stri
 		t.Fatalf("%s %s: %v\n%s", runtimeBin, strings.Join(runArgs, " "), runErr, runOut)
 	}
 
+	// A container that refused to start (the startup attestation failing is the
+	// live example: pokkum-init exits 125 before the child ever runs) surfaces
+	// at hostPortFor as "no public port '8081/tcp' published", which names the
+	// wrong cause entirely. Ask the runtime directly first, so the failure
+	// report is the container's own exit code and logs.
+	assertContainerRunning(t, runtimeBin, name)
+
 	probePort := hostPortFor(t, runtimeBin, name, ports.DefaultProbePort)
 	appPort := hostPortFor(t, runtimeBin, name, ports.DefaultPort)
 
@@ -366,6 +391,45 @@ func runContainerAndAssertServes(t *testing.T, runtimeBin, imageRef string) stri
 		t.Fatalf("runtime smoke test failed: the packaged image did not boot and serve correctly")
 	}
 	return name
+}
+
+// assertContainerRunning fails, with the container's exit code and its full
+// logs, if the container is not running — the shape a bricked image takes
+// (pokkum-init refusing to exec its child) rather than a serving failure.
+func assertContainerRunning(t *testing.T, runtimeBin, containerName string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, runtimeBin, "inspect",
+		"-f", "{{.State.Running}} {{.State.ExitCode}}", containerName).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s inspect %s: %v\n%s", runtimeBin, containerName, err, out)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) != 2 {
+		t.Fatalf("unexpected %s inspect output %q", runtimeBin, out)
+	}
+	if fields[0] != "true" {
+		t.Fatalf("the container is not running (exit code %s): the packaged image refused to start rather than "+
+			"failing to serve. Its own logs say why:\n%s", fields[1], containerLogs(t, runtimeBin, containerName))
+	}
+}
+
+// containerLogs returns everything the container has written to stdout/stderr
+// so far. pokkum-init's startup log lines (notably "startup attestation
+// verified ... files=N") are the only place the runtime side of the attestation
+// is observable from outside the container, and asserting on them is what makes
+// "the image booted" distinguishable from "the image booted with the control
+// covering nothing".
+func containerLogs(t *testing.T, runtimeBin, containerName string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, runtimeBin, "logs", containerName).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s logs %s: %v\n%s", runtimeBin, containerName, err, out)
+	}
+	return string(out)
 }
 
 // hostPortFor asks the runtime which host port a container's containerPort
@@ -581,10 +645,10 @@ func pollHTTP200Body(url string, timeout time.Duration) (bool, string) {
 // strategy's default base, cgr.dev/chainguard/static) instead of gcr.io.
 func TestRuntimeSmoke_StaticStrategy_BootsAndServes(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping real bun+docker runtime smoke test in short mode")
+		smokeGateSkipf(t, "skipping real bun+docker runtime smoke test in short mode")
 	}
 	if _, err := exec.LookPath("bun"); err != nil {
-		t.Skip("bun not found on PATH; skipping runtime smoke test")
+		smokeGateSkipf(t, "bun not found on PATH: %v", err)
 	}
 
 	fixtureDir, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fixtures", "sveltekit-static"))
@@ -592,12 +656,12 @@ func TestRuntimeSmoke_StaticStrategy_BootsAndServes(t *testing.T) {
 		t.Fatalf("Abs fixture path: %v", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(fixtureDir, "node_modules")); statErr != nil {
-		t.Skipf("fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, statErr)
+		smokeGateSkipf(t, "fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, statErr)
 	}
 
 	runtimeBin, ok := requireContainerRuntime(t)
 	if !ok {
-		return // requireContainerRuntime already called t.Skip.
+		return // requireContainerRuntime already called smokeGateSkipf.
 	}
 
 	requireNetworkPathTo(t, "cgr.dev:443")
@@ -657,10 +721,10 @@ func TestRuntimeSmoke_StaticStrategy_BootsAndServes(t *testing.T) {
 	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") && strings.Contains(err.Error(), "node_modules") {
-			t.Skipf("fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, err)
+			smokeGateSkipf(t, "fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, err)
 		}
 		if isNetworkError(err) {
-			t.Skipf("base image resolution could not reach the network: %v", err)
+			smokeGateSkipf(t, "base image resolution could not reach the network: %v", err)
 		}
 		if errors.Is(err, core.ErrAdapterMissing) {
 			// Bug #1 from this test's own doc comment: bunexec.Compiler.Preflight
@@ -733,6 +797,13 @@ func runContainerAndAssertServesStatic(t *testing.T, runtimeBin, imageRef, proje
 	if runErr != nil {
 		t.Fatalf("%s %s: %v\n%s", runtimeBin, strings.Join(runArgs, " "), runErr, runOut)
 	}
+
+	// A container that refused to start (the startup attestation failing is the
+	// live example: pokkum-init exits 125 before the child ever runs) surfaces
+	// at hostPortFor as "no public port '8081/tcp' published", which names the
+	// wrong cause entirely. Ask the runtime directly first, so the failure
+	// report is the container's own exit code and logs.
+	assertContainerRunning(t, runtimeBin, name)
 
 	probePort := hostPortFor(t, runtimeBin, name, ports.DefaultProbePort)
 	appPort := hostPortFor(t, runtimeBin, name, ports.DefaultPort)

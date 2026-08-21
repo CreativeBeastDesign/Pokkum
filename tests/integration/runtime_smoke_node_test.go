@@ -84,10 +84,10 @@ import (
 // base registry host.
 func TestRuntimeSmoke_NodeRuntime_BootsAndServes(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping real bun+docker runtime smoke test in short mode")
+		smokeGateSkipf(t, "skipping real bun+docker runtime smoke test in short mode")
 	}
 	if _, err := exec.LookPath("bun"); err != nil {
-		t.Skip("bun not found on PATH; skipping runtime smoke test")
+		smokeGateSkipf(t, "bun not found on PATH: %v", err)
 	}
 
 	fixtureDir, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fixtures", "sveltekit-adapter-node"))
@@ -95,17 +95,23 @@ func TestRuntimeSmoke_NodeRuntime_BootsAndServes(t *testing.T) {
 		t.Fatalf("Abs fixture path: %v", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(fixtureDir, "node_modules")); statErr != nil {
-		t.Skipf("fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, statErr)
+		smokeGateSkipf(t, "fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, statErr)
 	}
 
 	runtimeBin, ok := requireContainerRuntime(t)
 	if !ok {
-		return // requireContainerRuntime already called t.Skip.
+		return // requireContainerRuntime already called smokeGateSkipf.
 	}
 
 	requireNetworkPathTo(t, "gcr.io:443")
 
 	projectDir := copyFixtureProject(t, fixtureDir)
+	// A --runtime=node image resolves bare imports straight off the packaged
+	// tree with no bundler in front of it, so /app/node_modules matters here at
+	// least as much as it does for the Bun image — and the fixture ships no
+	// production dependencies of its own. See
+	// runtime_smoke_nodemodules_test.go.
+	injectProductionDependency(t, projectDir)
 
 	tarballPath := filepath.Join(t.TempDir(), "runtime-smoke-node.tar")
 	repo := "pokkum.local/runtime-smoke-node"
@@ -159,10 +165,10 @@ func TestRuntimeSmoke_NodeRuntime_BootsAndServes(t *testing.T) {
 	res, err := core.Build(context.Background(), deps, req, core.BuildOptions{})
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") && strings.Contains(err.Error(), "node_modules") {
-			t.Skipf("fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, err)
+			smokeGateSkipf(t, "fixture dependencies not installed (run `bun install` in %s): %v", fixtureDir, err)
 		}
 		if isNetworkError(err) {
-			t.Skipf("base image resolution could not reach the network: %v", err)
+			smokeGateSkipf(t, "base image resolution could not reach the network: %v", err)
 		}
 		t.Fatalf("core.Build failed for a real --runtime=node build: %v", err)
 	}
@@ -173,7 +179,8 @@ func TestRuntimeSmoke_NodeRuntime_BootsAndServes(t *testing.T) {
 	assertNodeRuntimeImage(t, tarballPath)
 
 	loadImageIntoRuntime(t, runtimeBin, tarballPath, imageRef)
-	runContainerAndAssertServes(t, runtimeBin, imageRef)
+	containerName := runContainerAndAssertServes(t, runtimeBin, imageRef)
+	assertNodeModulesAttestedAtRuntime(t, tarballPath, containerLogs(t, runtimeBin, containerName))
 }
 
 // assertNodeRuntimeImage inspects the OCI image written to tarballPath
