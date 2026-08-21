@@ -32,7 +32,15 @@ func writeStrategyDir(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
 	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		// Nested keys ("valibot/dist/index.js") are supported deliberately: a
+		// real node_modules or client-asset tree is almost entirely nested, and
+		// a helper that only wrote flat names quietly pushed every fixture
+		// toward a shape the packager never actually sees.
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir for %s: %v", name, err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}

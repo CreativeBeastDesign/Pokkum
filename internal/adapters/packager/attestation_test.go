@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/attestutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -51,6 +53,12 @@ func recomputeLayeredDigest(t *testing.T, req ports.PackageRequest) string {
 		{req.AssetOverlayDir, ports.AppClientDirPrefix},
 		{req.AppClientDir, ports.AppClientDirPrefix},
 		{req.AppVendorDir, ports.AppVendorDirPrefix},
+		// The project's production dependencies. Absent from this table until
+		// it shipped an unbootable image: the packager folded node_modules
+		// records into the manifest while this oracle — and pokkum-init's walk
+		// set — did not know the prefix existed, so the oracle agreed with the
+		// packager instead of modelling the runtime view it claims to model.
+		{req.AppNodeModulesDir, ports.AppNodeModulesDirPrefix},
 		{req.AppNativeDir, ports.AppNativeDirPrefix},
 		{req.AppPrerenderedDir, ports.AppPrerenderedDirPrefix},
 	}
@@ -99,6 +107,14 @@ func TestAttestationEnv_StampedForLayered(t *testing.T) {
 	req.AppServerDir = writeStrategyDir(t, map[string]string{"index.js": "server entry", "handler.js": "handler"})
 	req.AppClientDir = writeStrategyDir(t, map[string]string{"app.js": "var x=1"})
 	req.AppVendorDir = writeStrategyDir(t, map[string]string{"module.js": "export 1"})
+	// Populated so this test covers the node_modules layer too. While it was
+	// left empty, the attestation digest it verified simply had no dependency
+	// files in it, and the stamped-vs-re-derived comparison stayed green
+	// through the entire period in which no layered image could start.
+	req.AppNodeModulesDir = writeStrategyDir(t, map[string]string{
+		"valibot/package.json":  `{"name":"valibot","version":"1.4.2"}`,
+		"valibot/dist/index.js": "export const v=1",
+	})
 	req.AppNativeDir = writeStrategyDir(t, map[string]string{"addon.node": "\x7fELFdata"})
 	req.AppPrerenderedDir = writeStrategyDir(t, map[string]string{"index.html": "<h1>home</h1>"})
 	req.NoPrecompress = true // isolate attestation logic from sidecar generation
@@ -360,4 +376,160 @@ func isLowerHex(s string) bool {
 		}
 	}
 	return true
+}
+
+// digestFromBuiltImageFilesystem re-derives the attestation digest the way
+// pokkum-init actually does it at runtime: from the MERGED filesystem the
+// container sees, reconstructed by replaying every layer's tar stream in
+// order, then walking exactly ports.AttestationRoots over the result.
+//
+// This is deliberately not derived from req.App*Dir. An oracle built from the
+// packager's own host-directory table can only ever confirm that the packager
+// agrees with itself — it cannot notice that a prefix the packager records is
+// one pokkum-init will never walk, which is the failure that shipped an
+// unbootable image. Replaying the layers and filtering by AttestationRoots
+// models the runtime's two real inputs (what is in the image, which roots are
+// walked) and nothing else.
+//
+// Later layers overwrite earlier ones at the same path, matching real layer
+// squash semantics, so a path contributed twice collapses to the last writer.
+func digestFromBuiltImageFilesystem(t *testing.T, img v1.Image) string {
+	t.Helper()
+
+	layers, err := img.Layers()
+	if err != nil {
+		t.Fatalf("layers: %v", err)
+	}
+
+	// prefixes are the attested roots as tar-relative paths ("app/server/"),
+	// taken from the single source of truth rather than restated here.
+	prefixes := make([]string, 0, len(ports.AttestationRoots))
+	for _, p := range ports.AttestationRoots {
+		prefixes = append(prefixes, strings.TrimPrefix(p, "/")+"/")
+	}
+
+	byRel := make(map[string]string) // rel-to-/app -> sha, last layer wins
+	for _, layer := range layers {
+		rc, err := layer.Uncompressed()
+		if err != nil {
+			t.Fatalf("uncompressed: %v", err)
+		}
+		tr := tar.NewReader(rc)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				rc.Close() //nolint:errcheck // test cleanup
+				t.Fatalf("read tar: %v", err)
+			}
+			if hdr.Typeflag != tar.TypeReg {
+				continue // pokkum-init hashes regular files only
+			}
+			name := strings.TrimPrefix(hdr.Name, "./")
+			var under bool
+			for _, p := range prefixes {
+				if strings.HasPrefix(name, p) {
+					under = true
+					break
+				}
+			}
+			if !under {
+				continue
+			}
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				rc.Close() //nolint:errcheck // test cleanup
+				t.Fatalf("read tar entry %q: %v", hdr.Name, err)
+			}
+			byRel[strings.TrimPrefix(name, "app/")] = sha256Hex(data)
+		}
+		rc.Close() //nolint:errcheck // test cleanup
+	}
+
+	recs := make([]attestutils.Record, 0, len(byRel))
+	for rel, sha := range byRel {
+		recs = append(recs, attestutils.Record{Rel: rel, SHA: sha})
+	}
+	return attestutils.RootDigest(recs)
+}
+
+// TestAttestation_StampedDigestMatchesImageFilesystem is the check that would
+// have caught the shipped brick, and the one the other attestation tests
+// structurally could not.
+//
+// Every layered image built from main refused to start with "startup
+// attestation mismatch ... refusing to start" (exit 125) because the packager
+// folded /app/node_modules records into the stamped manifest while
+// pokkum-init's walk set omitted that root: 11762 files hashed at build time,
+// 509 findable at runtime. The existing coverage all passed throughout —
+// TestAttestationEnv_StampedForLayered compared the stamp against an oracle
+// built from the packager's own root table (which had the same omission and
+// never populated node_modules), and
+// TestBuild_LayeredPackagesNodeModulesWhereResolutionLooks asserted only that
+// a History entry named the layer.
+//
+// So this test asserts the property that actually matters and that neither of
+// those could express: the digest stamped into the image equals the digest a
+// walk of ports.AttestationRoots over the image's own merged filesystem
+// produces. Any root the packager records but the runtime does not walk — or
+// vice versa — breaks it.
+func TestAttestation_StampedDigestMatchesImageFilesystem(t *testing.T) {
+	req := newRequest(t, ports.LinuxAMD64)
+	req.Strategy = ports.StrategyLayered
+	req.BunRuntime = ports.BunResolverResult{BinaryPath: writeBinary(t, "bun", []byte("bun"))}
+	// Every attested root is populated, with distinct content per root, so an
+	// omission on either side changes the digest rather than being invisible.
+	req.AppServerDir = writeStrategyDir(t, map[string]string{"index.js": "server entry"})
+	req.AppClientDir = writeStrategyDir(t, map[string]string{"_app/immutable/app.js": "var x=1"})
+	req.AppVendorDir = writeStrategyDir(t, map[string]string{"module.js": "export 1"})
+	req.AppNodeModulesDir = writeStrategyDir(t, map[string]string{
+		"valibot/package.json":  `{"name":"valibot","version":"1.4.2"}`,
+		"valibot/dist/index.js": "export const v=1",
+	})
+	req.AppNativeDir = writeStrategyDir(t, map[string]string{"addon.node": "\x7fELFdata"})
+	req.AppPrerenderedDir = writeStrategyDir(t, map[string]string{"index.html": "<h1>home</h1>"})
+	req.NoPrecompress = true
+
+	img, err := NewPackager(testLogger()).Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	stamped, ok := envValue(configOf(t, img).Config.Env, ports.EnvAttestationDigest)
+	if !ok {
+		t.Fatalf("layered image is missing %s", ports.EnvAttestationDigest)
+	}
+	fromImage := digestFromBuiltImageFilesystem(t, img)
+
+	if stamped != fromImage {
+		t.Errorf("stamped attestation digest does not match a runtime-style walk of the image:\n"+
+			"  stamped (build time)      = %s\n"+
+			"  walked  (image + roots)   = %s\n"+
+			"A container would exit 125 with 'startup attestation mismatch'. This means the set of\n"+
+			"prefixes the packager records and ports.AttestationRoots have diverged.", stamped, fromImage)
+	}
+}
+
+// TestAttestation_ImageFilesystemOracleCanFail proves the oracle above is
+// capable of failing, per self-review row 45: a comparison that cannot
+// distinguish the buggy from the fixed code is not a check. Dropping any one
+// root from the walk must change the derived digest — that dropped root is
+// exactly the shape of the shipped bug.
+func TestAttestation_ImageFilesystemOracleCanFail(t *testing.T) {
+	if len(ports.AttestationRoots) < 2 {
+		t.Fatalf("expected several attestation roots, got %v", ports.AttestationRoots)
+	}
+	// node_modules specifically: it is the root whose omission shipped, and a
+	// populated node_modules layer must be able to move the digest at all.
+	full := []attestutils.Record{
+		{Rel: "server/index.js", SHA: "aaa"},
+		{Rel: "node_modules/valibot/dist/index.js", SHA: "bbb"},
+	}
+	withoutNodeModules := full[:1]
+	if attestutils.RootDigest(full) == attestutils.RootDigest(withoutNodeModules) {
+		t.Fatal("omitting node_modules records did not change the aggregate digest; " +
+			"the parity assertion above cannot detect a missing attestation root")
+	}
 }

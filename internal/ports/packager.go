@@ -116,11 +116,24 @@ const (
 // not its order, is what matters: the aggregate digest is sorted by relative
 // path before hashing, so iteration order cannot leak into it. A var, not a
 // const, because it is an array literal rather than a typed constant.
+//
+// Every prefix a packager layer contributes attestation records for MUST
+// appear here, and pokkum-init's mirrored list MUST match this one exactly.
+// Both halves of that invariant are enforced by tests rather than by comment:
+// TestAttestationRoots_MatchSupervisorMirror parses the supervisor's source
+// and compares the two literals, and
+// TestAttestationRoots_CoverEveryPackagedRecordPrefix builds a real layered
+// image with every root populated and asserts the prefixes actually recorded
+// equal this set. Omitting a prefix here does not weaken a check, it bricks
+// the image: the packager hashes files pokkum-init can never find, so the
+// digests cannot match and the container refuses to start. That is exactly
+// what shipping AppNodeModulesDirPrefix without adding it here did.
 var AttestationRoots = [...]string{
 	AppServerDirPrefix,
 	AppClientDirPrefix,
 	AppPrerenderedDirPrefix,
 	AppVendorDirPrefix,
+	AppNodeModulesDirPrefix,
 	AppNativeDirPrefix,
 }
 

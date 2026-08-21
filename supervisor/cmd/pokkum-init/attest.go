@@ -38,11 +38,21 @@ var attestAppDir = "/app"
 // attestRoots mirrors ports.AttestationRoots: the fixed set of in-image
 // directories covered. Order does not matter for the digest (records are
 // globally sorted by relative path), so this need only contain the same set.
+//
+// This list cannot import ports (see the package comment), so it is a literal
+// hand-copy — and a hand-copy that silently fell out of sync is precisely how
+// every layered image came to refuse to start once the packager began
+// archiving /app/node_modules without adding it here. The copy is therefore
+// no longer trusted to reviewers: TestAttestationRoots_MatchSupervisorMirror
+// parses THIS declaration out of THIS file with go/ast and fails if it does
+// not equal ports.AttestationRoots element-for-element. Keep the entries as
+// plain string literals, one per line, or that parser cannot read them.
 var attestRoots = []string{
 	"/app/server",
 	"/app/client",
 	"/app/prerendered",
 	"/app/vendor",
+	"/app/node_modules",
 	"/app/native",
 }
 

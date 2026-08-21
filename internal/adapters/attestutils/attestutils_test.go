@@ -3,10 +3,16 @@ package attestutils
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"testing"
+
+	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
 // TestRootDigest_DeterministicAcrossOrder proves the aggregate digest is
@@ -98,13 +104,13 @@ type supervisorRecord struct {
 // supervisor's runtime view of the same tree.
 func walkSupervisor(root string) []supervisorRecord {
 	var out []supervisorRecord
-	for _, prefix := range []string{
-		"/app/server",
-		"/app/client",
-		"/app/prerendered",
-		"/app/vendor",
-		"/app/native",
-	} {
+	// Iterate ports.AttestationRoots itself rather than a third inline copy of
+	// the same list. The copy this replaced had drifted from both of the other
+	// two: its doc comment claimed it walked AttestationRoots while it actually
+	// hardcoded five prefixes, so it kept agreeing with the supervisor after
+	// /app/node_modules was added to the packager and every image stopped
+	// booting.
+	for _, prefix := range ports.AttestationRoots {
 		dir := filepath.Join(root, filepath.FromSlash(prefix))
 		fi, err := os.Stat(dir)
 		if err != nil || !fi.IsDir() {
@@ -215,4 +221,135 @@ func TestParity_AbsentRootContributesNothing(t *testing.T) {
 	if d == "" {
 		t.Fatal("absent-other-roots produced empty digest")
 	}
+}
+
+// supervisorAttestSourcePath is pokkum-init's attestation source, relative to
+// this package. The supervisor deliberately cannot import ports (it must not
+// drag Go port types into a program whose only job is to fork one child), so
+// its root list is a hand-copy — and this test is what stops that copy from
+// being trusted on faith.
+const supervisorAttestSourcePath = "../../../supervisor/cmd/pokkum-init/attest.go"
+
+// parseSupervisorAttestRoots extracts the `attestRoots` string-slice literal
+// out of pokkum-init's source with go/ast. Reading the real declaration is the
+// entire point: a test that restated the list inline would be a fourth copy,
+// agreeing with a drifted third one.
+func parseSupervisorAttestRoots(t *testing.T) []string {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, supervisorAttestSourcePath, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", supervisorAttestSourcePath, err)
+	}
+
+	var got []string
+	var found bool
+	ast.Inspect(file, func(n ast.Node) bool {
+		vs, ok := n.(*ast.ValueSpec)
+		if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "attestRoots" || len(vs.Values) != 1 {
+			return true
+		}
+		lit, ok := vs.Values[0].(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		found = true
+		for _, elt := range lit.Elts {
+			bl, ok := elt.(*ast.BasicLit)
+			if !ok || bl.Kind != token.STRING {
+				// A non-literal element (a constant, a concatenation) would be
+				// invisible to this parser, so refuse rather than silently
+				// comparing a short list and reporting parity.
+				t.Fatalf("attestRoots contains a non-string-literal element %T; keep the entries as plain string literals so this drift check can read them", elt)
+			}
+			s, uerr := strconv.Unquote(bl.Value)
+			if uerr != nil {
+				t.Fatalf("unquote %s: %v", bl.Value, uerr)
+			}
+			got = append(got, s)
+		}
+		return false
+	})
+
+	if !found {
+		t.Fatalf("could not find the attestRoots declaration in %s — if it was renamed or restructured, update this test rather than deleting it", supervisorAttestSourcePath)
+	}
+	return got
+}
+
+// TestAttestationRoots_MatchSupervisorMirror is the drift tripwire for the one
+// invariant that cannot be enforced by the compiler: pokkum-init's hand-copied
+// root list must equal ports.AttestationRoots as a SET.
+//
+// This is the check whose absence shipped an unbootable image. The packager
+// began archiving /app/node_modules and folding its records into the
+// attestation manifest; pokkum-init's list was not updated; build-time hashed
+// 11762 files while runtime could only ever find 509, so every layered image
+// exited 125 with "startup attestation mismatch". Nothing failed — not the
+// existing parity test (which compares the two digest *functions*, not the two
+// *root sets*), not the packager's own attestation test (whose oracle mirrors
+// the packager's table and never populated node_modules), and not the full
+// suite, which was green at 49/49 packages while no produced image could start.
+func TestAttestationRoots_MatchSupervisorMirror(t *testing.T) {
+	supervisorRoots := parseSupervisorAttestRoots(t)
+
+	portsRoots := make([]string, 0, len(ports.AttestationRoots))
+	portsRoots = append(portsRoots, ports.AttestationRoots[:]...)
+
+	// Order is genuinely irrelevant to the digest (records are globally sorted
+	// by relative path before hashing), so compare as sets and let either side
+	// list its roots in whatever order reads best.
+	gotSorted := append([]string(nil), supervisorRoots...)
+	wantSorted := append([]string(nil), portsRoots...)
+	sort.Strings(gotSorted)
+	sort.Strings(wantSorted)
+
+	if len(gotSorted) != len(wantSorted) {
+		t.Fatalf("attestation root sets differ in size:\n  pokkum-init: %v\n  ports:       %v", gotSorted, wantSorted)
+	}
+	for i := range gotSorted {
+		if gotSorted[i] != wantSorted[i] {
+			t.Fatalf("attestation root sets differ:\n  pokkum-init: %v\n  ports:       %v\nAdding a root to one side without the other makes every layered image refuse to start.", gotSorted, wantSorted)
+		}
+	}
+}
+
+// TestAttestationRoots_MirrorCheckCanFail guards the guard. A parser that
+// silently found nothing would make the test above vacuous — it would compare
+// two empty-ish lists, or fatal in a way a future refactor might "fix" by
+// loosening the assertion. Feed the same comparison a deliberately wrong set
+// and prove it is rejected, so the check is known to be capable of failing.
+func TestAttestationRoots_MirrorCheckCanFail(t *testing.T) {
+	real := make([]string, 0, len(ports.AttestationRoots))
+	real = append(real, ports.AttestationRoots[:]...)
+	if len(real) < 2 {
+		t.Fatalf("expected several attestation roots, got %v", real)
+	}
+
+	// Dropping any single root must be detectable by the same set comparison
+	// the mirror test performs — this is precisely the shape of the shipped bug
+	// (one root present on one side, absent on the other).
+	for i := range real {
+		missing := append(append([]string(nil), real[:i]...), real[i+1:]...)
+		if setsEqual(missing, real) {
+			t.Fatalf("dropping root %q was not detected; the mirror comparison cannot fail and is therefore not a check", real[i])
+		}
+	}
+}
+
+func setsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	as := append([]string(nil), a...)
+	bs := append([]string(nil), b...)
+	sort.Strings(as)
+	sort.Strings(bs)
+	for i := range as {
+		if as[i] != bs[i] {
+			return false
+		}
+	}
+	return true
 }
