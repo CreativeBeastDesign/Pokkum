@@ -427,7 +427,9 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 					// source.
 					lockfileutils.SetLockedBase(lf, lockKey, entry)
 					lockfileutils.DeleteLockedBase(lf, legacyCustomLockKey)
-					if serr := lockfileutils.SaveLockfile(req.LockfilePath, lf); serr != nil {
+					if req.LockfileReadOnly {
+						r.logger().Debug("lockfile is read-only for this run; skipping slot migration write", "path", req.LockfilePath)
+					} else if serr := lockfileutils.SaveLockfile(req.LockfilePath, lf); serr != nil {
 						r.logger().Warn("failed to save base image lockfile after per-reference slot migration",
 							"path", req.LockfilePath, "err", serr)
 					} else {
@@ -586,7 +588,12 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 			// of a pin this build has just replaced.
 			lockfileutils.DeleteLockedBase(lf, legacyCustomLockKey)
 		}
-		if serr := lockfileutils.SaveLockfile(req.LockfilePath, lf); serr != nil {
+		if req.LockfileReadOnly {
+			// --dry-run: resolve and report, but leave the user's tree exactly
+			// as it was found.
+			r.logger().Debug("lockfile is read-only for this run; not persisting the resolved pin",
+				"path", req.LockfilePath, "pinned_ref", out.PinnedRef)
+		} else if serr := lockfileutils.SaveLockfile(req.LockfilePath, lf); serr != nil {
 			r.logger().Warn("failed to save updated base image lockfile", "path", req.LockfilePath, "err", serr)
 		} else {
 			r.logger().Info("updated base image lockfile", "path", req.LockfilePath, "preset", req.Preset, "pinned_ref", out.PinnedRef)

@@ -305,6 +305,18 @@ type BaseImageRequest struct {
 	// LockfilePath is the path to pokkum.lock (optional).
 	LockfilePath string
 
+	// LockfileReadOnly makes the resolver READ LockfilePath for pinning but
+	// never write it back.
+	//
+	// It exists for --dry-run, whose help text promises it will "perform no
+	// writes" and whose pipeline comment claims it stops "having touched
+	// nothing". Both were false: resolving a base image persisted lock entries
+	// and scan timestamps, so a dry run created pokkum.lock in a project that
+	// had none — a file appearing in the user's working tree from a command
+	// documented not to write, which is also the zero-mutation invariant this
+	// codebase holds for user source.
+	LockfileReadOnly bool
+
 	// UpdateBase forces re-resolving base image tags against remote registry and updating pokkum.lock.
 	UpdateBase bool
 
