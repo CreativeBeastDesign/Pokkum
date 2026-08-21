@@ -141,10 +141,23 @@ the flag. That flag only affects `--print-manifest`'s separate JSON path
 (§3) and every other subcommand (`scan`, `history`, `verify`, `adopt`, ...),
 which do wrap their result in a `{"schema_version", "command", "status",
 "data": {...}}` envelope (`internal/ports/output.go`'s `JSONEnvelope`).
-Piping `build`'s own `--output=json` output through `jq -r '.data.digest'`
-does not error — it silently returns `null`. A paranoid guide should not
-itself carry a command that quietly does nothing; extract the digest from
-the plain ref instead:
+Piping `build`'s own stdout through `jq -r '.data.digest'` therefore fails
+loudly rather than silently: the plain ref is not JSON at all, so jq never
+reaches the key lookup.
+
+```
+$ pokkum build . --output=json | jq -r '.data.digest'
+jq: parse error: Invalid numeric literal at line 1, column 10   # exit 5
+```
+
+(An earlier revision of this guide claimed that pipeline "silently returns
+`null`". It does not — verified against jq directly. A silent `null` is what
+you get from JSON that parses but lacks the key, e.g. the envelope other
+subcommands emit; `build`'s stdout never parses in the first place. The
+practical advice below is unchanged, but the reason is the opposite of what
+was written: the failure is loud, not quiet.)
+
+Extract the digest from the plain ref instead:
 
 ```bash
 DIGEST=${IMAGE_REF#*@}

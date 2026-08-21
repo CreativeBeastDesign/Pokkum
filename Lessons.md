@@ -5,6 +5,64 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-21 — A commit closed a roadmap item whose whole point was a measurement that was never taken
+
+**Category:** verification-gap / process
+
+**Root cause:** `generic-secret-rule-key-coverage` existed *because* widening the generic secret rule's key set spends false-positive budget that the immediately preceding tightening had just recovered. Its Recommendation was explicit: "validated against a corpus of real minified bundles so the false-positive cost is measured rather than assumed." Commit `5af6a29` shipped the regex widening with a good commit message, a fail-first proof, and ten new tests — and no corpus. Its false-positive tests were hand-written strings built from the author's model of minified output, checked against a regex built from the same model. The item was left `status: open`, so nothing downstream noticed the obligation was outstanding. Running the measurement later found the regex was in fact safe on 219 files / 2.65 MiB of real Vite/Rollup output — but that was luck, not evidence, and the real sweep surfaced a false-positive class no synthetic fixture would have produced (Vite's bundled `js-tokens` lexer reassigning `lastSignificantToken` to sentinel strings; unreachable today only because `ScanDirectory` skips `node_modules`).
+
+**Where:** `internal/adapters/secretguard/guard.go`; roadmap item `generic-secret-rule-key-coverage`.
+
+**Fix:** `internal/adapters/secretguard/minified_corpus_test.go` makes the measurement permanent, with floors on file count, byte count and longest line so a shrunken or de-minified corpus fails loudly rather than passing vacuously, plus a companion test that splices a credential into a real 29 215-character minified line so the zero is a scan that *can* fail. Item closed with the measured numbers recorded in its `decision`.
+
+**Preventative rule:** when a roadmap item's Recommendation names a *validation method* — a corpus, a real specimen, a benchmark — that method is acceptance criteria, not advice. Do not mark the item `shipped` until it has been run and its output recorded. A commit message asserting a trade-off is safe is not the same artefact as a measurement showing it. Corollary: shipping the code while leaving the item `open` is the worst of both — the code lands, the obligation silently doesn't, and the next reader sees an open item whose fix is already in `main`.
+
+## 2026-08-21 — Three verification-adjacent checks each answered "clean/valid" from no evidence, in three different packages
+
+**Category:** fail-open — the shape `mem:core` records as having already recurred three times, found three more times in one pass
+
+**Root cause:** all three follow the same template: a check whose failure path returns the *reassuring* value.
+
+1. `internal/adapters/cosign/signer.go` required the payload type `atomic container signature` and rejected `cosign container image signature`, which is what cosign has written for years — so static-key base-image verification could not succeed for any input. Worse, the check runs *before* any signature maths, so a correct key and a wrong key produced byte-identical errors. The lenient two-type form already existed in `baseimage/resolver.go` and `provenance/resolver.go`, each with a comment explaining why both are needed; the fix had never reached this third copy.
+2. `internal/adapters/provenance/resolver.go`'s `--expect-source` compared commits with an unbounded `strings.HasPrefix`. A one-character assertion (`repo@b`) matched roughly one commit in sixteen and returned success, and because `<sha>` is a prefix of `<sha>-dirty`, asserting the exact clean commit silently accepted an image built from uncommitted modifications — the precise case the flag exists to catch.
+3. `internal/adapters/slsa/gitdiscovery.go`'s `workingTreeDirty` returned `false` — "clean" — whenever the `git status` subprocess itself failed. Its own doc comment describes replacing `repro doctor`'s hardcoded-`true` version of this same bug; the replacement inverted the constant instead of removing it. This one had just been made more consequential: the OCI version label had been wired to it hours earlier, so an unavailable git would have produced a label claiming a clean tree.
+
+**Where:** the three files above, plus `cmd/pokkum/repro_doctor.go` and `cmd/pokkum/git_metadata.go` as consumers.
+
+**Fix:** (1) accepts both Simple Signing type strings, with the error naming both. (2) a `minAbbreviatedCommitLen` of 7 (git's own default abbreviation) and an explicit refusal when a clean assertion matches a `-dirty` provenance. (3) `WorkingTreeDirty` returns `(bool, error)`; an unavailable git reports *dirty* plus the error, `repro doctor` reports a distinct `INCONCLUSIVE` outcome rather than a pass, and the version label consults it only inside a real git repository — a directory under no version control is out of scope, not unverifiable.
+
+**Preventative rule:** for any predicate whose name implies safety (`isValid`, `isClean`, `verify`), enumerate every `return` on an error path and ask what a caller does with that value. If the error path returns the same value as the success path, the function cannot report failure and its callers cannot distinguish "checked and fine" from "could not check" — give it an error return or a tri-state. And when a lenient/strict decision is made about a wire format, grep for every implementation of that decision: this codebase had three, and fixed two.
+
+## 2026-08-21 — The SBOM was attached as an unsigned blob nothing bound to the image, so a signed image's SBOM could be swapped undetected
+
+**Category:** fail-open — a supply-chain document presented as evidence while nothing authenticated it
+
+**Root cause:** `AttachSBOM` published the SPDX document under the `.sbom` tag as a bare blob. Its manifest carried `subject: null` and no annotations, the SPDX document itself never named the image digest (`documentDescribes` absent), and the signed SLSA provenance's `resolvedDependencies` never referenced it. So nothing tied the SBOM to the image and nothing signed it. An independent tester pushed a doctored one-package SBOM over the `.sbom` tag of a **signed, self-verified** image; `pokkum verify` still returned `ATTESTATION_VALIDATED`, and `cosign verify` and `cosign verify-attestation` both still passed. Anyone with push access could make a signed image claim any dependency inventory they liked.
+
+**Where:** `internal/core/pipeline.go` (stage 10 / `signAndSelfVerify`), `internal/adapters/registry/attestation.go`.
+
+**Fix:** the SBOM is now wrapped in an in-toto Statement whose `subject` is the image digest, DSSE-signed with the build's key, and attached as a second layer of the same `.att` attachment — cosign's convention for multiple attestations, distinguished by `predicateType`. `cosign verify-attestation --type spdxjson` resolves and verifies it with no Pokkum in the loop, and the SLSA provenance stays layer 0 so `FetchAttestation`'s `layers[0]` contract and the post-push self-verification are untouched. The signing test now asserts *which* predicate types were signed and that each statement names the pushed digest, rather than counting signer calls — a count is satisfied by signing the same statement twice.
+
+Considered and rejected for now: recording the SBOM's hash in the provenance (weaker — needs a bespoke verifier), and signing the `.sbom` manifest itself (binds to the SBOM, not to the image). The legacy `.sbom` tag is still published for compatibility and is still unauthenticated; consumers should prefer the attestation.
+
+**Preventative rule:** an artifact published *as evidence about* another artifact must name its subject and be signed, or it is decoration. The test is not "can I fetch it" but "can someone who can write to this repository replace it without any verification path failing" — ask that of every attachment a build produces, and answer it by actually performing the swap rather than by reading the attach code.
+
+## 2026-08-21 — Every project whose vite.config.ts calls sveltekit() directly produced unreproducible images, because only the svelte.config.js injection path pinned kit.version
+
+**Category:** boundary / parallel-path drift — one of two injection paths gained a step the other never did
+
+**Root cause:** `sveltekitutils.TransformConfig` (the `svelte.config.js` path) pins `kit.version.name` to `SOURCE_DATE_EPOCH` at its step 2. `TransformViteConfig` — the path taken when a project's `vite.config.ts` calls `sveltekit()` itself, which is the officially supported pattern and the one Vitest's `projects:` config requires — never had an equivalent step. SvelteKit then falls back to its default version name of `Date.now()`, which lands in the client bundle as `_app/version.json`'s `{"version":"1787339446040"}` and cascades through every downstream Vite chunk hash: roughly fifty renamed `.js`/`.gz`/`.br` files and two differing OCI layers between two builds of identical committed source. Nothing warned that pinning had been skipped, and `README.md` promises "bit-for-bit reproducible builds out of the box".
+
+Found by an independent tester executing `paranoid-testing-guide.md` §13 as written — two builds, `sha256sum`, then a real byte-level `diff -rq` of the extracted tarballs — on a real project. A second tester, working blind on a different section, independently reported two consecutive builds producing different index digests with two layers differing in size. Neither was looking for this; the guide's insistence on diffing bytes rather than trusting digest equality is what surfaced it. Every fixture in the repo uses the `svelte.config.js` path, so no test could see it.
+
+`pokkum verify --against <tarball>` correctly reported `ERR_COMPARISON_MISMATCH` throughout — the verifier was honest, the build was not.
+
+**Where:** `internal/adapters/sveltekitutils/injector.go`, `TransformViteConfig`.
+
+**Fix:** `injectViteVersionPin` inserts `version: { name: process.env.SOURCE_DATE_EPOCH || 'pokkum-reproducible-build' }` into the flat options object, which the Vite form routes into `kit`. It is inserted first, ahead of any spread, so a project that sets its own version still wins (later keys and spreads override earlier ones), and it no-ops entirely if the args already mention `version`. The two tests asserting the injected output were updated to assert the version pin **alongside** the adapter rather than being loosened.
+
+**Preventative rule:** when a feature exists as two parallel implementations of "the same" transformation — two config formats, two output modes, two runtimes — a step added to one is not added to the other, and no compiler or test will say so. Enumerate the steps of both paths side by side whenever either changes, and prefer a shared, ordered pipeline over two hand-maintained sequences. Corollary for reproducibility specifically: a digest comparison is not a byte comparison, and only the byte comparison localises *what* differs — the guide's §13 instruction to diff extracted tarballs, not digests, is what turned "the digests differ" into a one-line root cause.
+
 ## 2026-08-21 — The only test that boots a produced image passed throughout the startup-attestation outage, because its fixture has no production dependencies
 
 **Category:** fixture fidelity / coverage-shape — a test that exercises the right code path against an input that structurally cannot contain the bug
