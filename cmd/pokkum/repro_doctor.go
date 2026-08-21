@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/slsa"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
@@ -38,7 +39,7 @@ rebuilds, use "pokkum verify", which rebuilds the image by default (opt out with
 			if outFlag != "" {
 				opts.output = outFlag
 			}
-			return runReproDoctor(logger, opts)
+			return runReproDoctor(cmd.Context(), logger, opts)
 		},
 	}
 
@@ -49,17 +50,27 @@ rebuilds, use "pokkum verify", which rebuilds the image by default (opt out with
 	return cmd
 }
 
-func runReproDoctor(_ *slog.Logger, opts *reproDoctorOptions) error {
+func runReproDoctor(ctx context.Context, _ *slog.Logger, opts *reproDoctorOptions) error {
 	outputFormat := ports.OutputFormat(opts.output)
 
 	// Check 1: Static timestamp check
 	sdeEnv := os.Getenv("SOURCE_DATE_EPOCH")
 	sdePresent := sdeEnv != ""
 
-	// Check 2: Git worktree status
+	// Check 2: Git worktree status.
+	//
+	// This used to be a constant: gitClean was initialised true and the only
+	// assignment inside the stat set it true again, so no git command ran and
+	// the check could never fail. It reported "no dirty modifications" for
+	// every tree, fed allDeterministic, and was cited in a field report as
+	// corroborating another signal — which it cannot do, since it agrees with
+	// everything. It now asks git, through the same helper that decides what
+	// provenance records, so the two cannot disagree about one tree.
 	gitClean := true
+	gitChecked := false
 	if _, err := os.Stat(filepath.Join(opts.dir, ".git")); err == nil {
-		gitClean = true
+		gitChecked = true
+		gitClean = !slsa.WorkingTreeDirty(ctx, opts.dir)
 	}
 
 	// --perturb advertised "dual builds in a perturbed environment to bisect
@@ -85,7 +96,7 @@ func runReproDoctor(_ *slog.Logger, opts *reproDoctorOptions) error {
 		{
 			"check":   "Clean Git Repository",
 			"passed":  gitClean,
-			"details": "No dirty uncommitted working tree modifications detected",
+			"details": gitCheckDetails(gitChecked, gitClean),
 		},
 	}
 
@@ -132,4 +143,18 @@ func reproSummary(deterministic bool) string {
 		return "Static reproducibility preflight passed."
 	}
 	return "Static reproducibility preflight found problems (see the checks above); these are preconditions only — a passing preflight still does not prove a build reproduces."
+}
+
+// gitCheckDetails describes what the git check actually observed, including
+// the case where there was no repository to inspect — previously reported as a
+// clean tree, which is a different claim from "there is nothing to check".
+func gitCheckDetails(checked, clean bool) string {
+	switch {
+	case !checked:
+		return "Not a git repository, so working-tree cleanliness could not be checked"
+	case clean:
+		return "No dirty uncommitted working tree modifications detected (ignoring Pokkum's own .pokkum/ and pokkum.lock)"
+	default:
+		return "Uncommitted working tree modifications detected; a rebuild from this commit would not reproduce this build"
+	}
 }
