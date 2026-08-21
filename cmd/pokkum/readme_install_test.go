@@ -35,6 +35,11 @@ import (
 
 const readmeRepoSlug = "CreativeBeastDesign/pokkum"
 
+// releasedVersionRefRe matches the only ref shape this repo publishes: a full
+// version tag. Deliberately rejects a bare major (`v1`), a branch name, and
+// `latest`.
+var releasedVersionRefRe = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
+
 func readmeBody(t *testing.T) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
@@ -93,18 +98,37 @@ func TestReadmeActionRefsResolve(t *testing.T) {
 					readmeRepoSlug, path, ref, path)
 			}
 		}
-		// Only enforce ref resolution when tags are actually present. A CI
-		// checkout (actions/checkout) fetches no tags by default, so refs/heads
-		// is populated while refs/tags is empty — treating "some refs exist" as
-		// "tags are available" made this test fail on a perfectly good ref, which
-		// is how this distinction was found. The path check above still runs.
-		if len(tags) == 0 {
+		// The ENFORCED property is the ref's shape, not its presence in this
+		// clone. That is a deliberate narrowing, and it cost two blocked releases
+		// to arrive at.
+		//
+		// The presence check cannot be trusted, because how many tags a checkout
+		// has is a property of the checkout, not of the repository. CI's
+		// actions/checkout fetches none, so an earlier version of this test
+		// skipped there and looked fine. The release job uses fetch-depth: 0 and
+		// gets a PARTIAL tag set — non-empty, so the old "skip only when empty"
+		// heuristic treated it as authoritative and failed on @v1.0.1, a tag that
+		// genuinely exists. A partial ref set is worse than an absent one: it
+		// looks complete. And this test blocked the release pipeline, which is
+		// the most expensive place to raise a false alarm.
+		//
+		// Shape is checkable anywhere and catches the bug this guard exists for:
+		// the README documented setup-pokkum@v1, and no `v1` ref has ever existed
+		// because only full versions are tagged. @main, @latest and @v2 fail here
+		// too. What shape cannot catch is a well-formed version that was never
+		// tagged (@v9.9.9) — accepted, because the alternative is a check that
+		// fails on correct input in half the environments it runs in.
+		if !releasedVersionRefRe.MatchString(ref) {
+			t.Errorf("README documents `uses: %s/%s@%s`, but %q is not a released-version tag.\n"+
+				"\tThis repo publishes only full versions (v1.2.3) and no moving major tag, so a ref like `v1`, `main` or `latest` cannot resolve.\n"+
+				"\tPin a released version, and re-point it when you release.",
+				readmeRepoSlug, path, ref, ref)
 			continue
 		}
-		if !tags[ref] && !heads[ref] {
-			t.Errorf("README documents `uses: %s/%s@%s`, but %q is not a tag or branch in this repo, so the ref cannot resolve.\n"+
-				"\tPin a released version (there is no moving major tag unless one is actually published and re-pointed on each release).",
-				readmeRepoSlug, path, ref, ref)
+		// Presence is reported, never enforced, for the reason above.
+		if len(tags) > 0 && !tags[ref] && !heads[ref] {
+			t.Logf("note: %q is not among the %d tag(s) in this checkout. That is expected when the clone "+
+				"has a partial tag set (CI fetches few or none); verify manually if you did not just bump it.", ref, len(tags))
 		}
 	}
 }

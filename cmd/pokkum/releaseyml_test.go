@@ -159,3 +159,38 @@ func TestReleaseWorkflowPublishesScopedPackagesPublicly(t *testing.T) {
 		t.Fatal("[TEST SETUP] found no `npm publish` invocation in release.yml; this guard is watching nothing")
 	}
 }
+
+// TestReleaseWorkflowTestStepMatchesCIGate keeps the release pipeline's test
+// invocation aligned with ci.yml's.
+//
+// They diverged once and it cost two tags: release.yml ran `go test ./...` while
+// ci.yml's gate ran `go test -short ...`, so the release job executed tests CI
+// had never run, in a job with no Bun and no Docker. Both v1.0.2 and v1.0.3
+// failed there — after the tag was pushed, and a tag's version can never be
+// reused. A release gate that is stricter than the gate people actually merge
+// against does not catch bugs earlier, it catches them at the worst moment.
+func TestReleaseWorkflowTestStepMatchesCIGate(t *testing.T) {
+	wf := loadReleaseWorkflow(t)
+
+	var found int
+	for jobName, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			for _, cmd := range commandLines(step.Run) {
+				if !strings.HasPrefix(cmd, "go test") {
+					continue
+				}
+				found++
+				if !strings.Contains(cmd, "-short") {
+					t.Errorf("release.yml job %q step %q runs %q without -short.\n"+
+						"\tci.yml's gate uses -short; a release job that runs more than the gate fails on a pushed tag "+
+						"for tests nobody ran at merge time. Non-short coverage belongs in ci.yml's e2e job, where the "+
+						"toolchain it needs is actually installed.",
+						jobName, step.Name, cmd)
+				}
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("[TEST SETUP] found no `go test` invocation in release.yml; this guard is watching nothing")
+	}
+}

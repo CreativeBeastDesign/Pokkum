@@ -39,8 +39,21 @@ jobs:
       - name: Run golangci-lint
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
 
+      # -short, to mirror ci.yml's gate exactly. This job previously ran the
+      # full suite while CI ran -short, so CI going green never implied the
+      # release would pass — and it didn't: v1.0.2 and v1.0.3 both died here, in
+      # a test CI had never executed, after the tag was already pushed and could
+      # not be reused.
+      #
+      # Running MORE here is not a stronger gate, it is a differently-configured
+      # one: this job has no Bun, no Docker and no fixture install, so the extra
+      # tests it picks up are exactly those most likely to fail for environmental
+      # reasons. By tag time the commit has already passed ci.yml's full matrix —
+      # the -short gate, the real-Bun e2e job, the privileged hermetic container
+      # and the macOS job. That is the coverage; this step is the last check that
+      # the tagged tree still builds and passes it.
       - name: Run Unit & Integration Tests
-        run: go test ./...
+        run: go test -short ./...
 
   release:
     name: GoReleaser & NPM Publish
