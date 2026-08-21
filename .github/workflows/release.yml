@@ -120,6 +120,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
       # SLSA subjects for the provenance job. dist/checksums.txt is GoReleaser's
       # own checksum listing, in `<sha256>  <filename>` form, covering exactly
@@ -140,7 +141,6 @@ jobs:
         run: |
           test -s dist/checksums.txt || { echo "::error::dist/checksums.txt missing; GoReleaser did not publish"; exit 1; }
           echo "hashes=$(base64 -w0 < dist/checksums.txt)" >> "$GITHUB_OUTPUT"
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
       # The npm side publishes FIVE packages, not one: goreleaser-npm-publisher
       # emits the optionalDependencies layout that esbuild and swc use — a tiny

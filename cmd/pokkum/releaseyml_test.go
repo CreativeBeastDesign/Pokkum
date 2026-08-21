@@ -55,6 +55,7 @@ type workflowFile struct {
 			Run  string            `yaml:"run"`
 			Uses string            `yaml:"uses"`
 			With map[string]string `yaml:"with"`
+			Env  map[string]string `yaml:"env"`
 		} `yaml:"steps"`
 	} `yaml:"jobs"`
 }
@@ -257,5 +258,45 @@ func TestWorkflowsPinToolVersionsTheyDependOn(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("[TEST SETUP] found none of the pinned-tool actions in any workflow; this guard is watching nothing")
+	}
+}
+
+// TestReleaseWorkflowGoReleaserHasSigningSecrets guards the signing secrets on
+// the GoReleaser step.
+//
+// Both are load-bearing and fail in different ways. Without COSIGN_PRIVATE_KEY
+// the script exits with a clear message. Without COSIGN_PASSWORD cosign falls
+// through to an interactive prompt and dies with "reading key: inappropriate
+// ioctl for device" — an error that says nothing about a missing secret, from a
+// step that had signed fine on the previous tag.
+//
+// That is not hypothetical: inserting a step directly after COSIGN_PRIVATE_KEY
+// split this env block, and COSIGN_PASSWORD was absorbed into the new step's
+// `run: |` block scalar as shell text. The file still parsed as valid YAML — the
+// damage was inside a block scalar — so a "does it parse" check passed while the
+// meaning had changed, and the next release failed at signing.
+func TestReleaseWorkflowGoReleaserHasSigningSecrets(t *testing.T) {
+	wf := loadReleaseWorkflow(t)
+
+	required := []string{"COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD"}
+	var found int
+	for jobName, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if !strings.Contains(step.Uses, "goreleaser-action") {
+				continue
+			}
+			found++
+			for _, key := range required {
+				if strings.TrimSpace(step.Env[key]) == "" {
+					t.Errorf("release.yml job %q step %q does not pass %s to GoReleaser.\n"+
+						"\tsigns: runs scripts/cosign-sign-blob.sh, which needs both. Missing COSIGN_PASSWORD makes cosign "+
+						"prompt interactively and fail with \"inappropriate ioctl for device\", which names nothing useful.",
+						jobName, step.Name, key)
+				}
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("[TEST SETUP] found no goreleaser-action step in release.yml; this guard is watching nothing")
 	}
 }
