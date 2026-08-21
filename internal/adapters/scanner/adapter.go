@@ -119,7 +119,25 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 			warnings = append(warnings, "toolchain (@sveltejs/kit) OSV lookup failed, coverage reduced")
 		}
 
-		if !req.ToolchainOnly && !req.Offline {
+		switch {
+		case req.ToolchainOnly:
+			// Caller asked for toolchain advisories only; nothing was skipped
+			// against their intent, so the result is not incomplete.
+		case req.Offline:
+			// --offline skips the dependency lookup entirely. That is the point
+			// of the flag, but the result must still say so: without this the
+			// scan reported Passed with zero vulnerabilities and Incomplete
+			// unset, which is indistinguishable from "scanned everything and
+			// found nothing". On a project with six real CVEs that reads as a
+			// clean bill of health — a security control reporting success while
+			// doing nothing, which is the failure mode this codebase keeps
+			// finding. Marking it incomplete lets a CI gate tell the two apart;
+			// the fail-closed exemption for --offline below is deliberate and
+			// unchanged, since air-gapped scanning is a supported workflow.
+			incomplete = true
+			warnings = append(warnings, "project dependency OSV lookup skipped (--offline), coverage reduced: no dependency CVEs were checked")
+			s.logger.WarnContext(ctx, "scanner: project dependency scan skipped because --offline is set; no dependency CVEs were checked", "target", target)
+		default:
 			dirVulns, err := s.scanProjectDependencies(ctx, target)
 			if err == nil {
 				vulnerabilities = append(vulnerabilities, dirVulns...)
