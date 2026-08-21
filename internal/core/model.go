@@ -1174,7 +1174,7 @@ func (r BuildRequest) Validate() error {
 			return fmt.Errorf("--require-signed conflicts with --no-sign: %w", ErrInvalidRequest)
 		}
 		if r.Output.Mode != OutputPush {
-			return fmt.Errorf("--require-signed needs --output=push (a %s build writes no registry artifact to attach a signature to): %w", r.Output.Mode, ErrInvalidRequest)
+			return fmt.Errorf("--require-signed needs a registry push, which is the default; drop --local/--tarball (a %s build writes no registry artifact to attach a signature to): %w", r.Output.Mode, ErrInvalidRequest)
 		}
 		if len(r.Signing.KeyPEM) == 0 {
 			return fmt.Errorf("--require-signed: %w", ErrSigningKeyMissing)

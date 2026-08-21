@@ -1,5 +1,7 @@
 package ports
 
+import "fmt"
+
 // OutputFormat represents the stdout output serialization format.
 type OutputFormat string
 
@@ -7,6 +9,26 @@ const (
 	FormatText OutputFormat = "text"
 	FormatJSON OutputFormat = "json"
 )
+
+// ParseOutputFormat validates a --output value.
+//
+// Every consumer of this flag is written as `if format == FormatJSON { … } else
+// { text }`, so an unrecognised value silently produces text output rather than
+// failing. That turns a typo (`--output=jsonl`, `--output=Json`) into a script
+// that parses human-readable text as JSON and reports a confusing downstream
+// error, and it let `--output=push` — a mode that has never existed, but which
+// three of Pokkum's own messages once told users to pass — be accepted in
+// silence. Reject the value here instead.
+func ParseOutputFormat(value string) (OutputFormat, error) {
+	switch OutputFormat(value) {
+	case FormatText:
+		return FormatText, nil
+	case FormatJSON:
+		return FormatJSON, nil
+	default:
+		return "", fmt.Errorf("invalid --output value %q: expected %q or %q", value, FormatText, FormatJSON)
+	}
+}
 
 // JSONEnvelope represents the versioned envelope for all --output=json CLI responses.
 type JSONEnvelope struct {

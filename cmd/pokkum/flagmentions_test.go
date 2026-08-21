@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -237,4 +239,101 @@ func TestFlagMentionAllowlistHasNoDeadEntries(t *testing.T) {
 			"\tRemove them; the real-flag check already covers these, and keeping them here "+
 			"hides the fact that pokkum owns the name.", nowReal)
 	}
+}
+
+// enumFlagValues are flags with a closed value set, mapped to the values the code
+// itself defines. Built from the ports constants rather than typed out, so it
+// cannot drift from the enum it guards.
+var enumFlagValues = map[string][]string{
+	"--output":      {string(ports.FormatText), string(ports.FormatJSON)},
+	"--strategy":    {string(ports.StrategyLayered), string(ports.StrategyExe), string(ports.StrategyStatic)},
+	"--runtime":     {string(ports.RuntimeBun), string(ports.RuntimeNode)},
+	"--sbom":        {string(ports.SBOMFormatSPDXJSON), string(ports.SBOMFormatCycloneDXJSON), string(ports.SBOMFormatNone)},
+	"--sbom-attach": {string(ports.SBOMAttachReferrer), string(ports.SBOMAttachTag), string(ports.SBOMAttachAuto)},
+}
+
+var flagValueRe = regexp.MustCompile(`(--[a-z][a-z0-9-]+)=([A-Za-z][A-Za-z0-9._-]*)`)
+
+// TestFlagValueMentionsAreValid checks the VALUE side of a flag mention.
+//
+// TestFlagMentionsInUserFacingStringsExist proves the flag NAME exists. That is
+// not enough, and the gap was live: three messages instructed users to pass
+// `--output=push`, and `--output` is a real flag — the serialization format,
+// whose only valid values are text and json. There has never been a push mode on
+// it; a registry push is the default, and --local/--tarball are the alternatives.
+// So the guard passed while the advice was impossible to follow.
+//
+// Worse, nothing rejected it: every consumer reads `if format == FormatJSON` and
+// falls through to text, so `--output=push` was accepted in silence. That is now
+// a hard error (ports.ParseOutputFormat), and this test stops the advice coming
+// back.
+func TestFlagValueMentionsAreValid(t *testing.T) {
+	real := realFlagNames(t)
+
+	// Premise checks: the extractor must find a value, and the data must be able
+	// to reject a wrong one.
+	if got := flagValueRe.FindStringSubmatch("pass --output=json here"); len(got) != 3 || got[2] != "json" {
+		t.Fatalf("[TEST SETUP] value extraction is broken: %v", got)
+	}
+	if slices.Contains(enumFlagValues["--output"], "push") {
+		t.Fatal("[TEST SETUP] --output must not list 'push' as valid; that is the bug this guards")
+	}
+
+	// scanFlagMentions reports names only, so this walks for name=value pairs.
+	var checked int
+	for _, dir := range []string{".", filepath.Join("..", "..", "internal")} {
+		err := filepath.Walk(dir, func(path string, fi os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if fi.IsDir() {
+				if n := fi.Name(); n == "testdata" || n == "node_modules" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			fset := token.NewFileSet()
+			f, perr := parser.ParseFile(fset, path, nil, 0)
+			if perr != nil {
+				return nil
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				lit, ok := n.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					return true
+				}
+				val, uerr := strconv.Unquote(lit.Value)
+				if uerr != nil {
+					val = lit.Value
+				}
+				for _, m := range flagValueRe.FindAllStringSubmatch(val, -1) {
+					flag, value := m[1], m[2]
+					allowed, guarded := enumFlagValues[flag]
+					if !guarded || !real[flag] {
+						continue
+					}
+					checked++
+					if slices.Contains(allowed, value) {
+						continue
+					}
+					rel := filepath.Clean(path)
+					t.Errorf("%s:%d says %q, but %s only accepts %v.\n"+
+						"\tThe flag name existing is not enough — check the value against the enum the code defines.",
+						rel, fset.Position(lit.Pos()).Line, flag+"="+value, flag, allowed)
+				}
+				return true
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walking %s: %v", dir, err)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("[TEST SETUP] found no enum flag=value mentions at all; this guard is watching nothing")
+	}
+	t.Logf("checked %d flag=value mentions against code-defined enums", checked)
 }

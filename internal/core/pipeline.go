@@ -693,7 +693,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				predecessorDigest = chain[0]
 			}
 		default:
-			log.Warn("--asset-overlay set but auto-discovery needs --output=push (or --asset-overlay-from with explicit refs); no overlay will be added to this build", "outputMode", req.Output.Mode)
+			log.Warn("--asset-overlay set but auto-discovery needs a registry push, which is the default; drop --local/--tarball, or pass --asset-overlay-from with explicit refs. No overlay will be added to this build", "outputMode", req.Output.Mode)
 		}
 		if len(assetOverlayDigests) > 0 {
 			log.Info("asset overlay: resolved prior generations", "count", len(assetOverlayDigests), "digests", assetOverlayDigests)

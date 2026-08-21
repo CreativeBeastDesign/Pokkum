@@ -36,7 +36,7 @@ func newExplainCommand(ctx context.Context, logger *slog.Logger) *cobra.Command 
 		Use:   "explain <image>",
 		Short: "Explain container layer composition and file origins",
 		Long: `Explain reads a real OCI image manifest — from a registry, or a local
-"pokkum build --output=tarball" result whose path ends in .tar — and reports
+"pokkum build --tarball <path>" result whose path ends in .tar — and reports
 each layer's actual digest, actual compressed size, actual file count, and,
 for layers Pokkum itself built, the layer's real purpose taken from the
 image's own history metadata.

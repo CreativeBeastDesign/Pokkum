@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
+	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
 )
 
@@ -115,6 +116,21 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 		// main() already logs the error through slog; without this cobra prints
 		// it a second time on stderr.
 		SilenceErrors: true,
+
+		// Validate --output centrally. It is a persistent flag that four
+		// subcommands also redefine locally, and every consumer compares it
+		// against FormatJSON and falls through to text, so an unrecognised value
+		// is silently ignored — `--output=jsonl` hands a script text output with
+		// no warning. cmd.Flags() resolves the executing command's effective
+		// flag, so the locally-redefined copies are covered too.
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if f := cmd.Flags().Lookup("output"); f != nil {
+				if _, err := ports.ParseOutputFormat(f.Value.String()); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
 	}
 
 	// SilenceUsage above suppresses usage for every error, including genuine

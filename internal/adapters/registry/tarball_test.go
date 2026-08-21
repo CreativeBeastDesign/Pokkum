@@ -298,7 +298,7 @@ func TestTarballWrite_WarnsOnDroppedAnnotations_NamesTheKeys(t *testing.T) {
 		t.Fatalf("warn-level log lines = %d, want exactly 1: %v", len(warnings), warnings)
 	}
 	want := "tarball output drops OCI annotations: org.opencontainers.image.revision, pokkum.dev/env-baked, pokkum.dev/predecessor" +
-		" (annotations survive a registry push — use --output=push to keep them)" +
+		" (annotations survive a registry push — push to a registry instead, which is the default, to keep them)" +
 		" — pokkum.dev/env-baked, pokkum.dev/predecessor carry build metadata other pokkum commands read back," +
 		" so commands depending on them cannot work against this output"
 	if warnings[0] != want {
@@ -410,7 +410,7 @@ func TestTarballWrite_WarnsOnDroppedAnnotations_IndexFlattening(t *testing.T) {
 		t.Fatalf("warn-level log lines = %d, want exactly 1: %v", len(warnings), warnings)
 	}
 	want := "tarball output drops OCI annotations: pokkum.dev/env-baked, pokkum.dev/predecessor" +
-		" (annotations survive a registry push — use --output=push to keep them)" +
+		" (annotations survive a registry push — push to a registry instead, which is the default, to keep them)" +
 		" — pokkum.dev/env-baked, pokkum.dev/predecessor carry build metadata other pokkum commands read back," +
 		" so commands depending on them cannot work against this output"
 	if warnings[0] != want {

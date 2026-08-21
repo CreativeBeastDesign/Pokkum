@@ -317,7 +317,7 @@ func annotationKeys(imgs ...v1.Image) ([]string, error) {
 // ordinary build without any of the above has nothing to warn about, and a
 // line that fired on every build would train operators to ignore it. This is
 // informational only — dropping annotations is a property of a format the
-// operator explicitly chose (`--output=tarball`/`--local`), not a build
+// operator explicitly chose (`--tarball`/`--local`), not a build
 // defect, so it never escalates past Warn and never affects the outcome
 // (the caller decides pass/fail on its own, independent of this call).
 //
@@ -352,7 +352,7 @@ func warnDroppedAnnotations(log *slog.Logger, dest string, imgs ...v1.Image) {
 	}
 
 	msg := fmt.Sprintf(
-		"%s output drops OCI annotations: %s (annotations survive a registry push — use --output=push to keep them)",
+		"%s output drops OCI annotations: %s (annotations survive a registry push — push to a registry instead, which is the default, to keep them)",
 		dest, strings.Join(keys, ", "),
 	)
 	if len(semantic) > 0 {

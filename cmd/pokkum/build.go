@@ -328,7 +328,7 @@ The project directory defaults to the current working directory.`,
 	cmd.Flags().StringSliceVar(&flags.keepVendor, "keep-vendor", nil,
 		"Custom glob pattern(s) of vendor files to preserve during pruning, repeatable (e.g. --keep-vendor='*.md')")
 	cmd.Flags().IntVar(&flags.assetOverlay, "asset-overlay", 0,
-		"Rolling-deploy asset overlay: merge up to <n> prior generations' immutable client assets into a new layer, so browsers holding stale HTML can still fetch old hashed chunks during a rolling update. 0 (default) disables the feature. Auto-discovers predecessors via the pushed image's own lineage annotation (--output=push only); use --asset-overlay-from to override")
+		"Rolling-deploy asset overlay: merge up to <n> prior generations' immutable client assets into a new layer, so browsers holding stale HTML can still fetch old hashed chunks during a rolling update. 0 (default) disables the feature. Auto-discovers predecessors via the pushed image's own lineage annotation (registry pushes only, i.e. not --local/--tarball); use --asset-overlay-from to override")
 	cmd.Flags().StringSliceVar(&flags.assetOverlayFrom, "asset-overlay-from", nil,
 		"Explicit image ref(s) to pull --asset-overlay content from instead of auto-discovering the predecessor chain, repeatable. Truncated to --asset-overlay's <n> if longer. Ignored unless --asset-overlay is also set")
 	cmd.Flags().BoolVar(&flags.noPrecompress, "no-precompress", false,
