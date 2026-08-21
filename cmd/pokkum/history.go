@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -103,6 +104,20 @@ func runHistory(ctx context.Context, logger *slog.Logger, flags *historyFlags, i
 	if v, ok := historyOut.Annotations["org.opencontainers.image.version"]; ok {
 		fmt.Printf("Version:       %s\n", v)
 	}
+
+	// The full annotation set, and where it was read from.
+	//
+	// The four fields above are a curated summary; for a long time they were
+	// the ONLY thing the text output showed, so `pokkum history <ref>` hid
+	// both the pokkum.dev/* annotations and which manifest they came from.
+	// That detail already existed in --output=json, which meant the answer to
+	// "what does this image actually claim about itself" depended on which
+	// output format the operator happened to pick. Print it in both.
+	fmt.Printf("Annotations:   %d (source: %s)\n", len(historyOut.Annotations), annSrc.Kind)
+	for _, k := range slices.Sorted(maps.Keys(historyOut.Annotations)) {
+		fmt.Printf("  %-42s %s\n", k, historyOut.Annotations[k])
+	}
+
 	fmt.Println()
 	fmt.Println("Signature / SLSA provenance are NOT verified by this command.")
 	fmt.Printf("Run `pokkum verify %s` for a cryptographic verdict.\n", imageRef)
