@@ -111,7 +111,6 @@ func TestRuntimeSmoke_NodeRuntime_BootsAndServes(t *testing.T) {
 	// least as much as it does for the Bun image — and the fixture ships no
 	// production dependencies of its own. See
 	// runtime_smoke_nodemodules_test.go.
-	injectProductionDependency(t, projectDir)
 
 	tarballPath := filepath.Join(t.TempDir(), "runtime-smoke-node.tar")
 	repo := "pokkum.local/runtime-smoke-node"

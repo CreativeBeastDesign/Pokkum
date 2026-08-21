@@ -60,6 +60,17 @@ func loadCIWorkflow(t *testing.T) ciWorkflow {
 
 var smokeFloorRe = regexp.MustCompile(`passed"? -lt ([0-9]+)`)
 
+// smokeTestNamePattern is the go-test name pattern that selects the runtime
+// smoke tests. It appears in ci.yml twice — `-run` on the step that owns them,
+// `-skip` on the step that must not run them a second time — and those two
+// occurrences must stay identical. Deriving both search strings from one
+// constant here is row 51 applied to a value duplicated between Go and YAML:
+// the pair is compared by a test rather than kept in sync by comment.
+const smokeTestNamePattern = "TestRuntimeSmoke"
+
+func smokeRunFlag() string  { return "-run '" + smokeTestNamePattern + "'" }
+func smokeSkipFlag() string { return "-skip '" + smokeTestNamePattern + "'" }
+
 // TestCI_RuntimeSmokeStepCannotSilentlySkip pins the CI half of the guard.
 //
 // TestRuntimeSmoke_* are the only tests in this repo that boot a produced image
@@ -76,7 +87,7 @@ func TestCI_RuntimeSmokeStepCannotSilentlySkip(t *testing.T) {
 	var steps []ciStep
 	for _, job := range wf.Jobs {
 		for _, step := range job.Steps {
-			if strings.Contains(step.Run, "-run 'TestRuntimeSmoke'") {
+			if strings.Contains(step.Run, smokeRunFlag()) {
 				steps = append(steps, step)
 			}
 		}
@@ -202,5 +213,56 @@ func TestCI_VerificationStepsSurviveAnEarlierFailure(t *testing.T) {
 	if checked < 10 {
 		t.Fatalf("only %d verification steps were examined across %d jobs; the workflow parse or the command "+
 			"regexp is wrong, so this test proved nothing", checked, len(wf.Jobs))
+	}
+}
+
+// TestCI_SmokeRunAndSkipPatternsAgree closes the last way the two halves of the
+// smoke-test wiring can drift apart.
+//
+// The smoke tests live in one CI step (`-run 'TestRuntimeSmoke'`, the step
+// carrying the no-skip floor) and are excluded from the broader e2e step
+// (`-skip 'TestRuntimeSmoke'`) so they do not run twice. Those are two
+// independent string literals in one YAML file describing the same set of
+// tests. Renaming the tests, or editing one literal, desyncs them silently:
+// the failure is not loud, it is a double run (wasted minutes, or a flake
+// blamed on the wrong step) or — if the owning step's pattern is the one that
+// drifts — a smoke step that matches nothing while the floor check is the only
+// thing standing between that and a green CI run.
+//
+// Asserting both literals derive from the same pattern makes the drift
+// impossible to introduce without failing here. The pattern's own validity is
+// covered separately: countRuntimeSmokeTests reads the real declarations out of
+// this package's source and fatals if it finds none, so a rename away from the
+// TestRuntimeSmoke_ prefix cannot leave both literals agreeing on a pattern
+// that selects nothing.
+func TestCI_SmokeRunAndSkipPatternsAgree(t *testing.T) {
+	wf := loadCIWorkflow(t)
+
+	var runSteps, skipSteps []string
+	for _, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if strings.Contains(step.Run, smokeRunFlag()) {
+				runSteps = append(runSteps, step.Name)
+			}
+			if strings.Contains(step.Run, smokeSkipFlag()) {
+				skipSteps = append(skipSteps, step.Name)
+			}
+		}
+	}
+
+	if len(runSteps) != 1 {
+		t.Errorf("expected exactly one CI step selecting the smoke tests with %s, found %d: %v",
+			smokeRunFlag(), len(runSteps), runSteps)
+	}
+	if len(skipSteps) != 1 {
+		t.Errorf("expected exactly one CI step excluding the smoke tests with %s, found %d: %v. "+
+			"Without it the smoke tests run twice; with a mismatched pattern the exclusion silently stops working.",
+			smokeSkipFlag(), len(skipSteps), skipSteps)
+	}
+
+	// Guard the guard: the pattern must actually select the tests that exist,
+	// or both literals could agree on something that matches nothing.
+	if n := countRuntimeSmokeTests(t); n == 0 {
+		t.Fatalf("[TEST SETUP] %q selects no declared test in this package", smokeTestNamePattern)
 	}
 }

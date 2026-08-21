@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "sv-adapter-node",
+      "dependencies": {
+        "clsx": "2.1.1",
+      },
       "devDependencies": {
         "@sveltejs/adapter-node": "^5.5.4",
         "@sveltejs/kit": "^2.63.0",

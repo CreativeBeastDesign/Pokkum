@@ -133,7 +133,6 @@ func TestRuntimeSmoke_LayeredStrategy_BootsAndServes(t *testing.T) {
 	// anything about whether that root is attested — see
 	// runtime_smoke_nodemodules_test.go's package note and the b439e6b
 	// post-mortem in Lessons.md.
-	injectProductionDependency(t, projectDir)
 
 	tarballPath := filepath.Join(t.TempDir(), "runtime-smoke.tar")
 	repo := "pokkum.local/runtime-smoke"
@@ -747,7 +746,7 @@ func TestRuntimeSmoke_StaticStrategy_BootsAndServes(t *testing.T) {
 	}
 
 	loadImageIntoRuntime(t, runtimeBin, tarballPath, imageRef)
-	runContainerAndAssertServesStatic(t, runtimeBin, imageRef, projectDir)
+	runContainerAndAssertServesStatic(t, runtimeBin, imageRef, projectDir, tarballPath)
 }
 
 // runContainerAndAssertServesStatic is runContainerAndAssertServes's
@@ -770,7 +769,7 @@ func TestRuntimeSmoke_StaticStrategy_BootsAndServes(t *testing.T) {
 //  3. Root ("/") and "/about" are asserted with the same rigor as the
 //     layered test's homepage check — deliberately not softened into a skip
 //     or a "known failure" tolerance, per this test's own doc comment.
-func runContainerAndAssertServesStatic(t *testing.T, runtimeBin, imageRef, projectDir string) string {
+func runContainerAndAssertServesStatic(t *testing.T, runtimeBin, imageRef, projectDir string, tarballPath string) string {
 	t.Helper()
 	name := uniqueName("pokkum-runtime-smoke-static")
 
@@ -829,6 +828,10 @@ func runContainerAndAssertServesStatic(t *testing.T, runtimeBin, imageRef, proje
 	} else if !strings.Contains(robotsBody, "User-agent") {
 		t.Errorf("/robots.txt responded 200 but body did not contain the fixture's known content; got %d bytes: %.200q", len(robotsBody), robotsBody)
 	}
+
+	// Serving three known URLs says nothing about how much of the site
+	// actually shipped. Assert coverage from the artifact itself.
+	assertStaticImageCarriesSite(t, tarballPath, appPort)
 
 	appOK, appBody := pollHTTP200Body(fmt.Sprintf("http://127.0.0.1:%d/", appPort), grace)
 	if !appOK {
