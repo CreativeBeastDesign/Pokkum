@@ -3,6 +3,7 @@ package slsa
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -53,7 +54,11 @@ func discoverGitCommit(ctx context.Context, dir string) (commit string, dirty bo
 		return "", false
 	}
 
-	return commit, workingTreeDirty(ctx, dir)
+	// An unknown verdict is reported as dirty: a commit recorded as clean is a
+	// reproducibility claim, and this function must never make that claim it
+	// could not verify.
+	dirty, _ = workingTreeDirty(ctx, dir)
+	return commit, dirty
 }
 
 // pokkumGeneratedNames are the paths, relative to the project directory,
@@ -126,11 +131,23 @@ var pokkumGeneratedNames = []string{".pokkum", ports.PokkumLockfileName}
 // a field report precisely because it looked like a second opinion. Two Pokkum
 // outputs disagreeing about one tree is the confusion this filter removed; two
 // agreeing by construction is the point.
-func WorkingTreeDirty(ctx context.Context, dir string) bool {
+func WorkingTreeDirty(ctx context.Context, dir string) (bool, error) {
 	return workingTreeDirty(ctx, dir)
 }
 
-func workingTreeDirty(ctx context.Context, dir string) bool {
+// workingTreeDirty returns (dirty, err). A non-nil error means the verdict
+// could not be established at all, and the bool is then reported as `true`
+// (dirty) so that every caller fails closed by default.
+//
+// It used to return a bare bool and answer `false` — "clean" — whenever the
+// git subprocess itself failed: a missing binary, a timeout, a locked index,
+// a permissions problem. That is the strongest claim this function can make
+// produced from the least possible evidence, and it is the same fail-open
+// shape mem:core records as having recurred three separate times in this
+// codebase. The function's own doc comment above describes replacing
+// `repro doctor`'s hardcoded-true version of this exact bug; the replacement
+// simply inverted the constant instead of removing it.
+func workingTreeDirty(ctx context.Context, dir string) (bool, error) {
 	// Pass 1 — everything that is not a Pokkum artifact, tracked or not.
 	//
 	// The exclusion is done by git rather than by matching its output in Go:
@@ -157,11 +174,11 @@ func workingTreeDirty(ctx context.Context, dir string) bool {
 		// under-reports.
 		out, err = runGit(ctx, dir, "status", "--porcelain", "-z")
 		if err != nil {
-			return false
+			return true, fmt.Errorf("slsa: could not determine whether the working tree at %s is clean: %w", dir, err)
 		}
 	}
 	if hasEntry(out) {
-		return true
+		return true, nil
 	}
 
 	// Pass 2 — the Pokkum artifact paths on their own, to catch the case
@@ -172,9 +189,9 @@ func workingTreeDirty(ctx context.Context, dir string) bool {
 	args = append([]string{"status", "--porcelain", "-z", "--"}, pokkumGeneratedNames...)
 	out, err = runGit(ctx, dir, args...)
 	if err != nil {
-		return false
+		return true, fmt.Errorf("slsa: could not determine whether Pokkum's own tracked artifacts at %s are modified: %w", dir, err)
 	}
-	return hasTrackedEntry(out)
+	return hasTrackedEntry(out), nil
 }
 
 // hasEntry reports whether NUL-separated `git status --porcelain -z` output

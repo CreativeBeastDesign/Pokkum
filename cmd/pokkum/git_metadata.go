@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -116,7 +117,21 @@ func getGitVersion(ctx context.Context, dir string) string {
 	// single-source-of-truth argument gitdiscovery.go already makes for
 	// `repro doctor`; the OCI label was simply a third implementation nobody
 	// had pointed at it.
-	if !strings.HasSuffix(base, "-dirty") && slsa.WorkingTreeDirty(ctx, dir) {
+	// Only a real git repository has a working tree to be dirty. A directory
+	// under no version control at all is not "unverifiable", it is simply out
+	// of scope — appending "-dirty" there would be noise, not caution. (This
+	// matters for a CI tag build, where GITHUB_REF_NAME supplies the version
+	// without git being consulted at all.)
+	if !isGitRepo(dir) {
+		return base
+	}
+
+	// Within a repo, WorkingTreeDirty fails closed: if git could not be
+	// consulted it reports dirty alongside an error, and marking the label
+	// dirty is the safe direction — it under-claims reproducibility rather
+	// than over-claiming it.
+	dirty, _ := slsa.WorkingTreeDirty(ctx, dir)
+	if !strings.HasSuffix(base, "-dirty") && dirty {
 		return base + "-dirty"
 	}
 	return base
@@ -151,4 +166,16 @@ func execGit(ctx context.Context, dir string, args ...string) (string, error) {
 		return "", err
 	}
 	return out.String(), nil
+}
+
+// isGitRepo reports whether dir is inside a git working tree. Used to scope the
+// dirty marker to directories where the question is meaningful.
+func isGitRepo(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		return true
+	}
+	return false
 }

@@ -113,8 +113,26 @@ func (s *Signer) Verify(ctx context.Context, bundle ports.CosignSignatureBundle,
 	}
 
 	// 2. Validate payload claims
-	if payload.Critical.Type != ports.CosignSimpleSigningType {
-		return fmt.Errorf("cosign: payload type %q != %q: %w", payload.Critical.Type, ports.CosignSimpleSigningType, core.ErrInvalidRequest)
+	//
+	// Both Simple Signing payload type strings are accepted. Real upstream
+	// Cosign writes ports.CosignContainerImageSignatureType; Pokkum's own
+	// static-key signer writes ports.CosignSimpleSigningType (Red Hat's
+	// original string). Requiring only the latter made this verifier reject
+	// every signature cosign has produced for years — so static-key base-image
+	// verification could not succeed for ANY input, and, because this check
+	// runs before any signature maths, a correct key and a wrong key produced
+	// byte-identical errors. A control that refuses everything is not a
+	// discriminator, and it passes a fail-closed test for the wrong reason.
+	//
+	// The lenient form already existed in baseimage/resolver.go's
+	// checkSimpleSigningClaims and provenance/resolver.go, each with a comment
+	// explaining exactly this; the fix had simply never reached this third
+	// implementation of the same check.
+	switch payload.Critical.Type {
+	case ports.CosignSimpleSigningType, ports.CosignContainerImageSignatureType:
+	default:
+		return fmt.Errorf("cosign: payload type %q is not a recognised Simple Signing type (expected %q or %q): %w",
+			payload.Critical.Type, ports.CosignContainerImageSignatureType, ports.CosignSimpleSigningType, core.ErrInvalidRequest)
 	}
 
 	actualRepo := payload.Critical.Identity.DockerReference

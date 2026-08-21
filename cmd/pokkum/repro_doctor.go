@@ -68,9 +68,12 @@ func runReproDoctor(ctx context.Context, _ *slog.Logger, opts *reproDoctorOption
 	// provenance records, so the two cannot disagree about one tree.
 	gitClean := true
 	gitChecked := false
+	var gitErr error
 	if _, err := os.Stat(filepath.Join(opts.dir, ".git")); err == nil {
 		gitChecked = true
-		gitClean = !slsa.WorkingTreeDirty(ctx, opts.dir)
+		var dirty bool
+		dirty, gitErr = slsa.WorkingTreeDirty(ctx, opts.dir)
+		gitClean = !dirty
 	}
 
 	// --perturb advertised "dual builds in a perturbed environment to bisect
@@ -96,7 +99,7 @@ func runReproDoctor(ctx context.Context, _ *slog.Logger, opts *reproDoctorOption
 		{
 			"check":   "Clean Git Repository",
 			"passed":  gitClean,
-			"details": gitCheckDetails(gitChecked, gitClean),
+			"details": gitCheckDetails(gitChecked, gitClean, gitErr),
 		},
 	}
 
@@ -148,10 +151,16 @@ func reproSummary(deterministic bool) string {
 // gitCheckDetails describes what the git check actually observed, including
 // the case where there was no repository to inspect — previously reported as a
 // clean tree, which is a different claim from "there is nothing to check".
-func gitCheckDetails(checked, clean bool) string {
+func gitCheckDetails(checked, clean bool, gitErr error) string {
 	switch {
 	case !checked:
 		return "Not a git repository, so working-tree cleanliness could not be checked"
+	case gitErr != nil:
+		// Distinct from both "clean" and "dirty": git itself could not be
+		// consulted, so this check has no verdict to offer. Reporting it as
+		// clean would be a reproducibility claim made from no evidence — the
+		// failure mode this check was rewritten to remove.
+		return "INCONCLUSIVE: git could not be consulted, so working-tree cleanliness is unknown (treated as dirty): " + gitErr.Error()
 	case clean:
 		return "No dirty uncommitted working tree modifications detected (ignoring Pokkum's own .pokkum/ and pokkum.lock)"
 	default:

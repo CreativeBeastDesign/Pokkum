@@ -98,8 +98,11 @@ func TestReproDoctor_GitCheckCanActuallyFail(t *testing.T) {
 	run("git", "add", "src.txt")
 	run("git", "commit", "-qm", "initial")
 
-	clean := !slsa.WorkingTreeDirty(context.Background(), dir)
-	if !clean {
+	dirty0, err0 := slsa.WorkingTreeDirty(context.Background(), dir)
+	if err0 != nil {
+		t.Fatalf("[TEST SETUP] git could not be consulted: %v", err0)
+	}
+	if dirty0 {
 		t.Fatal("[TEST SETUP] a freshly committed tree reported dirty")
 	}
 
@@ -107,8 +110,8 @@ func TestReproDoctor_GitCheckCanActuallyFail(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "src.txt"), []byte("v2"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if dirty := slsa.WorkingTreeDirty(context.Background(), dir); !dirty {
-		t.Error("a modified tracked file did not report dirty; the check cannot distinguish any tree from any other")
+	if dirty, err := slsa.WorkingTreeDirty(context.Background(), dir); err != nil || !dirty {
+		t.Errorf("a modified tracked file did not report dirty (dirty=%v err=%v); the check cannot distinguish any tree from any other", dirty, err)
 	}
 }
 
@@ -117,10 +120,16 @@ func TestReproDoctor_GitCheckCanActuallyFail(t *testing.T) {
 // including a directory that is not a git repository at all, a different claim
 // from a clean tree.
 func TestGitCheckDetails_DistinguishesAllThreeOutcomes(t *testing.T) {
-	notRepo := gitCheckDetails(false, true)
-	cleanRepo := gitCheckDetails(true, true)
-	dirtyRepo := gitCheckDetails(true, false)
+	notRepo := gitCheckDetails(false, true, nil)
+	cleanRepo := gitCheckDetails(true, true, nil)
+	dirtyRepo := gitCheckDetails(true, false, nil)
+	// A fourth outcome: git itself could not be consulted. Reporting that as
+	// "clean" is the fail-open this check exists to prevent.
+	unknown := gitCheckDetails(true, false, errors.New("git: exec format error"))
 
+	if unknown == cleanRepo || unknown == dirtyRepo || unknown == notRepo {
+		t.Errorf("an inconclusive git check is not distinguishable from a real verdict:\n  unknown: %q\n  clean:   %q\n  dirty:   %q", unknown, cleanRepo, dirtyRepo)
+	}
 	if notRepo == cleanRepo || cleanRepo == dirtyRepo || notRepo == dirtyRepo {
 		t.Errorf("outcomes are not distinguishable:\n  not-a-repo: %q\n  clean:      %q\n  dirty:      %q", notRepo, cleanRepo, dirtyRepo)
 	}

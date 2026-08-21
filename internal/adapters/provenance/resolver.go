@@ -1010,6 +1010,57 @@ func normalizeRepoURI(s string) string {
 // The commit comparison stays a prefix match, which is intentional: abbreviated
 // commit SHAs are how people actually refer to commits, and the value being
 // abbreviated is the caller's own assertion, not attacker-chosen input.
+//
+// It is nevertheless bounded on two axes that an unqualified strings.HasPrefix
+// left open, both found by a real field test:
+//
+//   - A minimum length. "@b" is a legal one-character prefix that matches
+//     roughly one commit in sixteen, and returned success. Git itself refuses
+//     to abbreviate below 4 and defaults to 7, so anything shorter than
+//     minAbbreviatedCommitLen is a mistake rather than an abbreviation, and is
+//     rejected as one instead of being honoured as an assertion that asserts
+//     almost nothing.
+//   - The dirty marker. A resolved commit of "<sha>-dirty" is prefixed by the
+//     clean "<sha>", so asserting the exact 40-character commit silently
+//     accepted an image built from uncommitted modifications — the precise
+//     case --expect-source exists to catch. A caller who does not write
+//     "-dirty" is asserting a clean tree, so a dirty build must fail.
+//
+// minAbbreviatedCommitLen is the shortest commit prefix --expect-source will
+// honour. Git refuses to abbreviate below 4 characters and defaults to 7;
+// anything shorter is a typo or a mistake, not an abbreviation, and treating
+// it as a satisfied assertion is worse than rejecting it.
+const minAbbreviatedCommitLen = 7
+
+// validateCommitMatch reports whether expectedCommit is an acceptable
+// assertion about resolvedCommit. See validateSourceMatch's doc comment for
+// why a prefix match is correct here and what bounds it needs.
+func validateCommitMatch(resolvedCommit, expectedCommit string) error {
+	expectedCommit = strings.TrimSpace(expectedCommit)
+	if expectedCommit == "" {
+		return nil
+	}
+	if len(expectedCommit) < minAbbreviatedCommitLen {
+		return fmt.Errorf("expected commit %q is shorter than %d characters, too ambiguous to assert anything: %w",
+			expectedCommit, minAbbreviatedCommitLen, core.ErrInvalidRequest)
+	}
+	if !strings.HasPrefix(resolvedCommit, expectedCommit) {
+		return fmt.Errorf("expected commit %q does not match resolved provenance %q: %w", expectedCommit, resolvedCommit, core.ErrInvalidRequest)
+	}
+	// The prefix matched, but a clean assertion must not be satisfied by a
+	// dirty build: "<sha>" is a prefix of "<sha>-dirty".
+	if strings.HasSuffix(resolvedCommit, dirtyCommitSuffix) && !strings.HasSuffix(expectedCommit, dirtyCommitSuffix) {
+		return fmt.Errorf("expected commit %q matches, but the image was built from a DIRTY working tree (provenance records %q); "+
+			"assert %q%s explicitly if that is intended: %w",
+			expectedCommit, resolvedCommit, expectedCommit, dirtyCommitSuffix, core.ErrInvalidRequest)
+	}
+	return nil
+}
+
+// dirtyCommitSuffix is the marker slsa.WorkingTreeDirty causes to be appended
+// to a recorded commit when the build's working tree carried changes.
+const dirtyCommitSuffix = "-dirty"
+
 func validateSourceMatch(resolvedRepo, resolvedCommit, expectSource string) error {
 	expectSource = strings.TrimSpace(expectSource)
 	cleanResolvedRepo := normalizeRepoURI(resolvedRepo)
@@ -1022,14 +1073,14 @@ func validateSourceMatch(resolvedRepo, resolvedCommit, expectSource string) erro
 		if expectedRepo != "" && cleanResolvedRepo != expectedRepo {
 			return fmt.Errorf("expected source repo %q does not match resolved provenance %q: %w", expectedRepo, resolvedRepo, core.ErrInvalidRequest)
 		}
-		if expectedCommit != "" && !strings.HasPrefix(resolvedCommit, expectedCommit) {
-			return fmt.Errorf("expected commit %q does not match resolved provenance %q: %w", expectedCommit, resolvedCommit, core.ErrInvalidRequest)
+		if err := validateCommitMatch(resolvedCommit, expectedCommit); err != nil {
+			return err
 		}
 		return nil
 	}
 
 	// No "@": the single value is either the repository or a commit prefix.
-	if normalizeRepoURI(expectSource) != cleanResolvedRepo && !strings.HasPrefix(resolvedCommit, expectSource) {
+	if normalizeRepoURI(expectSource) != cleanResolvedRepo && validateCommitMatch(resolvedCommit, expectSource) != nil {
 		return fmt.Errorf("expected source %q does not match resolved provenance (%s@%s): %w",
 			expectSource, resolvedRepo, resolvedCommit, core.ErrInvalidRequest)
 	}
