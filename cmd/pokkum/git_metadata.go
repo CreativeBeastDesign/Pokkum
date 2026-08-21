@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/slsa"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
@@ -98,6 +99,32 @@ func getGitSource(ctx context.Context, dir string) string {
 }
 
 func getGitVersion(ctx context.Context, dir string) string {
+	base := gitVersionBase(ctx, dir)
+	if base == "" {
+		return ""
+	}
+
+	// `git describe --dirty` only considers TRACKED modifications: an untracked
+	// source file leaves it reporting a clean version. The SLSA provenance uses
+	// slsa.WorkingTreeDirty, which does count untracked files (excluding
+	// Pokkum's own .pokkum/ and pokkum.lock), so for an untracked-file build the
+	// two disagreed about the same image — `pokkum history` reported a clean
+	// revision while the attestation on that very image said "-dirty".
+	//
+	// Resolve the dirty marker from WorkingTreeDirty on both paths so the label
+	// and the attestation can only ever reach one verdict. This is the same
+	// single-source-of-truth argument gitdiscovery.go already makes for
+	// `repro doctor`; the OCI label was simply a third implementation nobody
+	// had pointed at it.
+	if !strings.HasSuffix(base, "-dirty") && slsa.WorkingTreeDirty(ctx, dir) {
+		return base + "-dirty"
+	}
+	return base
+}
+
+// gitVersionBase resolves the version string before any dirty marker: a CI tag
+// ref when one is present, otherwise `git describe`.
+func gitVersionBase(ctx context.Context, dir string) string {
 	if os.Getenv("GITHUB_REF_TYPE") == "tag" {
 		if ref := os.Getenv("GITHUB_REF_NAME"); ref != "" {
 			return ref
