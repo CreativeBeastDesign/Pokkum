@@ -80,6 +80,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | [Rolling-deploy asset overlay (--asset-overlay)](items/rolling-deploy-asset-overlay.md) | Merges the last N generations' immutable /_app/immutable client assets into a separate overlay layer, registry-side, so a browser holding a prior generation's HTML never hits a 404 mid-rollout. | feature | shipped | `f9c2f1d` |
 | [--runtime=node, the second runtime dimension](items/runtime-node.md) | Targets a distroless-node base and execs adapter-node output directly under /nodejs/bin/node with no Bun layer at all, proven by a real Docker boot and, since e918c52, an automated smoke test. | feature | shipped | `f5229c3`, `e918c52` |
 | [--strategy=static](items/strategy-static.md) | Compiles a pure static SvelteKit site onto chainguard/static with an embedded pokkum-static Go file server as PID 1 — genuinely functional only since 2026-08-19, after six independent bugs were found by its first real boot test. | feature | shipped | `8306d37`, `1c33509`, `5693980`, `61fd873` |
+| [Ship production dependencies so images are self-contained](items/vendor-production-dependencies.md) | Layered images shipped the server bundle without its dependencies; Bun's runtime auto-install silently fetched them from npm inside the running container. | fix | shipped |  |
 
 ### Developer Experience
 

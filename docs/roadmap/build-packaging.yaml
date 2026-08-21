@@ -5,6 +5,105 @@ items:
   # Compilation & Container Packaging")
   # ---------------------------------------------------------------------
 
+  - id: vendor-production-dependencies
+    title: "Ship production dependencies so images are self-contained"
+    status: shipped
+    kind: fix
+    tier: foundation
+    summary: "Layered images shipped the server bundle without its dependencies; Bun's runtime auto-install silently fetched them from npm inside the running container."
+    problem: |
+      Vite externalises dependencies during the SSR build, so adapter-node output keeps bare
+      imports and expects a node_modules tree beside it — its documented deployment model is
+      "ship build/ AND production node_modules". Pokkum shipped only the first half.
+
+      On Bun the gap was masked rather than visible: the runtime auto-install fetched missing
+      packages from the public npm registry into the running container, so the app appeared to
+      work while executing code that is in neither the image, the SBOM, the signature nor the
+      provenance. Under `pokkum resolve`'s own `readOnlyRootFilesystem` the write failed and
+      the pod crash-looped after reporting a successful rollout; and because the default
+      NetworkPolicy permits TCP 443, the fetch succeeds in-cluster until an operator tightens
+      egress, at which point a working deployment breaks with no change to the image. On Node,
+      which has no auto-install, any route touching an externalised dependency simply 500s.
+    decision: |
+      Shipped 2026-08-21, found by an adversarial field test against a real application.
+
+      `Prepare` installs the project's production dependencies into a staging tree under
+      `.pokkum/` (never touching the user's own tree) and the packager mounts it at
+      **/app/node_modules**. The path is load-bearing: Node and Bun resolve a bare import by
+      walking upward from the importing file, so `/app/server/index.js` finds
+      `/app/node_modules` and never `/app/vendor` — which is where the pre-existing vendor
+      layer pointed, and which is why populating that layer would not have worked. That layer
+      turned out to be dead wiring: the pipeline pointed it at `<output>/vendor` and nothing
+      ever created the directory.
+
+      A missing lockfile warns rather than refusing. Making it an error was the first cut and
+      was over-reach: it turned a reproducibility preference into a gate on building at all
+      and refused every project without a lockfile, including three of the repo's own
+      fixtures. With a lockfile the install uses `--frozen-lockfile`, so versions are exactly
+      what is pinned; hermetic builds add `--offline` and fail with a warm-the-cache hint
+      rather than silently shipping an image without its dependencies.
+
+      The image entrypoint now also passes Bun's `--no-install`, so a remaining gap fails
+      loudly at startup instead of being papered over by a network fetch. Verified in both
+      directions: an `await import("valibot")` in an empty project resolves by downloading the
+      package at runtime, and the same import under `--no-install` fails with "Cannot find
+      package".
+    limitations:
+      - "Build-time detection of a dependency that will be missing at runtime is **not** solved — see [Detect dependencies that will be missing at runtime](item:unresolved-import-guard). A static-analysis attempt was reverted for failing correctly-configured builds."
+      - "`--runtime=node` images benefit automatically (they previously had no dependency store at all), but that combination has not been re-tested end to end against a real application since the fix."
+    impl:
+      - internal/adapters/bunexec/vendor_install.go
+      - internal/adapters/packager/packager.go
+      - internal/ports/packager.go
+
+  - id: unresolved-import-guard
+    title: "Detect dependencies that will be missing at runtime"
+    status: open
+    kind: hardening
+    tier: polish
+    summary: "A build-time check that every externalised bare import resolves inside the image — attempted with static analysis, which proved unsound; needs the bundler's own externals list."
+    problem: |
+      [Ship production dependencies so images are self-contained](item:vendor-production-dependencies)
+      fixes the images built today. Nothing yet catches the next time something falls out of
+      the tree, and the failure it would cause is invisible until a request arrives in
+      production: the container starts, both probes pass, and the first route touching the
+      missing package 500s.
+
+      A static-analysis version was written and **reverted**, because it failed real,
+      correctly-configured builds. Recording why, so it is not attempted the same way twice:
+
+      - **Type-only imports survive as text.** The adapter-node fixture's built server
+        contains `from 'types'` eleven times — a type import erased at runtime, naming a
+        package that does not exist. A regex over the bundle cannot tell it from a real one.
+      - **adapter-node bundles most dependencies.** The fixture declares zero production
+        dependencies, its built output still contains bare imports for `svelte`,
+        `@sveltejs/kit`, `polka`, `sirv` and `cookie`, and its image boots and serves traffic
+        (`TestRuntimeSmoke_LayeredStrategy_BootsAndServes`). The remaining specifiers are
+        artifacts of bundling, not runtime requirements.
+
+      So "appears as a bare import in the output" does not imply "must resolve at runtime",
+      and a guard that fails a working build is worse than the bug it guards.
+    options:
+      - title: "Read the bundler's own externals list"
+        description: "Vite/Rollup knows exactly which modules it externalised. Capture that during the build (a metafile, or an explicit ssr.external configuration Pokkum sets) and check only those specifiers against the staged tree."
+        tradeoffs: "Exact rather than heuristic, and cheap at build time — but requires reaching into the build's own output format, which differs across Vite versions and is not a stable contract."
+      - title: "Verify empirically at build time"
+        description: "After building, start the produced server with Bun's --no-install in the staged environment and confirm it reaches a listening state."
+        tradeoffs: "Authoritative — it is what actually happens in production — but slow, needs a free port, and turns every build into a partial smoke test."
+      - title: "Rely on the runtime check already in place"
+        description: "The image entrypoint passes --no-install, so a missing dependency now fails loudly at startup instead of being silently fetched from npm."
+        tradeoffs: "Zero cost and already shipped, but the failure surfaces at deploy time rather than build time — better than production, worse than CI."
+    recommendation: |
+      First option. The bundler is the only component that actually knows which specifiers it
+      externalised, and every heuristic that does not consult it will keep mistaking type
+      imports and bundled-away packages for real dependencies.
+
+      Until then the third option is genuinely load-bearing rather than a placeholder: with
+      `--no-install` in the entrypoint, a gap fails at container start with "Cannot find
+      package", which is loud, immediate and honest — the property that was missing when Bun
+      silently downloaded the difference from npm.
+    related: ["route-exclusion-filter"]
+
   - id: route-exclusion-filter
     title: "Exclude routes from the production build"
     status: open
