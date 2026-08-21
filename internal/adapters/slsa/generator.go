@@ -10,6 +10,26 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
+// inTotoStatementTypeV1 is the in-toto Statement v1 type URI, the envelope
+// version the SLSA v1.0 provenance predicate
+// (ports.SLSAProvenancePredicateType, "https://slsa.dev/provenance/v1") is
+// defined against.
+//
+// It shadows ports.InTotoStatementType, which is still
+// "https://in-toto.io/Statement/v0.1" — the pairing every attestation Pokkum
+// has signed so far carried. cosign tolerates that mismatch, but
+// slsa-verifier and policy engines that validate `_type` are entitled to
+// reject it, so the signed artifact is fixed here rather than left to a
+// verifier's leniency.
+//
+// This constant is package-local ONLY because ports/ is outside this
+// package's ownership in the change that introduced it. The correct end
+// state is a single source of truth: update
+// internal/ports/supplychain.go's InTotoStatementType to this value and
+// delete this constant. See statement_test.go for the drift guard that keeps
+// `_type` and `predicateType` a legal pair either way.
+const inTotoStatementTypeV1 = "https://in-toto.io/Statement/v1"
+
 var _ ports.SLSAGenerator = (*Generator)(nil)
 
 // Generator implements ports.SLSAGenerator.
@@ -194,7 +214,7 @@ func (g *Generator) Generate(ctx context.Context, req ports.SLSAGeneratorRequest
 
 	// 5. Construct Statement
 	stmt := ports.SLSAStatement{
-		Type:          ports.InTotoStatementType,
+		Type:          inTotoStatementTypeV1,
 		Subject:       []ports.ResourceDescriptor{subject},
 		PredicateType: ports.SLSAProvenancePredicateType,
 		Predicate: ports.SLSAPredicate{

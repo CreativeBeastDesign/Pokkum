@@ -73,8 +73,8 @@ func TestSLSAGenerator_Generate(t *testing.T) {
 	}
 
 	// 1. Check in-toto statement envelopes
-	if stmt.Type != ports.InTotoStatementType {
-		t.Errorf("Type = %q, want %q", stmt.Type, ports.InTotoStatementType)
+	if stmt.Type != inTotoStatementTypeV1 {
+		t.Errorf("Type = %q, want %q", stmt.Type, inTotoStatementTypeV1)
 	}
 	if stmt.PredicateType != ports.SLSAProvenancePredicateType {
 		t.Errorf("PredicateType = %q, want %q", stmt.PredicateType, ports.SLSAProvenancePredicateType)
