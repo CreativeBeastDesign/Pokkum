@@ -167,10 +167,20 @@ jobs:
       # in place above.
       - name: Publish NPM Packages
         run: |
+          # npm refuses to publish a prerelease version without an explicit
+          # --tag, so a tag like v1.1.0-rc1 would fail here — after the binaries
+          # were already released. Found by dry-running a publish with a
+          # prerelease-shaped version. `latest` is npm's default and passing it
+          # explicitly changes nothing for normal releases.
+          version=$(npm pkg get version --prefix dist/npm/pokkum | tr -d '"')
+          npm_tag=latest
+          case "$version" in *-*) npm_tag=next ;; esac
+          echo "publishing $version under npm dist-tag '$npm_tag'"
+
           for d in dist/npm/pokkum-*/; do
             echo "publishing $d"
-            npm publish "$d" --access public
+            npm publish "$d" --access public --tag "$npm_tag"
           done
-          npm publish dist/npm/pokkum --access public
+          npm publish dist/npm/pokkum --access public --tag "$npm_tag"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
