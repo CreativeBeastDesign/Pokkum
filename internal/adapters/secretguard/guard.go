@@ -3,6 +3,8 @@ package secretguard
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -34,6 +36,16 @@ const binarySniffBytes = 512
 type rule struct {
 	Name    string
 	Pattern *regexp.Regexp
+	// Validate, when non-nil, is an extra check run against the exact
+	// substring Pattern matched, before it is reported as a finding. Every
+	// rule below except the JWT one leaves this nil and relies on Pattern
+	// alone — a high-signal literal prefix (ghp_, xoxb-, sk_live_, ...) is
+	// already near-zero false positive on its own. JWT is the one shape
+	// where the regex alone (three dot-separated base64url runs starting
+	// with the base64 encoding of `{"`) is not tight enough by itself, so
+	// looksLikeJWTHeader below decodes the first segment and confirms it is
+	// actually JSON containing "alg" before the match counts.
+	Validate func(match string) bool
 }
 
 var defaultSecretRules = []rule{
@@ -46,8 +58,55 @@ var defaultSecretRules = []rule{
 		Pattern: regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
 	},
 	{
-		Name:    "GitHub Personal Access Token",
-		Pattern: regexp.MustCompile(`\bghp_[a-zA-Z0-9]{36}\b`),
+		Name: "GitHub Personal Access Token",
+		// Classic GitHub PATs are `ghp_` + 36 alphanumeric chars, but
+		// fine-grained PATs use the same prefix with a much longer,
+		// variable-length suffix — an exact {36} quantifier missed both
+		// the fine-grained shape AND, per the F9 field test, any token
+		// whose length simply wasn't exactly 36 for whatever reason (the
+		// \b on both sides required an exact-length match with no partial
+		// credit). {36,255} keeps the same near-zero-false-positive prefix
+		// while accepting the real range of lengths GitHub actually issues.
+		Pattern: regexp.MustCompile(`\bghp_[a-zA-Z0-9]{36,255}\b`),
+	},
+	{
+		Name: "GitHub App Token",
+		// gho_ (OAuth), ghu_ (user-to-server), ghs_ (server-to-server) share
+		// the same value shape as ghp_ but are not personal access tokens,
+		// so they get their own rule name — a finding should say which kind
+		// of GitHub credential was found, not lump every gh*_ prefix under
+		// "personal access token".
+		Pattern: regexp.MustCompile(`\bgh[osu]_[a-zA-Z0-9]{36,255}\b`),
+	},
+	{
+		Name: "Slack Token",
+		// xoxb- (bot) / xoxp- (user) tokens: <workspace-id>-<id>-<secret>,
+		// with the user token format sometimes carrying a fourth numeric
+		// segment. The xoxb-/xoxp- literal prefix is essentially never seen
+		// outside a real Slack token, so this stays high-signal even with a
+		// fairly permissive tail.
+		Pattern: regexp.MustCompile(`\bxox[bp]-[0-9]+-[0-9]+-(?:[0-9]+-)?[a-zA-Z0-9]+\b`),
+	},
+	{
+		Name:    "Stripe Live Secret Key",
+		Pattern: regexp.MustCompile(`\bsk_live_[a-zA-Z0-9]{16,99}\b`),
+	},
+	{
+		Name:    "GitLab Personal Access Token",
+		Pattern: regexp.MustCompile(`\bglpat-[a-zA-Z0-9_-]{20,50}\b`),
+	},
+	{
+		Name: "JSON Web Token (JWT)",
+		// `eyJ` is the base64 encoding of the literal `{"` almost every JWT
+		// header starts with (`{"alg":...`), so requiring it plus two more
+		// dot-separated base64url runs narrows the regex considerably on its
+		// own — but base64 blobs unrelated to JWTs can still coincidentally
+		// start that way, which is exactly the false-positive risk called
+		// out for this format. Validate below closes that gap by actually
+		// decoding the header and checking it is JSON with an "alg" key,
+		// the one field RFC 7519 §5.1 guarantees every JWT header carries.
+		Pattern:  regexp.MustCompile(`\beyJ[a-zA-Z0-9_-]{5,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}`),
+		Validate: looksLikeJWTHeader,
 	},
 	{
 		Name:    "Google API Key",
@@ -274,6 +333,33 @@ func looksBinary(head []byte) bool {
 // whole (size-bounded) file and splitting in memory has no such line-length
 // ceiling.
 
+// looksLikeJWTHeader reports whether token's first, dot-delimited segment is
+// base64url that decodes to a JSON object containing an "alg" key — the one
+// field every real JWT header carries (RFC 7519 §5.1). A bare "three
+// dot-separated base64url runs starting with eyJ" shape is not unique enough
+// to a JWT on its own (see the rule's comment above), so this is what turns
+// that shape into a genuinely low-false-positive check: an arbitrary base64
+// blob that happens to start with "eyJ" and contain two dots would have to
+// ALSO decode to valid JSON with an "alg" field, which is not something
+// ordinary data does by coincidence.
+func looksLikeJWTHeader(token string) bool {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	// JWT uses unpadded base64url (RFC 4648 §5), hence RawURLEncoding.
+	decoded, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return false
+	}
+	var header map[string]any
+	if err := json.Unmarshal(decoded, &header); err != nil {
+		return false
+	}
+	_, ok := header["alg"]
+	return ok
+}
+
 // lineIsAnnotated reports whether the line at idx is exempted by an inline
 // marker, either on that line or on the one immediately above it.
 //
@@ -365,6 +451,9 @@ func scanFile(absPath, relPath string, allowPatterns []*regexp.Regexp, maxSize i
 		for _, r := range defaultSecretRules {
 			for _, loc := range r.Pattern.FindAllStringIndex(line, -1) {
 				snippet := line[loc[0]:loc[1]]
+				if r.Validate != nil && !r.Validate(snippet) {
+					continue
+				}
 				if len(snippet) > 40 {
 					snippet = snippet[:37] + "..."
 				}
