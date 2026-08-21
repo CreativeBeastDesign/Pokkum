@@ -34,6 +34,19 @@ trap 'rm -f "$key_file" "$bundle_file"' EXIT
 
 printf '%s' "$COSIGN_PRIVATE_KEY" > "$key_file"
 
+# Fail with the actual cause rather than cosign's "unknown flag". This flag
+# exists from cosign v3.1.0; v3.0.x does not have it, and cosign-installer's
+# default version has been older than what this script needs before. If it is
+# missing, the signature this produces would silently come from a different code
+# path (a TUF-provided signing config rather than the static key), so refuse.
+if ! cosign sign-blob --help 2>&1 | grep -q -- '--use-signing-config'; then
+  installed="$(cosign version 2>/dev/null | grep -i GitVersion | awk '{print $2}')"
+  echo "cosign-sign-blob.sh: this cosign (${installed:-unknown version}) has no --use-signing-config flag." >&2
+  echo "  It is required to force key-based signing; without it cosign v3.1+ defaults to a TUF-provided signing config." >&2
+  echo "  Install cosign >= v3.1.0 (the release workflow pins cosign-release explicitly for this reason)." >&2
+  exit 1
+fi
+
 cosign sign-blob \
   --key="$key_file" \
   --use-signing-config=false \

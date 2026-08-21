@@ -51,8 +51,10 @@ var npmPublisherFlags = map[string]bool{
 type workflowFile struct {
 	Jobs map[string]struct {
 		Steps []struct {
-			Name string `yaml:"name"`
-			Run  string `yaml:"run"`
+			Name string            `yaml:"name"`
+			Run  string            `yaml:"run"`
+			Uses string            `yaml:"uses"`
+			With map[string]string `yaml:"with"`
 		} `yaml:"steps"`
 	} `yaml:"jobs"`
 }
@@ -192,5 +194,68 @@ func TestReleaseWorkflowTestStepMatchesCIGate(t *testing.T) {
 	}
 	if found == 0 {
 		t.Fatal("[TEST SETUP] found no `go test` invocation in release.yml; this guard is watching nothing")
+	}
+}
+
+// TestWorkflowsPinToolVersionsTheyDependOn covers the class that broke releasing
+// v1.0.4: a third-party CLI installed at whatever version its installer action
+// happens to default to, while a script in this repo depends on a flag only some
+// versions have.
+//
+// scripts/cosign-sign-blob.sh passes --use-signing-config, which exists from
+// cosign v3.1.0. sigstore/cosign-installer@v3 defaults to v3.0.6. The script was
+// written and tested against a locally installed v3.1.3, so it worked everywhere
+// except the one place it had to. GoReleaser had already built and archived every
+// binary before signing failed with "unknown flag".
+//
+// The version an action picks by default is a value the environment resolves, not
+// one this repo controls, and it can change under you when the action updates —
+// mem:self_review_checklist row 48. Pin it, so the tool and the script that drives
+// it move together.
+func TestWorkflowsPinToolVersionsTheyDependOn(t *testing.T) {
+	// action prefix -> the input that pins its version.
+	pinned := map[string]string{
+		"sigstore/cosign-installer": "cosign-release",
+	}
+
+	dir := filepath.Join("..", "..", ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("[TEST SETUP] reading %s: %v", dir, err)
+	}
+
+	var checked int
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("[TEST SETUP] reading %s: %v", e.Name(), err)
+		}
+		var wf workflowFile
+		if err := yaml.Unmarshal(data, &wf); err != nil {
+			t.Fatalf("[TEST SETUP] parsing %s: %v", e.Name(), err)
+		}
+		for jobName, job := range wf.Jobs {
+			for _, step := range job.Steps {
+				for action, input := range pinned {
+					if !strings.HasPrefix(step.Uses, action) {
+						continue
+					}
+					checked++
+					if strings.TrimSpace(step.With[input]) == "" {
+						t.Errorf("%s job %q uses %s without pinning %q.\n"+
+							"\tThe action's default version is chosen by the action, not by this repo, and scripts here depend on "+
+							"flags only some versions have (cosign's --use-signing-config needs >= v3.1.0, while the installer "+
+							"defaults to v3.0.6). Pin it.",
+							e.Name(), jobName, action, input)
+					}
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("[TEST SETUP] found none of the pinned-tool actions in any workflow; this guard is watching nothing")
 	}
 }

@@ -80,8 +80,17 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
+      # Pin the cosign version. The action's own default is a floating value it
+      # decides, not one this repo controls: cosign-installer@v3 currently
+      # defaults to v3.0.6, which has no --use-signing-config flag, so
+      # scripts/cosign-sign-blob.sh — written and tested against v3.1.3 — died
+      # with "unknown flag" partway through releasing v1.0.4, after the binaries
+      # were already built. Pin it here so the script and the binary that runs it
+      # move together. See mem:self_review_checklist row 48.
       - name: Set up Cosign
         uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v3.1.3'
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
