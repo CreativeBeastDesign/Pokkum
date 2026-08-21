@@ -31,6 +31,54 @@ func jsonPrerenderedDirPattern(dirVar string) string {
 // so each is attempted.
 var prerenderedDirVars = []string{"dir", "__dirname", "server_dir", "serverDir"}
 
+// clientDirPattern and jsonClientDirPattern are the client-asset equivalents of
+// the prerendered joins above. adapter-node builds the client tree path as
+// path.join(dir, 'client') — see handler.js's
+// `serve(path.join(dir, 'client'), true)` — and Pokkum mounts that tree in its
+// own /app/client layer rather than under the server dir, exactly as it does
+// for prerendered.
+//
+// This mattered more than the prerendered case and was missed for longer: a
+// missing prerendered directory only loses prerendered routes, while a missing
+// client directory loses every stylesheet and script in the application. Worse,
+// it loses them silently — serve() returns false for a non-existent path and
+// the chain is built with .filter(Boolean), so the middleware is dropped with
+// no error, and the image boots, passes both probes and serves unstyled,
+// non-hydrated HTML with a 200.
+func clientDirPattern(dirVar string) string {
+	return `path.join(` + dirVar + `, "client")`
+}
+
+func jsonClientDirPattern(dirVar string) string {
+	return `path.join(` + dirVar + `, 'client')`
+}
+
+// applyClientPatch wraps every known client-path join found in src as
+// (process.env.POKKUM_CLIENT_DIR || <original-expr>).
+func applyClientPatch(src string) (string, bool) {
+	patched := false
+	for _, dirVar := range prerenderedDirVars {
+		for _, pat := range []string{clientDirPattern(dirVar), jsonClientDirPattern(dirVar)} {
+			if !strings.Contains(src, pat) {
+				continue
+			}
+			src = strings.ReplaceAll(src, pat, `(process.env.POKKUM_CLIENT_DIR || `+pat+`)`)
+			patched = true
+		}
+	}
+	return src, patched
+}
+
+// applyHandlerPathPatches applies every in-image path redirection the handler
+// needs, and reports whether any matched. Both are attempted on the same
+// source: an app may have client assets without prerendered pages, and the two
+// joins live in the same generated file.
+func applyHandlerPathPatches(src string) (string, bool) {
+	src, prerendered := applyPrerenderedPatch(src)
+	src, client := applyClientPatch(src)
+	return src, prerendered || client
+}
+
 // applyPrerenderedPatch wraps every known prerendered-path join found in src
 // as (process.env.POKKUM_PRERENDERED_DIR || <original-expr>), returning the
 // rewritten source and whether anything matched.
@@ -140,7 +188,7 @@ func patchPrerenderedEnv(handlerPath, pokkumDir string, log *slog.Logger) error 
 	}
 	src := string(data)
 
-	if patchedSrc, ok := applyPrerenderedPatch(src); ok {
+	if patchedSrc, ok := applyHandlerPathPatches(src); ok {
 		return writePatchedHandler(handlerPath, pokkumDir, patchedSrc, log)
 	}
 
@@ -152,7 +200,7 @@ func patchPrerenderedEnv(handlerPath, pokkumDir string, log *slog.Logger) error 
 			log.Debug("bunexec: handler re-export target not readable, skipping", "handler", handlerPath, "target", target, "err", err)
 			continue
 		}
-		patchedSrc, ok := applyPrerenderedPatch(string(chunk))
+		patchedSrc, ok := applyHandlerPathPatches(string(chunk))
 		if !ok {
 			continue
 		}
@@ -160,7 +208,7 @@ func patchPrerenderedEnv(handlerPath, pokkumDir string, log *slog.Logger) error 
 		return writePatchedHandler(target, pokkumDir, patchedSrc, log)
 	}
 
-	return fmt.Errorf("bunexec: handler %s has no recognizable prerendered path pattern; prerendered pages would silently resolve from the adapter default instead of /app/prerendered", handlerPath)
+	return fmt.Errorf("bunexec: handler %s has no recognizable prerendered or client path pattern; prerendered pages and client assets would silently resolve from the adapter default (/app/server/...) instead of the layers Pokkum mounts them in", handlerPath)
 }
 
 // patchPrerenderedHandler locates the generated adapter-node handler.js under

@@ -225,15 +225,25 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 			}
 			rc.Env[ports.EnvStaticFallback] = req.StaticFallback
 		}
-	} else if req.Strategy == ports.StrategyLayered && req.AppPrerenderedDir != "" {
-		// Let the patched adapter-node handler locate the prerendered tree Pokkum
-		// mounts at /app/prerendered (see Prepare and the fan-out in core). The
-		// stock handler would otherwise look for it under /app/server/prerendered,
-		// where it no longer lives.
+	} else if req.Strategy == ports.StrategyLayered {
 		if rc.Env == nil {
 			rc.Env = map[string]string{}
 		}
-		rc.Env[ports.EnvPrerenderedDir] = ports.AppPrerenderedDirPrefix
+
+		// Point the patched adapter-node handler at the client tree Pokkum
+		// mounts at /app/client. Unconditional for layered builds: every one of
+		// them has client assets, unlike prerendered pages below. Without this
+		// the stock handler looks under /app/server/client, finds nothing, and
+		// drops its asset middleware silently — the image boots, both probes
+		// pass, and every stylesheet and script 404s.
+		rc.Env[ports.EnvClientDir] = ports.AppClientDirPrefix
+
+		if req.AppPrerenderedDir != "" {
+			// Same redirection for the prerendered tree at /app/prerendered (see
+			// Prepare and the fan-out in core). The stock handler would otherwise
+			// look for it under /app/server/prerendered, where it no longer lives.
+			rc.Env[ports.EnvPrerenderedDir] = ports.AppPrerenderedDirPrefix
+		}
 	}
 	ts := pinnedTime(req.CreatedAt)
 

@@ -446,7 +446,7 @@ func TestPatchPrerenderedEnv_ReExportWithoutPatternStillHardFails(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected a hard failure when neither handler.js nor its re-export target has a recognizable pattern")
 	}
-	if !strings.Contains(err.Error(), "no recognizable prerendered path pattern") {
+	if !strings.Contains(err.Error(), "no recognizable prerendered or client path pattern") {
 		t.Fatalf("expected the unchanged no-match error, got: %v", err)
 	}
 

@@ -131,6 +131,20 @@ const (
 	// default (path.Join(dir, "prerendered")).
 	EnvPrerenderedDir = "POKKUM_PRERENDERED_DIR"
 
+	// EnvClientDir is read by the patched adapter-node runtime handler to
+	// locate the client asset tree.
+	//
+	// Same shape as EnvPrerenderedDir and the same reason. adapter-node's
+	// handler.js serves assets from path.join(dir, 'client'), where dir is the
+	// handler's own directory — /app/server in a layered image — while Pokkum
+	// mounts the client tree in its own layer at /app/client. The stock handler
+	// therefore looks in /app/server/client, finds nothing, and because
+	// serve() returns false for a missing directory and the middleware chain is
+	// assembled with .filter(Boolean), the asset handler is dropped from the
+	// chain entirely. The result is a container that boots, passes both probes,
+	// answers / with 200, and 404s every stylesheet and script.
+	EnvClientDir = "POKKUM_CLIENT_DIR"
+
 	// EnvStaticRoots is read by pokkum-static to choose the read-only
 	// directories it serves, as a path-list separated by os.PathListSeparator.
 	// It defaults to AppClientDirPrefix + os.PathListSeparator +

@@ -108,7 +108,10 @@ func TestBuild_StrategyDispatch(t *testing.T) {
 				"pokkum: add " + ports.AppNativeDirPrefix,
 				"pokkum: add " + ports.AppPrerenderedDirPrefix,
 			},
-			wantEnv:       map[string]string{ports.EnvPrerenderedDir: ports.AppPrerenderedDirPrefix},
+			wantEnv: map[string]string{
+				ports.EnvPrerenderedDir: ports.AppPrerenderedDirPrefix,
+				ports.EnvClientDir:      ports.AppClientDirPrefix,
+			},
 			wantEnvAbsent: []string{ports.EnvStaticRoots},
 		},
 		{
@@ -517,4 +520,52 @@ func TestBuild_PrecompressionFormatsPerStrategy(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestBuild_LayeredClientEnvSetWithoutPrerendered is the regression guard for the
+// silent-404 defect.
+//
+// EnvClientDir used to be set nowhere at all, and the branch that set
+// EnvPrerenderedDir was reached only when AppPrerenderedDir was non-empty. An
+// app with client assets and no prerendered pages — entirely ordinary — got
+// neither, so adapter-node looked for its assets under /app/server/client,
+// found nothing, and dropped its asset middleware silently via .filter(Boolean).
+// Every stylesheet and script 404'd while the image booted, both probes passed
+// and / returned 200.
+//
+// The condition here is deliberately "no prerendered dir": that is the case the
+// old code could not reach.
+func TestBuild_LayeredClientEnvSetWithoutPrerendered(t *testing.T) {
+	req := newRequest(t, ports.LinuxAMD64)
+	req.Strategy = ports.StrategyLayered
+	req.BunRuntime = ports.BunResolverResult{
+		BinaryPath: writeBinary(t, "bun", []byte("#!/bin/sh\necho bun")),
+	}
+	req.AppServerDir = writeStrategyDir(t, map[string]string{"index.js": "server entry"})
+	req.AppClientDir = writeStrategyDir(t, map[string]string{"app.js": "client asset"})
+	req.AppPrerenderedDir = ""
+
+	img, err := NewPackager(testLogger()).Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	cfg, err := img.ConfigFile()
+	if err != nil {
+		t.Fatalf("ConfigFile: %v", err)
+	}
+
+	env := map[string]string{}
+	for _, kv := range cfg.Config.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			env[k] = v
+		}
+	}
+
+	if got := env[ports.EnvClientDir]; got != ports.AppClientDirPrefix {
+		t.Errorf("%s = %q, want %q — without it adapter-node serves assets from /app/server/client, which does not exist, and drops the handler silently",
+			ports.EnvClientDir, got, ports.AppClientDirPrefix)
+	}
+	if _, ok := env[ports.EnvPrerenderedDir]; ok {
+		t.Errorf("%s must not be set when there is no prerendered tree", ports.EnvPrerenderedDir)
+	}
 }
