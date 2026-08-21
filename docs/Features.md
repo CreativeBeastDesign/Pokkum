@@ -316,6 +316,15 @@ The compiled exe strategy's single binary output has no post-build secret scan, 
   - [internal/adapters/provenance/resolver.go](../internal/adapters/provenance/resolver.go)
   - [internal/adapters/slsa/generator.go](../internal/adapters/slsa/generator.go)
 
+### [The generic secret rule misses camelCase and suffixed key names](items/generic-secret-rule-key-coverage.md)
+
+password/secret/api_key/token are word-boundary anchored, so apiKey, dbPassword and accessToken are not matched at all.
+
+- Implementation:
+  - [internal/adapters/secretguard/guard.go](../internal/adapters/secretguard/guard.go)
+  - [internal/adapters/secretguard/generic_key_coverage_test.go](../internal/adapters/secretguard/generic_key_coverage_test.go)
+  - [internal/adapters/secretguard/minified_corpus_test.go](../internal/adapters/secretguard/minified_corpus_test.go)
+
 ### [Image signing with Cosign/DSSE](items/image-signing.md)
 
 Builds are signed via Cosign static-key or DSSE, with a fetch-back-and-reverify step before the build is allowed to report `Signed: true`.
@@ -470,7 +479,11 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - The rejection of scanning the compiled binary is now empirically confirmed rather than assumed: a third test drives the real `bun build --compile`, verifies the secret's literal bytes DO survive into the 94MB binary, then runs `ScanDirectory` against it and gets `Passed=true, findings=0` — the NUL-byte sniff skips binary content, so that approach is a silent no-op, exactly as the decision above predicted. ([`--strategy=exe` secret-scanning gap](items/exe-secret-scan-gap.md))
 - exe is **not** at parity with layered/static: a secret injected by the `bun build --compile` step itself — a `bunfig.toml` preload plugin, a `with { type: "macro" }` import — is present in neither scanned tree. ([`--strategy=exe` secret-scanning gap](items/exe-secret-scan-gap.md))
 - Breaking change: CI using `--expect-source` on unsigned images now fails until it signs or passes `--allow-unverified-source`. ([`--expect-source` requires verified provenance](items/expect-source-verified.md))
-- The generic rule's key list is word-boundary anchored, so camelCase (`apiKey`) and suffixed (`dbPassword`) identifiers are not matched. Widening it belongs in its own change, alongside the false-positive budget that widening would spend. ([The generic secret rule fired on minified code](items/generic-secret-rule-matched-minified-code.md))
+- A quoted key is still not matched: `"apiKey": "…"` fails because the closing quote sits between the keyword and the `[:=]` anchor. This is pre-existing and unchanged by the widening — the old word-anchored rule missed it too — but it means JSON and JSONC config files get no generic-rule coverage at all. ([The generic secret rule misses camelCase and suffixed key names](items/generic-secret-rule-key-coverage.md))
+- An identifier that legitimately ends in `Token`/`Secret`/`Password`/`ApiKey` without being a credential still matches — measured at 24 occurrences of one such class (Vite's bundled `js-tokens` lexer) across 105.6 MiB of real JS. Nothing structural separates `lastSignificantToken` from `accessToken`, and naming the specific identifiers in a stop-word list was rejected as a decaying allowlist. Unreachable today because `node_modules` is never walked, but a vendored or re-bundled copy inside build output would be flagged. ([The generic secret rule misses camelCase and suffixed key names](items/generic-secret-rule-key-coverage.md))
+- Kebab-case `api-key` is not matched; `api_?key` folds only the underscore spelling. ([The generic secret rule misses camelCase and suffixed key names](items/generic-secret-rule-key-coverage.md))
+- Keyword-as-prefix identifiers (`passwordHash`, `tokenStore`) are deliberately excluded. The rule claims to catch identifiers that ARE a credential, not every identifier that mentions one. ([The generic secret rule misses camelCase and suffixed key names](items/generic-secret-rule-key-coverage.md))
+- The generic rule's key list was word-boundary anchored, so camelCase (`apiKey`) and suffixed (`dbPassword`) identifiers were not matched. Widening it belonged in its own change, alongside the false-positive budget that widening would spend — since closed by [The generic secret rule misses camelCase and suffixed key names](items/generic-secret-rule-key-coverage.md), which measured that cost at zero on real build output. ([The generic secret rule fired on minified code](items/generic-secret-rule-matched-minified-code.md))
 - Static-key signing only — there is no keyless (Fulcio/OIDC) signing path. Keyless Sigstore exists only on the verification side (base images, `pokkum verify`). ([Image signing with Cosign/DSSE](items/image-signing.md))
 - The placeholder trust-anchor fallback was removed; an unconfigured key now hard-fails instead of silently no-op signing (a breaking change for anyone who relied on the old default). ([Image signing with Cosign/DSSE](items/image-signing.md))
 - Interop with `cosign verify-attestation` in tag-fallback mode required a follow-up fix (see [cosign verify-attestation interop fix](items/cosign-attestation-interop.md)) — dual-publish alone did not guarantee third-party tool agreement. ([Multi-arch signature/attestation subject (dual-publish)](items/multi-arch-attestation-subject.md))

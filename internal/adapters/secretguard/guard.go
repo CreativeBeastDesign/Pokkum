@@ -153,6 +153,30 @@ var defaultSecretRules = []rule{
 		// only case-folds letters, not the literal underscore, so the two
 		// spellings need the explicit optional `_` rather than relying on the
 		// flag.
+		//
+		// The false-positive cost of that widening was MEASURED against real
+		// bundles rather than assumed — see minified_corpus_test.go, which
+		// makes the measurement a permanent test. Both key patterns were also
+		// swept over every real .js/.mjs/.cjs/.ts under testdata/ (4598 files,
+		// 105.6MiB, including the published npm bundles of the Svelte
+		// compiler, Vite, TypeScript, Rollup, Rolldown and esbuild): the old
+		// word-anchored key found 0, the widened one found 24. All 24 are one
+		// class — Vite's bundled js-tokens lexer assigning a local named
+		// `lastSignificantToken` to sentinel strings like
+		// "?InterpolationInTemplate" — and all 24 sit under node_modules/,
+		// which ScanDirectory never walks. Over the file set the scanner
+		// actually reaches in this repo's three real SvelteKit fixtures, the
+		// count is 0 before and 0 after.
+		//
+		// The residual risk is therefore a non-credential identifier that
+		// genuinely ENDS in Token/Secret/Password/ApiKey and lands somewhere
+		// the scanner does walk. Nothing structural separates
+		// `lastSignificantToken` from `accessToken`, so no tightening on the
+		// key side can exclude one and keep the other; naming such identifiers
+		// in a stop-word list was rejected because an allowlist of exempted key
+		// names decays into a pre-authorised blind spot for a key genuinely
+		// named that way. The escape hatches for that case are the existing
+		// per-line `pokkum:allow-secret` marker and AllowPatterns.
 		Pattern: regexp.MustCompile(`(?i)\b[a-z0-9_]*(?:password|secret|token|api_?key)\s*[:=]\s*["']([^"'\s(){}\[\];]{8,})["']`),
 	},
 }

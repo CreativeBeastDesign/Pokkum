@@ -15,16 +15,27 @@ import (
 // rule and must be caught by the widened one.
 func TestGenericRule_MatchesSuffixedKeyForms(t *testing.T) {
 	for name, src := range map[string]string{
+		// The seven spellings the roadmap item names explicitly, each in the
+		// form a JS/TS project actually writes it.
+		"apiKey (camelCase, bare)":     `apiKey = "abcdefgh12345678"`,
+		"api_key (snake_case, bare)":   `api_key = "abcdefgh12345678"`,
+		"apikey (no separator, bare)":  `apikey = "abcdefgh12345678"`,
+		"accessToken (camelCase)":      `accessToken = "abcdefgh12345678"`,
+		"clientSecret (camelCase)":     `clientSecret = "abcdefgh12345678"`,
+		"dbPassword (camelCase)":       `dbPassword = "abcdefgh12345678"`,
+		"refreshToken (bare property)": `refreshToken:"abcdefgh12345678"`,
+
+		// Further real-world spellings around the same four keywords.
 		"camelCase suffix (password)":      `const fallbackPassword = "hunter2hunter2";`,
 		"camelCase suffix, second example": `const thirdPassword = "abcdefgh12345678";`,
 		"camelCase suffix (token)":         `apiToken: "abcdefgh12345678",`,
 		"camelCase suffix, auth token":     `authToken = "abcdefgh12345678"`,
 		"SCREAMING_SNAKE prefix":           `DB_PASSWORD="abcdefgh12345678"`,
+		"SCREAMING_SNAKE api key":          `STRIPE_API_KEY = "abcdefgh12345678"`,
 		"camelCase suffix (secret)":        `stripeSecret: 'abcdefgh12345678'`,
-		"camelCase suffix, refresh token":  `refreshToken:"abcdefgh12345678"`,
-		"camelCase suffix (clientSecret)":  `clientSecret = "abcdefgh12345678"`,
 		"snake_case api_key":               `stripe_api_key = "abcdefgh12345678"`,
 		"no-underscore apikey":             `myApikey = "abcdefgh12345678"`,
+		"camelCase apiKey with prefix":     `stripeApiKey: "abcdefgh12345678"`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			res := scanSource(t, "src/config.ts", "export const config = {\n  "+src+"\n};\n")
@@ -72,21 +83,37 @@ func TestGenericRule_SuffixWideningDoesNotReintroduceMinifiedFalsePositives(t *t
 // TestGenericRule_DoesNotMatchStopWordsOrPrefixOnlyKeys guards the two ways
 // a naive "contains" widening (rather than a suffix-anchored one) would have
 // overreached: (a) real English words/identifiers that happen to CONTAIN one
-// of the keyword substrings without ending in it (tokenizer, secretary,
-// keyboard, monkey), and (b) identifiers where the keyword is a PREFIX
-// rather than a SUFFIX (passwordHash) — this rule only ever claimed to catch
-// identifiers that ARE a password/secret/token/api key, not every
-// identifier that merely mentions one. All of these carry a
-// credential-shaped value (8+ chars, no excluded punctuation) so a match
-// here could only be explained by the key side, isolating exactly what this
-// test intends to check.
+// of the keyword substrings without ending in it (tokenizer, tokenize,
+// secretary, passwordless, keyboard, keys, keyof, monkey), and (b) identifiers
+// where the keyword is a PREFIX rather than a SUFFIX (passwordHash,
+// tokenStore) — this rule only ever claimed to catch identifiers that ARE a
+// password/secret/token/api key, not every identifier that merely mentions
+// one. All of these carry a credential-shaped value (8+ chars, no excluded
+// punctuation) so a match here could only be explained by the key side,
+// isolating exactly what this test intends to check.
+//
+// Note there is deliberately NO literal stop-word list in guard.go for these
+// to be checked against. End-anchoring the keyword at `\s*[:=]` excludes every
+// one of them structurally, and a maintained list of exempted words would be
+// an allowlist that decays: each entry silently becomes either dead weight or
+// a pre-authorised blind spot for a key genuinely named that way
+// (mem:self_review_checklist row 46). The list lives here, in the test, as
+// coverage of the structural rule rather than as configuration the rule reads.
 func TestGenericRule_DoesNotMatchStopWordsOrPrefixOnlyKeys(t *testing.T) {
 	for name, src := range map[string]string{
-		"tokenizer (contains token, not suffixed)":         `tokenizer = "abcdefgh12345678"`,
-		"secretary (contains secret, not suffixed)":        `secretary = "abcdefgh12345678"`,
-		"keyboard (contains key, not api_key)":             `keyboard = "abcdefgh12345678"`,
-		"monkey (contains key, not api_key)":               `monkey = "abcdefgh12345678"`,
+		// (a) keyword present but not at the end of the identifier.
+		"tokenizer (token + izer)":        `tokenizer = "abcdefgh12345678"`,
+		"tokenize (token + ize)":          `tokenize = "abcdefgh12345678"`,
+		"secretary (secret + ary)":        `secretary = "abcdefgh12345678"`,
+		"passwordless (password + less)":  `passwordless = "abcdefgh12345678"`,
+		"keyboard (key, and not api_key)": `keyboard = "abcdefgh12345678"`,
+		"monkey (key, and not api_key)":   `monkey = "abcdefgh12345678"`,
+		"keys (key, plural, not api_key)": `keys = "abcdefgh12345678"`,
+		"keyof (key + of, not api_key)":   `keyof = "abcdefgh12345678"`,
+
+		// (b) keyword is the identifier's PREFIX rather than its suffix.
 		"passwordHash (keyword is a prefix, not a suffix)": `passwordHash = "abcdefgh12345678"`,
+		"tokenStore (keyword is a prefix, not a suffix)":   `tokenStore = "abcdefgh12345678"`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			res := scanSource(t, "src/util.ts", src)

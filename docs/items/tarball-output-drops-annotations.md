@@ -47,9 +47,36 @@ remains for that output mode specifically.
 
 Do both, in order: warn now, since a silent loss of provenance metadata is the actual defect, then fold real annotation support into the --to-oci-layout work rather than duplicating it.
 
+## Decision
+
+Warn half shipped 2026-08-19 (cd5c7f0). `Write` in tarball.go now calls a shared
+`warnDroppedAnnotations` helper (registry.go) after a successful write, naming every
+manifest annotation key actually being discarded, sorted, deterministic across runs. It
+is a deliberate no-op when the image carries no annotations at all, so an ordinary build
+stays silent. A `pokkum.dev/*` key gets its own clause calling out that other Pokkum
+commands (e.g. `pokkum verify` reading `pokkum.dev/asset-overlay-sources`) cannot work
+against this output, distinct from the purely descriptive `org.opencontainers.image.*`
+set. `--local` shares the same fix: `daemon.Write` (daemon.go) calls `tarball.Write`
+internally, so it hits the identical annotations-less docker-save format and now warns
+too — beyond this item's original scope but the same root cause, so it was folded in
+rather than filed separately.
+
+Still open: the actual defect (no annotations field in the format at all) is unfixed.
+Real annotation support remains folded into
+[--to-oci-layout for daemonless cluster loading](oci-layout-dev-output.md) per the
+recommendation above, rather than duplicated here.
+
 ## Implementation
 
 - [internal/adapters/registry/tarball.go](../../internal/adapters/registry/tarball.go)
+- [internal/adapters/registry/daemon.go](../../internal/adapters/registry/daemon.go)
+- [internal/adapters/registry/registry.go](../../internal/adapters/registry/registry.go)
+- [internal/adapters/registry/tarball_test.go](../../internal/adapters/registry/tarball_test.go)
+- [internal/adapters/registry/daemon_test.go](../../internal/adapters/registry/daemon_test.go)
+
+## Evidence
+
+- Commits: `cd5c7f0`
 
 ## Related
 

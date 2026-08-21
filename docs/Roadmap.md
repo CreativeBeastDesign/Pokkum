@@ -29,7 +29,6 @@ _None._
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
 | [Build-environment capture (Go + SvelteKit versions)](items/build-environment-capture.md) | Round out toolchain provenance by also recording the SvelteKit version used, alongside Go and Bun which are already captured. | feature | open |
-| [The generic secret rule misses camelCase and suffixed key names](items/generic-secret-rule-key-coverage.md) | password/secret/api_key/token are word-boundary anchored, so apiKey, dbPassword and accessToken are not matched at all. | hardening | open |
 
 ## v1.2
 

@@ -66,7 +66,7 @@ as a tightening — recorded as its own follow-up.
 
 ## Known Limitations
 
-- The generic rule's key list is word-boundary anchored, so camelCase (`apiKey`) and suffixed (`dbPassword`) identifiers are not matched. Widening it belongs in its own change, alongside the false-positive budget that widening would spend.
+- The generic rule's key list was word-boundary anchored, so camelCase (`apiKey`) and suffixed (`dbPassword`) identifiers were not matched. Widening it belonged in its own change, alongside the false-positive budget that widening would spend — since closed by [The generic secret rule misses camelCase and suffixed key names](generic-secret-rule-key-coverage.md), which measured that cost at zero on real build output.
 
 ## Related
 
