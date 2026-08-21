@@ -186,7 +186,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 				// npm package name to resolve, not a local file, and fails with
 				// "preload not found" for exactly that reason.
 				preloadPath := ports.AppServerDirPrefix + "/" + req.TelemetryPreloadRelPath
-				req.Runtime.Entrypoint = []string{ports.SupervisorPath, "--", ports.BunBinaryPath, "--preload", preloadPath, ports.AppServerIndexPath}
+				req.Runtime.Entrypoint = []string{ports.SupervisorPath, "--", ports.BunBinaryPath, ports.BunNoInstallFlag, "--preload", preloadPath, ports.AppServerIndexPath}
 			} else {
 				req.Runtime.Entrypoint = ports.DefaultLayeredEntrypoint()
 			}

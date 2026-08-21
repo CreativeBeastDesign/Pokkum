@@ -321,10 +321,28 @@ const (
 	AnnotationVEXExemptions = "pokkum.dev/vex-exemptions"
 )
 
+// BunNoInstallFlag disables Bun's runtime auto-install.
+//
+// Bun resolves a missing package by fetching it from the public npm registry
+// mid-execution. In a container that turns a packaging gap into a silent
+// supply-chain hole: code that is in neither the image, the SBOM, the signature
+// nor the provenance is downloaded and executed in production, and the app
+// appears to work. Verified locally — an `await import("valibot")` in an empty
+// project resolves, and the same import with this flag fails with
+// "Cannot find package".
+//
+// Every production dependency now ships in the image (AppNodeModulesDirPrefix),
+// so auto-install has nothing legitimate left to do, and any remaining gap
+// should fail loudly at startup instead of being papered over by a network
+// fetch that a read-only root filesystem or a tightened egress policy would
+// break later anyway.
+const BunNoInstallFlag = "--no-install"
+
 // DefaultLayeredEntrypoint returns the image entrypoint for StrategyLayered:
-// the supervisor, "--", the Bun runtime executable, then the application server index.js.
+// the supervisor, "--", the Bun runtime executable with auto-install disabled,
+// then the application server index.js.
 func DefaultLayeredEntrypoint() []string {
-	return []string{SupervisorPath, "--", BunBinaryPath, AppServerIndexPath}
+	return []string{SupervisorPath, "--", BunBinaryPath, BunNoInstallFlag, AppServerIndexPath}
 }
 
 // DefaultLayeredNodeEntrypoint returns the image entrypoint for

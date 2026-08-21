@@ -252,7 +252,7 @@ func TestBuild_LayeredEntrypoint_TelemetryInsertsPreload(t *testing.T) {
 	}
 	cfg := configOf(t, img)
 	want := []string{
-		ports.SupervisorPath, "--", ports.BunBinaryPath,
+		ports.SupervisorPath, "--", ports.BunBinaryPath, ports.BunNoInstallFlag,
 		"--preload", ports.AppServerDirPrefix + "/otel-bootstrap.ts",
 		ports.AppServerIndexPath,
 	}

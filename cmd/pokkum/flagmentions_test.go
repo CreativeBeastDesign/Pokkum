@@ -57,6 +57,7 @@ var foreignFlags = map[string]string{
 	"--production":      "bun install",
 	"--no-save":         "bun install",
 	"--frozen-lockfile": "bun install",
+	"--no-install":      "bun runtime — disables auto-install in the image entrypoint",
 
 	// git — gitutils, slsa/gitdiscovery, config source-date discovery
 	"--always":    "git describe",
