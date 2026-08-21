@@ -99,8 +99,11 @@ Choose your preferred installation method:
 ### 1. Homebrew (macOS & Linux)
 
 ```bash
-brew install CreativeBeastDesign/pokkum/pokkum
+brew tap CreativeBeastDesign/pokkum
+brew install pokkum
 ```
+
+Homebrew no longer auto-taps third-party taps, so the `brew tap` line is required — `brew install CreativeBeastDesign/pokkum/pokkum` on its own fails with "No available formula or cask".
 
 ---
 
