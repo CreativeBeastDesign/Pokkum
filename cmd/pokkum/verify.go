@@ -2,15 +2,24 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/assetoverlay"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/comparator"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
@@ -192,7 +201,7 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 
 	if opts.noRebuild {
 		if !provSummary.HasProvenance && !provSummary.SignatureValid {
-			msg := fmt.Sprintf("image %s has neither a valid SLSA provenance attestation nor a verified signature", imageRef)
+			msg := unverifiedImageMessage(ctx, imageRef, provSummary.ImageDigest, opts.registryConfig)
 			if outputFormat == ports.FormatJSON {
 				_ = jsonutils.WriteError(os.Stdout, "verify", "ERR_PROVENANCE_FAILED", msg, "")
 				exitFunc(2)
@@ -323,4 +332,124 @@ func runVerify(ctx context.Context, logger *slog.Logger, opts *verifyOptions, im
 	}
 
 	return nil
+}
+
+// unverifiedImageMessage builds the error text for the "no attestation,
+// no verified signature" case at --no-rebuild's default log level (F10).
+//
+// Before this, `!provSummary.HasProvenance && !provSummary.SignatureValid`
+// always produced the exact same sentence regardless of *why*: an image
+// nobody ever signed reads identically to an image signed with a real
+// signature that fails to verify against the configured key/identity (wrong
+// --public-key, wrong --keyless-identity/--keyless-issuer, or genuine
+// tampering). cosign distinguishes these ("no signatures found" vs "invalid
+// signature ..."); this did not.
+//
+// The distinguishing fact -- was signature/attestation material present at
+// all -- is computed inside internal/adapters/provenance.Resolver
+// (sigVerifyOutcome tracks keylessMaterialSeen/staticSigSeenNoKey, and
+// tryParseAndVerifySLSA's DSSE failure is logged at slog.LevelDebug) but is
+// discarded before it reaches ports.ProvenanceSummary: only the two
+// booleans survive. cmd/pokkum does not own internal/adapters/provenance or
+// internal/ports, so it cannot widen that struct here. As a client-side
+// stopgap, this independently re-derives *presence* (never validity) by
+// checking for the same "<repo>:<alg>-<hex>.sig/.att" tags
+// ResolveProvenance itself looks for (probeSignatureMaterialPresence).
+//
+// This is a real fix for the symptom, but it is not the durable one: it
+// duplicates ResolveProvenance's tag-naming convention instead of reusing
+// information the resolver already computed, so the two can silently drift
+// if that convention ever changes on one side and not the other. The
+// durable fix is to have internal/adapters/provenance carry its own
+// materialPresent/validity distinction out on ports.ProvenanceSummary (e.g.
+// a SignatureMaterialPresent/AttestationMaterialPresent pair, or a small
+// VerificationDiagnostic string) instead of reducing it to two booleans, and
+// have this function read that field instead of re-probing the registry.
+func unverifiedImageMessage(ctx context.Context, imageRef, imageDigest, registryConfigPath string) string {
+	sigPresent, attPresent, probeErr := probeSignatureMaterialPresence(ctx, imageRef, imageDigest, registryConfigPath)
+
+	switch {
+	case probeErr != nil:
+		// Inconclusive: don't assert a distinction this couldn't actually
+		// confirm. Keep the original wording, but say so rather than
+		// silently guessing one way or the other.
+		return fmt.Sprintf(
+			"image %s has neither a valid SLSA provenance attestation nor a verified signature "+
+				"(could not determine whether the image is unsigned or carries a failed signature: %v)",
+			imageRef, probeErr)
+
+	case sigPresent || attPresent:
+		var present []string
+		if sigPresent {
+			present = append(present, "a Cosign signature")
+		}
+		if attPresent {
+			present = append(present, "an SLSA provenance attestation")
+		}
+		return fmt.Sprintf(
+			"image %s carries %s that did NOT verify -- the signature/attestation is present but invalid "+
+				"(wrong key, wrong --keyless-identity/--keyless-issuer, or tampering), not an absence of "+
+				"signing. Re-run with --log-level=debug for the underlying verification error",
+			imageRef, strings.Join(present, " and "))
+
+	default:
+		return fmt.Sprintf(
+			"image %s has no Cosign signature or SLSA provenance attestation at all -- it was never signed. "+
+				"Sign it with `pokkum build --sign` (the default) to enable verification",
+			imageRef)
+	}
+}
+
+// probeSignatureMaterialPresence is a best-effort, read-only check for
+// whether imageRef carries Cosign signature (.sig) and/or SLSA attestation
+// (.att) tags at all, independent of whether that material actually
+// verifies. See unverifiedImageMessage's doc comment for why this exists and
+// what the non-duplicated fix would look like.
+func probeSignatureMaterialPresence(ctx context.Context, imageRef, imageDigest, registryConfigPath string) (sigPresent, attPresent bool, err error) {
+	ref, err := name.ParseReference(imageRef, name.WeakValidation)
+	if err != nil {
+		return false, false, fmt.Errorf("parse image reference %q: %w", imageRef, err)
+	}
+	digest, err := v1.NewHash(imageDigest)
+	if err != nil {
+		return false, false, fmt.Errorf("parse image digest %q: %w", imageDigest, err)
+	}
+	kc, err := registryutils.ResolveKeychain(registryConfigPath)
+	if err != nil {
+		return false, false, err
+	}
+	opts := []remote.Option{remote.WithContext(ctx), remote.WithAuthFromKeychain(kc)}
+	repo := ref.Context().Name()
+
+	sigPresent, err = registryTagExists(fmt.Sprintf("%s:%s-%s.sig", repo, digest.Algorithm, digest.Hex), opts)
+	if err != nil {
+		return false, false, err
+	}
+	attPresent, err = registryTagExists(fmt.Sprintf("%s:%s-%s.att", repo, digest.Algorithm, digest.Hex), opts)
+	if err != nil {
+		return false, false, err
+	}
+	return sigPresent, attPresent, nil
+}
+
+// registryTagExists reports whether tagStr resolves to a manifest, treating
+// a 404 as "does not exist" and any other transport error (auth rejection,
+// DNS failure, timeout, 5xx) as inconclusive -- mirroring
+// internal/adapters/registry.Adapter.digestExists's classification, since a
+// transient network problem must not be silently reinterpreted as proof a
+// tag is absent.
+func registryTagExists(tagStr string, opts []remote.Option) (bool, error) {
+	tagRef, err := name.ParseReference(tagStr, name.WeakValidation)
+	if err != nil {
+		return false, fmt.Errorf("parse tag %q: %w", tagStr, err)
+	}
+	_, err = remote.Head(tagRef, opts...)
+	if err == nil {
+		return true, nil
+	}
+	var terr *transport.Error
+	if errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	return false, fmt.Errorf("check %q: %w", tagStr, err)
 }
