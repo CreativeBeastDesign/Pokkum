@@ -42,11 +42,23 @@ brews:
       name: homebrew-pokkum
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
+    # Never point the tap at a prerelease. Without this, any hyphenated tag — a
+    # release-candidate, or a throwaway tag pushed to exercise the pipeline —
+    # rewrites the formula, and `brew install pokkum` starts serving it to
+    # everyone. Set explicitly rather than trusting a default.
+    skip_upload: auto
     homepage: "https://github.com/CreativeBeastDesign/pokkum"
     description: "Zero-dependency OCI container image compiler for SvelteKit applications"
     license: "Apache-2.0"
     install: |
       bin.install "pokkum"
+
+# Hyphenated tags (v1.1.0-rc1, or a throwaway v0.0.1-test) are marked as GitHub
+# prereleases, which keeps them out of the /releases/latest endpoint — the one
+# install.sh resolves when no POKKUM_VERSION is given. Without this a test tag
+# becomes "Latest" and every `curl … | sh` installs it.
+release:
+  prerelease: auto
 
 checksum:
   name_template: "checksums.txt"
