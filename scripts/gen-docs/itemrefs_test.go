@@ -149,7 +149,7 @@ func TestGeneratedDocsHaveNoDeadRelativeLinks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
-		for _, m := range mdLinkRe.FindAllStringSubmatch(string(body), -1) {
+		for _, m := range mdLinkRe.FindAllStringSubmatch(stripCodeBlocks(string(body)), -1) {
 			target := strings.TrimSpace(m[1])
 			// Skip absolute URLs and any unresolved scheme — a leftover
 			// item: ref is caught by TestGeneratedDocsHaveNoRawItemRefs.
@@ -197,3 +197,36 @@ func TestGeneratedDocsHaveNoRawItemRefs(t *testing.T) {
 		}
 	}
 }
+
+// stripCodeBlocks blanks out fenced and indented code blocks so the link
+// walkers below read prose only.
+//
+// Markdown link syntax and regular-expression syntax overlap: a character
+// class like [^"'\s(){}] is not a link, but it matches the same
+// `[...](...)` shape. An item documenting a regex in a code block therefore
+// failed the dead-link check for a "link" that was never a link — the doc was
+// correct and the checker was wrong. Blanking rather than deleting keeps byte
+// offsets and line numbers intact for any error message built from them.
+func stripCodeBlocks(md string) string {
+	lines := strings.Split(md, "\n")
+	inFence := false
+	for i, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			lines[i] = ""
+			continue
+		}
+		// An indented code block: four spaces or a tab, the CommonMark rule.
+		if inFence || strings.HasPrefix(ln, "    ") || strings.HasPrefix(ln, "\t") {
+			lines[i] = ""
+			continue
+		}
+		// Inline code spans on a prose line, for the same reason.
+		lines[i] = inlineCodeRe.ReplaceAllString(ln, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// inlineCodeRe matches a backtick-delimited inline code span.
+var inlineCodeRe = regexp.MustCompile("`[^`]*`")
