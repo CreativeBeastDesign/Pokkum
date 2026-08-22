@@ -15,7 +15,7 @@ static key pair.
 which returns a defensive copy of the bytes so callers cannot mutate the
 package-level embedded data.
 
-See [fixes-to-v1.md](../../../fixes-to-v1.md) at the repo root for details on
+See [fixes-to-v1.md](../../../docs/archive/fixes-to-v1.md) for details on
 the keyless verification implementation and how it closes the gap that the
 static-key Cosign verifier (`internal/adapters/cosign`) alone could not cover
 for real upstream signatures on the `distroless`/`chainguard` base image presets.

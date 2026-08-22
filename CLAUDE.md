@@ -133,7 +133,7 @@ A change that only exists as uncommitted working-tree state is one `git clean`/`
 Upon discovering a bug during self-review or debugging:
 
 1. Conduct a root-cause analysis into _why_ the bug was introduced (e.g., faulty assumption, missed boundary, leaky abstraction).
-2. Log the incident in [`Lessons.md`](file:///Users/andrebarlocher/Documents/Go/Pokkum/Lessons.md) (creating the file if it does not exist), using this structure so future agents can find and act on it, not just read it in passing:
+2. Log the incident in [`Lessons.md`](Lessons.md) (creating the file if it does not exist), using this structure so future agents can find and act on it, not just read it in passing:
 
    ```
    ## YYYY-MM-DD — <one-line summary>

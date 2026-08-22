@@ -21,7 +21,7 @@ At the beginning of any non-trivial task you MUST read exactly these sources, in
 
 1. **This file (`DSH.md`)** — the operating instructions. It is already loaded at conversation start via `instructionFileCandidates`; do not re-read it, but treat its rules as binding.
 2. **Serena MCP contents** — read `mem:core` via the `read_memory` tool, then follow references to the domain-specific memories (`mem:conventions`, `mem:tech_stack`, `mem:telemetry`, `mem:task_completion`, `mem:self_review_checklist`) as needed for the task. Memory is the machine-readable source of truth; always prefer it over any `.md` prose that conflicts.
-3. **`Lessons.md`** — read (or at minimum grep) it for entries tied to the packages/files/behavior about to be touched, **before** writing any code. A prior incident in the same area is a strong signal you are about to repeat it ([`Lessons.md`](file:///Users/andrebarlocher/Documents/Go/Pokkum/Lessons.md), entries newest-first; see §5.2 for the format).
+3. **`Lessons.md`** — read (or at minimum grep) it for entries tied to the packages/files/behavior about to be touched, **before** writing any code. A prior incident in the same area is a strong signal you are about to repeat it ([`Lessons.md`](Lessons.md), entries newest-first; see §5.2 for the format).
 
 ### Pre-task checklist
 

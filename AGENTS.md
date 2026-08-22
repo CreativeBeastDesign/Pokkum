@@ -144,7 +144,7 @@ The sub-agent executes independently in its clean context and must:
 Upon receiving a bug/defect report from the sub-agent:
 
 1. The main agent **MUST** conduct a root-cause analysis into _why_ the bug was introduced in the first place (e.g., faulty assumption, missed boundary, leaky abstraction).
-2. The main agent **MUST** log the incident and key takeaway in [`Lessons.md`](file:///Users/andrebarlocher/Documents/Go/Pokkum/Lessons.md) (creating the file if it does not exist).
+2. The main agent **MUST** log the incident and key takeaway in [`Lessons.md`](Lessons.md) (creating the file if it does not exist).
 
 ---
 

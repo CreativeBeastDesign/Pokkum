@@ -1,6 +1,6 @@
 # Kubernetes Manifest Adapter (`internal/adapters/k8s`)
 
-The `k8s` adapter implements the [`ports.Resolver`](file:///Users/andrebarlocher/Documents/Go/Pokkum/internal/ports/k8s.go) interface. It parses Kubernetes manifests (YAML documents), finds `pokkum://` image references, invokes the provided image builder callback to compile and publish container images, and rewrites the manifest fields to immutable digest references.
+The `k8s` adapter implements the [`ports.Resolver`](../../ports/k8s.go) interface. It parses Kubernetes manifests (YAML documents), finds `pokkum://` image references, invokes the provided image builder callback to compile and publish container images, and rewrites the manifest fields to immutable digest references.
 
 This mechanism works like Google Cloud / CNCF `ko`'s `ko://` scheme, tailored for SvelteKit projects processed by Pokkum.
 
