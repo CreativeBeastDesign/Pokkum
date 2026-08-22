@@ -1,0 +1,25 @@
+{
+	"extends": "$app/tsconfig",
+	"compilerOptions": {
+		"allowJs": true,
+		"checkJs": true,
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"sourceMap": true,
+		"strict": true,
+		"moduleResolution": "bundler"
+	}
+	// SvelteKit 3 removes the generated .svelte-kit/tsconfig.json a project
+	// used to extend directly (see $lib below); "$app/tsconfig" is the
+	// replacement entry point SvelteKit 3 resolves to the equivalent
+	// generated config. Extending "./.svelte-kit/tsconfig.json" here, the
+	// pattern every SvelteKit 2 fixture in this repo uses, is a hard error
+	// under SvelteKit 3 -- verified empirically against the real
+	// @sveltejs/kit@3.0.0-next.25 install this fixture pins.
+	//
+	// $lib itself is also gone in SvelteKit 3: this project's own library
+	// code is reached through "#lib" (this file's sibling package.json
+	// "imports" field), not "$lib".
+}
