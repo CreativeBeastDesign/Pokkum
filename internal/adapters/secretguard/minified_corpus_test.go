@@ -2,9 +2,11 @@ package secretguard_test
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -144,7 +146,23 @@ func TestGenericRule_NoFindingsOnRealMinifiedBuildCorpus(t *testing.T) {
 		t.Run(c.dir, func(t *testing.T) {
 			dir := filepath.Join(root, filepath.FromSlash(c.dir))
 			if _, err := os.Stat(dir); err != nil {
-				t.Fatalf("real build-output corpus %s is missing (it is checked into the repository, so this is a defect, not a skip): %v", c.dir, err)
+				// The corpora are build OUTPUT (testdata/fixtures/*/build,
+				// .svelte-kit/output) and are gitignored, not checked in — the
+				// original wording here claimed otherwise, which is why this
+				// test passed on any machine that had built the fixtures and
+				// failed on the first clean CI checkout.
+				//
+				// Absent is therefore legitimate on a fresh clone. It must NOT
+				// be legitimate where the fixtures have been built, or the
+				// measurement quietly stops happening; POKKUM_REQUIRE_MINIFIED_CORPUS
+				// makes it a hard failure there. Same shape as the runtime
+				// smoke tests' POKKUM_REQUIRE_RUNTIME_SMOKE gate.
+				if requireMinifiedCorpus() {
+					t.Fatalf("real build-output corpus %s is missing, and %s is set — the fixtures are supposed to be built in this environment: %v",
+						c.dir, requireMinifiedCorpusEnv, err)
+				}
+				t.Skipf("build-output corpus %s not present (it is gitignored build output; run the fixture builds to measure against it, or set %s to require it)",
+					c.dir, requireMinifiedCorpusEnv)
 			}
 
 			files, bytes, longestLine := measureCorpus(t, dir)
@@ -192,11 +210,21 @@ func TestGenericRule_NoFindingsOnRealMinifiedBuildCorpus(t *testing.T) {
 // output shared with other packages' tests and is never written to here.
 func TestGenericRule_RealMinifiedCorpusCanProduceAFinding(t *testing.T) {
 	root := repoRoot(t)
-	src := filepath.Join(root, filepath.FromSlash("testdata/fixtures/sveltekit-adapter-node/build/client/_app/immutable/chunks/BchoDuwy.js"))
+	// Discover a real minified chunk rather than naming one. The previous
+	// version hardcoded "BchoDuwy.js" — a CONTENT HASH, which changes whenever
+	// the fixture's sources or toolchain change, on top of the file being
+	// gitignored build output that does not exist on a clean checkout at all.
+	src, err := findLongestMinifiedChunk(filepath.Join(root, filepath.FromSlash("testdata/fixtures/sveltekit-adapter-node/build/client/_app/immutable/chunks")))
+	if err != nil {
+		if requireMinifiedCorpus() {
+			t.Fatalf("no real minified chunk found, and %s is set: %v", requireMinifiedCorpusEnv, err)
+		}
+		t.Skipf("no built fixture output to splice a credential into (gitignored build output; set %s to require it): %v", requireMinifiedCorpusEnv, err)
+	}
 
 	data, err := os.ReadFile(src)
 	if err != nil {
-		t.Fatalf("read real minified chunk: %v", err)
+		t.Fatalf("read real minified chunk %s: %v", src, err)
 	}
 	lines := strings.Split(string(data), "\n")
 	longest := 0
@@ -242,4 +270,49 @@ func TestGenericRule_RealMinifiedCorpusCanProduceAFinding(t *testing.T) {
 		t.Fatalf("a %s= credential spliced into a real %d-char minified line produced no generic-rule finding; the corpus scan above is therefore incapable of failing and its zero proves nothing (matches=%+v)",
 			key, len(lines[longest]), res.Matches)
 	}
+}
+
+// requireMinifiedCorpusEnv turns an absent build-output corpus from a skip into
+// a failure, for environments where the fixtures are known to have been built.
+const requireMinifiedCorpusEnv = "POKKUM_REQUIRE_MINIFIED_CORPUS"
+
+func requireMinifiedCorpus() bool {
+	v := strings.TrimSpace(os.Getenv(requireMinifiedCorpusEnv))
+	if v == "" {
+		return false
+	}
+	b, err := strconv.ParseBool(v)
+	// An unparseable but non-empty value resolves toward "required": a typo
+	// must not silently disable the check it was meant to enable.
+	return err != nil || b
+}
+
+// findLongestMinifiedChunk returns the genuinely-minified .js file with the
+// longest single line under dir, so the test splices its credential into real
+// minified content instead of a hardcoded, content-hashed filename.
+func findLongestMinifiedChunk(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	best, bestLine := "", 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".js") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		data, rerr := os.ReadFile(p)
+		if rerr != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if len(line) > bestLine {
+				best, bestLine = p, len(line)
+			}
+		}
+	}
+	if bestLine < 500 {
+		return "", fmt.Errorf("no .js file under %s has a line longer than 500 chars (longest %d); that is not minified output", dir, bestLine)
+	}
+	return best, nil
 }
