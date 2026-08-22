@@ -723,7 +723,7 @@ func PrepareVirtualViteConfigPassthrough(projectDir, viteConfigName, viteConfigS
 		return nil, fmt.Errorf("no vite config source to pass through")
 	}
 
-	transformed := rewriteRelativeImportSpecifiers(viteConfigSource)
+	transformed, pinned := pinViteConfigVersion(rewriteRelativeImportSpecifiers(viteConfigSource), projectDir)
 	transformed = remoteManifestSortPrelude + transformed
 	transformed = shimDirnameAndImportMetaURL(transformed, filepath.Join(projectDir, viteConfigName))
 
@@ -739,10 +739,79 @@ func PrepareVirtualViteConfigPassthrough(projectDir, viteConfigName, viteConfigS
 		TransformedSource: transformed,
 		VirtualConfigPath: virtualPath,
 		InjectedAdapter:   false,
+		PinnedVersion:     pinned,
 	}, nil
 }
 
+// pinViteConfigVersion pins kit.version.name in a config Pokkum is passing
+// through unchanged, returning whether it could.
+//
+// This was missed when the passthrough path was added: it applied the remote
+// manifest sort but not the version pin, so a project whose adapter was
+// already correct — every SvelteKit 3 project, since svelte.config.js is a
+// hard error there, and the common case on SvelteKit 2 — still emitted
+// SvelteKit's default Date.now() version name into _app/version.json and was
+// therefore not reproducible. Measured: two builds produced
+// {"version":"1787380297729"} and {"version":"1787380341039"}.
+//
+// The bare-call case is deliberately NOT pinned when a svelte.config.js
+// exists. SvelteKit ignores svelte.config.js the moment the plugin receives
+// any argument, so turning `sveltekit()` into `sveltekit({ version: ... })`
+// would silently discard the project's aliases, csp, prerender settings and
+// experimental flags — trading a reproducibility gap for a correctness bug.
+// The caller warns instead.
+func pinViteConfigVersion(source, projectDir string) (string, bool) {
+	if strings.Contains(source, "SOURCE_DATE_EPOCH") {
+		return source, true // the project pins it itself
+	}
+	idx := findLiveSvelteKitCall(source)
+	if idx < 0 {
+		return source, false
+	}
+	openParen := idx + len("sveltekit(") - 1
+	args, ok := scanCallArgs(source, openParen)
+	if !ok {
+		return source, false
+	}
+	closeParen := openParen + 1 + len(args)
+	trimmed := strings.TrimSpace(args)
+
+	var newArgs string
+	switch {
+	case strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}"):
+		// Already passing options, so the project has itself opted out of
+		// svelte.config.js and nothing can be lost by adding one more key.
+		newArgs = injectViteVersionPin(args)
+	case trimmed == "" && findUserSvelteConfigName(projectDir) == "":
+		// No options and no svelte.config.js to shadow: safe to supply one.
+		newArgs = "{" + viteVersionProp + "\n\t\t}"
+	default:
+		return source, false
+	}
+	if newArgs == args {
+		return source, false
+	}
+	return source[:openParen+1] + newArgs + source[closeParen:], true
+}
+
+// findUserSvelteConfigName returns the project's svelte.config.* filename, or
+// "" when the project has none (which SvelteKit 3 requires).
+func findUserSvelteConfigName(projectDir string) string {
+	for _, name := range []string{"svelte.config.js", "svelte.config.ts", "svelte.config.mjs"} {
+		if _, err := os.Stat(filepath.Join(projectDir, name)); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
 var kitBlockRegex = regexp.MustCompile(`kit\s*:\s*\{`)
+
+// viteVersionProp is the kit.version.name pin, in the flat form the Vite
+// config's sveltekit() options object takes. Shared by both the injection and
+// the passthrough paths so the two cannot drift — the passthrough silently
+// lacking it is exactly the bug this const exists to prevent recurring.
+const viteVersionProp = "\n\t\t\tversion: { name: process.env.SOURCE_DATE_EPOCH || 'pokkum-reproducible-build' },"
 
 // injectViteVersionPin inserts a pinned kit.version.name into the flat options
 // object passed to sveltekit().
@@ -764,8 +833,7 @@ func injectViteVersionPin(args string) string {
 	if firstBrace < 0 {
 		return args
 	}
-	const versionProp = "\n\t\t\tversion: { name: process.env.SOURCE_DATE_EPOCH || 'pokkum-reproducible-build' },"
-	return args[:firstBrace+1] + versionProp + args[firstBrace+1:]
+	return args[:firstBrace+1] + viteVersionProp + args[firstBrace+1:]
 }
 
 func injectVersionPin(source string) string {

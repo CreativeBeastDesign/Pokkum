@@ -383,7 +383,19 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 			} else {
 				runViteWrapper = true
 				viteWrapperConfigPath = vcVite.VirtualConfigPath
-				log.Info("bunexec: determinism config prepared (adapter already correct)", "path", vcVite.VirtualConfigPath)
+				log.Info("bunexec: determinism config prepared (adapter already correct)",
+					"path", vcVite.VirtualConfigPath, "versionPinned", vcVite.PinnedVersion)
+				if !vcVite.PinnedVersion {
+					// Silence here is what shipped an unreproducible build once
+					// already: the passthrough applied the manifest sort but not
+					// the version pin, so SvelteKit fell back to Date.now() and
+					// two builds differed. If it cannot be pinned, say so.
+					log.Warn("could not pin kit.version.name in this project's Vite config, so builds are NOT bit-for-bit reproducible: "+
+						"SvelteKit falls back to a Date.now() version name that lands in _app/version.json and changes every client chunk hash. "+
+						"Set it yourself — kit.version.name = process.env.SOURCE_DATE_EPOCH — or pass the adapter options inline in "+
+						"sveltekit({ ... }) so Pokkum can add it without shadowing svelte.config.js",
+						"config", vcVite.VirtualConfigPath)
+				}
 			}
 		}
 		warnIfRemoteFunctionsBreakReproducibility(log, req.ProjectDir, "")
