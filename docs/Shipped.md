@@ -84,6 +84,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | [--strategy=static](items/strategy-static.md) | Compiles a pure static SvelteKit site onto chainguard/static with an embedded pokkum-static Go file server as PID 1 — genuinely functional only since 2026-08-19, after six independent bugs were found by its first real boot test. | feature | shipped | `8306d37`, `1c33509`, `5693980`, `61fd873` |
 | [Tarball output silently drops every OCI annotation](items/tarball-output-drops-annotations.md) | pokkum build --output=tarball writes the legacy docker-save format, which has no annotations field, so every annotation Pokkum stamps is lost without warning. | fix | shipped | `cd5c7f0` |
 | [Ship production dependencies so images are self-contained](items/vendor-production-dependencies.md) | Layered images shipped the server bundle without its dependencies; Bun's runtime auto-install silently fetched them from npm inside the running container. | fix | shipped |  |
+| [Pin kit.version.name so correctly-configured projects build reproducibly](items/version-name-pin.md) | The reproducibility pin lived inside the adapter-injection path, so it only ran for misconfigured projects — a correctly configured one got no pin and a different image on every build. | fix | shipped |  |
 
 ### Developer Experience
 

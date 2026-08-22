@@ -5,6 +5,50 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-22 — A feature only ran for input it was supposed to be unnecessary for
+
+**Category:** boundary / coupling
+**Root cause:** The `kit.version.name` reproducibility pin was implemented as a side effect of
+staging a Vite config during *adapter injection*. Injection only runs when the project's
+adapter is wrong, so the pin only ran for misconfigured projects. A correctly configured
+project got no injection, no pin, and a `Date.now()` version name that renames every hashed
+client chunk — inverting the tool's central claim, and doing so in the direction where nobody
+looks, because "correctly configured project builds fine" is what you expect to see. Measured
+on a real project: two builds of an unchanged tree emitted different `version.json` values and
+differed in two OCI layers.
+**Where:** `internal/adapters/bunexec/compiler.go` `Prepare`
+**Fix:** The pin runs as its own guard, independent of injection: stage a config to pin it
+where the build script is exactly `vite build`, warn loudly where the script does more and
+taking it over would skip the rest.
+**Preventative rule:** When a capability is implemented inside a conditional path that exists
+for a *different* reason (an injection, a repair, a fallback), state which inputs reach it and
+confirm that set matches the inputs the capability is *for*. A capability that piggybacks on a
+fix-up path inherits that path's trigger condition — usually "the input was broken" — which is
+frequently the exact complement of the set it should cover.
+
+---
+
+## 2026-08-22 — `else if` chained to a different `if` than its indentation showed
+
+**Category:** control-flow
+**Root cause:** The first fix for the entry above was hung off the injection block as
+`} else if ... {`. The block above it is deeply nested, so the `else` bound to an inner `if`,
+not the outer one it lined up with visually. Go accepts this silently, `gofmt` leaves it
+alone (the indentation *is* consistent with the real binding), the build is clean, and all
+five verification steps pass — the branch simply never executes. Debug logging *before* the
+`if` printed the expected values, which made the condition look satisfied and sent the
+investigation after the predicate rather than after the branch.
+**Where:** `internal/adapters/bunexec/compiler.go` `Prepare`
+**Fix:** Rewritten as a standalone `if` with an explicit `!runViteWrapper` condition instead of
+an `else`, plus `TestPrepare_PinsVersionNameWhenAdapterAlreadyCorrect`, which drives `Prepare`
+end to end and fails against both the original bug and the non-executing fix.
+**Preventative rule:** A new branch is not verified by reading its condition or by logging the
+values that feed it — only by observing an effect that exists solely inside it. Prefer a
+standalone `if` over an `else if` when the preceding block is long or deeply nested, and put
+the probe *inside* the new branch, never just before it.
+
+---
+
 ## 2026-08-22 — The reproducibility fix reached only misconfigured projects, because the passthrough path got the manifest sort but not the version pin
 
 **Category:** parallel-path drift — the same shape as the entry two below, created in the code written to fix it
