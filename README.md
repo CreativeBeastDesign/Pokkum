@@ -130,7 +130,9 @@ npm install -g @pokkum/cli
 `@pokkum/cli` is a thin launcher: the real binary ships in one of four platform
 packages (`@pokkum/pokkum_{linux,darwin}_{amd64,arm64}`), listed as
 `optionalDependencies` so npm downloads only the one matching your machine.
-Pin a version in CI (`npx @pokkum/cli@1.0.6`) rather than tracking `latest`.
+Pin a version in CI (`npx @pokkum/cli@<version>`, using a published
+[release](https://github.com/CreativeBeastDesign/pokkum/releases)) rather than
+tracking `latest`.
 
 > [!NOTE]
 > The npm packages carry no signature of their own. If you need the supply-chain
@@ -146,10 +148,10 @@ Pin a version in CI (`npx @pokkum/cli@1.0.6`) rather than tracking `latest`.
 curl -fsSL https://raw.githubusercontent.com/CreativeBeastDesign/pokkum/main/install.sh | sh
 ```
 
-Detects your OS and architecture, downloads the matching release archive, and **verifies its SHA-256 against the release's `checksums.txt` before installing** — a mismatch aborts without installing anything. Override the destination with `POKKUM_INSTALL_DIR` (default `/usr/local/bin`) or pick a version with `POKKUM_VERSION`:
+Detects your OS and architecture, downloads the matching release archive, and **verifies its SHA-256 against the release's `checksums.txt` before installing** — a mismatch aborts without installing anything. Override the destination with `POKKUM_INSTALL_DIR` (default `/usr/local/bin`) or pick a [released version](https://github.com/CreativeBeastDesign/pokkum/releases) with `POKKUM_VERSION` (default: the latest release):
 
 ```bash
-POKKUM_VERSION=v1.0.1 POKKUM_INSTALL_DIR="$HOME/.local/bin" \
+POKKUM_VERSION=v<version> POKKUM_INSTALL_DIR="$HOME/.local/bin" \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/CreativeBeastDesign/pokkum/main/install.sh)"
 ```
 
@@ -163,7 +165,7 @@ POKKUM_VERSION=v1.0.1 POKKUM_INSTALL_DIR="$HOME/.local/bin" \
   # published — so `@v1` cannot resolve. Bump this when you upgrade.
   uses: CreativeBeastDesign/pokkum/.github/actions/setup-pokkum@v1.0.1
   with:
-    version: "v1.0.1" # or 'latest' to track the newest release
+    version: "v<version>" # a released tag; omit for the default, 'latest'
 
 - name: Build & Push SvelteKit Container
   env:
