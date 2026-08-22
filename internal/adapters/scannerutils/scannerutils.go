@@ -355,18 +355,51 @@ func ParseBunLock(data []byte) ([]CatalogPackage, error) {
 
 	type parsedEntry struct {
 		name, version string
+		hoisted       bool
 	}
 	entries := make(map[string]parsedEntry, len(parsed.Packages))
 	graph := make(map[string][]string, len(parsed.Packages))
-	for k, v := range parsed.Packages {
+
+	// Iterate in sorted key order, not map order. A lockfile routinely holds
+	// the same package name at several versions — a hoisted copy keyed by the
+	// bare name, plus nested copies keyed by their dependency path, e.g.
+	//
+	//	"@oxc-parser/binding-linux-arm64-gnu"            -> 0.127.0
+	//	"knip/oxc-parser/@oxc-parser/binding-linux-arm64-gnu" -> 0.137.0
+	//
+	// and this catalogue is keyed by name, so exactly one of them wins.
+	// Ranging over the map let Go's randomized iteration order pick, which
+	// made two SBOMs of an unchanged project disagree on package versions —
+	// and, through the reachability graph below, on dependency scope and
+	// therefore on how many packages the document contained at all. Measured
+	// on a real project: six builds of identical source produced 9, 10, 11,
+	// 13, 14 and 15 packages.
+	keys := make([]string, 0, len(parsed.Packages))
+	for k := range parsed.Packages {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
 		if k == "" {
 			continue
 		}
+		v := parsed.Packages[k]
 		name, version := parseBunPackageEntry(k, v)
 		if name == "" || version == "" {
 			continue
 		}
-		entries[name] = parsedEntry{name: name, version: version}
+		// The hoisted copy wins, because it is the one a bare import actually
+		// resolves to: bun installs it at node_modules/<name>, where module
+		// resolution finds it first. Its key is exactly the package name;
+		// every nested copy carries its dependency path. Among nested copies
+		// with no hoisted sibling the lexically first key wins, which is
+		// arbitrary but stable — and stable is the property being fixed here.
+		hoisted := k == name
+		if existing, ok := entries[name]; ok && (existing.hoisted || !hoisted) {
+			continue
+		}
+		entries[name] = parsedEntry{name: name, version: version, hoisted: hoisted}
 		graph[name] = bunPackageDependencyNames(v)
 	}
 
@@ -604,20 +637,42 @@ func ParsePackageLock(data []byte) ([]CatalogPackage, error) {
 	seen := make(map[string]packageLockEntry)
 
 	if len(parsed.Packages) > 0 {
-		for path, pkg := range parsed.Packages {
+		// Sorted, with the hoisted copy winning — same reasoning as
+		// ParseBunLock: "node_modules/foo" and
+		// "node_modules/bar/node_modules/foo" are different versions of one
+		// name, this catalogue holds one of them, and ranging over the map let
+		// Go's randomized order decide which.
+		paths := make([]string, 0, len(parsed.Packages))
+		for path := range parsed.Packages {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+
+		hoistedNames := make(map[string]bool, len(paths))
+		for _, path := range paths {
+			pkg := parsed.Packages[path]
 			if path == "" || pkg.Version == "" {
 				continue
 			}
 			// Extract package name from node_modules/ path
 			idx := strings.LastIndex(path, "node_modules/")
-			if idx >= 0 {
-				name := path[idx+len("node_modules/"):]
-				scope := ScopeProduction
-				if pkg.Dev {
-					scope = ScopeDevelopment
-				}
-				seen[name] = packageLockEntry{version: pkg.Version, scope: scope}
+			if idx < 0 {
+				continue
 			}
+			name := path[idx+len("node_modules/"):]
+			// Hoisted means the entry lives directly under the root
+			// node_modules, i.e. the path has exactly one "node_modules/"
+			// segment — that is the copy a bare import resolves to.
+			hoisted := idx == 0
+			if _, ok := seen[name]; ok && (hoistedNames[name] || !hoisted) {
+				continue
+			}
+			scope := ScopeProduction
+			if pkg.Dev {
+				scope = ScopeDevelopment
+			}
+			seen[name] = packageLockEntry{version: pkg.Version, scope: scope}
+			hoistedNames[name] = hoisted
 		}
 	} else if len(parsed.Dependencies) > 0 {
 		extractV1Dependencies(parsed.Dependencies, seen)
@@ -639,15 +694,31 @@ func ParsePackageLock(data []byte) ([]CatalogPackage, error) {
 	return packages, nil
 }
 
+// extractV1Dependencies walks a v1 lockfile's nested "dependencies" tree.
+//
+// Names are visited in sorted order at every level, and a shallower entry is
+// never overwritten by a deeper one: the outermost copy of a package is the
+// hoisted one that a bare import resolves to, and without both rules the same
+// name appearing at two depths resolved to whichever version Go's randomized
+// map iteration reached last.
 func extractV1Dependencies(deps map[string]any, seen map[string]packageLockEntry) {
-	for name, val := range deps {
+	names := make([]string, 0, len(deps))
+	for name := range deps {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		val := deps[name]
 		if obj, ok := val.(map[string]any); ok {
 			if v, ok := obj["version"].(string); ok && v != "" {
-				scope := ScopeProduction
-				if dev, ok := obj["dev"].(bool); ok && dev {
-					scope = ScopeDevelopment
+				if _, already := seen[name]; !already {
+					scope := ScopeProduction
+					if dev, ok := obj["dev"].(bool); ok && dev {
+						scope = ScopeDevelopment
+					}
+					seen[name] = packageLockEntry{version: v, scope: scope}
 				}
-				seen[name] = packageLockEntry{version: v, scope: scope}
 			}
 			if sub, ok := obj["dependencies"].(map[string]any); ok {
 				extractV1Dependencies(sub, seen)
@@ -681,7 +752,15 @@ func ParsePnpmLock(data []byte) ([]CatalogPackage, error) {
 	}
 
 	var packages []CatalogPackage
+	// Sorted: the caller collapses this slice by name and keeps the first
+	// entry it sees, so a randomly ordered slice picked a random version when
+	// pnpm records the same package at more than one.
+	pnpmKeys := make([]string, 0, len(parsed.Packages))
 	for key := range parsed.Packages {
+		pnpmKeys = append(pnpmKeys, key)
+	}
+	sort.Strings(pnpmKeys)
+	for _, key := range pnpmKeys {
 		name, version := parsePnpmKey(key)
 		if name != "" && version != "" {
 			packages = append(packages, CatalogPackage{

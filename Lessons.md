@@ -5,6 +5,36 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-22 — Sorting the output hid a nondeterministic choice of what went into it
+
+**Category:** determinism
+**Root cause:** Every npm-family lockfile can record one package name at several
+versions — a hoisted copy plus nested copies belonging to some dependency. All four
+parsers built their name-keyed catalogue by ranging over the parsed `packages` **map**,
+so Go's randomized iteration order decided which duplicate won. Two SBOMs of an
+unchanged project therefore disagreed on package versions, and — because the same loop
+built the reachability graph that assigns production/development scope — on how many
+packages the document contained at all. Six builds of identical source produced 9, 10,
+11, 13, 14 and 15 packages, and six SBOM documents with six different SHA-256s.
+
+The reason this survived review is the interesting part: the *output* was carefully
+sorted, with a comment explaining that the document's package order must be fully
+deterministic. It is. Sorting a list assembled by a nondeterministic selection produces
+a stably-ordered list of unstable contents, and looks exactly like the fix.
+**Where:** `internal/adapters/scannerutils/scannerutils.go` — `ParseBunLock`,
+`ParsePackageLock` (v2 path), `extractV1Dependencies`, `ParsePnpmLock`
+**Fix:** Iterate keys in sorted order and make the winner an explicit rule rather than
+an accident: the hoisted copy wins, because it is the one at `node_modules/<name>` that
+a bare import actually resolves to. Found in `bun.lock` first; the other three parsers
+had the identical defect and were fixed in the same pass.
+**Preventative rule:** A sorted output proves nothing about determinism if the values
+being sorted were *selected* nondeterministically. For any map range whose body writes
+into a keyed collection, ask what happens when two iterations target the same key —
+if either can win, the result is random, and no amount of downstream sorting recovers
+it. Fix it where the collision is resolved, not where the output is ordered.
+
+---
+
 ## 2026-08-22 — A feature only ran for input it was supposed to be unnecessary for
 
 **Category:** boundary / coupling
