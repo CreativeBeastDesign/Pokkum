@@ -121,6 +121,16 @@ const (
 // PID-1 server. It is used whenever a static build does not pin an explicit
 // base via --base; see internal/ports/packager.go for the runtime contract the
 // static server satisfies on such a base.
+//
+// Paired with BaseImageChainguard, not BaseImageDistroless. Pokkum keys
+// pokkum.lock entries by preset, and each preset must identify exactly one
+// upstream image — the invariant that makes BaseImageDistrolessNode its own
+// preset rather than a Ref override. Pointing this at distroless/static while
+// keeping the distroless preset was tried and immediately collided: a project
+// with an existing "distroless" lock entry for cc-debian12 had its static build
+// resolve straight back to cc-debian12, silently, because the lock key matched.
+// Using distroless/static properly needs its own preset key, not a different
+// ref under an existing one.
 const StaticBaseRef = "cgr.dev/chainguard/static:latest"
 
 // Keyless Sigstore identity constants for the stock distroless/chainguard

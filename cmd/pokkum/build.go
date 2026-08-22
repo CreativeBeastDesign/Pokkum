@@ -736,18 +736,27 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	}
 	if flags.static {
 		strategy = "static"
-		// Unless the user pinned an explicit base (--base/--hardened), default
-		// to a fully static, libc-free image: the entire point of --static is a
-		// server with no dynamic dependencies. StaticBaseRef (chainguard/static)
-		// is signed with Chainguard's identity, not Distroless's — Preset must
-		// be BaseImageChainguard so signature verification and the pokkum.lock
-		// cache key both agree with the image actually being pulled, and so a
-		// plain build's "distroless"-keyed lock entry never collides with a
-		// --static build's base in the same project.
-		if basePreset == "" {
-			req.BaseImage.Preset = core.BaseImageChainguard
-			req.BaseImage.Ref = core.StaticBaseRef
-		}
+	}
+
+	// Unless the user pinned an explicit base (--base/--hardened), a static
+	// build gets a fully static, libc-free image: the whole point of the
+	// strategy is a server with no dynamic dependencies, and pokkum-static is
+	// built CGO_ENABLED=0 precisely so it needs none.
+	//
+	// This is keyed on the resolved STRATEGY, not on the --static flag. It used
+	// to be inside the `if flags.static` branch above, so `--strategy=static`
+	// — the documented spelling, and the one the strategy flag exists for —
+	// silently fell through to the distroless/cc default and shipped libssl,
+	// libstdc++ and libgomp that nothing in the image can even load. Measured on
+	// a real project: 44.3MB, of which roughly 34MB was base the server never
+	// touches, for a feature whose entire pitch is not shipping a runtime.
+	if strategy == "static" && basePreset == "" {
+		// Chainguard preset, not distroless: StaticBaseRef is chainguard/static,
+		// and the preset is the pokkum.lock key. Keying it "distroless" makes a
+		// project that already has a distroless entry resolve back to
+		// cc-debian12 — verified by doing it.
+		req.BaseImage.Preset = core.BaseImageChainguard
+		req.BaseImage.Ref = core.StaticBaseRef
 	}
 
 	// Compile options
