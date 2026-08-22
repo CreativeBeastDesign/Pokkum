@@ -8,15 +8,14 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
-| Stage | backlog |
+| Status | shipped |
 | Kind | feature |
 | Tier | foundation |
 | Area | Supply Chain & Attestation |
 
 ## Summary
 
-sbom.Generator can now catalogue a resolved base image's dpkg/apk packages with correct pkg:deb/pkg:apk purls, but nothing in a real `pokkum build` calls that path yet — the generated SBOM still describes npm dependencies only.
+The generated SBOM now catalogues the base image's dpkg/apk packages with correct pkg:deb/pkg:apk purls alongside npm dependencies, and the npm side is scoped to what the image actually ships.
 
 ## Problem
 
@@ -77,6 +76,17 @@ pokkum:osPackageCount=0` — a real, positive zero, structurally distinct from "
 scanned" rather than sharing its representation (this codebase's recurring "found
 nothing" vs "could not check" failure mode — see Lessons.md).
 
+The ports/core wiring described above landed the same day, so this is now reachable from
+a real build: `ports.SBOMRequest` carries the resolved per-platform base images and the
+single port method uses them, rather than a second method a caller can forget. Measured
+on a real signed build, ground truth being the package directories present under
+/app/node_modules in the pushed image: 11 pkg:deb entries including libssl3 and libc6;
+npm packages 378 -> 300; listed-but-not-shipped 127 -> 50; shipped-but-not-listed 0
+before and after. The npm scoping is a reachability walk over bun.lock's own graph
+(dependencies, optionalDependencies and peerDependencies edges from the root's
+dependencies), matching what `bun install --production` stages, not a blanket
+devDependencies drop; an undeterminable scope is always kept.
+
 ## Implementation
 
 - [internal/adapters/sbom/generator.go](../../internal/adapters/sbom/generator.go)
@@ -85,9 +95,9 @@ nothing" vs "could not check" failure mode — see Lessons.md).
 
 ## Known Limitations
 
-- Not reachable from a real `pokkum build` yet: nothing calls GenerateForImage until the ports.SBOMRequest/core.fanOut change above lands.
+- 49 of the 50 remaining listed-but-not-shipped npm packages are cross-platform optional stubs (@esbuild/darwin-x64 and similar). Narrowing them to the host's GOOS/GOARCH would make the SBOM's content depend on which machine ran the build, violating bit-for-bit reproducibility to fix a reporting nit — a deliberate trade-off, not an oversight.
+- Dependency scope is undeterminable for pnpm lockfiles and for a bun.lock with no workspaces object; those projects keep the pre-existing behaviour of listing every package.
 - OS-package purls assume one distro identity per build (the resolved base image's own os-release, or a debian/alpine fallback); a hypothetical base whose platforms genuinely disagree on distro would have the first-encountered platform's distro win for namespacing every OS purl, not per-platform namespaces.
-- Separate, pre-existing over-reporting on the npm side (dev-dependencies and cross-platform binary stubs appearing in the SBOM despite not shipping in the image) is untouched by this change — it is a distinct problem from the under-reporting fixed here.
 
 ## Related
 

@@ -380,6 +380,15 @@ A build signed via --signing-key alone doesn't automatically make its own remote
   - [internal/core/pipeline.go](../internal/core/pipeline.go)
   - [internal/adapters/remotecacheutils/remotecacheutils.go](../internal/adapters/remotecacheutils/remotecacheutils.go)
 
+### [SBOM coverage for base-image OS packages](items/sbom-os-package-coverage.md)
+
+The generated SBOM now catalogues the base image's dpkg/apk packages with correct pkg:deb/pkg:apk purls alongside npm dependencies, and the npm side is scoped to what the image actually ships.
+
+- Implementation:
+  - [internal/adapters/sbom/generator.go](../internal/adapters/sbom/generator.go)
+  - [internal/adapters/sbom/os_packages_test.go](../internal/adapters/sbom/os_packages_test.go)
+  - [internal/adapters/scannerutils/scannerutils.go](../internal/adapters/scannerutils/scannerutils.go)
+
 ### [Secret-inlining guard (secretguard)](items/secret-inlining-guard.md)
 
 Regex-based build-time scan over both pre-build source and packaged build output, catching secrets baked in by build-time dependencies as well as the project's own source.
@@ -496,9 +505,9 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - Diff mode ("N new vulnerabilities since last build") from the original CVE-scanning concept remains unbuilt; this item covers exemption consumption only, not vulnerability-diffing. ([OpenVEX exemptions for the CVE gate](items/openvex-exemptions.md))
 - Breaking change: static-key verification now requires an explicitly configured key rather than silently trusting an undocumented shared fallback that nobody's private key ever matched. ([Remove shared placeholder trust-anchor fallback](items/placeholder-pubkey-fallback-removed.md))
 - The fallback removal exposed two latent fail-opens in `internal/adapters/provenance/resolver.go` (a nil-tolerant signer check and a bare `false` for a nil DSSE signer) — both now refuse via `ErrVerifierNotInjected` instead of silently skipping verification. ([Remove shared placeholder trust-anchor fallback](items/placeholder-pubkey-fallback-removed.md))
-- Not reachable from a real `pokkum build` yet: nothing calls GenerateForImage until the ports.SBOMRequest/core.fanOut change above lands. ([SBOM coverage for base-image OS packages](items/sbom-os-package-coverage.md))
+- 49 of the 50 remaining listed-but-not-shipped npm packages are cross-platform optional stubs (@esbuild/darwin-x64 and similar). Narrowing them to the host's GOOS/GOARCH would make the SBOM's content depend on which machine ran the build, violating bit-for-bit reproducibility to fix a reporting nit — a deliberate trade-off, not an oversight. ([SBOM coverage for base-image OS packages](items/sbom-os-package-coverage.md))
+- Dependency scope is undeterminable for pnpm lockfiles and for a bun.lock with no workspaces object; those projects keep the pre-existing behaviour of listing every package. ([SBOM coverage for base-image OS packages](items/sbom-os-package-coverage.md))
 - OS-package purls assume one distro identity per build (the resolved base image's own os-release, or a debian/alpine fallback); a hypothetical base whose platforms genuinely disagree on distro would have the first-encountered platform's distro win for namespacing every OS purl, not per-platform namespaces. ([SBOM coverage for base-image OS packages](items/sbom-os-package-coverage.md))
-- Separate, pre-existing over-reporting on the npm side (dev-dependencies and cross-platform binary stubs appearing in the SBOM despite not shipping in the image) is untouched by this change — it is a distinct problem from the under-reporting fixed here. ([SBOM coverage for base-image OS packages](items/sbom-os-package-coverage.md))
 - A file too large or unreadable to scan fails the build (ErrSecretScanIncomplete) rather than silently reporting a clean pass. ([Secret-inlining guard (secretguard)](items/secret-inlining-guard.md))
 - Five fixed regex patterns only (private key headers, AWS access keys, GitHub PATs, Google API keys, generic password/secret/token assignments) — not Shannon-entropy analysis. An entropy-based scan for arbitrary high-randomness strings was the original design language but was never built. ([Secret-inlining guard (secretguard)](items/secret-inlining-guard.md))
 - See [--strategy=exe secret-scanning gap](items/exe-secret-scan-gap.md) for the one strategy this does not cover. ([Secret-inlining guard (secretguard)](items/secret-inlining-guard.md))

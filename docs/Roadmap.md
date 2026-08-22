@@ -86,7 +86,6 @@ _None._
 | [Lifecycle-script execution provenance](items/lifecycle-script-provenance.md) | Record which packages actually ran install-time lifecycle scripts during the build as a provenance field. | feature | open |
 | [Native addon (.node binary) provenance](items/native-addon-provenance.md) | Hash and record prebuilt native addon binaries in provenance instead of leaving them outside the SBOM/SLSA story entirely. | feature | open |
 | [Node-core CVE lookup for --runtime=node](items/node-cve-lookup.md) | Decide whether to add an OSV Node-core ecosystem query path, or document the gap and leave base-image CVE posture to the operator. | feature | open |
-| [SBOM coverage for base-image OS packages](items/sbom-os-package-coverage.md) | sbom.Generator can now catalogue a resolved base image's dpkg/apk packages with correct pkg:deb/pkg:apk purls, but nothing in a real `pokkum build` calls that path yet — the generated SBOM still describes npm dependencies only. | feature | open |
 | [Verify base image on cache hit](items/verify-base-on-cache-hit.md) | Opt-in flag to re-verify the base image's signature even on a confirmed remote-cache hit, for audit environments that need a uniform verified-base guarantee. | hardening | open |
 
 ### Testing & Infrastructure

@@ -5,6 +5,32 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-22 — The reproducibility fix reached only misconfigured projects, because the passthrough path got the manifest sort but not the version pin
+
+**Category:** parallel-path drift — the same shape as the entry two below, created in the code written to fix it
+
+**Root cause:** the remote-manifest sort could only be delivered through a Vite config Pokkum authors, and Pokkum authored one only when the adapter needed injecting. `PrepareVirtualViteConfigPassthrough` was added so projects whose adapter is already correct — the documented happy path, and the *only* possible path under SvelteKit 3, where `svelte.config.js` is a hard error — would get it too. It applied `remoteManifestSortPrelude` and stopped there; `injectVersionPin`, the other half of determinism, was never called. Those projects still emitted SvelteKit's default `Date.now()` version name into `_app/version.json`, which changes every downstream client chunk hash. The net effect was close to the opposite of the intent: the reproducibility work applied to projects configured wrongly, and not to those configured correctly.
+
+**How it was caught:** two independent signals within minutes — an agent promoting a SvelteKit 3 fixture read the two paths side by side and noticed the asymmetry, and a pristine two-build test of `testdata/fixtures/sveltekit-adapter-node` produced different digests. Measured: passthrough config `SOURCE_DATE_EPOCH` count 0 against the injection path's 1, and `{"version":"1787380297729"}` vs `{"version":"1787380341039"}`. No test found it; the byte comparison did.
+
+**Where:** `internal/adapters/sveltekitutils/injector.go`, `PrepareVirtualViteConfigPassthrough`.
+
+**Fix:** `pinViteConfigVersion` applies the pin on the passthrough path, and both paths now draw the property text from one shared `viteVersionProp` const so they cannot drift again. The bare-`sveltekit()`-with-a-`svelte.config.js` case is deliberately left unpinned — SvelteKit ignores that file the moment the plugin receives any argument, so injecting one would discard the project's aliases, csp and prerender settings — and now warns, naming both ways out. Verified from pristine state on all three paths (adapter-injected SK2, passthrough SK2, passthrough SK3), two builds each, byte-compared.
+
+**Preventative rule:** when a fix is delivered through a mechanism with more than one entry point, enumerate the entry points and confirm it reaches all of them before claiming it lands — and say which ones were actually measured rather than generalising from the one tested. Adding a second entry point to a mechanism is itself the moment to re-run the full checklist of what that mechanism must do, not only the part that motivated the addition.
+
+## 2026-08-22 — `crane validate` rejected every multi-arch image Pokkum ever produced, because the index descriptor's platform was synthesized from Pokkum's own narrower vocabulary
+
+**Category:** vocabulary narrower than the external format it is written into
+
+**Root cause:** `packager.Index` stamped each index descriptor from `ports.Platform`, which models only OS/Arch/Variant and carries `Variant: ""` for both supported platforms. The child *config* is a deep copy of the resolved base image's config, and `gcr.io/distroless/cc-debian12`'s arm64 image declares `variant: v8`. So the descriptor said `linux/arm64` while the config it pointed at said `linux/arm64/v8`, and go-containerregistry's `validate` compares exactly those two with `Platform.Equals`. Every multi-arch image failed `crane validate --remote` on `platform[1]`, in every output mode, with an **empty** error — gcr's own `validatePlatform` has no `Variant` clause, checking `OSVersion` twice instead, so it detects a mismatch it cannot describe.
+
+**Why nothing caught it:** the golden tests build children on `helper_test.go`'s `syntheticBase`, which sets `cfg.Variant = plat.Variant`, i.e. `""`. The fixture cannot reproduce the one property of the real base image that causes the bug, so the golden index digest is genuinely unaffected and the tests were green on an input that could not exhibit it. Every in-repo assertion round-tripped Pokkum's own vocabulary against itself; nothing ever asked an external OCI tool whether the artifact was well-formed.
+
+**Fix:** `descriptorPlatform` reads the resolved child's `ConfigFile().Platform()` and uses that, deep-copied because `Equals` sorts `OSFeatures` in place. `"v8"` is never named — the value is whatever the base declared — and `OSVersion`/`OSFeatures` ride along for the same reason. The fan-out key is still enforced, so a mislabelled child remains `core.ErrUnsupportedPlatform`. This moves the index digest of affected builds.
+
+**Preventative rule:** an internal type that is deliberately a *subset* of an external format may be used to select and to check, but must never be the *source* of bytes written into that format — derive those from the artifact the descriptor describes, or the two disagree the moment an upstream input populates a field the subset cannot hold. And at least one acceptance check should be an external tool run against a real artifact (`crane validate`), not only in-repo assertions written in the same vocabulary as the code under test.
+
 ## 2026-08-21 — A commit closed a roadmap item whose whole point was a measurement that was never taken
 
 **Category:** verification-gap / process
