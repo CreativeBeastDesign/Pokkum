@@ -380,7 +380,7 @@ before trusting a claim that predates the commit it cites.
   silently-skipped smoke test (the exact hole that let commit `b439e6b`'s
   startup-attestation brick ship while `go test ./...` reported all green)
   now fails the CI step instead of passing quietly.
-- `POKKUM_REQUIRE_MINIFIED_CORPUS` is the same shape of gate for
+- `POKKUM_REQUIRE_MINIFIED_CORPUS turns an absent real-minified-bundle corpus into a hard failure — but it is NOT set in CI and cannot usefully be: the corpus is `testdata/fixtures/*/build` and `.svelte-kit/output`, gitignored build output that the real-build tests never create, because `copyFixtureProject` builds in `t.TempDir()` so the shared fixture directory is never written to (Lessons.md 2026-08-19). A CI step wiring it was added on the assumption the e2e tests populated those directories, failed correctly, and was reverted. The measurement is therefore a developer-machine check, not a CI-enforced guarantee.
   `TestGenericRule_NoFindingsOnRealMinifiedBuildCorpus`
   (`internal/adapters/secretguard/minified_corpus_test.go`) but, verified
   2026-08-22, is **not actually set anywhere in `.github/workflows/*.yml`** —

@@ -274,30 +274,25 @@ jobs:
             ./internal/adapters/bunexec/... \
             ./internal/adapters/sveltekitutils/...
 
-      # The secret guard's false-positive measurement runs over REAL minified
-      # bundles: testdata/fixtures/*/build and .svelte-kit/output. Those are
-      # gitignored build output, so on a clean checkout they do not exist and
-      # the test skips — which is correct in the fast job, and useless as a
-      # guarantee if it is the only place the test ever runs.
+      # NOT HERE: the secret guard's false-positive measurement.
       #
-      # This step runs after the real-build e2e tests above, which is what
-      # produces that output, and sets POKKUM_REQUIRE_MINIFIED_CORPUS so an
-      # absent corpus is a hard failure rather than a skip. Without it the
-      # measurement that justifies the generic secret rule's key widening
-      # never executes in CI at all: a gate built to satisfy
-      # mem:self_review_checklist row 47 that was itself never wired up.
-      - name: Secret-Guard False-Positive Measurement (must not skip)
-        if: ${{ !cancelled() }}
-        env:
-          POKKUM_REQUIRE_MINIFIED_CORPUS: '1'
-        run: |
-          set -euo pipefail
-          go test -v -count=1 -run 'TestGenericRule_(NoFindingsOnRealMinifiedBuildCorpus|RealMinifiedCorpusCanProduceAFinding)' \
-            ./internal/adapters/secretguard/ 2>&1 | tee secretguard-corpus.log
-          if grep -q -- '--- SKIP' secretguard-corpus.log; then
-            echo "::error::the minified-corpus measurement SKIPPED in a job that builds the fixtures — the corpus is supposed to exist here"
-            exit 1
-          fi
+      # It runs over REAL minified bundles at testdata/fixtures/*/build and
+      # .svelte-kit/output. Those are gitignored build output, and — crucially —
+      # the real-build tests above never create them: copyFixtureProject copies
+      # each fixture into t.TempDir() and builds THERE, deliberately, because
+      # a fixture directory shared across packages must never be written to by
+      # a test (Lessons.md, 2026-08-19). So the corpus does not exist on a CI
+      # runner at any point, and cannot be made to without either breaking that
+      # rule or teaching the test to accept a corpus root outside the repo.
+      #
+      # A step was added here setting POKKUM_REQUIRE_MINIFIED_CORPUS=1 on the
+      # assumption the e2e tests populated those directories. They do not, and
+      # the gate correctly failed rather than passing on a corpus of nothing.
+      # The measurement therefore runs on developer machines that have built
+      # the fixtures, and is a hard failure there when the env var is set — it
+      # is not, today, a CI-enforced guarantee. Recorded rather than papered
+      # over, so the next reader does not re-add this step on the same wrong
+      # premise.
 
   # Scoped macOS platform job: the release ships darwin amd64/arm64 binaries
   # (see .goreleaser.yaml / slsa-builder.yml) and internal/adapters/bunexec/
