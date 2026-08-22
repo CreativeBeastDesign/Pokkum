@@ -205,7 +205,10 @@ actually absent rather than silently wrong.
 
 ```bash
 docker buildx imagetools inspect "$POKKUM_DOCKER_REPO@$DIGEST" --format '{{json .}}' | jq .
-# or, if attached as an OCI 1.1 referrer (Pokkum's default):
+# or, if attached as an OCI 1.1 referrer (--sbom-attach's default is `auto`,
+# which probes for referrers support and falls back to the tag convention —
+# so which of these two applies depends on your registry, not on a fixed
+# default; a registry without referrers support gets the `.sbom` tag):
 oras discover --format json "$POKKUM_DOCKER_REPO@$DIGEST"   # if you have `oras` installed
 ```
 
@@ -214,6 +217,70 @@ that match what's actually in your `package.json`/`bun.lock` — spot-check
 3-4 dependencies by name. An SBOM that's present but empty, or that lists
 generic placeholders instead of your actual deps, is worse than no SBOM at
 all because it looks like coverage that isn't there.
+
+### 7b. The SBOM is signed — verify that, not just its contents
+
+The `.sbom` tag is a bare blob: its manifest carries no subject, the SPDX
+document does not name the image digest, and nothing signs it. Anyone with
+push access to the repository can replace it and every other check still
+passes. Prove that to yourself if you like — push a one-package SBOM over the
+tag and watch `pokkum verify` still report `ATTESTATION_VALIDATED`.
+
+What you should actually verify is the SBOM **attestation**: an in-toto
+Statement whose subject is the image digest, DSSE-signed with the build's key
+and attached alongside the SLSA provenance:
+
+```bash
+cosign verify-attestation --key /tmp/pokkum-sign.pub --type spdxjson \
+  --insecure-ignore-tlog=true "$POKKUM_DOCKER_REPO@$DIGEST" \
+  | tail -1 | jq -r '.payload' | base64 -d | jq '{_type, predicateType, subject}'
+```
+
+Expect `_type` `https://in-toto.io/Statement/v1`, `predicateType`
+`https://spdx.dev/Document`, and a `subject[0].digest.sha256` equal to
+`${DIGEST#sha256:}`. If the subject is anything else, the SBOM describes a
+different image than the one you are verifying.
+
+Then read what it actually catalogues. It should contain BOTH ecosystems —
+`pkg:npm/...` for the project's production dependencies and `pkg:deb/...`
+(or `pkg:apk/...`) for the base image's OS packages:
+
+```bash
+jq -r '[.packages[].externalRefs[]?.referenceLocator] | map(split("/")[0]) | group_by(.) | map({t:.[0], n:length}) | .[] | "\(.t) \(.n)"' /tmp/sbom.json
+```
+
+An SBOM with zero `pkg:deb` entries on a Debian-based image is not describing
+the image — `libc6` and `libssl3` are the most CVE-bearing things in it.
+Cross-check against the image itself rather than trusting the count:
+
+```bash
+crane export "$POKKUM_DOCKER_REPO@$DIGEST" - | tar -tf - | grep -c 'var/lib/dpkg/status.d/[^.]*$'
+```
+
+Note the npm side is scoped to what actually ships, so it will NOT list
+devDependencies. Cross-platform optional stubs (`@esbuild/darwin-x64` and
+friends) are deliberately still listed: filtering them by the build host's
+architecture would make the SBOM's content depend on which machine ran the
+build, which trades a reporting nit for a reproducibility violation.
+
+### 7c. `--to-oci-layout` — the lossless output mode
+
+`--tarball` writes the legacy docker-save format, which has no annotations
+field at all and flattens a multi-platform build into one tag per
+architecture. Pokkum warns and names the dropped keys. When you need the
+metadata to survive without a registry, use `--to-oci-layout`:
+
+```bash
+./pokkum-test build . --to-oci-layout ./oci-out --platform linux/amd64 --platform linux/arm64
+cat ./oci-out/oci-layout
+jq '.manifests[0].annotations' ./oci-out/index.json
+crane validate ./oci-out 2>/dev/null || crane push ./oci-out localhost:5000/app:latest
+```
+
+Compare the same build through both modes: the layout's per-platform manifests
+keep `org.opencontainers.image.*` **and** `pokkum.dev/*`, where the tarball's
+`manifest.json` contains neither. `docker load` does not accept a layout — that
+is what `--tarball` remains for.
 
 ## 8. SLSA provenance — verify with `cosign`, independent of `pokkum verify`
 
@@ -286,7 +353,12 @@ verify-attestation` fails for you now, check the `--type` above before
 suspecting the attestation, and only then check whether the registry served a
 referrer or fell back to the legacy `.att` tag:
 ```bash
-crane manifest "$POKKUM_DOCKER_REPO:sha256-${DIGEST#sha256:}.att" >/dev/null && echo "tag-mode fallback was used"
+# NOTE: run this under bash. In zsh, ${DIGEST#sha256:} inside a double-quoted
+# string is parsed as a :s history modifier and silently expands to just the
+# repository, so the command queries :latest and reports MANIFEST_UNKNOWN — a
+# shell bug that reads exactly like a missing attestation.
+ATT_TAG="sha256-$(printf '%s' "$DIGEST" | sed 's/^sha256://').att"
+crane manifest "$POKKUM_DOCKER_REPO:$ATT_TAG" >/dev/null && echo "tag-mode fallback was used"
 ```
 
 ## 9. Cosign signature — generate a real key, sign for real, verify with the `cosign` CLI directly
@@ -344,8 +416,18 @@ DIGEST=${IMAGE_REF#*@}
 **Verify independently, with `cosign` and only the public key — not
 `pokkum verify`:**
 ```bash
-cosign verify --key /tmp/pokkum-sign.pub "$POKKUM_DOCKER_REPO@$DIGEST" 2>&1 | tail -10
+cosign verify --key /tmp/pokkum-sign.pub --insecure-ignore-tlog=true \
+  "$POKKUM_DOCKER_REPO@$DIGEST" 2>&1 | tail -10
 ```
+
+> `--insecure-ignore-tlog=true` is required and its absence is a trap. Pokkum
+> signs with a static key and does not upload to Rekor, so cosign v3 refuses a
+> perfectly valid signature with `no matching signatures: signature not found
+> in transparency log` — which shares its prefix with the tamper case below.
+> A tester running this without the flag sees a genuine signature read as a
+> failure. (It also silently POSTs a lookup to the public `rekor.sigstore.dev`,
+> worth knowing before running this against a private image.) Drop the flag
+> only when verifying an image that was genuinely signed keylessly.
 This must come back with a real, cryptographic verification report from
 the `cosign` binary itself — a tool this project didn't write. If it
 fails, don't fall back to trusting `pokkum verify`'s own report of the
@@ -355,7 +437,8 @@ all, so you can tell the two apart when something looks wrong in the field:
 ```bash
 openssl ecparam -genkey -name prime256v1 -noout -out /tmp/wrong.key
 openssl ec -in /tmp/wrong.key -pubout -out /tmp/wrong.pub
-cosign verify --key /tmp/wrong.pub "$POKKUM_DOCKER_REPO@$DIGEST" 2>&1 | tail -3
+cosign verify --key /tmp/wrong.pub --insecure-ignore-tlog=true \
+  "$POKKUM_DOCKER_REPO@$DIGEST" 2>&1 | tail -3
 #   → "Error: no matching signatures: invalid signature when validating
 #      ASN.1 encoded signature" — a broken/wrong-key signature. Compare
 #      against "no signatures found" above: these must read differently,
@@ -429,23 +512,29 @@ Then, separately, run `--no-verify-base` once and confirm the complete
 looks like too — not just what "verified" looks like:
 ```bash
 ./pokkum-test build . --no-verify-base --print-manifest --log-level=DEBUG 2>&1 | grep -i "keyless\|signature\|verif"
-#   → no output at all
+#   → one unrelated line about remote-cache verification survives this grep;
+#     what disappears is exactly three lines — "base image keyless signature
+#     verified", "base image signature verified", "keyless Sigstore signature
+#     verified". Diff the msg= sets of a run with and without the flag rather
+#     than expecting an empty grep.
 ```
 
-**A known gap worth flagging rather than working around:** the `--base`
-flag's own help text advertises "distroless [default], chainguard, or
-custom reference," but no current CLI flag or `.pokkum.yaml` field actually
-lets you supply an arbitrary custom base image reference — `--base=custom`
-alone fails with `base image reference is required for preset "custom"`,
-and nothing else populates `BuildRequest.BaseImage.Ref` besides the
-hardcoded static-strategy default. Confirmed by trying it. This means a
-genuinely-successful static-key verification (a self-signed custom base,
-with `POKKUM_BASE_IMAGE_PUBKEY` set to the matching public key) cannot be
-demonstrated from this CLI today — the distroless/chainguard/distroless-node
-presets are all keyless-signed upstream and have no static-key `.sig` to
-check against. If you need to exercise the success path, it's covered by
-`internal/adapters/baseimage/resolver_test.go`'s unit tests, not by any
-command this guide can hand you right now.
+**Note on the static-key success path.** `--base=custom` alone still fails
+with `base image reference is required for preset "custom"` — but `--base`
+does now accept a full reference directly (`--base=gcr.io/distroless/base-debian12:nonroot`),
+and a custom reference defaults to static-key verification. So a
+genuinely-successful static-key verification *can* be constructed from the
+CLI: copy a base into a local registry, sign it with
+`cosign sign --key ... --registry-referrers-mode=legacy`, and point
+`POKKUM_BASE_IMAGE_PUBKEY` at the matching public key.
+
+Two things to know before you try it. Pokkum's base verifier reads the legacy
+`sha256-<hex>.sig` tag, while cosign v3's *default* signing mode writes an
+OCI-1.1 referrers-fallback tag instead — hence `--registry-referrers-mode=legacy`,
+without which you get `MANIFEST_UNKNOWN`. And an earlier revision of this guide
+said no CLI flag could supply a custom base at all; that is stale, and the
+sentence is corrected here rather than deleted so a reader who remembers it
+knows it changed.
 
 ## 11. Sigstore trust root coverage — confirm the embedded snapshot covers the log your signature actually landed in
 
