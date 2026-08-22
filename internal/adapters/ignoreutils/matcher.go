@@ -69,6 +69,21 @@ func DefaultPatterns() []string {
 		".git/",
 		"*.map",
 		".env*",
+		// Storybook's built output. It is generated, minified, and not source,
+		// but it sits at the project root where the pre-build source scan finds
+		// it — a real project produced 11 "hardcoded secret" findings in one
+		// storybook-static/sb-manager/globals-runtime.js and could not build.
+		// The advice the guard prints does not help there either: a
+		// pokkum:allow-secret comment cannot be added to generated output, so
+		// the only route was a regex against machine-generated code.
+		//
+		// Deliberately narrow. Only the OUTPUT directory is excluded, not
+		// .storybook/, which holds hand-written configuration and belongs in the
+		// scan. Other build outputs (build/, dist/) are left in for now: they
+		// are conventional enough to be a policy decision rather than an
+		// obvious omission, and a project's own .pokkumignore overrides these
+		// defaults either way.
+		"storybook-static/",
 	}
 }
 

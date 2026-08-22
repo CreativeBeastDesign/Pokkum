@@ -2073,7 +2073,7 @@ func checkCtx(ctx context.Context, stage string) error {
 // for this ecosystem. Used only to phrase a suggestion — nothing is skipped on
 // the strength of a name, because these are conventions and a project may keep
 // real source in any of them.
-var generatedOutputDirs = []string{"build", "dist", "out", ".output", ".vercel", ".netlify", ".next"}
+var generatedOutputDirs = []string{"build", "dist", "out", ".output", ".vercel", ".netlify", ".next", "storybook-static"}
 
 // generatedDirsAmong returns, sorted and deduplicated, the conventional
 // output-directory prefixes present in the findings.
