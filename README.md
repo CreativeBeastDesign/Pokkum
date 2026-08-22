@@ -1,6 +1,6 @@
 # Pokkum: SvelteKit to OCI in One Command
 
-[![GitHub Actions Build Status](https://github.com/CreativeBeastDesign/pokkum/workflows/ci/badge.svg)](https://github.com/CreativeBeastDesign/pokkum/actions)
+[![GitHub Actions Build Status](https://github.com/CreativeBeastDesign/Pokkum/workflows/ci/badge.svg)](https://github.com/CreativeBeastDesign/Pokkum/actions)
 [![pkg.go.dev](https://pkg.go.dev/badge/github.com/CreativeBeastDesign/pokkum.svg)](https://pkg.go.dev/github.com/CreativeBeastDesign/pokkum)
 [![Go Report Card](https://goreportcard.com/badge/github.com/CreativeBeastDesign/pokkum)](https://goreportcard.com/report/github.com/CreativeBeastDesign/pokkum)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
@@ -88,7 +88,7 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum resolve -f deployment.yaml \
 
 **What Pokkum does not do.** Pokkum compiles SvelteKit applications into OCI container images — it does not target edge/isolate runtimes (Cloudflare Workers, Deno Deploy, Vercel Edge Functions). Those aren't OCI images; they're a fundamentally different deployment model, and SvelteKit's own `adapter-cloudflare`/`adapter-vercel`/`adapter-deno` already serve that use case directly. This is an explicit non-goal, not an unaddressed gap — if edge deployment is what you need, Pokkum isn't the tool for that half of your stack.
 
-**Telemetry.** The `pokkum` CLI itself sends no telemetry, analytics, or usage data anywhere, ever — no phone-home, no update-check pings beyond an explicit `pokkum upgrade --check`. (This is unrelated to the `--telemetry` *build* flag, which configures OpenTelemetry instrumentation inside the SvelteKit application you're compiling — see [Vocabulary.md](Vocabulary.md) §3a. That feature is entirely opt-in, off by default, and exports only to the OTLP endpoint you configure.)
+**Telemetry.** The `pokkum` CLI itself sends no telemetry, analytics, or usage data anywhere, ever — no phone-home, no update-check pings beyond an explicit `pokkum upgrade --check`. (This is unrelated to the `--telemetry` _build_ flag, which configures OpenTelemetry instrumentation inside the SvelteKit application you're compiling — see [Vocabulary.md](Vocabulary.md) §3a. That feature is entirely opt-in, off by default, and exports only to the OTLP endpoint you configure.)
 
 ---
 
@@ -106,14 +106,14 @@ brew install pokkum
 
 All three lines are required on current Homebrew, which added two gates for third-party taps:
 
-- it no longer auto-taps, so `brew install CreativeBeastDesign/pokkum/pokkum` alone fails with *"No available formula or cask"*;
+- it no longer auto-taps, so `brew install CreativeBeastDesign/pokkum/pokkum` alone fails with _"No available formula or cask"_;
 - it refuses to load formulae from an untrusted tap until you run `brew trust`.
 
 `brew trust` is a deliberate security decision — it tells Homebrew you accept running code from this tap. If you would rather not, the [installer script](#3-standalone-installer-script-linux--macos) verifies a SHA-256 against the release checksums and needs no trust grant.
 
 ---
 
-### 2. NPM / NPX — *not yet published*
+### 2. NPM / NPX — _not yet published_
 
 > [!NOTE]
 > `@pokkum/cli` is **not on npm yet**, so `npx @pokkum/cli` and `npm install -g @pokkum/cli` do not work today. The package name is reserved in the release pipeline and this section will describe the real commands once the first publish succeeds. Until then use Homebrew, the installer script, or a release binary below.
@@ -143,7 +143,7 @@ POKKUM_VERSION=v1.0.1 POKKUM_INSTALL_DIR="$HOME/.local/bin" \
   # published — so `@v1` cannot resolve. Bump this when you upgrade.
   uses: CreativeBeastDesign/pokkum/.github/actions/setup-pokkum@v1.0.1
   with:
-    version: 'v1.0.1' # or 'latest' to track the newest release
+    version: "v1.0.1" # or 'latest' to track the newest release
 
 - name: Build & Push SvelteKit Container
   env:
@@ -173,18 +173,18 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 
 ## CLI Command Reference
 
-| Command                    | Usage                                       | Description                                                                        |
-| -------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `pokkum build [dir]`       | `pokkum build ./my-app`                     | Compiles SvelteKit app into a multi-layer OCI container image.                     |
-| `pokkum resolve -f <file>` | `pokkum resolve -f deploy.yaml`             | Resolves `pokkum://` URIs in K8s manifests to immutable image digests.             |
-| `pokkum apply -f <file>`   | `pokkum apply -f deploy.yaml`               | Resolves manifests and pipes directly to `kubectl apply`.                          |
-| `pokkum dev [dir]`         | `pokkum dev ./my-app`                       | Local development mode with hot-reloading file watcher and Docker daemon loading.  |
-| `pokkum scan [target]`     | `pokkum scan ./my-app`                      | Security vulnerability scanner for directories, images, or tarballs.               |
-| `pokkum doctor [dir]`      | `pokkum doctor ./my-app`                    | Diagnostic wizard for preflight checks and mechanical repairs.                     |
-| `pokkum init [dir]`        | `pokkum init ./my-app`                      | Bootstraps project config and `.pokkumignore`.                                     |
-| `pokkum explain [image]`   | `pokkum explain <ref>`                      | Inspects layer hierarchy, file origin tracing (`why`), and image diffing (`diff`). |
-| `pokkum rollback`          | `pokkum rollback -f deploy.yaml`            | Rolls back to the previous image ref (`pokkum.dev/previous-image` annotation), or pass `--to=<ref>` explicitly. One hop deep. |
-| `pokkum upgrade`           | `pokkum upgrade --check`                    | Checks for signed CLI release updates.                                             |
+| Command                    | Usage                            | Description                                                                                                                   |
+| -------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `pokkum build [dir]`       | `pokkum build ./my-app`          | Compiles SvelteKit app into a multi-layer OCI container image.                                                                |
+| `pokkum resolve -f <file>` | `pokkum resolve -f deploy.yaml`  | Resolves `pokkum://` URIs in K8s manifests to immutable image digests.                                                        |
+| `pokkum apply -f <file>`   | `pokkum apply -f deploy.yaml`    | Resolves manifests and pipes directly to `kubectl apply`.                                                                     |
+| `pokkum dev [dir]`         | `pokkum dev ./my-app`            | Local development mode with hot-reloading file watcher and Docker daemon loading.                                             |
+| `pokkum scan [target]`     | `pokkum scan ./my-app`           | Security vulnerability scanner for directories, images, or tarballs.                                                          |
+| `pokkum doctor [dir]`      | `pokkum doctor ./my-app`         | Diagnostic wizard for preflight checks and mechanical repairs.                                                                |
+| `pokkum init [dir]`        | `pokkum init ./my-app`           | Bootstraps project config and `.pokkumignore`.                                                                                |
+| `pokkum explain [image]`   | `pokkum explain <ref>`           | Inspects layer hierarchy, file origin tracing (`why`), and image diffing (`diff`).                                            |
+| `pokkum rollback`          | `pokkum rollback -f deploy.yaml` | Rolls back to the previous image ref (`pokkum.dev/previous-image` annotation), or pass `--to=<ref>` explicitly. One hop deep. |
+| `pokkum upgrade`           | `pokkum upgrade --check`         | Checks for signed CLI release updates.                                                                                        |
 
 ---
 
