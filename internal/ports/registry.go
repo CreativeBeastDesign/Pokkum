@@ -298,8 +298,47 @@ type TarballRequest struct {
 	// Tags are the tags recorded in the archive. Empty means DefaultTag.
 	Tags []string
 
-	// Payload is the image or index to write. Required. Unlike LoadRequest, an
-	// index is written faithfully: the OCI layout format represents one.
+	// Payload is the image or index to write. Required.
+	//
+	// The docker-save format this mode emits cannot represent a manifest
+	// list, so an index is flattened to one platform-suffixed tag per child
+	// (see the adapter's flattenIndexTags). Use OCILayoutRequest when the
+	// index itself, and the annotations hanging off it, must survive.
+	Payload Payload
+}
+
+// OCILayoutRequest writes a standards-conformant OCI image layout to a
+// directory, the `--to-oci-layout` output mode.
+//
+// It is deliberately a separate request type from TarballRequest rather than
+// a format flag on it, because the two formats differ in what they can
+// represent, not merely in how they encode it: TarballRequest emits the
+// legacy docker-save format, which has neither an annotations field nor a
+// manifest list, whereas an OCI image layout has first-class support for
+// both. Anything that reads an annotation back off a built image — `pokkum
+// verify` reconstructing an asset-overlay layer from
+// pokkum.dev/asset-overlay-sources, for one — works against this output and
+// cannot work against a tarball.
+type OCILayoutRequest struct {
+	// Path is the destination *directory*. Required — core owns the choice of
+	// location. An existing layout at Path is replaced wholesale rather than
+	// merged into, so the directory always holds exactly the blobs this build
+	// produced. Parent directories are created if missing.
+	Path string
+
+	// Repo is the repository name recorded in the layout's index.json
+	// descriptor annotations so that a later `ctr images import` / `skopeo
+	// copy oci:…` knows what to call the image. Required.
+	Repo string
+
+	// Tags are the tags recorded in index.json, one descriptor each. Empty
+	// means DefaultTag.
+	Tags []string
+
+	// Payload is the image or index to write. Required. Unlike TarballRequest,
+	// an index is written faithfully — index.json references the real
+	// multi-platform index blob, which in turn references every per-platform
+	// manifest, exactly as a registry would hold it.
 	Payload Payload
 }
 
@@ -372,4 +411,29 @@ type LocalLoader interface {
 type TarballWriter interface {
 	// Write serialises the payload to req.Path.
 	Write(ctx context.Context, req TarballRequest) (PublishResult, error)
+}
+
+// OCILayoutWriter writes an image to an OCI image layout directory on disk.
+// Like TarballWriter it needs neither a network nor a daemon, which is what
+// makes it usable from a hermetic CI runner or a contributor's machine with
+// no Docker/Podman installed at all; unlike TarballWriter it emits a format
+// that preserves annotations and multi-platform indexes, so it is the
+// lossless local output mode.
+//
+// It is a separate interface from TarballWriter for the same reason
+// LocalLoader is separate from Registry: a caller that only ever writes a
+// layout should not depend on the docker-save writer, and the two have
+// genuinely different capabilities (see OCILayoutRequest).
+//
+// Error expectations: core.ErrTarballFailed for any filesystem or
+// serialisation failure. That sentinel is deliberately shared with
+// TarballWriter rather than duplicated — both mean "writing the finished
+// image to a local path failed", which is the distinction callers actually
+// match on (a local-artifact failure, not a registry or daemon one), and a
+// second sentinel with an identical meaning would only invite half the call
+// sites to check the wrong one.
+type OCILayoutWriter interface {
+	// WriteOCILayout serialises the payload into the layout directory at
+	// req.Path.
+	WriteOCILayout(ctx context.Context, req OCILayoutRequest) (PublishResult, error)
 }

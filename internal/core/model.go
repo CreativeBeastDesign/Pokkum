@@ -238,8 +238,17 @@ const (
 	// OutputLocal imports into the local Docker daemon (--local).
 	OutputLocal OutputMode = "local"
 
-	// OutputTarball writes an OCI archive to disk (--tarball path).
+	// OutputTarball writes a legacy docker-save archive to disk (--tarball
+	// path). The format has no annotations field and cannot express a
+	// manifest list; see OutputOCILayout for the lossless alternative.
 	OutputTarball OutputMode = "tarball"
+
+	// OutputOCILayout writes a standards-conformant OCI image layout to a
+	// directory (--to-oci-layout path). Unlike OutputTarball it preserves
+	// every OCI annotation and the full multi-platform index, which is what
+	// makes it the mode a daemonless environment can load into a local
+	// cluster (kind/k3d/minikube) without a registry round-trip.
+	OutputOCILayout OutputMode = "oci-layout"
 )
 
 // DefaultOutputMode is used when OutputOptions.Mode is the zero value.
@@ -249,7 +258,7 @@ const DefaultOutputMode = OutputPush
 // Normalize replaces it with DefaultOutputMode.
 func (m OutputMode) Valid() bool {
 	switch m {
-	case OutputPush, OutputLocal, OutputTarball:
+	case OutputPush, OutputLocal, OutputTarball, OutputOCILayout:
 		return true
 	default:
 		return false
@@ -669,8 +678,9 @@ type SBOMOptions struct {
 	// image but not the extra sha256-….sbom tag, which is a real and confusing
 	// failure on locked-down registries.
 	//
-	// Attachment only happens in OutputPush mode; the daemon and tarball
-	// destinations have nowhere to put it, and core skips it silently there.
+	// Attachment only happens in OutputPush mode; the daemon, tarball and
+	// oci-layout destinations have nowhere to put it, and core skips it
+	// silently there.
 	NoAttach bool
 }
 
@@ -682,6 +692,15 @@ type OutputOptions struct {
 	// TarballPath is the archive path. Required when Mode is OutputTarball,
 	// ignored otherwise.
 	TarballPath string
+
+	// OCILayoutPath is the destination directory for the OCI image layout.
+	// Required when Mode is OutputOCILayout, ignored otherwise. It is a
+	// separate field from TarballPath rather than a shared "output path"
+	// because the two name different kinds of thing — a file and a directory —
+	// and a single field would make "which mode am I in?" answerable only by
+	// reading Mode anyway, while letting a --tarball value silently satisfy
+	// the --to-oci-layout requirement check.
+	OCILayoutPath string
 }
 
 // CompileOptions tunes the Bun compile step.
@@ -779,7 +798,7 @@ type BuildRequest struct {
 	// "ghcr.io/acme/app".
 	//
 	// Required for OutputPush; an empty value there is ErrNoDockerRepo. For
-	// OutputLocal and OutputTarball, Normalize substitutes
+	// OutputLocal, OutputTarball and OutputOCILayout, Normalize substitutes
 	// "pokkum.local/<project-dir-basename>", because those destinations are
 	// local and a wrong name there costs nothing, whereas guessing a remote
 	// repository could publish to somewhere unintended.
@@ -1029,6 +1048,9 @@ func (r BuildRequest) Validate() error {
 	if r.Output.Mode == OutputTarball && strings.TrimSpace(r.Output.TarballPath) == "" {
 		return fmt.Errorf("tarball path is required in %s mode: %w", r.Output.Mode, ErrInvalidRequest)
 	}
+	if r.Output.Mode == OutputOCILayout && strings.TrimSpace(r.Output.OCILayoutPath) == "" {
+		return fmt.Errorf("oci layout path is required in %s mode: %w", r.Output.Mode, ErrInvalidRequest)
+	}
 	if strings.TrimSpace(r.Repo) == "" {
 		return fmt.Errorf("destination repository is required in %s mode: %w", r.Output.Mode, ErrNoDockerRepo)
 	}
@@ -1174,7 +1196,7 @@ func (r BuildRequest) Validate() error {
 			return fmt.Errorf("--require-signed conflicts with --no-sign: %w", ErrInvalidRequest)
 		}
 		if r.Output.Mode != OutputPush {
-			return fmt.Errorf("--require-signed needs a registry push, which is the default; drop --local/--tarball (a %s build writes no registry artifact to attach a signature to): %w", r.Output.Mode, ErrInvalidRequest)
+			return fmt.Errorf("--require-signed needs a registry push, which is the default; drop --local/--tarball/--to-oci-layout (a %s build writes no registry artifact to attach a signature to): %w", r.Output.Mode, ErrInvalidRequest)
 		}
 		if len(r.Signing.KeyPEM) == 0 {
 			return fmt.Errorf("--require-signed: %w", ErrSigningKeyMissing)
@@ -1287,6 +1309,10 @@ type ImageResult struct {
 	// TarballPath is the archive that was written, for OutputTarball only.
 	TarballPath string
 
+	// OCILayoutPath is the layout directory that was written, for
+	// OutputOCILayout only.
+	OCILayoutPath string
+
 	// Platforms are the platforms present in the published artefact. For
 	// OutputLocal this is a single platform even when more were built, because
 	// the Docker image store holds one.
@@ -1310,16 +1336,27 @@ func (r ImageResult) String() string { return r.Ref }
 // It exists so that the three destination branches of the pipeline converge on
 // one line each rather than repeating the field mapping.
 func NewImageResult(mode OutputMode, pr ports.PublishResult, platforms []Platform, isIndex bool) ImageResult {
-	return ImageResult{
-		Mode:        mode,
-		Ref:         pr.Ref,
-		Digest:      pr.Digest,
-		Tags:        slices.Clone(pr.Tags),
-		TarballPath: pr.Path,
-		Platforms:   slices.Clone(platforms),
-		IsIndex:     isIndex,
-		Size:        pr.Size,
+	res := ImageResult{
+		Mode:      mode,
+		Ref:       pr.Ref,
+		Digest:    pr.Digest,
+		Tags:      slices.Clone(pr.Tags),
+		Platforms: slices.Clone(platforms),
+		IsIndex:   isIndex,
+		Size:      pr.Size,
 	}
+	// ports.PublishResult carries one Path field for every on-disk
+	// destination; which of the two typed fields it lands in is the mode's
+	// business, not the port's. Routing on Mode rather than "whichever field
+	// is non-empty" keeps a layout path from ever being reported as a tarball
+	// path (and vice versa) to anything that formats this result.
+	switch mode {
+	case OutputOCILayout:
+		res.OCILayoutPath = pr.Path
+	default:
+		res.TarballPath = pr.Path
+	}
+	return res
 }
 
 // SBOMResult describes the bill of materials produced for a build. It is nil in

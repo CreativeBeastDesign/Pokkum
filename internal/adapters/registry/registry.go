@@ -1,16 +1,22 @@
-// Package registry implements ports.Registry, ports.LocalLoader and
-// ports.TarballWriter against github.com/google/go-containerregistry: pushing
-// images and SBOMs to a remote registry, loading into the local Docker
-// daemon, and writing OCI archives to disk.
+// Package registry implements ports.Registry, ports.LocalLoader,
+// ports.TarballWriter and ports.OCILayoutWriter against
+// github.com/google/go-containerregistry: pushing images and SBOMs to a
+// remote registry, loading into the local Docker daemon, writing legacy
+// docker-save archives to disk, and writing OCI image layouts to disk.
 //
-// A single Adapter implements all three interfaces. That mirrors how the
-// three interfaces are actually used: core selects one destination per build
-// via OutputMode, so there is never a reason to construct three separate
-// adapters wired to three separate configurations. Splitting them into three
-// interfaces at the port level (W1) still pays for itself even though one
-// type satisfies all three, because it lets a caller that only ever runs
-// `--tarball` depend on ports.TarballWriter and never pull in a Docker daemon
-// client transitively.
+// A single Adapter implements all four interfaces. That mirrors how they are
+// actually used: core selects one destination per build via OutputMode, so
+// there is never a reason to construct four separate adapters wired to four
+// separate configurations. Splitting them at the port level (W1) still pays
+// for itself even though one type satisfies all four, because it lets a
+// caller that only ever runs `--tarball` depend on ports.TarballWriter and
+// never pull in a Docker daemon client transitively.
+//
+// The two on-disk modes are NOT interchangeable. `--tarball` is the legacy
+// docker-save format, which `docker load` accepts but which has neither an
+// annotations field nor a manifest list; `--to-oci-layout` is a
+// standards-conformant OCI image layout, which preserves both. See
+// WriteOCILayout in ocilayout.go.
 //
 // # Idempotent push
 //
@@ -94,13 +100,14 @@ var (
 )
 
 var (
-	_ ports.Registry      = (*Adapter)(nil)
-	_ ports.LocalLoader   = (*Adapter)(nil)
-	_ ports.TarballWriter = (*Adapter)(nil)
+	_ ports.Registry        = (*Adapter)(nil)
+	_ ports.LocalLoader     = (*Adapter)(nil)
+	_ ports.TarballWriter   = (*Adapter)(nil)
+	_ ports.OCILayoutWriter = (*Adapter)(nil)
 )
 
-// Adapter implements ports.Registry, ports.LocalLoader and
-// ports.TarballWriter. The zero value is not usable; construct with
+// Adapter implements ports.Registry, ports.LocalLoader, ports.TarballWriter
+// and ports.OCILayoutWriter. The zero value is not usable; construct with
 // NewAdapter.
 //
 // Adapter is safe for concurrent use: it holds no mutable state of its own,

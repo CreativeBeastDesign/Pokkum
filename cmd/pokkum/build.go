@@ -52,6 +52,7 @@ type buildFlags struct {
 	sbomAttach    string
 	local         bool
 	tarball       string
+	toOCILayout   string
 	dryRun        bool
 	printManifest bool
 	logLevel      string
@@ -172,7 +173,8 @@ func newBuildCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
 		Short: "Build a SvelteKit application into a container image",
 		Long: `Build compiles a SvelteKit application and assembles it into a reproducible
 container image with a hardened base. It handles multi-platform builds, SBOM generation,
-and multiple output modes (push to registry, load into Docker daemon, or export to tarball).
+and multiple output modes (push to registry, load into Docker daemon, export to a docker-save
+tarball, or export to an OCI image layout directory).
 
 The project directory defaults to the current working directory.`,
 		Args: cobra.MaximumNArgs(1),
@@ -213,7 +215,9 @@ The project directory defaults to the current working directory.`,
 	cmd.Flags().BoolVar(&flags.local, "local", false,
 		"Load the image into the local Docker daemon instead of pushing to a registry")
 	cmd.Flags().StringVar(&flags.tarball, "tarball", "",
-		"Export the image as an OCI archive to the specified path (e.g., image.tar)")
+		"Export the image as a docker-save archive to the specified path (e.g., image.tar). Loadable with docker load, but the format has no annotations field and cannot hold a multi-platform index — use --to-oci-layout to keep either")
+	cmd.Flags().StringVar(&flags.toOCILayout, "to-oci-layout", "",
+		"Export the image as an OCI image layout into the specified directory (e.g., ./oci-out). Daemonless: needs no Docker/Podman, and unlike --tarball it preserves every OCI annotation and the full multi-platform index, so it can be imported straight into kind/k3d/minikube or read by crane/skopeo")
 	cmd.Flags().BoolVar(&flags.dryRun, "dry-run", false,
 		"Resolve everything and report what would be built and pushed, but perform no writes")
 	cmd.Flags().BoolVar(&flags.printManifest, "print-manifest", false,
@@ -328,7 +332,7 @@ The project directory defaults to the current working directory.`,
 	cmd.Flags().StringSliceVar(&flags.keepVendor, "keep-vendor", nil,
 		"Custom glob pattern(s) of vendor files to preserve during pruning, repeatable (e.g. --keep-vendor='*.md')")
 	cmd.Flags().IntVar(&flags.assetOverlay, "asset-overlay", 0,
-		"Rolling-deploy asset overlay: merge up to <n> prior generations' immutable client assets into a new layer, so browsers holding stale HTML can still fetch old hashed chunks during a rolling update. 0 (default) disables the feature. Auto-discovers predecessors via the pushed image's own lineage annotation (registry pushes only, i.e. not --local/--tarball); use --asset-overlay-from to override")
+		"Rolling-deploy asset overlay: merge up to <n> prior generations' immutable client assets into a new layer, so browsers holding stale HTML can still fetch old hashed chunks during a rolling update. 0 (default) disables the feature. Auto-discovers predecessors via the pushed image's own lineage annotation (registry pushes only, i.e. not --local/--tarball/--to-oci-layout); use --asset-overlay-from to override")
 	cmd.Flags().StringSliceVar(&flags.assetOverlayFrom, "asset-overlay-from", nil,
 		"Explicit image ref(s) to pull --asset-overlay content from instead of auto-discovering the predecessor chain, repeatable. Truncated to --asset-overlay's <n> if longer. Ignored unless --asset-overlay is also set")
 	cmd.Flags().BoolVar(&flags.noPrecompress, "no-precompress", false,
@@ -484,9 +488,10 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		Packager:     packager.NewPackager(logger),
 		BunRuntime:   bunruntime.NewResolver("", nil),
 
-		Registry: reg,
-		Daemon:   reg,
-		Tarballs: reg,
+		Registry:   reg,
+		Daemon:     reg,
+		Tarballs:   reg,
+		OCILayouts: reg,
 
 		SBOM:            sbom.NewGenerator(logger),
 		NativeInspector: nativeinspect.NewClosuredAdapter(),
@@ -692,15 +697,26 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 		req.SBOM.AttachMode = sbomAttachMode
 	}
 
-	// Output mode: explicit flag > active profile output > default push
-	if flags.local && flags.tarball != "" {
+	// Output mode: explicit flag > active profile output > default push.
+	// The three destination flags are mutually exclusive — each names a
+	// different place the finished image goes, and silently preferring one
+	// would build something the user did not ask for.
+	switch {
+	case flags.local && flags.tarball != "":
 		return nil, fmt.Errorf("cannot specify both --local and --tarball")
+	case flags.local && flags.toOCILayout != "":
+		return nil, fmt.Errorf("cannot specify both --local and --to-oci-layout")
+	case flags.tarball != "" && flags.toOCILayout != "":
+		return nil, fmt.Errorf("cannot specify both --tarball and --to-oci-layout")
 	}
 	if flags.local {
 		req.Output.Mode = core.OutputLocal
 	} else if flags.tarball != "" {
 		req.Output.Mode = core.OutputTarball
 		req.Output.TarballPath = flags.tarball
+	} else if flags.toOCILayout != "" {
+		req.Output.Mode = core.OutputOCILayout
+		req.Output.OCILayoutPath = flags.toOCILayout
 	} else if activeProfile != "" && projCfg != nil && projCfg.Profiles[activeProfile].Output != "" {
 		outMode, err := core.ParseOutputMode(projCfg.Profiles[activeProfile].Output)
 		if err != nil {
