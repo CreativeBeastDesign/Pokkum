@@ -399,6 +399,66 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		}
 	}
 
+	// Pin kit.version.name when the block above did not.
+	//
+	// Written as its own guard rather than an else: the injection block is
+	// deeply nested and an `else if` hung off it silently never ran, which cost
+	// an hour of a build-instrument-rebuild loop to notice. `runViteWrapper` is
+	// the honest condition anyway — what matters is whether a config was staged,
+	// not which branch decided that.
+	if pinViteSource, pinViteName := readViteConfigSource(req.ProjectDir); !runViteWrapper &&
+		!sveltekitutils.VersionNamePinned(readConfigSource(req.ProjectDir), pinViteSource) {
+		// The adapter is already correct, so nothing above ran — and the version
+		// pin lives inside that injection path. That inverts the property this
+		// tool sells: a project configured correctly gets no injection, no pin,
+		// and non-reproducible images, while a misconfigured one gets all three.
+		// Measured on a real project: two builds of an unchanged tree produced
+		// {"version":"1787392160265"} and {"version":"1787392373500"}, renaming
+		// every hashed chunk and differing two OCI layers.
+		//
+		// Taking over the build to fix it is only safe under the same condition
+		// Option B already requires — a build script that is exactly `vite
+		// build` — because swapping in `bun x vite build` silently skips
+		// anything else the script does. Where that holds, pin it. Where it does
+		// not, say so rather than shipping a quietly unreproducible image.
+		pinnable := false
+		if !req.NoInject {
+			if pkgForPin, pkgErr := sveltekitutils.ReadPackageJSON(req.ProjectDir); pkgErr == nil {
+				pinnable = strings.TrimSpace(pkgForPin.Scripts["build"]) == "vite build"
+			}
+		}
+
+		switch {
+		case pinnable:
+			opts := sveltekitutils.DefaultInjectorOptions()
+			opts.TargetAdapter = targetAdapter
+			opts.SourceEpoch = req.SourceDateEpoch.Format("20060102150405")
+			if req.SourceDateEpoch.IsZero() {
+				opts.SourceEpoch = "pokkum-reproducible-build"
+			}
+			opts.UserSvelteConfigFile = findUserSvelteConfig(req.ProjectDir)
+			vcPin, pinErr := sveltekitutils.PrepareVirtualViteConfig(req.ProjectDir, pinViteName, pinViteSource, opts)
+			if pinErr != nil {
+				log.Warn("kit.version.name is not pinned and Pokkum could not stage a config to pin it, so this build is NOT bit-for-bit reproducible: "+
+					"SvelteKit falls back to a Date.now() version name that lands in _app/version.json and renames every client chunk. "+
+					"Set kit.version.name = process.env.SOURCE_DATE_EPOCH in svelte.config.js (Pokkum exports SOURCE_DATE_EPOCH into the build)",
+					"err", pinErr)
+				break
+			}
+			runViteWrapper = true
+			viteWrapperConfigPath = vcPin.VirtualConfigPath
+			log.Info("bunexec: adapter already configured; staged a Vite config solely to pin kit.version.name for reproducibility",
+				"path", vcPin.VirtualConfigPath, "versionPinned", vcPin.PinnedVersion)
+		default:
+			log.Warn("kit.version.name is not pinned, so this build is NOT bit-for-bit reproducible: "+
+				"SvelteKit falls back to a Date.now() version name that lands in _app/version.json and renames every client chunk, "+
+				"so two builds of identical source produce different images. Pokkum cannot pin it for you here because your build "+
+				"script does more than `vite build` and taking it over would skip the rest. "+
+				"Set kit.version.name = process.env.SOURCE_DATE_EPOCH in svelte.config.js — Pokkum exports SOURCE_DATE_EPOCH into the build environment",
+				"projectDir", req.ProjectDir)
+		}
+	}
+
 	entrypoint := filepath.Join(req.ProjectDir, "build", "index.js")
 	outputDir := filepath.Join(req.ProjectDir, "build")
 	if req.Strategy == ports.StrategyExe {

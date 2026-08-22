@@ -936,3 +936,39 @@ import __pokkumFs from 'node:fs';
 	};
 })();
 `
+
+// VersionNamePinned reports whether a SvelteKit config already fixes
+// kit.version.name to something stable.
+//
+// It matters because SvelteKit's default is Date.now(). That timestamp lands in
+// _app/version.json, is embedded in the client bundle, and cascades through
+// every content hash — two builds of identical committed source produce
+// differently-named chunks and differing OCI layers. Pokkum pins it whenever it
+// injects a config, but a project that already configures its adapter correctly
+// gets no injection and therefore no pin, which inverts the property: the
+// better-configured project is the one whose builds do not reproduce.
+//
+// Deliberately conservative. It returns true on any plausible pin, because the
+// cost of a false negative is a warning the user cannot act on, while a false
+// positive merely leaves today's silence. Recognised: a SOURCE_DATE_EPOCH
+// reference (what Pokkum's own injection writes) and an explicit name inside a
+// version block.
+func VersionNamePinned(sources ...string) bool {
+	for _, src := range sources {
+		if src == "" {
+			continue
+		}
+		if strings.Contains(src, "SOURCE_DATE_EPOCH") {
+			return true
+		}
+		if versionNameRe.MatchString(src) {
+			return true
+		}
+	}
+	return false
+}
+
+// versionNameRe matches a `version: { name: ... }` block, allowing whitespace
+// and an optional quote style, e.g. `version: { name: "1.2.3" }` or
+// `version:{name:pkg.version}`.
+var versionNameRe = regexp.MustCompile(`version\s*:\s*\{[^}]*\bname\s*:`)
