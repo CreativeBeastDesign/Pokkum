@@ -299,7 +299,7 @@ The project directory defaults to the current working directory.`,
 	cmd.Flags().StringSliceVar(&flags.allowSecretPatterns, "allow-secret-pattern", nil,
 		"Regex pattern to ignore during build-time secret scanning, repeatable")
 	cmd.Flags().StringSliceVar(&flags.excludeRoutes, "exclude-route", nil,
-		"Drop a prerendered route from the image, repeatable (e.g. --exclude-route=/storybook). A bare path covers its subtree; '*' matches within a segment and '**' across segments. Merged with build.exclude_routes in .pokkum.yaml. Filters prerendered files only: a server-rendered route is compiled into the server bundle and is reported as unmatched rather than silently kept")
+		"Keep a route out of the image, repeatable (e.g. --exclude-route=/dev). A bare path covers its subtree; '*' matches within a segment, '**' across segments, and route groups are transparent. Merged with build.exclude_routes in .pokkum.yaml. Where Pokkum authors the project's Vite config it points kit.files.routes at a filtered mirror, so the route's code is absent from the image entirely; otherwise it removes the route's prerendered output only (the code still ships) and warns which applied")
 	cmd.Flags().BoolVar(&flags.showSecretValues, "show-secret-values", false,
 		"Reveal the matched text of secret-guard findings instead of redacting it. For local triage of a false positive in minified output; never set this in CI, where it would copy real credentials into build logs")
 

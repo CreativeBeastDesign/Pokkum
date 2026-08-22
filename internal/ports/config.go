@@ -51,10 +51,10 @@ type BuildConfig struct {
 	// subtree ("/storybook" excludes /storybook/button), "*" matches within a
 	// segment and "**" across segments.
 	//
-	// This filters prerendered *files*. A server-rendered route on the layered
-	// strategy is compiled into the server bundle and cannot be removed by
-	// dropping a file, so a pattern naming one is reported as unmatched rather
-	// than silently treated as excluded.
+	// Applied at build time where Pokkum authors the project's Vite config
+	// (kit.files.routes is pointed at a filtered mirror, so the route's code
+	// never enters the bundle). Otherwise only the route's prerendered output
+	// is removed and the build warns that its code still ships.
 	ExcludeRoutes []string `yaml:"exclude_routes,omitempty" json:"exclude_routes,omitempty"`
 }
 
