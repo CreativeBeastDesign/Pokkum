@@ -64,6 +64,16 @@ Merges the last N generations' immutable /_app/immutable client assets into a se
   - [internal/adapters/packager/packager.go](../internal/adapters/packager/packager.go)
   - [tests/integration/asset_overlay_e2e_test.go](../tests/integration/asset_overlay_e2e_test.go)
 
+### [Exclude routes from the production build](items/route-exclusion-filter.md)
+
+Dev-only routes are bundle entry points, so tree-shaking cannot remove them; a build-time filter would keep their code out of the image entirely — which output filtering cannot do.
+
+- Flags: `--exclude-route`
+- Implementation:
+  - [internal/adapters/routefilterutils/mirror.go](../internal/adapters/routefilterutils/mirror.go)
+  - [internal/adapters/bunexec/route_mirror.go](../internal/adapters/bunexec/route_mirror.go)
+  - [internal/adapters/sveltekitutils/injector.go](../internal/adapters/sveltekitutils/injector.go)
+
 ### [Exclude prerendered routes from the packaged image](items/route-exclusion-output-filter.md)
 
 A first phase of route exclusion: --exclude-route / build.exclude_routes drops prerendered routes from the output before packaging, and warns about links left pointing at them.
@@ -462,6 +472,9 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - Lineage discovery is registry-side via a pokkum.dev/predecessor manifest annotation, deliberately independent of Kubernetes' pokkum.dev/image-history — a build-time flag cannot depend on cluster state without coupling build to Kubernetes. The annotation is only stamped when --asset-overlay is actually in use, so auto-discovery can only find a chain that opted in from the start of a rollout sequence. ([Rolling-deploy asset overlay (--asset-overlay)](items/rolling-deploy-asset-overlay.md))
 - Requires --output=push for auto-discovery (there is no current tag to inspect for --local/--tarball); --asset-overlay-from's explicit refs work regardless of output mode. ([Rolling-deploy asset overlay (--asset-overlay)](items/rolling-deploy-asset-overlay.md))
 - pokkum verify's rebuild-and-compare path does not reproduce this layer — see [pokkum verify doesn't reproduce the asset-overlay layer](items/asset-overlay-verify-gap.md). ([Rolling-deploy asset overlay (--asset-overlay)](items/rolling-deploy-asset-overlay.md))
+- Falls back to output filtering (prerendered page removed, code still shipped) whenever Pokkum does not author the Vite config: a build script that does more than `vite build`, a bare `sveltekit()` whose options live in svelte.config.js, or SvelteKit below 2.62.0. The log says which mechanism applied. ([Exclude routes from the production build](items/route-exclusion-filter.md))
+- SvelteKit prints `svelte.config.js is ignored when options are passed via your Vite config` when config is passed inline. Cosmetic, but user-visible, and pre-existing for adapter injection. ([Exclude routes from the production build](items/route-exclusion-filter.md))
+- The mirror filters the route graph, not the filesystem. A surviving route that reaches into an excluded directory by relative import still pulls that module into the bundle — the route entry points are excluded, arbitrary modules living under the excluded path are not. ([Exclude routes from the production build](items/route-exclusion-filter.md))
 - Server-rendered routes on `--strategy=layered` are compiled into the server bundle and cannot be removed by deleting a file. A pattern naming one is reported as unmatched; it is not excluded. ([Exclude prerendered routes from the packaged image](items/route-exclusion-output-filter.md))
 - This filters **output**, not the build. A route's JavaScript chunks, its imports and its SBOM entries still ship — only the prerendered HTML is removed. The size and SBOM-noise win needs the build-time filter in [Exclude routes from the production build](items/route-exclusion-filter.md), which stays open. ([Exclude prerendered routes from the packaged image](items/route-exclusion-output-filter.md))
 - --telemetry is rejected outright for node, not silently ignored: the layered strategy's OTel bootstrap is a bun --preload mechanism with no Node equivalent. ([--runtime=node, the second runtime dimension](items/runtime-node.md))

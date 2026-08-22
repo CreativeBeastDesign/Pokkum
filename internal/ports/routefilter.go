@@ -7,6 +7,12 @@ import "context"
 type RouteFilterRequest struct {
 	// PrerenderedDir is the prerendered output tree to filter.
 	PrerenderedDir string
+	// AlreadyExcluded are routes the build itself kept out, from
+	// PrepareResult.RoutesExcludedAtBuild. A pattern covering one of these
+	// matched nothing on disk precisely because it worked, so it must not be
+	// reported as unmatched.
+	AlreadyExcluded []string
+
 	// Patterns are absolute route paths. A bare path covers the route and its
 	// subtree; "*" matches within a segment and "**" across segments.
 	Patterns []string

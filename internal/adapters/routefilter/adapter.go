@@ -30,7 +30,7 @@ func (a *Adapter) FilterRoutes(ctx context.Context, req ports.RouteFilterRequest
 	out := ports.RouteFilterResult{
 		ExcludedRoutes:    res.ExcludedRoutes,
 		RemovedFiles:      res.RemovedFiles,
-		UnmatchedPatterns: res.UnmatchedPatterns,
+		UnmatchedPatterns: filterHandledPatterns(res.UnmatchedPatterns, req.AlreadyExcluded),
 		SkippedSymlinks:   res.SkippedSymlinks,
 	}
 	dead, err := routefilterutils.FindDeadLinks(req.PrerenderedDir, req.Patterns)
@@ -46,3 +46,26 @@ func (a *Adapter) FilterRoutes(ctx context.Context, req ports.RouteFilterRequest
 }
 
 var _ ports.RouteFilter = (*Adapter)(nil)
+
+// filterHandledPatterns drops patterns that matched no prerendered file only
+// because the build already excluded the route. Without this, the feature
+// working perfectly produces a warning saying it did nothing.
+func filterHandledPatterns(unmatched, alreadyExcluded []string) []string {
+	if len(unmatched) == 0 || len(alreadyExcluded) == 0 {
+		return unmatched
+	}
+	kept := make([]string, 0, len(unmatched))
+	for _, p := range unmatched {
+		handled := false
+		for _, route := range alreadyExcluded {
+			if routefilterutils.MatchesAny(route, []string{p}) {
+				handled = true
+				break
+			}
+		}
+		if !handled {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}

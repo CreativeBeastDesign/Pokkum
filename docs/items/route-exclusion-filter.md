@@ -8,7 +8,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
+| Status | shipped |
 | Kind | feature |
 | Tier | moat |
 | Area | Build & Packaging |
@@ -60,6 +60,75 @@ shipping behind a guard that one refactor can remove.
 Config shape should name route paths rather than file globs (`exclude_routes: ["/dev/**"]`),
 since that is how the user thinks about them, and the guard test should assert the produced
 manifest lacks those routes rather than asserting on the filter's own bookkeeping.
+
+## Decision
+
+Shipped 2026-08-22, taking the first option after proving it against real builds rather
+than reasoning about it. Justified on developer experience rather than size: the
+measurement below came out modest, and the reason to have it is being able to keep as
+many `/dev/` routes in a project as you like knowing none of them ship.
+
+`kit.files.routes` is pointed at `.pokkum/routes`, a mirror of the routes directory
+built from symlinks with the excluded routes left out. Symlinks rather than copies are
+required for correctness: Vite resolves a symlinked module to its real path, so a
+route's relative import that escapes the routes tree (`../../lib/thing.js`) still
+resolves. A copied tree breaks every one of those.
+
+There is no supported way to point SvelteKit at a different config file — no
+`SVELTE_CONFIG_PATH`, no CLI flag, and Kit sets vite-plugin-svelte's `configFile: false`
+unconditionally. The supported override is passing config inline to the `sveltekit()`
+plugin, which Pokkum already does for adapter injection and the version pin; routes are
+one more injected key, applied as a wrapper so the object is evaluated once and any
+`files` the project set survives.
+
+Three guards, each from an observed failure rather than a precaution:
+
+- `resolve.preserveSymlinks: true` is refused. It makes every escaping relative import
+  fail to resolve — reproduced as a real `UNRESOLVED_IMPORT` build failure.
+- A partially excluded directory is recreated with **all** its surviving entries,
+  layouts included. A mirror that dropped `admin/+layout.svelte` while keeping
+  `/admin/panel` built cleanly, served the page wrapped in the *root* layout, and warned
+  about nothing. SvelteKit cannot detect it, so the mirror has to be right.
+- SvelteKit below 2.62.0 cannot take config inline, so exclusion falls back to output
+  filtering with a warning instead of editing the user's `svelte.config.js`.
+
+Verified end to end on a real layered build: a `/dev` route's marker string appears 3
+times in the image built without the flag and 0 times with it, its server chunk
+(`app/server/.../entries/pages/dev/_page.svelte.js`) is gone, and the kept routes are
+untouched in both.
+Measurement, run before building it as this item asked. Three builds of a real project (static
+strategy): baseline, output filtering only, and the two demo routes deleted from source
+as a stand-in for build-time exclusion.
+
+| | prerendered | client JS/CSS | image (compressed) |
+|---|---|---|---|
+| baseline | 384 KB | 6912 KB | 10196 KB |
+| output filter only | 256 KB | 6912 KB | 10056 KB (-1.4%) |
+| routes removed | 256 KB | 6272 KB | 9924 KB (-2.7%) |
+
+So build-time exclusion is worth 132 KB more than output filtering on that project —
+1.3% of the image. The premise this item was written on ("a style guide imports the
+entire component library, so it can be one of the largest things in the image") did not
+hold there, and the reason generalises: that project is itself a component-library
+showcase, so every route imports the library and it cannot be dropped by removing two of
+five routes. The size win is real only where an excluded route is the *sole* consumer of
+something heavy. Built anyway, for the DX.
+
+## Flags
+
+- `--exclude-route`
+
+## Implementation
+
+- [internal/adapters/routefilterutils/mirror.go](../../internal/adapters/routefilterutils/mirror.go)
+- [internal/adapters/bunexec/route_mirror.go](../../internal/adapters/bunexec/route_mirror.go)
+- [internal/adapters/sveltekitutils/injector.go](../../internal/adapters/sveltekitutils/injector.go)
+
+## Known Limitations
+
+- The mirror filters the route graph, not the filesystem. A surviving route that reaches into an excluded directory by relative import still pulls that module into the bundle — the route entry points are excluded, arbitrary modules living under the excluded path are not.
+- Falls back to output filtering (prerendered page removed, code still shipped) whenever Pokkum does not author the Vite config: a build script that does more than `vite build`, a bare `sveltekit()` whose options live in svelte.config.js, or SvelteKit below 2.62.0. The log says which mechanism applied.
+- SvelteKit prints `svelte.config.js is ignored when options are passed via your Vite config` when config is passed inline. Cosmetic, but user-visible, and pre-existing for adapter injection.
 
 ## Related
 

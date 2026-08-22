@@ -1,6 +1,7 @@
 package sveltekitutils
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,6 +42,13 @@ type InjectorOptions struct {
 	// When set, the injected config imports that file and merges it, so only the
 	// adapter is replaced.
 	UserSvelteConfigFile string
+
+	// RoutesDir, when set, overrides kit.files.routes — pointing SvelteKit at a
+	// filtered mirror of src/routes so excluded routes never become bundle
+	// entry points. Interpreted relative to the build's working directory,
+	// which is how SvelteKit resolves it (it calls path.resolve against
+	// process.cwd(), not against the config file's location).
+	RoutesDir string
 }
 
 // VirtualConfigResult holds the result of preparing a virtual svelte.config.js.
@@ -56,6 +64,11 @@ type VirtualConfigResult struct {
 
 	// PinnedVersion indicates whether version pinning was injected.
 	PinnedVersion bool
+
+	// RoutesRedirected reports whether kit.files.routes was pointed at a
+	// filtered mirror. False means excluded routes are still bundle entry
+	// points and the caller must say so rather than assume they were removed.
+	RoutesRedirected bool
 
 	// InjectedTelemetry indicates whether telemetry experimental flags were injected.
 	InjectedTelemetry bool
@@ -134,6 +147,7 @@ func PrepareVirtualConfig(projectDir string, opts InjectorOptions) (*VirtualConf
 		TransformedSource: transformed,
 		VirtualConfigPath: virtualPath,
 		InjectedAdapter:   injectedAdapter,
+		RoutesRedirected:  opts.RoutesDir != "" && strings.Contains(transformed, "__pokkumWithRoutes"),
 		PinnedVersion:     pinnedVersion,
 		InjectedTelemetry: injectedTelemetry,
 	}, nil
@@ -584,6 +598,21 @@ func TransformViteConfig(source string, opts InjectorOptions) (string, error) {
 	// any test: every fixture used the svelte.config.js path.
 	newArgs = injectViteVersionPin(newArgs)
 
+	// Point kit.files.routes at the filtered mirror, if one was staged.
+	//
+	// Applied as a wrapper rather than an extra key so it works for all three
+	// argument shapes above without string-surgery on each: the object is
+	// evaluated once (adapter() must not be called twice), any `files` the
+	// project already configured is preserved key by key, and `routes` wins
+	// because it is spread last.
+	if opts.RoutesDir != "" {
+		prelude += fmt.Sprintf(
+			"const __pokkumRoutesDir = %s;\n"+
+				"const __pokkumWithRoutes = (o) => ({ ...o, files: { ...(o?.files ?? {}), routes: __pokkumRoutesDir } });\n",
+			jsStringLiteral(filepath.ToSlash(opts.RoutesDir)))
+		newArgs = "__pokkumWithRoutes(" + newArgs + ")"
+	}
+
 	result = result[:openParen+1] + newArgs + result[closeParen:]
 	if prelude != "" {
 		// Prepended rather than inserted after the imports: ESM import
@@ -715,7 +744,7 @@ func PrepareVirtualViteConfig(projectDir, viteConfigName, viteConfigSource strin
 // rewriting the sveltekit() call would risk changing semantics (SvelteKit
 // ignores svelte.config.js the moment the plugin receives any argument) for no
 // benefit.
-func PrepareVirtualViteConfigPassthrough(projectDir, viteConfigName, viteConfigSource string) (*VirtualConfigResult, error) {
+func PrepareVirtualViteConfigPassthrough(projectDir, viteConfigName, viteConfigSource, routesDir string) (*VirtualConfigResult, error) {
 	if viteConfigName == "" {
 		viteConfigName = "vite.config.ts"
 	}
@@ -724,6 +753,7 @@ func PrepareVirtualViteConfigPassthrough(projectDir, viteConfigName, viteConfigS
 	}
 
 	transformed, pinned := pinViteConfigVersion(rewriteRelativeImportSpecifiers(viteConfigSource), projectDir)
+	transformed, routesPointed := pointViteConfigRoutes(transformed, routesDir)
 	transformed = remoteManifestSortPrelude + transformed
 	transformed = shimDirnameAndImportMetaURL(transformed, filepath.Join(projectDir, viteConfigName))
 
@@ -740,6 +770,7 @@ func PrepareVirtualViteConfigPassthrough(projectDir, viteConfigName, viteConfigS
 		VirtualConfigPath: virtualPath,
 		InjectedAdapter:   false,
 		PinnedVersion:     pinned,
+		RoutesRedirected:  routesPointed,
 	}, nil
 }
 
@@ -972,3 +1003,52 @@ func VersionNamePinned(sources ...string) bool {
 // and an optional quote style, e.g. `version: { name: "1.2.3" }` or
 // `version:{name:pkg.version}`.
 var versionNameRe = regexp.MustCompile(`version\s*:\s*\{[^}]*\bname\s*:`)
+
+// jsStringLiteral renders s as a JavaScript string literal. JSON's string
+// encoding is a subset of JavaScript's, so this is exact for any path.
+func jsStringLiteral(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		// json.Marshal only fails on unencodable types, never on a string.
+		return `""`
+	}
+	return string(b)
+}
+
+// pointViteConfigRoutes rewrites a passed-through Vite config so SvelteKit
+// reads its routes from the filtered mirror, reporting whether it could.
+//
+// Same wrapper shape TransformViteConfig uses, for the same reasons: the
+// argument is evaluated once, and any `files` the project already configured
+// survives key by key with `routes` spread last so it wins.
+func pointViteConfigRoutes(source, routesDir string) (string, bool) {
+	if routesDir == "" {
+		return source, false
+	}
+	idx := findLiveSvelteKitCall(source)
+	if idx < 0 {
+		return source, false
+	}
+	openParen := idx + len("sveltekit(") - 1
+	args, ok := scanCallArgs(source, openParen)
+	if !ok {
+		return source, false
+	}
+	closeParen := openParen + len(args) + 1
+
+	trimmed := strings.TrimSpace(args)
+	if trimmed == "" {
+		// A bare sveltekit() loads svelte.config.js, and passing any argument
+		// makes SvelteKit skip that file entirely — so injecting routes here
+		// would silently discard the project's whole configuration. The
+		// caller reports this as "could not apply" rather than doing it.
+		return source, false
+	}
+
+	prelude := fmt.Sprintf(
+		"const __pokkumRoutesDir = %s;\n"+
+			"const __pokkumWithRoutes = (o) => ({ ...o, files: { ...(o?.files ?? {}), routes: __pokkumRoutesDir } });\n",
+		jsStringLiteral(filepath.ToSlash(routesDir)))
+
+	return prelude + source[:openParen+1] + "__pokkumWithRoutes(" + args + ")" + source[closeParen:], true
+}

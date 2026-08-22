@@ -304,6 +304,15 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	var runViteWrapper bool
 	var viteWrapperConfigPath string
 
+	// Build-time route exclusion, staged before any config is written so every
+	// branch below can point kit.files.routes at the mirror. Output filtering
+	// in core covers whatever this could not.
+	var routesRedirected bool
+	routesMirror, mirrorErr := stageRoutesMirror(req.ProjectDir, req.ExcludeRoutes, kitVersionForProject(req.ProjectDir), log)
+	if mirrorErr != nil {
+		return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, mirrorErr)
+	}
+
 	if checkErr := checkEffectiveAdapter(req.ProjectDir, req.Strategy, targetAdapter); checkErr != nil {
 		if req.NoInject {
 			return ports.PrepareResult{}, checkErr
@@ -347,6 +356,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		// settings and kit.experimental flags.
 		opts.UserSvelteConfigFile = findUserSvelteConfig(req.ProjectDir)
 		opts.TargetAdapter = targetAdapter
+		opts.RoutesDir = routesMirror.RoutesDir
 		opts.SourceEpoch = req.SourceDateEpoch.Format("20060102150405")
 		if req.SourceDateEpoch.IsZero() {
 			opts.SourceEpoch = "pokkum-reproducible-build"
@@ -359,6 +369,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		}
 		runViteWrapper = true
 		viteWrapperConfigPath = vcVite.VirtualConfigPath
+		routesRedirected = vcVite.RoutesRedirected
 		log.Info("bunexec: virtual vite config injected", "path", vcVite.VirtualConfigPath)
 	} else if !req.NoInject {
 		// The adapter is already correct, so nothing needs injecting — but the
@@ -376,12 +387,13 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		// does not get the sort — correctness first, determinism second.
 		if viteSource, viteName := readViteConfigSource(req.ProjectDir); strings.TrimSpace(viteSource) != "" &&
 			sveltekitutils.HasLiveSvelteKitCall(viteSource) && buildScriptIsPlainViteBuild(req.ProjectDir) {
-			vcVite, err := sveltekitutils.PrepareVirtualViteConfigPassthrough(req.ProjectDir, viteName, viteSource)
+			vcVite, err := sveltekitutils.PrepareVirtualViteConfigPassthrough(req.ProjectDir, viteName, viteSource, routesMirror.RoutesDir)
 			if err != nil {
 				log.Warn("bunexec: could not prepare the determinism config; building without it (the image will still be correct, but two builds of identical source may differ)", "err", err)
 			} else {
 				runViteWrapper = true
 				viteWrapperConfigPath = vcVite.VirtualConfigPath
+				routesRedirected = vcVite.RoutesRedirected
 				log.Info("bunexec: determinism config prepared (adapter already correct)",
 					"path", vcVite.VirtualConfigPath, "versionPinned", vcVite.PinnedVersion)
 				if !vcVite.PinnedVersion {
@@ -432,6 +444,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		case pinnable:
 			opts := sveltekitutils.DefaultInjectorOptions()
 			opts.TargetAdapter = targetAdapter
+			opts.RoutesDir = routesMirror.RoutesDir
 			opts.SourceEpoch = req.SourceDateEpoch.Format("20060102150405")
 			if req.SourceDateEpoch.IsZero() {
 				opts.SourceEpoch = "pokkum-reproducible-build"
@@ -447,6 +460,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 			}
 			runViteWrapper = true
 			viteWrapperConfigPath = vcPin.VirtualConfigPath
+			routesRedirected = vcPin.RoutesRedirected
 			log.Info("bunexec: adapter already configured; staged a Vite config solely to pin kit.version.name for reproducibility",
 				"path", vcPin.VirtualConfigPath, "versionPinned", vcPin.PinnedVersion)
 		default:
@@ -457,6 +471,32 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 				"Set kit.version.name = process.env.SOURCE_DATE_EPOCH in svelte.config.js — Pokkum exports SOURCE_DATE_EPOCH into the build environment",
 				"projectDir", req.ProjectDir)
 		}
+	}
+
+	// Reconcile what was asked for with what actually happened. A mirror that
+	// was staged but never reached a config is worse than none: the routes are
+	// still bundle entry points, and reporting them as excluded would be a
+	// false claim about what is in the image.
+	var excludedAtBuild []string
+	switch {
+	case routesMirror.RoutesDir != "" && routesRedirected:
+		excludedAtBuild = routesMirror.ExcludedRoutes
+		for _, p := range routesMirror.UnmatchedPatterns {
+			log.Warn("route exclusion pattern matched no route directory, so nothing was removed from the build",
+				"pattern", p)
+		}
+	case routesMirror.RoutesDir != "":
+		if rmErr := os.RemoveAll(filepath.Join(req.ProjectDir, filepath.FromSlash(routesMirrorRelDir))); rmErr != nil {
+			log.Warn("bunexec: could not remove the unused routes mirror", "err", rmErr)
+		}
+		log.Warn("route exclusions could not be applied at build time, because Pokkum did not end up authoring this "+
+			"project's Vite config — the excluded routes' code, imports and SBOM entries still ship. Their prerendered "+
+			"pages are still removed from the image. Passing the SvelteKit options inline in sveltekit({ ... }), or "+
+			"using a build script that is exactly `vite build`, lets Pokkum exclude them from the build itself",
+			"routes", routesMirror.ExcludedRoutes)
+	case routesMirror.Skipped != "":
+		log.Warn("route exclusions were not applied at build time; their prerendered pages are still removed from the image, "+
+			"but their code still ships", "reason", routesMirror.Skipped)
 	}
 
 	entrypoint := filepath.Join(req.ProjectDir, "build", "index.js")
@@ -815,6 +855,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		NodeModulesDir:          nodeModulesDir,
 		StaticFallbackRelPath:   staticFallbackRel,
 		TelemetryPreloadRelPath: telemetryPreloadRelPath,
+		RoutesExcludedAtBuild:   excludedAtBuild,
 	}, nil
 }
 

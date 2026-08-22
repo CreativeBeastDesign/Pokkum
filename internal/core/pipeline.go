@@ -932,6 +932,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	g.Go(func() error {
 		p, err := deps.Compiler.Prepare(gctx, ports.PrepareRequest{
 			Strategy:               req.Compile.Strategy,
+			ExcludeRoutes:          slices.Clone(req.ExcludeRoutes),
 			ProjectDir:             req.ProjectDir,
 			SourceDateEpoch:        req.SourceDateEpoch,
 			Env:                    req.Compile.Env,
@@ -2557,15 +2558,19 @@ func baseImagesFor(base *ports.BaseImage) map[ports.Platform]v1.Image {
 func applyRouteExclusions(ctx context.Context, deps Deps, req BuildRequest, prep ports.PrepareResult) error {
 	log := deps.Logger
 	res, err := deps.RouteFilter.FilterRoutes(ctx, ports.RouteFilterRequest{
-		PrerenderedDir: filepath.Join(prep.OutputDir, "prerendered"),
-		Patterns:       req.ExcludeRoutes,
+		PrerenderedDir:  filepath.Join(prep.OutputDir, "prerendered"),
+		Patterns:        req.ExcludeRoutes,
+		AlreadyExcluded: prep.RoutesExcludedAtBuild,
 	})
 	if err != nil {
 		return fmt.Errorf("core: excluding routes: %w", err)
 	}
 
+	for _, r := range prep.RoutesExcludedAtBuild {
+		log.Info("route excluded from the build; its code is not in the image at all", "route", r)
+	}
 	for _, r := range res.ExcludedRoutes {
-		log.Info("route excluded from image", "route", r)
+		log.Info("route's prerendered output removed from image", "route", r)
 	}
 	for _, f := range res.SkippedSymlinks {
 		log.Warn("route exclusion skipped a symlink rather than deleting through it; it is still in the image", "path", f)

@@ -335,6 +335,13 @@ type PrepareRequest struct {
 	// Strategy selects the build packaging strategy (layered vs exe).
 	Strategy BuildStrategy
 
+	// ExcludeRoutes are route patterns to keep out of the build entirely, by
+	// pointing kit.files.routes at a filtered mirror of the routes directory.
+	// Whether that is possible depends on whether Pokkum ends up authoring the
+	// project's Vite config; PrepareResult.RoutesExcludedAtBuild reports what
+	// actually happened rather than what was asked for.
+	ExcludeRoutes []string
+
 	// ProjectDir is the absolute SvelteKit project root. Required.
 	ProjectDir string
 
@@ -419,6 +426,12 @@ type TelemetryOptions struct {
 // are absolute and live inside ProjectDir; they are inputs to Compile, not
 // deliverables, and core does not copy or archive them.
 type PrepareResult struct {
+	// RoutesExcludedAtBuild are the routes that were genuinely kept out of the
+	// build — their code is not in the bundle at all. Patterns absent from this
+	// list were not applied at build time, and the caller must still filter
+	// their rendered output rather than assume they are gone.
+	RoutesExcludedAtBuild []string
+
 	// EntrypointPath is the absolute path of the generated TypeScript server
 	// entrypoint, conventionally
 	// <ProjectDir>/.svelte-kit/jesterkit-sveltekit/temp-server/index.ts.

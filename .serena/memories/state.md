@@ -474,6 +474,29 @@ before trusting a claim that predates the commit it cites.
 
 ## Route exclusion (`--exclude-route`, `build.exclude_routes`) — shipped 2026-08-22
 
+**Two mechanisms. Build-time is primary; output filtering is the fallback.**
+
+- **Build-time** (`internal/adapters/bunexec/route_mirror.go` +
+  `routefilterutils/mirror.go`): stage `.pokkum/routes` as a SYMLINK mirror of
+  the routes dir minus the excluded routes, and set `kit.files.routes` to it via
+  the injector's `RoutesDir` option. The route is then not a bundle entry point,
+  so its code is genuinely absent. Verified: a `/dev` marker appears 3x in a real
+  layered image without the flag, 0x with it.
+- **Symlinks are mandatory, not a convenience.** Vite resolves a symlinked
+  module to its real path, so `../../lib/x` from a mirrored route still
+  resolves. A copied tree breaks every escaping relative import. Correspondingly
+  `resolve.preserveSymlinks: true` is REFUSED — it produces UNRESOLVED_IMPORT.
+- **A partially excluded directory must carry ALL its surviving entries,
+  layouts included.** Dropping `admin/+layout.svelte` while keeping
+  `/admin/panel` builds fine, serves the page in the ROOT layout, and warns
+  about nothing. SvelteKit cannot detect it.
+- **No `SVELTE_CONFIG_PATH` exists**, and Kit sets vite-plugin-svelte's
+  `configFile: false` unconditionally. The only supported override is passing
+  config inline to `sveltekit()`, which needs **Kit >= 2.62.0**. Below that,
+  fall back — never edit the user's svelte.config.js.
+- Known gap: the mirror filters the route GRAPH, not the filesystem. A kept
+  route importing `../dev/shared.js` still bundles that module.
+
 - `ports.RouteFilter` / `internal/adapters/routefilter` over
   `internal/adapters/routefilterutils`. Wired in `cmd/pokkum/build.go`'s Deps
   literal; nil disables the feature.
