@@ -105,13 +105,13 @@ func TestReadPackageIdentity_MissingFileIsNotAnError(t *testing.T) {
 func TestRenderSPDXJSON_Deterministic(t *testing.T) {
 	pkgs := []scannerutils.CatalogPackage{{Name: "a", Version: "1.0.0", Type: scannerutils.PkgTypeNpm}}
 	createdAt := time.Unix(1700000000, 0).UTC().Format(time.RFC3339)
-	id := contentIdentityUUID("app", "1.0.0", pkgs, "", "")
+	id := contentIdentityUUID("app", "1.0.0", pkgs, "", "", scannerutils.DistroInfo{}, false)
 
-	out1, err := renderSPDXJSON("app", "1.0.0", id, createdAt, pkgs, "", "")
+	out1, err := renderSPDXJSON("app", "1.0.0", id, createdAt, pkgs, "", "", scannerutils.DistroInfo{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out2, err := renderSPDXJSON("app", "1.0.0", id, createdAt, pkgs, "", "")
+	out2, err := renderSPDXJSON("app", "1.0.0", id, createdAt, pkgs, "", "", scannerutils.DistroInfo{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,9 +136,9 @@ func TestRenderSPDXJSON_Deterministic(t *testing.T) {
 func TestRenderCycloneDXJSON_Deterministic(t *testing.T) {
 	pkgs := []scannerutils.CatalogPackage{{Name: "a", Version: "1.0.0", Type: scannerutils.PkgTypeNpm}}
 	createdAt := time.Unix(1700000000, 0).UTC().Format(time.RFC3339)
-	id := contentIdentityUUID("app", "1.0.0", pkgs, "", "")
+	id := contentIdentityUUID("app", "1.0.0", pkgs, "", "", scannerutils.DistroInfo{}, false)
 
-	out, err := renderCycloneDXJSON("app", "1.0.0", id, createdAt, pkgs, "", "")
+	out, err := renderCycloneDXJSON("app", "1.0.0", id, createdAt, pkgs, "", "", scannerutils.DistroInfo{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,18 +161,18 @@ func TestContentIdentityUUID_Deterministic(t *testing.T) {
 		{Name: "b", Version: "2.0.0", Type: scannerutils.PkgTypeNpm},
 		{Name: "a", Version: "1.0.0", Type: scannerutils.PkgTypeNpm},
 	}
-	id1 := contentIdentityUUID("app", "1.0.0", pkgs, "", "")
-	id2 := contentIdentityUUID("app", "1.0.0", []scannerutils.CatalogPackage{pkgs[1], pkgs[0]}, "", "")
+	id1 := contentIdentityUUID("app", "1.0.0", pkgs, "", "", scannerutils.DistroInfo{}, false)
+	id2 := contentIdentityUUID("app", "1.0.0", []scannerutils.CatalogPackage{pkgs[1], pkgs[0]}, "", "", scannerutils.DistroInfo{}, false)
 	if id1 != id2 {
 		t.Errorf("contentIdentityUUID depends on package slice order: %v != %v", id1, id2)
 	}
 
-	id3 := contentIdentityUUID("app", "1.0.1", pkgs, "", "")
+	id3 := contentIdentityUUID("app", "1.0.1", pkgs, "", "", scannerutils.DistroInfo{}, false)
 	if id1 == id3 {
 		t.Error("contentIdentityUUID did not change when the version changed")
 	}
 
-	id4 := contentIdentityUUID("app", "1.0.0", pkgs, "1.2.2", "abc123")
+	id4 := contentIdentityUUID("app", "1.0.0", pkgs, "1.2.2", "abc123", scannerutils.DistroInfo{}, false)
 	if id1 == id4 {
 		t.Error("contentIdentityUUID did not change when BunVersion/BunSHA256 changed")
 	}
@@ -185,9 +185,9 @@ func TestContentIdentityUUID_Deterministic(t *testing.T) {
 // project having any npm dependencies at all.
 func TestRenderCycloneDXJSON_BunComponent(t *testing.T) {
 	createdAt := time.Unix(1700000000, 0).UTC().Format(time.RFC3339)
-	id := contentIdentityUUID("app", "1.0.0", nil, "1.2.2", "deadbeef")
+	id := contentIdentityUUID("app", "1.0.0", nil, "1.2.2", "deadbeef", scannerutils.DistroInfo{}, false)
 
-	out, err := renderCycloneDXJSON("app", "1.0.0", id, createdAt, nil, "1.2.2", "deadbeef")
+	out, err := renderCycloneDXJSON("app", "1.0.0", id, createdAt, nil, "1.2.2", "deadbeef", scannerutils.DistroInfo{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,9 +228,9 @@ func TestRenderCycloneDXJSON_BunComponent(t *testing.T) {
 func TestRenderCycloneDXJSON_NoBunComponentWhenVersionEmpty(t *testing.T) {
 	createdAt := time.Unix(1700000000, 0).UTC().Format(time.RFC3339)
 	pkgs := []scannerutils.CatalogPackage{{Name: "a", Version: "1.0.0", Type: scannerutils.PkgTypeNpm}}
-	id := contentIdentityUUID("app", "1.0.0", pkgs, "", "")
+	id := contentIdentityUUID("app", "1.0.0", pkgs, "", "", scannerutils.DistroInfo{}, false)
 
-	out, err := renderCycloneDXJSON("app", "1.0.0", id, createdAt, pkgs, "", "")
+	out, err := renderCycloneDXJSON("app", "1.0.0", id, createdAt, pkgs, "", "", scannerutils.DistroInfo{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,9 +255,9 @@ func TestRenderCycloneDXJSON_NoBunComponentWhenVersionEmpty(t *testing.T) {
 // carrying the purl and checksum.
 func TestRenderSPDXJSON_BunComponent(t *testing.T) {
 	createdAt := time.Unix(1700000000, 0).UTC().Format(time.RFC3339)
-	id := contentIdentityUUID("app", "1.0.0", nil, "1.2.2", "deadbeef")
+	id := contentIdentityUUID("app", "1.0.0", nil, "1.2.2", "deadbeef", scannerutils.DistroInfo{}, false)
 
-	out, err := renderSPDXJSON("app", "1.0.0", id, createdAt, nil, "1.2.2", "deadbeef")
+	out, err := renderSPDXJSON("app", "1.0.0", id, createdAt, nil, "1.2.2", "deadbeef", scannerutils.DistroInfo{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

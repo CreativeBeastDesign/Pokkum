@@ -63,8 +63,13 @@ type Deps struct {
 	// Daemon loads into the local Docker daemon. Required for OutputLocal.
 	Daemon ports.LocalLoader
 
-	// Tarballs writes an OCI archive. Required for OutputTarball.
+	// Tarballs writes a legacy docker-save archive. Required for
+	// OutputTarball.
 	Tarballs ports.TarballWriter
+
+	// OCILayouts writes a standards-conformant OCI image layout directory.
+	// Required for OutputOCILayout.
+	OCILayouts ports.OCILayoutWriter
 
 	// SBOM generates the bill of materials. Required when the request's SBOM
 	// format is enabled and the build is not a dry run.
@@ -229,6 +234,10 @@ func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 	case OutputTarball:
 		if d.Tarballs == nil {
 			return missing("tarball writer")
+		}
+	case OutputOCILayout:
+		if d.OCILayouts == nil {
+			return missing("oci layout writer")
 		}
 	default:
 		// An unrecognized output mode reached here would otherwise pass
@@ -625,11 +634,12 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		}
 		res := BuildResult{
 			Image: ImageResult{
-				Mode:        req.Output.Mode,
-				Tags:        slices.Clone(req.Tags),
-				TarballPath: req.Output.TarballPath,
-				Platforms:   slices.Clone(req.Platforms),
-				IsIndex:     len(req.Platforms) > 1,
+				Mode:          req.Output.Mode,
+				Tags:          slices.Clone(req.Tags),
+				TarballPath:   req.Output.TarballPath,
+				OCILayoutPath: req.Output.OCILayoutPath,
+				Platforms:     slices.Clone(req.Platforms),
+				IsIndex:       len(req.Platforms) > 1,
 			},
 			BaseImage:       baseInfo,
 			Toolchain:       toolchain,
@@ -1151,11 +1161,12 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			return result, err
 		}
 		result.Image = ImageResult{
-			Mode:        req.Output.Mode,
-			Tags:        slices.Clone(req.Tags),
-			TarballPath: req.Output.TarballPath,
-			Platforms:   slices.Clone(req.Platforms),
-			IsIndex:     multi,
+			Mode:          req.Output.Mode,
+			Tags:          slices.Clone(req.Tags),
+			TarballPath:   req.Output.TarballPath,
+			OCILayoutPath: req.Output.OCILayoutPath,
+			Platforms:     slices.Clone(req.Platforms),
+			IsIndex:       multi,
 		}
 		if d, err := payloadDigest(payload); err == nil {
 			result.Image.Digest = d
@@ -1856,6 +1867,10 @@ func fanOut(
 			log.Info("scanning project for sbom", "format", req.SBOM.Format)
 			d, err := deps.SBOM.Generate(gctx, ports.SBOMRequest{
 				ProjectDir: req.ProjectDir,
+				// The resolved base images, so the document catalogues the OS
+				// packages the image actually ships rather than describing the
+				// npm tree alone.
+				BaseImages: baseImagesFor(base),
 				Format:     req.SBOM.Format,
 				Name:       req.Repo,
 				CreatedAt:  req.SourceDateEpoch,
@@ -1917,6 +1932,18 @@ func publish(ctx context.Context, deps Deps, req BuildRequest, payload ports.Pay
 	case OutputTarball:
 		return deps.Tarballs.Write(ctx, ports.TarballRequest{
 			Path:    req.Output.TarballPath,
+			Repo:    req.Repo,
+			Tags:    slices.Clone(req.Tags),
+			Payload: payload,
+		})
+
+	case OutputOCILayout:
+		// No platform selection and no flattening, unlike OutputLocal and
+		// OutputTarball respectively: an OCI image layout represents a
+		// manifest list natively, so the whole index goes to disk exactly as
+		// it would have gone to a registry.
+		return deps.OCILayouts.WriteOCILayout(ctx, ports.OCILayoutRequest{
+			Path:    req.Output.OCILayoutPath,
 			Repo:    req.Repo,
 			Tags:    slices.Clone(req.Tags),
 			Payload: payload,
@@ -2334,6 +2361,8 @@ func writePlan(w io.Writer, req BuildRequest, res BuildResult) error {
 		row("would load", "docker daemon, as "+req.Repo)
 	case OutputTarball:
 		row("would write", req.Output.TarballPath+", as "+req.Repo)
+	case OutputOCILayout:
+		row("would write", req.Output.OCILayoutPath+" (oci image layout), as "+req.Repo)
 	default:
 		// Should be unreachable by construction: Deps.validate (Stage 1,
 		// run before dry-run ever reaches this point) now rejects an
@@ -2489,4 +2518,14 @@ func imageEntry(p Platform, img v1.Image) (manifestEntry, error) {
 		Manifest:  json.RawMessage(raw),
 		Config:    json.RawMessage(cfg),
 	}, nil
+}
+
+// baseImagesFor returns the resolved per-platform base images, or nil when
+// none were resolved. nil is meaningful downstream: it records that no OS
+// package scan was attempted, as distinct from one that found nothing.
+func baseImagesFor(base *ports.BaseImage) map[ports.Platform]v1.Image {
+	if base == nil || len(base.Images) == 0 {
+		return nil
+	}
+	return base.Images
 }

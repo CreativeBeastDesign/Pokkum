@@ -20,6 +20,8 @@ import (
 
 	"github.com/google/uuid"
 
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/ignoreutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scannerutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekitutils"
@@ -53,8 +55,155 @@ func NewGenerator(log *slog.Logger) *Generator {
 	return &Generator{log: log}
 }
 
-// Generate implements ports.SBOMGenerator.
+// Generate implements ports.SBOMGenerator. It describes only req.ProjectDir's
+// npm dependency graph (plus the Bun runtime component, if BunVersion is
+// set) — it never claims anything about a base image's OS package surface,
+// because it has no image to look at. Every document it produces marks
+// "pokkum:osPackagesScanned" false in both formats' metadata (see
+// renderSPDXJSON/renderCycloneDXJSON), so a consumer can tell "npm-only
+// because that's genuinely all there is" (impossible to represent — the
+// image always has *a* base) apart from "npm-only because nobody looked at
+// the base image", rather than the two being silently indistinguishable.
+//
+// See GenerateForImage's doc comment for why base-image OS packages are not
+// merged in here directly.
 func (g *Generator) Generate(ctx context.Context, req ports.SBOMRequest) (*ports.SBOMDocument, error) {
+	// When the caller supplied the resolved base images, catalogue their OS
+	// packages too. Routing through the one port method keeps the OS surface
+	// from being an opt-in a caller can forget: before this, an SBOM that
+	// omitted libc6 and libssl3 entirely was the default and looked exactly
+	// like a complete one.
+	if len(req.BaseImages) > 0 {
+		return g.GenerateForImage(ctx, req, req.BaseImages)
+	}
+	return g.generate(ctx, req, nil, scannerutils.DistroInfo{}, false)
+}
+
+// GenerateForImage extends Generate with the resolved base image's OS
+// package database (Debian/dpkg or Alpine/apk, via
+// scannerutils.ExtractImagePackages), merged into the document alongside
+// the project's own npm dependency graph, each with a purl matching its
+// real ecosystem ("pkg:deb/...", "pkg:apk/...", "pkg:npm/...").
+//
+// images should be the resolved base image's ports.BaseImage.Images map —
+// the same v1.Image values the packager builds from, already pulled by
+// core.Build's BaseImageResolver.Resolve call earlier in the same build.
+// This method deliberately never pulls or resolves an image itself: doing
+// so would either duplicate a fetch the pipeline already paid for, or give
+// SBOM generation a network dependency it has never had. Every platform
+// present is scanned and the results deduped by name+version+architecture,
+// since a multi-arch base image is not guaranteed to carry identical
+// per-arch package builds even when it usually does in practice.
+//
+// A nil or empty images map is treated exactly like Generate — "not
+// scanned" — rather than as a base image confirmed to carry zero packages.
+// Only a real, non-empty image that scannerutils.ExtractImagePackages
+// genuinely walked and found no dpkg/apk database in (a scratch or fully
+// static base) produces the "scanned, zero packages" state; the two are
+// marked distinctly in the output (see renderSPDXJSON/renderCycloneDXJSON)
+// so "we found nothing" and "we did not look" can never be confused for
+// each other downstream — the exact failure mode named in this
+// package's Lessons.md entries for the scanner and secretguard adapters.
+//
+// GenerateForImage is not part of ports.SBOMGenerator: wiring a real
+// `pokkum build` to call it instead of Generate requires threading the
+// resolved ports.BaseImage through ports.SBOMRequest and
+// internal/core/pipeline.go's fanOut, both outside this package's scope.
+// See the package-level "OS package coverage" note below for the exact
+// change needed.
+func (g *Generator) GenerateForImage(ctx context.Context, req ports.SBOMRequest, images map[ports.Platform]v1.Image) (*ports.SBOMDocument, error) {
+	if len(images) == 0 {
+		return g.generate(ctx, req, nil, scannerutils.DistroInfo{}, false)
+	}
+	osPackages, distro, err := extractBaseImageOSPackages(ctx, images)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("sbom: extracting base image OS packages: %w: %w", err, core.ErrSBOMFailed)
+	}
+	return g.generate(ctx, req, osPackages, distro, true)
+}
+
+// extractBaseImageOSPackages scans every platform's resolved base image for
+// its dpkg/apk package database via scannerutils.ExtractImagePackages and
+// returns the deduplicated union, plus the distro identified for purl
+// namespacing. Platforms are visited in a fixed (OS, Arch, Variant) order —
+// map iteration order is not — so that which platform's DistroInfo "wins"
+// when picking the first non-empty one is deterministic across runs, not
+// just eventually-consistent by content.
+//
+// Only Deb/Apk entries are kept: ExtractImagePackages also looks for
+// app/-prefixed package.json/bun.lock files, which a pure, pre-packaging
+// base image never has (there is no /app yet), so this filter is a
+// defensive assertion of that assumption rather than an observed real
+// case — if it were ever violated (e.g. this function accidentally handed
+// an already-packaged image), it fails safely by dropping the npm entries
+// instead of silently double-counting the app's own dependencies.
+func extractBaseImageOSPackages(ctx context.Context, images map[ports.Platform]v1.Image) ([]scannerutils.CatalogPackage, scannerutils.DistroInfo, error) {
+	platforms := make([]ports.Platform, 0, len(images))
+	for p := range images {
+		platforms = append(platforms, p)
+	}
+	sort.Slice(platforms, func(i, j int) bool {
+		if platforms[i].OS != platforms[j].OS {
+			return platforms[i].OS < platforms[j].OS
+		}
+		if platforms[i].Arch != platforms[j].Arch {
+			return platforms[i].Arch < platforms[j].Arch
+		}
+		return platforms[i].Variant < platforms[j].Variant
+	})
+
+	seen := make(map[string]scannerutils.CatalogPackage)
+	var distro scannerutils.DistroInfo
+	for _, p := range platforms {
+		img := images[p]
+		if img == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, scannerutils.DistroInfo{}, err
+		}
+		pkgs, d, err := scannerutils.ExtractImagePackages(ctx, img)
+		if err != nil {
+			return nil, scannerutils.DistroInfo{}, fmt.Errorf("platform %s: %w", p.String(), err)
+		}
+		if distro.ID == "" {
+			distro = d
+		}
+		for _, pkg := range pkgs {
+			if pkg.Type != scannerutils.PkgTypeDeb && pkg.Type != scannerutils.PkgTypeApk {
+				continue
+			}
+			key := string(pkg.Type) + "@" + pkg.Name + "@" + pkg.Version + "@" + pkg.Architecture
+			seen[key] = pkg
+		}
+	}
+
+	result := make([]scannerutils.CatalogPackage, 0, len(seen))
+	for _, pkg := range seen {
+		result = append(result, pkg)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Name != result[j].Name {
+			return result[i].Name < result[j].Name
+		}
+		if result[i].Version != result[j].Version {
+			return result[i].Version < result[j].Version
+		}
+		return result[i].Architecture < result[j].Architecture
+	})
+	return result, distro, nil
+}
+
+// generate is the shared implementation behind Generate and
+// GenerateForImage. osPackages is nil for a plain Generate call; osScanned
+// is false exactly when osPackages was never populated because no base
+// image was consulted at all, true whenever a real image was scanned
+// (regardless of how many, or zero, packages it turned up) — see
+// GenerateForImage's doc comment for why those two are not the same claim.
+func (g *Generator) generate(ctx context.Context, req ports.SBOMRequest, osPackages []scannerutils.CatalogPackage, distro scannerutils.DistroInfo, osScanned bool) (*ports.SBOMDocument, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -108,21 +257,41 @@ func (g *Generator) Generate(ctx context.Context, req ports.SBOMRequest) (*ports
 		return nil, err
 	}
 
+	// Merged and re-sorted by (Type, Name, Version) rather than trusting
+	// scanProject's npm-only ordering or extractBaseImageOSPackages' own
+	// sort: the combined document's package order must be fully
+	// deterministic (Bit-for-bit OCI Reproducibility) regardless of which
+	// of the two sources found what, and grouping by Type ("apk" < "deb" <
+	// "npm") keeps OS and application packages visually separated in the
+	// rendered document.
+	if len(osPackages) > 0 {
+		packages = append(packages, osPackages...)
+	}
+	sort.Slice(packages, func(i, j int) bool {
+		if packages[i].Type != packages[j].Type {
+			return packages[i].Type < packages[j].Type
+		}
+		if packages[i].Name != packages[j].Name {
+			return packages[i].Name < packages[j].Name
+		}
+		return packages[i].Version < packages[j].Version
+	})
+
 	if unresolved := countUnresolved(packages); unresolved > 0 {
 		g.log.WarnContext(ctx, "sbom: some packages could not be resolved to an installed version; "+
 			"recording their declared package.json range instead, marked as unresolved",
 			"unresolved", unresolved, "total", len(packages))
 	}
 
-	id := contentIdentityUUID(name, version, packages, req.BunVersion, req.BunSHA256)
+	id := contentIdentityUUID(name, version, packages, req.BunVersion, req.BunSHA256, distro, osScanned)
 	created := req.CreatedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
 
 	var docBytes []byte
 	switch req.Format {
 	case ports.SBOMFormatSPDXJSON:
-		docBytes, err = renderSPDXJSON(name, version, id, created, packages, req.BunVersion, req.BunSHA256)
+		docBytes, err = renderSPDXJSON(name, version, id, created, packages, req.BunVersion, req.BunSHA256, distro, osScanned)
 	case ports.SBOMFormatCycloneDXJSON:
-		docBytes, err = renderCycloneDXJSON(name, version, id, created, packages, req.BunVersion, req.BunSHA256)
+		docBytes, err = renderCycloneDXJSON(name, version, id, created, packages, req.BunVersion, req.BunSHA256, distro, osScanned)
 	default:
 		return nil, fmt.Errorf("sbom: unsupported format %q: %w", req.Format, core.ErrInvalidSBOMFormat)
 	}
@@ -148,7 +317,8 @@ func (g *Generator) Generate(ctx context.Context, req ports.SBOMRequest) (*ports
 		SHA256:       hex.EncodeToString(sum[:]),
 		PackageCount: packageCount,
 	}
-	g.log.InfoContext(ctx, "sbom: generated", "format", req.Format, "packages", doc.PackageCount, "bytes", len(docBytes))
+	g.log.InfoContext(ctx, "sbom: generated", "format", req.Format, "packages", doc.PackageCount, "bytes", len(docBytes),
+		"osPackagesScanned", osScanned)
 	return doc, nil
 }
 
@@ -354,7 +524,7 @@ func (g *Generator) buildMatcher(req ports.SBOMRequest) (*ignoreutils.Matcher, e
 	return ignoreutils.New(patterns)
 }
 
-func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string) ([]byte, error) {
+func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string, distro scannerutils.DistroInfo, osScanned bool) ([]byte, error) {
 	spdxPackages := make([]map[string]any, 0, len(packages)+2)
 	relationships := make([]map[string]any, 0, len(packages)+2)
 
@@ -419,7 +589,7 @@ func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages
 
 	for _, p := range packages {
 		pkgSPDXID := fmt.Sprintf("SPDXRef-Package-%s-%s", sanitizeSPDXID(p.Name), sanitizeSPDXID(p.Version))
-		purl := fmt.Sprintf("pkg:npm/%s@%s", p.Name, p.Version)
+		purl := purlFor(p, distro)
 
 		pkgMap := map[string]any{
 			"SPDXID":           pkgSPDXID,
@@ -461,6 +631,12 @@ func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages
 			"creators": []string{
 				"Tool: Pokkum",
 			},
+			// osScanComment is always present (never a silently-omitted
+			// field) so "the base image's OS package database was scanned
+			// and genuinely has zero entries (a scratch/static base)" can
+			// never be confused with "nobody scanned it" -- see
+			// GenerateForImage's doc comment.
+			"comment": osScanComment(osScanned, countOSPackages(packages)),
 		},
 		"packages":      spdxPackages,
 		"relationships": relationships,
@@ -469,7 +645,7 @@ func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages
 	return marshalDeterministic(doc)
 }
 
-func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string) ([]byte, error) {
+func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string, distro scannerutils.DistroInfo, osScanned bool) ([]byte, error) {
 	components := make([]map[string]any, 0, len(packages)+1)
 
 	// Bun is a Pokkum-embedded runtime artifact, not a project dependency
@@ -492,7 +668,7 @@ func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, pac
 	}
 
 	for _, p := range packages {
-		purl := fmt.Sprintf("pkg:npm/%s@%s", p.Name, p.Version)
+		purl := purlFor(p, distro)
 		comp := map[string]any{
 			"type":    "library",
 			"name":    p.Name,
@@ -505,6 +681,20 @@ func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, pac
 			}
 		}
 		components = append(components, comp)
+	}
+
+	// metadataProperties always carries the OS-scan marker, never only when
+	// true -- an absent property is indistinguishable from "this pokkum
+	// version doesn't know the concept" to a consumer, whereas an explicit
+	// "false" is unambiguous. See GenerateForImage's doc comment and the
+	// matching osScanComment used for the SPDX document's creationInfo.
+	metadataProperties := []map[string]any{
+		{"name": "pokkum:osPackagesScanned", "value": fmt.Sprintf("%v", osScanned)},
+	}
+	if osScanned {
+		metadataProperties = append(metadataProperties, map[string]any{
+			"name": "pokkum:osPackageCount", "value": fmt.Sprintf("%d", countOSPackages(packages)),
+		})
 	}
 
 	doc := map[string]any{
@@ -525,6 +715,7 @@ func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, pac
 				"name":    name,
 				"version": version,
 			},
+			"properties": metadataProperties,
 		},
 		"components": components,
 	}
@@ -532,7 +723,7 @@ func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, pac
 	return marshalDeterministic(doc)
 }
 
-func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string) uuid.UUID {
+func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string, distro scannerutils.DistroInfo, osScanned bool) uuid.UUID {
 	ids := make([]string, 0, len(packages))
 	for _, p := range packages {
 		ids = append(ids, fmt.Sprintf("%s@%s@%s@resolved=%v", p.Name, p.Version, p.Type, p.Resolved))
@@ -552,7 +743,84 @@ func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPa
 		// to fold "bun" into the same sort as npm package names.
 		fmt.Fprintf(&b, "bun@%s@%s\n", bunVersion, bunSHA256)
 	}
+	// osScanned/distro are folded into identity even though every package
+	// they produced is already present in ids above: a "scanned this
+	// scratch base and found zero OS packages" document and a "never
+	// looked at a base image" document can otherwise hash identical (same
+	// packages list, same Bun component) despite making a materially
+	// different claim about what was checked.
+	fmt.Fprintf(&b, "osScanned=%v@distro=%s:%s\n", osScanned, distro.ID, distro.VersionID)
 	return uuid.NewSHA1(pokkumSBOMNamespace, []byte(b.String()))
+}
+
+// purlFor derives the Package URL for a catalogued component. distro is the
+// base image's identity (Debian/Alpine/Wolfi/...), used only for the deb/apk
+// namespace segment -- it has nothing to do with npm packages and is the
+// zero value whenever no base image was scanned. It is threaded through as
+// one shared value per render call rather than stored per-package because
+// every OS package in a single Generate/GenerateForImage call comes from
+// exactly one resolved base image.
+//
+// This is an explicit switch over every scannerutils.PackageType, not an
+// if/else keyed on the one type this codebase happened to emit before this
+// change (npm): a future PackageType value reaching this function without
+// an explicit case falls into the generic default instead of silently being
+// mislabeled with an npm purl, matching the "positive gate, not a negative
+// one" rule from this repo's Lessons.md.
+func purlFor(p scannerutils.CatalogPackage, distro scannerutils.DistroInfo) string {
+	switch p.Type {
+	case scannerutils.PkgTypeNpm:
+		return fmt.Sprintf("pkg:npm/%s@%s", p.Name, p.Version)
+	case scannerutils.PkgTypeDeb:
+		return osPurl("deb", "debian", distro, p)
+	case scannerutils.PkgTypeApk:
+		return osPurl("apk", "alpine", distro, p)
+	default:
+		return fmt.Sprintf("pkg:generic/%s@%s", p.Name, p.Version)
+	}
+}
+
+// osPurl builds a "pkg:<purlType>/<namespace>/<name>@<version>[?arch=...]"
+// purl for an OS package. defaultNamespace is used only when distro.ID is
+// empty -- e.g. the base image's os-release couldn't be read even though its
+// dpkg/apk database could -- so a purl is still emitted rather than dropping
+// the package from the document entirely.
+func osPurl(purlType, defaultNamespace string, distro scannerutils.DistroInfo, p scannerutils.CatalogPackage) string {
+	ns := strings.ToLower(distro.ID)
+	if ns == "" {
+		ns = defaultNamespace
+	}
+	purl := fmt.Sprintf("pkg:%s/%s/%s@%s", purlType, ns, p.Name, p.Version)
+	if p.Architecture != "" {
+		purl += "?arch=" + p.Architecture
+	}
+	return purl
+}
+
+// osScanComment is the SPDX document creationInfo.comment recording whether
+// a base image's OS package database was consulted at all, and if so how
+// many packages it turned up -- see GenerateForImage's doc comment for why
+// this needs to be unconditionally present rather than an optional field
+// only added when true.
+func osScanComment(osScanned bool, osPackageCount int) string {
+	if !osScanned {
+		return "pokkum:osPackagesScanned=false"
+	}
+	return fmt.Sprintf("pokkum:osPackagesScanned=true pokkum:osPackageCount=%d", osPackageCount)
+}
+
+// countOSPackages returns how many entries in packages are OS (deb/apk)
+// packages rather than npm ones, for the scan-status marker above. Computed
+// from the merged list instead of threaded as a separate parameter so it
+// can never drift from what the document's own components array contains.
+func countOSPackages(packages []scannerutils.CatalogPackage) int {
+	n := 0
+	for _, p := range packages {
+		if p.Type == scannerutils.PkgTypeDeb || p.Type == scannerutils.PkgTypeApk {
+			n++
+		}
+	}
+	return n
 }
 
 func sanitizeSPDXID(s string) string {

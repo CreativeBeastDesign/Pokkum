@@ -3,6 +3,8 @@ package ports
 import (
 	"context"
 	"time"
+
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
 // SBOMFormat selects the serialisation of the generated software bill of
@@ -117,6 +119,19 @@ type SBOMRequest struct {
 	// is generated once per build and attached to the index digest, not once
 	// per platform. The dependency set does not vary by architecture.
 	ProjectDir string
+
+	// BaseImages maps each built platform to its resolved base image, so the
+	// generator can catalogue the OS packages the image actually ships
+	// (Debian's /var/lib/dpkg/status.d, Alpine's /lib/apk/db/installed)
+	// alongside the project's npm dependencies.
+	//
+	// Optional, and the distinction matters: nil means "no image was offered,
+	// so no OS scan was attempted", which the document records as
+	// osPackagesScanned=false. An image that genuinely ships no package
+	// database records osPackagesScanned=true with a count of zero. Those two
+	// are different claims and must not share a representation — an SBOM that
+	// silently omits libc6 and libssl3 looks like coverage that isn't there.
+	BaseImages map[Platform]v1.Image
 
 	// Format is the output format. Required and must be Valid and Enabled;
 	// core must not call Generate at all when the format is SBOMFormatNone.
