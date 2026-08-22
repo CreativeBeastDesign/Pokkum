@@ -7,9 +7,9 @@ branding:
 
 inputs:
   version:
-    description: 'Pokkum CLI version to install (e.g. v1.0.1, latest)'
+    description: 'Pokkum CLI version to install (e.g. v1.0.6, latest)'
     required: false
-    default: 'v1.0.1'
+    default: 'v1.0.6'
 
   project-dir:
     description: 'Path to the SvelteKit project directory'
@@ -83,24 +83,22 @@ runs:
         fi
 
         VERSION="${{ inputs.version }}"
-        OS=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
-        ARCH="${{ runner.arch }}"
-        if [ "$ARCH" = "X64" ]; then ARCH="amd64"; fi
-        if [ "$ARCH" = "ARM64" ]; then ARCH="arm64"; fi
-
         INSTALL_DIR="$HOME/.pokkum/bin"
         mkdir -p "$INSTALL_DIR"
 
-        ASSET_URL="https://github.com/CreativeBeastDesign/pokkum/releases/download/${VERSION}/pokkum_${OS}_${ARCH}.tar.gz"
-        echo "Attempting to download prebuilt binary from ${ASSET_URL}..."
-
-        if curl -sSL -f "$ASSET_URL" | tar -xz -C "$INSTALL_DIR" pokkum 2>/dev/null; then
-          echo "Prebuilt binary installed successfully."
+        # Delegate to install.sh rather than assembling the URL here. The
+        # hand-rolled version built "pokkum_${OS}_${ARCH}.tar.gz", omitting the
+        # version segment that GoReleaser's name_template actually emits
+        # ("pokkum_1.0.6_linux_amd64.tar.gz"), so the download 404'd on every
+        # run and silently fell through to `go install` — slow, and with no
+        # checksum verification at all. install.sh builds the real name and
+        # verifies SHA-256 against the release's checksums.txt before
+        # installing.
+        if [ "$VERSION" = "latest" ]; then
+          POKKUM_INSTALL_DIR="$INSTALL_DIR" sh "${GITHUB_ACTION_PATH}/install.sh"
         else
-          echo "Prebuilt binary download failed or unreleased version requested. Falling back to 'go install'..."
-          go install "github.com/CreativeBeastDesign/pokkum/cmd/pokkum@${VERSION}"
-          GO_BIN=$(go env GOPATH)/bin
-          cp "${GO_BIN}/pokkum" "$INSTALL_DIR/pokkum" || true
+          POKKUM_VERSION="$VERSION" POKKUM_INSTALL_DIR="$INSTALL_DIR" \
+            sh "${GITHUB_ACTION_PATH}/install.sh"
         fi
 
         echo "$INSTALL_DIR" >> $GITHUB_PATH

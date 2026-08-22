@@ -64,7 +64,7 @@ unmatched pattern warned instead of passing silently.
 
 ## Known Limitations
 
-- This filters **output**, not the build. A route's JavaScript chunks, its imports and its SBOM entries still ship — only the prerendered HTML is removed. The size and SBOM-noise win needs the build-time filter in [Exclude routes from the production build](route-exclusion-filter.md), which stays open.
+- This phase filters **output**, not the build: it removes the prerendered HTML while the route's JavaScript chunks, imports and SBOM entries still ship. The build-time filter that removes the code as well shipped the same day — see [Exclude routes from the production build](route-exclusion-filter.md) — so this phase is now the fallback, used where Pokkum does not author the project's Vite config.
 - Server-rendered routes on `--strategy=layered` are compiled into the server bundle and cannot be removed by deleting a file. A pattern naming one is reported as unmatched; it is not excluded.
 
 ## Related

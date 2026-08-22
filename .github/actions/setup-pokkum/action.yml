@@ -24,13 +24,33 @@ runs:
       id: install
       shell: bash
       run: |
-        VERSION="${{ inputs.version }}"
-        if [ "$VERSION" = "latest" ]; then
-          VERSION="v1.0.0"
+        set -euo pipefail
+
+        # Delegate to the repository's own install.sh rather than
+        # reimplementing the download here. That script detects OS/arch and —
+        # the part that matters — verifies the archive's SHA-256 against the
+        # release's checksums.txt before installing, refusing on a mismatch.
+        # This step previously created an empty directory, put it on PATH and
+        # printed "installed successfully" without downloading anything, so
+        # every workflow following the README got a CI job that reported
+        # success and then failed at `pokkum: command not found`.
+        INSTALL_DIR="${HOME}/.pokkum/bin"
+        mkdir -p "$INSTALL_DIR"
+
+        # install.sh resolves the newest release itself when POKKUM_VERSION is
+        # unset, so "latest" means "do not pin" rather than a hardcoded tag.
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          POKKUM_INSTALL_DIR="$INSTALL_DIR" sh "${GITHUB_ACTION_PATH}/../../../install.sh"
+        else
+          POKKUM_VERSION="${{ inputs.version }}" POKKUM_INSTALL_DIR="$INSTALL_DIR" \
+            sh "${GITHUB_ACTION_PATH}/../../../install.sh"
         fi
 
-        echo "Installing Pokkum ${VERSION}..."
-        mkdir -p "${HOME}/.pokkum/bin"
-        echo "${HOME}/.pokkum/bin" >> $GITHUB_PATH
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
-        echo "Pokkum ${VERSION} installed successfully."
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+        # Report the version actually installed, read back from the binary, so
+        # the output cannot claim a version that was never put on disk.
+        installed="$("$INSTALL_DIR/pokkum" --version 2>/dev/null | head -n 1 || true)"
+        [ -n "$installed" ] || { echo "::error::pokkum was not installed"; exit 1; }
+        echo "version=${installed}" >> "$GITHUB_OUTPUT"
+        echo "Installed: ${installed}"

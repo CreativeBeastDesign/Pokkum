@@ -49,7 +49,7 @@ items:
       package at runtime, and the same import under `--no-install` fails with "Cannot find
       package".
     limitations:
-      - "Build-time detection of a dependency that will be missing at runtime is **not** solved — see [Detect dependencies that will be missing at runtime](item:unresolved-import-guard). A static-analysis attempt was reverted for failing correctly-configured builds."
+      - "Build-time detection of a dependency that will be missing at runtime shipped separately on 2026-08-22 — see [Detect dependencies that will be missing at runtime](item:unresolved-import-guard). An earlier static-analysis attempt was reverted for failing correctly-configured builds; the shipped guard reads the manifest adapter-node externalises from instead of scanning the bundle."
       - "`--runtime=node` images benefit automatically (they previously had no dependency store at all), but that combination has not been re-tested end to end against a real application since the fix."
     impl:
       - internal/adapters/bunexec/vendor_install.go
@@ -336,7 +336,7 @@ items:
       `index.html` and all three precompressed variants from the packaged layer, and an
       unmatched pattern warned instead of passing silently.
     limitations:
-      - "This filters **output**, not the build. A route's JavaScript chunks, its imports and its SBOM entries still ship — only the prerendered HTML is removed. The size and SBOM-noise win needs the build-time filter in [Exclude routes from the production build](item:route-exclusion-filter), which stays open."
+      - "This phase filters **output**, not the build: it removes the prerendered HTML while the route's JavaScript chunks, imports and SBOM entries still ship. The build-time filter that removes the code as well shipped the same day — see [Exclude routes from the production build](item:route-exclusion-filter) — so this phase is now the fallback, used where Pokkum does not author the project's Vite config."
       - "Server-rendered routes on `--strategy=layered` are compiled into the server bundle and cannot be removed by deleting a file. A pattern naming one is reported as unmatched; it is not excluded."
     flags: ["--exclude-route"]
     impl:

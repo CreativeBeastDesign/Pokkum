@@ -66,6 +66,6 @@ package".
 
 ## Known Limitations
 
-- Build-time detection of a dependency that will be missing at runtime is **not** solved — see [Detect dependencies that will be missing at runtime](unresolved-import-guard.md). A static-analysis attempt was reverted for failing correctly-configured builds.
+- Build-time detection of a dependency that will be missing at runtime shipped separately on 2026-08-22 — see [Detect dependencies that will be missing at runtime](unresolved-import-guard.md). An earlier static-analysis attempt was reverted for failing correctly-configured builds; the shipped guard reads the manifest adapter-node externalises from instead of scanning the bundle.
 - `--runtime=node` images benefit automatically (they previously had no dependency store at all), but that combination has not been re-tested end to end against a real application since the fix.
 

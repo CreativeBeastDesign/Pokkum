@@ -9,7 +9,7 @@ The official **Pokkum GitHub Action** (`CreativeBeastDesign/pokkum`) enables fas
 
 ## Quickstart
 
-Add `CreativeBeastDesign/pokkum@v1` to your repository's `.github/workflows/deploy.yml`:
+Add `CreativeBeastDesign/pokkum@v1.0.6` to your repository's `.github/workflows/deploy.yml`:
 
 ```yaml
 name: Build & Publish Container
@@ -39,7 +39,7 @@ jobs:
 
       - name: Build & Push Container with Pokkum
         id: pokkum
-        uses: CreativeBeastDesign/pokkum@v1
+        uses: CreativeBeastDesign/pokkum@v1.0.6
         with:
           repo: ghcr.io/${{ github.repository }}
           platforms: linux/amd64,linux/arm64
@@ -143,7 +143,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Verify Build & Preview Manifest
-        uses: CreativeBeastDesign/pokkum@v1
+        uses: CreativeBeastDesign/pokkum@v1.0.6
         with:
           repo: ghcr.io/${{ github.repository }}
           dry-run: "true"
@@ -157,7 +157,7 @@ Use `steps.pokkum.outputs.ref` directly in your deployment pipeline to update Ku
 ```yaml
       - name: Build & Push
         id: pokkum
-        uses: CreativeBeastDesign/pokkum@v1
+        uses: CreativeBeastDesign/pokkum@v1.0.6
         with:
           repo: ghcr.io/${{ github.repository }}
 
@@ -173,7 +173,7 @@ Use `output: tarball` for workflows that need the image artifact without pushing
 
 ```yaml
       - name: Build to OCI Tarball
-        uses: CreativeBeastDesign/pokkum@v1
+        uses: CreativeBeastDesign/pokkum@v1.0.6
         with:
           project-dir: .
           output: tarball
@@ -195,7 +195,7 @@ Pokkum automatically derives `SOURCE_DATE_EPOCH` from the last git commit timest
         with:
           fetch-depth: 0 # Ensure git history is available for SOURCE_DATE_EPOCH derivation
 
-      - uses: CreativeBeastDesign/pokkum@v1
+      - uses: CreativeBeastDesign/pokkum@v1.0.6
         with:
           repo: ghcr.io/${{ github.repository }}
 ```
