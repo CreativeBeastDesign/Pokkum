@@ -12,12 +12,6 @@ _None._
 
 ## v1.1
 
-### Build & Packaging
-
-| Title | Summary | Kind | Status |
-| --- | --- | --- | --- |
-| [Tarball output silently drops every OCI annotation](items/tarball-output-drops-annotations.md) | pokkum build --output=tarball writes the legacy docker-save format, which has no annotations field, so every annotation Pokkum stamps is lost without warning. | fix | open |
-
 ### Developer Experience
 
 | Title | Summary | Kind | Status |
@@ -67,7 +61,6 @@ _None._
 | [pokkum config view value provenance](items/config-view-provenance.md) | Show where each resolved `.pokkum.yaml` setting actually came from — flag, profile, env, or default — not just its final value. | dx | open |
 | [Documented CLI exit-code table](items/exit-code-reference.md) | Publish a stable reference table for the CLI's exit codes — 125 and 126 already carry specific, undocumented meanings. | dx | open |
 | [Pre/post-build shell hooks](items/hooks-system.md) | Deferred: pre/post-build shell hooks would defuse plugin-system demand cheaply, but add new maintenance surface for something CI pipelines already provide natively. | dx | open |
-| [--to-oci-layout for daemonless cluster loading](items/oci-layout-dev-output.md) | Emit an OCI layout on disk and load it directly into kind/k3d/minikube, for contributors and CI environments with no Docker/Podman daemon at all. | dx | open |
 | [JSON Schema for .pokkum.yaml](items/pokkum-yaml-json-schema.md) | Publish a JSON Schema for `.pokkum.yaml` so editors can offer inline validation and completion instead of only failing at `pokkum config validate` time. | dx | open |
 | [Stable Go library API](items/stable-go-library-api.md) | Expose Pokkum's build pipeline as a stable, embeddable Go library API, for a future Skaffold/Tilt-style integration. | dx | open |
 
@@ -93,6 +86,7 @@ _None._
 | [Lifecycle-script execution provenance](items/lifecycle-script-provenance.md) | Record which packages actually ran install-time lifecycle scripts during the build as a provenance field. | feature | open |
 | [Native addon (.node binary) provenance](items/native-addon-provenance.md) | Hash and record prebuilt native addon binaries in provenance instead of leaving them outside the SBOM/SLSA story entirely. | feature | open |
 | [Node-core CVE lookup for --runtime=node](items/node-cve-lookup.md) | Decide whether to add an OSV Node-core ecosystem query path, or document the gap and leave base-image CVE posture to the operator. | feature | open |
+| [SBOM coverage for base-image OS packages](items/sbom-os-package-coverage.md) | sbom.Generator can now catalogue a resolved base image's dpkg/apk packages with correct pkg:deb/pkg:apk purls, but nothing in a real `pokkum build` calls that path yet — the generated SBOM still describes npm dependencies only. | feature | open |
 | [Verify base image on cache hit](items/verify-base-on-cache-hit.md) | Opt-in flag to re-verify the base image's signature even on a confirmed remote-cache hit, for audit environments that need a uniform verified-base guarantee. | hardening | open |
 
 ### Testing & Infrastructure

@@ -68,19 +68,63 @@ items:
 
   - id: oci-layout-dev-output
     title: "--to-oci-layout for daemonless cluster loading"
-    stage: backlog
-    status: open
+    status: shipped
     kind: dx
     tier: polish
-    summary: "Emit an OCI layout on disk and load it directly into kind/k3d/minikube, for contributors and CI environments with no Docker/Podman daemon at all."
+    summary: "Writes a standards-conformant OCI image layout to a directory — no daemon, no registry — preserving every annotation and the full multi-platform index, ready for `ctr images import` / kind / k3d / minikube."
     problem: |
       Adjacent to [pokkum dev --cluster](item:cluster-dev-loop) but structurally simpler and cheaper
       to build — it doesn't touch the in-pod sync problem, it just gives daemonless environments a way
       to get a built image into a local cluster without a registry round-trip. Ordered after the
       cluster dev loop because it is a hermetic-CI nicety, not a faster inner loop, but it's cheap
       enough to pick up independently.
+
+      It also carries the second half of
+      [Tarball output silently drops every OCI annotation](item:tarball-output-drops-annotations),
+      whose recommendation was to warn first and then fold real annotation support into this work
+      rather than duplicating it. The two existing local output modes both go through the legacy
+      docker-save format, which has neither an annotations field nor any representation of a manifest
+      list, so `--tarball` silently discarded every `org.opencontainers.image.*` and `pokkum.dev/*`
+      annotation and flattened a multi-platform build into one platform-suffixed tag per child. An
+      OCI image layout has first-class support for both, which makes this the lossless local output.
+    decision: |
+      Implemented against go-containerregistry's own `pkg/v1/layout` rather than hand-rolled, so
+      the on-disk result is whatever that library — and therefore crane, skopeo and containerd —
+      already agree an OCI layout is.
+
+      Four decisions worth recording. (1) `index.json` holds one descriptor per requested tag
+      pointing at the payload's own top-level blob, which is the shape `crane pull --format=oci`
+      produces; writing the payload index *as* `index.json` would have left nowhere to record the
+      tag. (2) Each descriptor carries two name annotations, not one, because the consumers this
+      mode exists to serve disagree: `org.opencontainers.image.ref.name` (bare tag) is what
+      skopeo's `oci:` transport and podman match on, `io.containerd.image.name` (fully qualified)
+      is what containerd's archive importer reads first — and therefore what `ctr images import`,
+      `k3d image import` and `minikube image load` see. (3) A single-image descriptor gets its
+      platform read off the image's own config, since `partial.Descriptor` never populates it and
+      an index child is not there to carry it; an index descriptor deliberately does not, because
+      claiming one platform for a multi-platform artefact would be wrong. (4) The layout is
+      assembled in a staging directory and swapped into place, so an interrupted run leaves either
+      the previous layout or nothing — never an `index.json` referencing blobs that were never
+      written — and a re-run replaces rather than merges, so a repeated dev loop cannot accumulate
+      orphaned blobs.
+
+      The three destination flags (`--local`, `--tarball`, `--to-oci-layout`) are mutually
+      exclusive, following the wording the pre-existing `--local`/`--tarball` check established.
+      `--require-signed` still rejects this mode along with the other two: signatures live in a
+      registry, keyed to a pushed digest, and a layout on disk has nothing to attach them to.
     flags: ["--to-oci-layout"]
-    related: ["cluster-dev-loop"]
+    impl:
+      - internal/adapters/registry/ocilayout.go
+      - internal/adapters/registry/ocilayout_test.go
+      - internal/ports/registry.go
+      - internal/core/model.go
+      - internal/core/pipeline.go
+      - cmd/pokkum/build.go
+    limitations:
+      - "`docker load` does not accept an OCI image layout, so this mode does not replace `--tarball` — anyone piping into Docker still needs the docker-save format, which is exactly why the lossy mode was kept alongside rather than fixed in place."
+      - "SBOM, signature and attestation attachment still happen only for a registry push: they are separate manifests keyed to a pushed digest, and the layout carries the image alone. A layout build reports itself as unsigned rather than silently claiming otherwise."
+      - "`--asset-overlay` auto-discovery still requires a registry push. The layout preserves the `pokkum.dev/predecessor` annotation, but walking a lineage backwards means fetching predecessors, which a directory on disk cannot serve."
+    related: ["cluster-dev-loop", "tarball-output-drops-annotations"]
 
   - id: base-flag-custom-reference
     title: "--base accepts a custom image reference"
@@ -160,6 +204,56 @@ items:
     summary: "Migrates SvelteKit projects off `adapter-node`, `adapter-vercel`, `adapter-auto`, or a legacy Dockerfile onto Pokkum compilation defaults."
     impl:
       - cmd/pokkum/adopt.go
+
+  - id: adopt-reorders-package-json-and-duplicates-adapter-import
+    title: "adopt reordered untouched package.json keys and could duplicate a third-party adapter import"
+    stage: v1.1
+    status: shipped
+    kind: fix
+    tier: foundation
+    summary: "A real, non-dry-run `pokkum adopt` alphabetized every nested `package.json` object on write, and `--write-config` could emit two colliding `adapter` bindings for a third-party adapter package, breaking every build strategy."
+    problem: |
+      An independent tester running paranoid-testing-guide.md §18 against a real SvelteKit app
+      found two defects in the same command:
+
+      1. `git diff package.json` after a real (non-dry-run) `pokkum adopt .` showed the entire
+         `scripts` object re-serialized in alphabetical order (`dev, build, preview, prepare,
+         check` became `build, check, check:watch, dev, pokkum:build, prepare`), rather than just
+         the new `pokkum:build` key being added. `Adopt` unmarshalled `package.json` into
+         `map[string]any` and re-marshalled it; Go maps have no iteration order, so
+         `json.Marshal` alphabetizes every key at every depth. A prior fix
+         (`marshalPreservingTopLevelKeyOrder`) had already addressed this for top-level keys, but
+         its own doc comment recorded that nested objects — `scripts`, `dependencies`,
+         `devDependencies`, exactly what a codemod actually edits — were not order-preserved,
+         since the map had already lost their order by the time that function saw them.
+      2. On a project whose `svelte.config.js` imports a third-party adapter
+         (`import adapter from "svelte-adapter-bun"` — a real, widely used package, not a
+         `@sveltejs/adapter-*` one), `pokkum adopt . --write-config` prepended a second import
+         instead of replacing the first: `replaceAdapterImport` only recognized
+         `@sveltejs/adapter-[a-z-]+` specifiers, so the existing import went unmatched. The
+         result, two `import adapter from ...` lines binding the same name, is a parse-time
+         `SyntaxError: Identifier 'adapter' has already been declared`, not just a messy diff —
+         `pokkum build` then failed under every strategy.
+    decision: |
+      `Adopt` (`internal/adapters/sveltekitutils/adopt.go`) now decodes `package.json` into a
+      small order-preserving JSON object model (`internal/adapters/sveltekitutils/orderedjson.go`)
+      instead of `map[string]any`, and re-encodes through it — preserving member order at every
+      nesting depth the codemod touches, not only the top level. `marshalPreservingTopLevelKeyOrder`
+      is retired; the ordered model replaces it outright.
+
+      `replaceAdapterImport` (`internal/adapters/sveltekitutils/injector.go`) now traces which
+      *identifier* the config actually invokes as the adapter factory (`adapter: X(...)`) and
+      replaces whichever import/require statement binds that identifier, regardless of package
+      name or local variable name — covering a default import, a `{ default as X }` re-export, a
+      CommonJS `require`, and a solo named import. An import it can't safely isolate (one name
+      among several in a multi-specifier named import) is left untouched rather than risk
+      prepending a second, colliding declaration — the same failure mode this fix exists to close.
+    flags: ["--write-config"]
+    impl:
+      - internal/adapters/sveltekitutils/adopt.go
+      - internal/adapters/sveltekitutils/orderedjson.go
+      - internal/adapters/sveltekitutils/injector.go
+    related: ["adopt-codemod"]
 
   - id: signed-self-update
     title: "pokkum upgrade"

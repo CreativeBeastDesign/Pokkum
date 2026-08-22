@@ -42,6 +42,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Title | Summary | Kind | Status | Commits |
 | --- | --- | --- | --- | --- |
+| [adopt reordered untouched package.json keys and could duplicate a third-party adapter import](items/adopt-reorders-package-json-and-duplicates-adapter-import.md) | A real, non-dry-run `pokkum adopt` alphabetized every nested `package.json` object on write, and `--write-config` could emit two colliding `adapter` bindings for a third-party adapter package, breaking every build strategy. | fix | shipped |  |
 | [Human-readable console output for build logs](items/console-log-rendering.md) | Build progress rendered with level glyphs and aligned attribute blocks on a terminal, while piped and CI output stays byte-identical logfmt. | dx | shipped |  |
 | [pokkum init wrote a config pokkum build refused](items/init-generates-invalid-config.md) | Every generated .pokkum.yaml carried an invalid sbom.attach value, so the first two commands a new user runs did not work together. | fix | shipped |  |
 | [pokkum init recommended a command it had guaranteed could not work](items/init-recommends-a-failing-command.md) | init always ended with "you can now run pokkum build", which fails immediately for the local-only setup its own first prompt invites. | fix | shipped |  |
@@ -81,6 +82,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | [Rolling-deploy asset overlay (--asset-overlay)](items/rolling-deploy-asset-overlay.md) | Merges the last N generations' immutable /_app/immutable client assets into a separate overlay layer, registry-side, so a browser holding a prior generation's HTML never hits a 404 mid-rollout. | feature | shipped | `f9c2f1d` |
 | [--runtime=node, the second runtime dimension](items/runtime-node.md) | Targets a distroless-node base and execs adapter-node output directly under /nodejs/bin/node with no Bun layer at all, proven by a real Docker boot and, since e918c52, an automated smoke test. | feature | shipped | `f5229c3`, `e918c52` |
 | [--strategy=static](items/strategy-static.md) | Compiles a pure static SvelteKit site onto chainguard/static with an embedded pokkum-static Go file server as PID 1 — genuinely functional only since 2026-08-19, after six independent bugs were found by its first real boot test. | feature | shipped | `8306d37`, `1c33509`, `5693980`, `61fd873` |
+| [Tarball output silently drops every OCI annotation](items/tarball-output-drops-annotations.md) | pokkum build --output=tarball writes the legacy docker-save format, which has no annotations field, so every annotation Pokkum stamps is lost without warning. | fix | shipped | `cd5c7f0` |
 | [Ship production dependencies so images are self-contained](items/vendor-production-dependencies.md) | Layered images shipped the server bundle without its dependencies; Bun's runtime auto-install silently fetched them from npm inside the running container. | fix | shipped |  |
 
 ### Developer Experience
@@ -95,6 +97,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | [Standardized machine-readable output (--output=json)](items/json-output-envelope.md) | A global `--output=json` flag emits a versioned JSON envelope across every command, instead of callers parsing human-readable stdout. | feature | shipped |  |
 | [pokkum explain / explain why / explain diff](items/layer-origin-tracing.md) | Reads a real OCI image and reports its actual per-layer digests, sizes, and file origins, and diffs two images layer-by-layer. | feature | shipped |  |
 | [pokkum dev --no-container](items/no-container-dev-mode.md) | Runs the project's own dev server directly on the host, skipping image construction entirely, for the fastest possible local iteration loop. | feature | shipped | `18f056c` |
+| [--to-oci-layout for daemonless cluster loading](items/oci-layout-dev-output.md) | Writes a standards-conformant OCI image layout to a directory — no daemon, no registry — preserving every annotation and the full multi-platform index, ready for `ctr images import` / kind / k3d / minikube. | dx | shipped |  |
 | [pokkum upgrade](items/signed-self-update.md) | Checks for new releases and verifies the release binary's checksum signature via Cosign before self-replacing. | feature | shipped |  |
 | [pokkum init](items/workspace-init-wizard.md) | Guided interactive setup for `.pokkum.yaml` and `.pokkumignore`, with a non-interactive `--defaults` mode. | feature | shipped |  |
 

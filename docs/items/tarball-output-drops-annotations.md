@@ -8,8 +8,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
-| Stage | v1.1 |
+| Status | shipped |
 | Kind | fix |
 | Tier | foundation |
 | Area | Build & Packaging |
@@ -61,22 +60,45 @@ internally, so it hits the identical annotations-less docker-save format and now
 too — beyond this item's original scope but the same root cause, so it was folded in
 rather than filed separately.
 
-Still open: the actual defect (no annotations field in the format at all) is unfixed.
-Real annotation support remains folded into
-[--to-oci-layout for daemonless cluster loading](oci-layout-dev-output.md) per the
-recommendation above, rather than duplicated here.
+Second half shipped as
+[--to-oci-layout for daemonless cluster loading](oci-layout-dev-output.md), per the
+recommendation above rather than duplicated here. `--to-oci-layout <dir>` writes a
+standards-conformant OCI image layout, which has first-class annotation support: every
+`org.opencontainers.image.*` and `pokkum.dev/*` key survives on both the per-platform
+manifests and the index, and the multi-platform index itself is written faithfully instead
+of being flattened into one platform-suffixed tag per child. The layout writer therefore
+does NOT call `warnDroppedAnnotations` — there is nothing to warn about, and
+`TestOCILayout_AnnotationsSurvive_TarballLosesThem` asserts the warning's absence rather
+than leaving that to a comment. That same test runs one annotated payload through both
+writers in one place, so "annotations are preserved" is asserted against the loss it fixes
+rather than in isolation.
+
+`--tarball` itself is deliberately unchanged and still lossy. The format cannot carry
+annotations at all, and replacing it with a layout would break everyone piping into
+`docker load`, which does not accept one — so the two modes now coexist: the docker-save
+format for Docker compatibility, warning honestly about what it drops, and the OCI layout
+for anything that needs the metadata to survive. `--local` is in the same position for the
+same reason (the daemon's classic image store has no annotations either) and keeps its
+warning.
 
 ## Implementation
 
 - [internal/adapters/registry/tarball.go](../../internal/adapters/registry/tarball.go)
 - [internal/adapters/registry/daemon.go](../../internal/adapters/registry/daemon.go)
 - [internal/adapters/registry/registry.go](../../internal/adapters/registry/registry.go)
+- [internal/adapters/registry/ocilayout.go](../../internal/adapters/registry/ocilayout.go)
 - [internal/adapters/registry/tarball_test.go](../../internal/adapters/registry/tarball_test.go)
 - [internal/adapters/registry/daemon_test.go](../../internal/adapters/registry/daemon_test.go)
+- [internal/adapters/registry/ocilayout_test.go](../../internal/adapters/registry/ocilayout_test.go)
 
 ## Evidence
 
 - Commits: `cd5c7f0`
+
+## Known Limitations
+
+- The `--tarball` and `--local` outputs remain annotation-free by design; the fix is a lossless alternative mode plus an honest warning on the lossy ones, not a change to the docker-save format, which has no annotations field to write into.
+- `pokkum verify`'s rebuild-and-compare path for an `--asset-overlay` image can now engage against an OCI layout, since `pokkum.dev/asset-overlay-sources` survives there — but an image whose only output was `--tarball` still cannot be verified that way.
 
 ## Related
 
