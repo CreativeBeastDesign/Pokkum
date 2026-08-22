@@ -65,6 +65,18 @@ func NewGenerator(log *slog.Logger) *Generator {
 // image always has *a* base) apart from "npm-only because nobody looked at
 // the base image", rather than the two being silently indistinguishable.
 //
+// npm scope: the catalogue is production-scoped by default -- an npm
+// package Generate is confident is reachable only through the project's
+// devDependencies (scannerutils.ScopeDevelopment) is excluded, because it
+// never reaches the image's node_modules (see
+// partitionByDependencyScope's doc comment for the full design rationale
+// and the measured before/after numbers). A package whose scope this
+// generator could not determine (scannerutils.ScopeUnknown) is kept, never
+// guessed at. Both the excluded count and the scope policy are recorded in
+// the document's metadata, always present (never only when non-zero),
+// matching the same "always present, not conditional" idiom
+// "pokkum:osPackagesScanned" uses.
+//
 // See GenerateForImage's doc comment for why base-image OS packages are not
 // merged in here directly.
 func (g *Generator) Generate(ctx context.Context, req ports.SBOMRequest) (*ports.SBOMDocument, error) {
@@ -277,21 +289,30 @@ func (g *Generator) generate(ctx context.Context, req ports.SBOMRequest, osPacka
 		return packages[i].Version < packages[j].Version
 	})
 
+	// Excludes confidently dev-only npm packages from the catalogue -- see
+	// partitionByDependencyScope's doc comment for the design decision this
+	// implements and why. Placed after the merge+sort above so it applies
+	// uniformly regardless of which source (project scan or base-image OS
+	// scan) produced a given entry, and before countUnresolved/rendering so
+	// neither the warning nor the document describes something no longer in
+	// scope.
+	packages, npmDevExcluded := partitionByDependencyScope(packages)
+
 	if unresolved := countUnresolved(packages); unresolved > 0 {
 		g.log.WarnContext(ctx, "sbom: some packages could not be resolved to an installed version; "+
 			"recording their declared package.json range instead, marked as unresolved",
 			"unresolved", unresolved, "total", len(packages))
 	}
 
-	id := contentIdentityUUID(name, version, packages, req.BunVersion, req.BunSHA256, distro, osScanned)
+	id := contentIdentityUUID(name, version, packages, req.BunVersion, req.BunSHA256, distro, osScanned, npmDevExcluded)
 	created := req.CreatedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
 
 	var docBytes []byte
 	switch req.Format {
 	case ports.SBOMFormatSPDXJSON:
-		docBytes, err = renderSPDXJSON(name, version, id, created, packages, req.BunVersion, req.BunSHA256, distro, osScanned)
+		docBytes, err = renderSPDXJSON(name, version, id, created, packages, req.BunVersion, req.BunSHA256, distro, osScanned, npmDevExcluded)
 	case ports.SBOMFormatCycloneDXJSON:
-		docBytes, err = renderCycloneDXJSON(name, version, id, created, packages, req.BunVersion, req.BunSHA256, distro, osScanned)
+		docBytes, err = renderCycloneDXJSON(name, version, id, created, packages, req.BunVersion, req.BunSHA256, distro, osScanned, npmDevExcluded)
 	default:
 		return nil, fmt.Errorf("sbom: unsupported format %q: %w", req.Format, core.ErrInvalidSBOMFormat)
 	}
@@ -318,8 +339,55 @@ func (g *Generator) generate(ctx context.Context, req ports.SBOMRequest, osPacka
 		PackageCount: packageCount,
 	}
 	g.log.InfoContext(ctx, "sbom: generated", "format", req.Format, "packages", doc.PackageCount, "bytes", len(docBytes),
-		"osPackagesScanned", osScanned)
+		"osPackagesScanned", osScanned, "npmDevDependenciesExcluded", npmDevExcluded)
 	return doc, nil
+}
+
+// partitionByDependencyScope splits packages into what stays in the
+// document and how many npm packages were excluded because they are
+// confidently reachable only from the project's devDependencies.
+//
+// This is the design decision at the center of the SBOM/produced-image
+// parity gap: the document describes the PROJECT (see
+// ports.SBOMRequest.ProjectDir's doc comment), but it is attached to and
+// consumed as a description of the IMAGE. An npm package unreachable from
+// "dependencies" never reaches bunexec.stageProductionDependencies' real
+// `bun install --production`, so it is never staged into
+// ports.AppNodeModulesDirPrefix -- keeping it catalogued here would
+// describe a dependency of the image that was never installed, which is
+// exactly the noise a CVE scanner cannot tell apart from a real finding
+// (measured on a real project: 378 catalogued npm packages against 251
+// actually staged, 127 of them devDependencies/build-tool-only transitive
+// packages like vitest, prettier, and per-platform @esbuild/* stubs that
+// never ship).
+//
+// ScopeUnknown packages are deliberately kept, never excluded: this
+// codebase has been bitten repeatedly by conflating "checked and found
+// nothing" with "could not check" (Lessons.md, 2026-08-21, the
+// scanner/secretguard entries), and excluding something this generator is
+// not confident about would silently misreport "we don't know" as "we
+// checked and it doesn't ship" -- a false negative that hides a real
+// dependency from a vulnerability scanner, the more dangerous of the two
+// possible mistakes for a security document. Only ScopeDevelopment, the
+// confident negative, is excluded. See DependencyScope's doc comment.
+//
+// The excluded count is threaded into the document's metadata
+// (renderSPDXJSON/renderCycloneDXJSON) and its content identity
+// (contentIdentityUUID) rather than the packages simply vanishing with no
+// trace: a consumer must be able to tell "this document only ever
+// catalogues production dependencies, N were excluded" apart from "this
+// pokkum version doesn't know the concept at all".
+func partitionByDependencyScope(packages []scannerutils.CatalogPackage) ([]scannerutils.CatalogPackage, int) {
+	kept := make([]scannerutils.CatalogPackage, 0, len(packages))
+	excluded := 0
+	for _, p := range packages {
+		if p.Type == scannerutils.PkgTypeNpm && p.Scope == scannerutils.ScopeDevelopment {
+			excluded++
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return kept, excluded
 }
 
 func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils.Matcher) ([]scannerutils.CatalogPackage, error) {
@@ -430,36 +498,8 @@ func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils
 		case "package.json":
 			pkgJSON, pErr := sveltekitutils.ReadPackageJSON(dir)
 			if pErr == nil {
-				for name, ver := range pkgJSON.Dependencies {
-					resolved := sveltekitutils.ResolveVersion(dir, name, pkgJSON)
-					if resolved == "" {
-						resolved = ver
-					}
-					if _, ok := seen[name]; !ok {
-						seen[name] = scannerutils.CatalogPackage{
-							Name:      name,
-							Version:   resolved,
-							Type:      scannerutils.PkgTypeNpm,
-							Ecosystem: "npm",
-							Resolved:  scannerutils.IsConcreteVersion(resolved),
-						}
-					}
-				}
-				for name, ver := range pkgJSON.DevDependencies {
-					resolved := sveltekitutils.ResolveVersion(dir, name, pkgJSON)
-					if resolved == "" {
-						resolved = ver
-					}
-					if _, ok := seen[name]; !ok {
-						seen[name] = scannerutils.CatalogPackage{
-							Name:      name,
-							Version:   resolved,
-							Type:      scannerutils.PkgTypeNpm,
-							Ecosystem: "npm",
-							Resolved:  scannerutils.IsConcreteVersion(resolved),
-						}
-					}
-				}
+				addOrUpgradeScope(seen, pkgJSON.Dependencies, dir, pkgJSON, scannerutils.ScopeProduction)
+				addOrUpgradeScope(seen, pkgJSON.DevDependencies, dir, pkgJSON, scannerutils.ScopeDevelopment)
 			}
 		}
 
@@ -485,6 +525,49 @@ func (g *Generator) scanProject(ctx context.Context, root string, m *ignoreutils
 	return results, nil
 }
 
+// addOrUpgradeScope records each name in deps under scope, unless scanProject
+// already has an entry for it from a lockfile. For a name already present
+// whose lockfile-derived scope is scannerutils.ScopeUnknown (the lockfile
+// format couldn't place it -- e.g. a hand-written bun.lock fixture with no
+// "workspaces" object, or pnpm-lock.yaml, see ParsePnpmLock's doc comment),
+// this upgrades that entry's Scope to the confident value a direct
+// package.json declaration gives, without touching the version a
+// lockfile/node_modules already resolved. It never downgrades an
+// already-confident Production/Development classification: a graph walk
+// that placed a package via transitive reachability (ParseBunLock) is more
+// authoritative than the name merely also appearing in a root declaration
+// -- a package can legitimately be both a transitive production dependency
+// of one package and a direct devDependency by name, and it still ships.
+func addOrUpgradeScope(
+	seen map[string]scannerutils.CatalogPackage,
+	deps map[string]string,
+	dir string,
+	pkgJSON sveltekitutils.PackageJSON,
+	scope scannerutils.DependencyScope,
+) {
+	for name, ver := range deps {
+		if existing, ok := seen[name]; ok {
+			if existing.Scope == scannerutils.ScopeUnknown {
+				existing.Scope = scope
+				seen[name] = existing
+			}
+			continue
+		}
+		resolved := sveltekitutils.ResolveVersion(dir, name, pkgJSON)
+		if resolved == "" {
+			resolved = ver
+		}
+		seen[name] = scannerutils.CatalogPackage{
+			Name:      name,
+			Version:   resolved,
+			Type:      scannerutils.PkgTypeNpm,
+			Ecosystem: "npm",
+			Resolved:  scannerutils.IsConcreteVersion(resolved),
+			Scope:     scope,
+		}
+	}
+}
+
 // countUnresolved returns how many packages carry an unresolved
 // package.json range instead of a concrete, installed version.
 func countUnresolved(packages []scannerutils.CatalogPackage) int {
@@ -506,6 +589,16 @@ func countUnresolved(packages []scannerutils.CatalogPackage) int {
 const unresolvedVersionComment = "versionInfo is an unresolved package.json range, not an installed version: " +
 	"no lockfile entry or installed copy in node_modules was found for this package"
 
+// unknownScopeComment is the SPDX package "comment" and CycloneDX
+// "pokkum:dependencyScope" property value explaining why a package this
+// generator could not confirm as either a production or development-only
+// dependency was kept in the document rather than silently excluded -- see
+// partitionByDependencyScope's doc comment for why "unknown" must default
+// to kept.
+const unknownScopeComment = "dependency scope (production vs. development) could not be determined for this package " +
+	"from the available lockfile; kept rather than silently excluded, since a missed production dependency " +
+	"is worse than one extra catalogued entry"
+
 func (g *Generator) buildMatcher(req ports.SBOMRequest) (*ignoreutils.Matcher, error) {
 	patterns := ignoreutils.DefaultPatterns()
 
@@ -524,7 +617,7 @@ func (g *Generator) buildMatcher(req ports.SBOMRequest) (*ignoreutils.Matcher, e
 	return ignoreutils.New(patterns)
 }
 
-func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string, distro scannerutils.DistroInfo, osScanned bool) ([]byte, error) {
+func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string, distro scannerutils.DistroInfo, osScanned bool, npmDevExcluded int) ([]byte, error) {
 	spdxPackages := make([]map[string]any, 0, len(packages)+2)
 	relationships := make([]map[string]any, 0, len(packages)+2)
 
@@ -608,8 +701,15 @@ func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages
 				},
 			},
 		}
+		var comments []string
 		if !p.Resolved {
-			pkgMap["comment"] = unresolvedVersionComment
+			comments = append(comments, unresolvedVersionComment)
+		}
+		if p.Type == scannerutils.PkgTypeNpm && p.Scope == scannerutils.ScopeUnknown {
+			comments = append(comments, unknownScopeComment)
+		}
+		if len(comments) > 0 {
+			pkgMap["comment"] = strings.Join(comments, " ")
 		}
 		spdxPackages = append(spdxPackages, pkgMap)
 
@@ -640,12 +740,35 @@ func renderSPDXJSON(name, version string, id uuid.UUID, created string, packages
 		},
 		"packages":      spdxPackages,
 		"relationships": relationships,
+		// A dedicated SPDX annotation (rather than folding this into
+		// creationInfo.comment above, which already carries the unrelated
+		// OS-scan marker) records the npm scope policy this document was
+		// generated under -- always present, not conditional on
+		// npmDevExcluded being non-zero, matching the same "always present"
+		// idiom osScanComment uses. See partitionByDependencyScope's doc
+		// comment.
+		"annotations": []map[string]any{
+			{
+				"annotationType": "OTHER",
+				"annotator":      "Tool: Pokkum",
+				"annotationDate": created,
+				"comment":        npmScopeComment(npmDevExcluded),
+			},
+		},
 	}
 
 	return marshalDeterministic(doc)
 }
 
-func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string, distro scannerutils.DistroInfo, osScanned bool) ([]byte, error) {
+// npmScopeComment is the SPDX document annotation and CycloneDX metadata
+// properties' value pair recording the npm dependency scope policy this
+// document was generated under, and how many devDependencies-only packages
+// were excluded under it -- see partitionByDependencyScope's doc comment.
+func npmScopeComment(npmDevExcluded int) string {
+	return fmt.Sprintf("pokkum:npmDependencyScope=production pokkum:npmDevDependenciesExcluded=%d", npmDevExcluded)
+}
+
+func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string, distro scannerutils.DistroInfo, osScanned bool, npmDevExcluded int) ([]byte, error) {
 	components := make([]map[string]any, 0, len(packages)+1)
 
 	// Bun is a Pokkum-embedded runtime artifact, not a project dependency
@@ -675,10 +798,22 @@ func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, pac
 			"version": p.Version,
 			"purl":    purl,
 		}
+		var props []map[string]any
 		if !p.Resolved {
-			comp["properties"] = []map[string]any{
-				{"name": "pokkum:versionResolved", "value": "false"},
-			}
+			props = append(props, map[string]any{"name": "pokkum:versionResolved", "value": "false"})
+		}
+		if p.Type == scannerutils.PkgTypeNpm && p.Scope == scannerutils.ScopeUnknown {
+			props = append(props, map[string]any{"name": "pokkum:dependencyScope", "value": "unknown"})
+			// CycloneDX's own native scope enum (required [default] |
+			// optional | excluded) -- "optional" is the closest match for
+			// "not confirmed necessary", used only for the noteworthy
+			// unknown case, matching how the "pokkum:versionResolved"
+			// property above only appears for the noteworthy unresolved
+			// case rather than being stamped on every component.
+			comp["scope"] = "optional"
+		}
+		if len(props) > 0 {
+			comp["properties"] = props
 		}
 		components = append(components, comp)
 	}
@@ -696,6 +831,13 @@ func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, pac
 			"name": "pokkum:osPackageCount", "value": fmt.Sprintf("%d", countOSPackages(packages)),
 		})
 	}
+	// Always present, same "always present" idiom as the OS-scan marker
+	// above -- see npmScopeComment and partitionByDependencyScope's doc
+	// comment.
+	metadataProperties = append(metadataProperties,
+		map[string]any{"name": "pokkum:npmDependencyScope", "value": "production"},
+		map[string]any{"name": "pokkum:npmDevDependenciesExcluded", "value": fmt.Sprintf("%d", npmDevExcluded)},
+	)
 
 	doc := map[string]any{
 		"bomFormat":    "CycloneDX",
@@ -723,10 +865,10 @@ func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, pac
 	return marshalDeterministic(doc)
 }
 
-func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string, distro scannerutils.DistroInfo, osScanned bool) uuid.UUID {
+func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string, distro scannerutils.DistroInfo, osScanned bool, npmDevExcluded int) uuid.UUID {
 	ids := make([]string, 0, len(packages))
 	for _, p := range packages {
-		ids = append(ids, fmt.Sprintf("%s@%s@%s@resolved=%v", p.Name, p.Version, p.Type, p.Resolved))
+		ids = append(ids, fmt.Sprintf("%s@%s@%s@resolved=%v@scope=%s", p.Name, p.Version, p.Type, p.Resolved, p.Scope))
 	}
 	sort.Strings(ids)
 
@@ -750,6 +892,13 @@ func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPa
 	// packages list, same Bun component) despite making a materially
 	// different claim about what was checked.
 	fmt.Fprintf(&b, "osScanned=%v@distro=%s:%s\n", osScanned, distro.ID, distro.VersionID)
+	// npmDevExcluded is folded in for the identical reason: two builds
+	// whose kept package sets happen to be identical (e.g. the excluded
+	// devDependency set changed but every package's Scope survives kept)
+	// but whose excluded COUNT differs would otherwise hash identical
+	// despite the document's own "pokkum:npmDevDependenciesExcluded"
+	// metadata differing between them.
+	fmt.Fprintf(&b, "npmDevExcluded=%d\n", npmDevExcluded)
 	return uuid.NewSHA1(pokkumSBOMNamespace, []byte(b.String()))
 }
 

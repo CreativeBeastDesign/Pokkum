@@ -227,6 +227,111 @@ func TestParseBunLock_TrailingComma(t *testing.T) {
 	}
 }
 
+// TestParseBunLock_ProductionScopeFromWorkspaces is the core regression test
+// for the SBOM/image npm-package gap: a real bun.lock records the root
+// workspace's production ("dependencies") and development-only
+// ("devDependencies") names, plus each resolved package's own dependency
+// edges. This fixture mirrors the real shape that produced the gap: a
+// production root ("prod-root") that itself pulls in a package
+// ("prod-transitive") the project never declares directly (matching how
+// @friendofsvelte/mermaid pulls in @sveltejs/adapter-auto in the real
+// project this fix was measured against), a dev root ("dev-root") that
+// pulls in a build-tool-only package ("dev-transitive", matching how vite
+// pulls in esbuild), and one package unreachable from either root
+// ("orphan-pkg", matching a hand-written or out-of-sync lockfile entry).
+func TestParseBunLock_ProductionScopeFromWorkspaces(t *testing.T) {
+	data := []byte(`{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "app",
+      "dependencies": { "prod-root": "1.0.0" },
+      "devDependencies": { "dev-root": "1.0.0" }
+    }
+  },
+  "packages": {
+    "prod-root": ["prod-root@1.0.0", "", {"dependencies": {"prod-transitive": "2.0.0"}}, "sha512-a"],
+    "prod-transitive": ["prod-transitive@2.0.0", "", {}, "sha512-b"],
+    "dev-root": ["dev-root@1.0.0", "", {"dependencies": {"dev-transitive": "3.0.0"}}, "sha512-c"],
+    "dev-transitive": ["dev-transitive@3.0.0", "", {}, "sha512-d"],
+    "orphan-pkg": ["orphan-pkg@4.0.0", "", {}, "sha512-e"]
+  }
+}`)
+
+	pkgs, err := ParseBunLock(data)
+	if err != nil {
+		t.Fatalf("ParseBunLock error: %v", err)
+	}
+
+	scopes := make(map[string]DependencyScope, len(pkgs))
+	for _, p := range pkgs {
+		scopes[p.Name] = p.Scope
+	}
+
+	want := map[string]DependencyScope{
+		"prod-root":       ScopeProduction,
+		"prod-transitive": ScopeProduction, // reachable only via a transitive edge from the prod root
+		"dev-root":        ScopeDevelopment,
+		"dev-transitive":  ScopeDevelopment, // reachable only via a transitive edge from the dev root
+		"orphan-pkg":      ScopeUnknown,     // unreachable from either root: kept, not guessed at
+	}
+	for name, wantScope := range want {
+		if got := scopes[name]; got != wantScope {
+			t.Errorf("scope[%q] = %q, want %q", name, got, wantScope)
+		}
+	}
+}
+
+// TestParseBunLock_OptionalDependencyIsGraphEdge proves optionalDependencies
+// count as graph edges too, matching the real-world case of a build tool's
+// platform-specific native binary packages (e.g. vite -> esbuild ->
+// @esbuild/darwin-x64 declared under esbuild's own optionalDependencies).
+func TestParseBunLock_OptionalDependencyIsGraphEdge(t *testing.T) {
+	data := []byte(`{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "app",
+      "dependencies": {},
+      "devDependencies": { "build-tool": "1.0.0" }
+    }
+  },
+  "packages": {
+    "build-tool": ["build-tool@1.0.0", "", {"optionalDependencies": {"native-stub": "1.0.0"}}, "sha512-a"],
+    "native-stub": ["native-stub@1.0.0", "", {"os": "darwin"}, "sha512-b"]
+  }
+}`)
+
+	pkgs, err := ParseBunLock(data)
+	if err != nil {
+		t.Fatalf("ParseBunLock error: %v", err)
+	}
+	for _, p := range pkgs {
+		if p.Name == "native-stub" && p.Scope != ScopeDevelopment {
+			t.Errorf("native-stub scope = %q, want %q (reachable only via a dev-root's optionalDependencies)", p.Scope, ScopeDevelopment)
+		}
+	}
+}
+
+// TestParseBunLock_NoWorkspacesFieldIsUnknownNotExcluded pins the fallback
+// for a bun.lock with no "workspaces" object (the shape every hand-written
+// fixture elsewhere in this test suite and in the sbom package uses): every
+// package must come back ScopeUnknown, never ScopeDevelopment -- an
+// unknown-scope package must default to being kept downstream, and getting
+// this wrong here would silently start excluding packages that legitimately
+// have no scope information at all.
+func TestParseBunLock_NoWorkspacesFieldIsUnknownNotExcluded(t *testing.T) {
+	data := []byte(`{"lockfileVersion":1,"packages":{"svelte":["svelte@5.0.0","",{},"sha512-x"]}}`)
+
+	pkgs, err := ParseBunLock(data)
+	if err != nil {
+		t.Fatalf("ParseBunLock error: %v", err)
+	}
+	if len(pkgs) != 1 || pkgs[0].Scope != ScopeUnknown {
+		t.Fatalf("ParseBunLock() = %+v, want exactly one package with Scope=%q", pkgs, ScopeUnknown)
+	}
+}
+
 func TestIsConcreteVersion(t *testing.T) {
 	tests := []struct {
 		version string
@@ -285,6 +390,43 @@ func TestParsePackageLock(t *testing.T) {
 	}
 }
 
+// TestParsePackageLock_DevFlagSetsDevelopmentScope proves npm's own
+// per-entry "dev" boolean (present in every real v2/v3 package-lock.json)
+// drives Scope directly, with no graph walk needed: a package marked
+// "dev": true comes back ScopeDevelopment, and one without the flag -- even
+// one that is ALSO independently declared under root devDependencies by
+// name, matching a package legitimately required by both a production and a
+// development path -- comes back ScopeProduction, exactly matching what npm
+// itself decided.
+func TestParsePackageLock_DevFlagSetsDevelopmentScope(t *testing.T) {
+	data := []byte(`{
+  "name": "app",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "name": "app", "version": "1.0.0" },
+    "node_modules/prod-pkg": { "version": "1.0.0" },
+    "node_modules/dev-only-pkg": { "version": "2.0.0", "dev": true }
+  }
+}`)
+
+	pkgs, err := ParsePackageLock(data)
+	if err != nil {
+		t.Fatalf("ParsePackageLock error: %v", err)
+	}
+
+	scopes := make(map[string]DependencyScope, len(pkgs))
+	for _, p := range pkgs {
+		scopes[p.Name] = p.Scope
+	}
+	if scopes["prod-pkg"] != ScopeProduction {
+		t.Errorf("prod-pkg scope = %q, want %q", scopes["prod-pkg"], ScopeProduction)
+	}
+	if scopes["dev-only-pkg"] != ScopeDevelopment {
+		t.Errorf("dev-only-pkg scope = %q, want %q", scopes["dev-only-pkg"], ScopeDevelopment)
+	}
+}
+
 func TestParsePnpmLock(t *testing.T) {
 	data := []byte(`
 lockfileVersion: '6.0'
@@ -314,6 +456,15 @@ packages:
 	}
 	if seen["@sveltejs/kit"] != "2.31.0" {
 		t.Errorf("expected @sveltejs/kit@2.31.0, got %s", seen["@sveltejs/kit"])
+	}
+
+	// pnpm-lock.yaml carries no reliable per-package dev/prod marker (see
+	// ParsePnpmLock's doc comment) -- every package must come back
+	// ScopeUnknown, kept rather than guessed at.
+	for _, p := range pkgs {
+		if p.Scope != ScopeUnknown {
+			t.Errorf("%s scope = %q, want %q (pnpm scope determination is a documented, deliberate gap)", p.Name, p.Scope, ScopeUnknown)
+		}
 	}
 }
 
@@ -425,8 +576,8 @@ func TestExtractImagePackages_VendoredPackageJSON(t *testing.T) {
 	}
 
 	want := []CatalogPackage{
-		{Name: "express", Version: "4.18.2", Type: PkgTypeNpm, Ecosystem: "npm", Resolved: true},
-		{Name: "lodash", Version: "4.17.21", Type: PkgTypeNpm, Ecosystem: "npm", Resolved: true},
+		{Name: "express", Version: "4.18.2", Type: PkgTypeNpm, Ecosystem: "npm", Resolved: true, Scope: ScopeProduction},
+		{Name: "lodash", Version: "4.17.21", Type: PkgTypeNpm, Ecosystem: "npm", Resolved: true, Scope: ScopeProduction},
 	}
 
 	if len(pkgs) != len(want) {

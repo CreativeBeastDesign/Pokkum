@@ -66,12 +66,22 @@ func TestGenerator_SPDX_ReproducibilityAndPackages(t *testing.T) {
 		t.Fatal("PackageCount is zero -- the scan silently produced an empty catalog")
 	}
 
-	// The fixture's package.json/bun.lock declare these; assert a couple of
-	// them actually made it into the document, so an empty-but-well-formed
-	// SBOM can't pass this test by accident.
-	for _, want := range []string{"svelte", "vite", "@sveltejs/kit", "@jesterkit/exe-sveltekit"} {
+	// The fixture declares "@jesterkit/exe-sveltekit" as its one production
+	// dependency (package.json "dependencies"), which itself peer-depends on
+	// "typescript" -- both must appear. "svelte", "vite", and "@sveltejs/kit"
+	// are declared under "devDependencies" with no path back to the
+	// production root, so a real `bun install --production` never stages
+	// them and they must NOT appear -- this is the production-only scoping
+	// this test now proves end-to-end through the real Generate() path,
+	// not just an "a couple of them made it in" smoke check.
+	for _, want := range []string{"@jesterkit/exe-sveltekit", "typescript"} {
 		if !bytes.Contains(doc1.Content, []byte(`"`+want+`"`)) {
-			t.Errorf("expected package %q from the fixture's bun.lock to appear in the SPDX document", want)
+			t.Errorf("expected production package %q to appear in the SPDX document", want)
+		}
+	}
+	for _, notWant := range []string{`"svelte"`, `"vite"`, `"@sveltejs/kit"`} {
+		if bytes.Contains(doc1.Content, []byte(notWant)) {
+			t.Errorf("dev-only package %s leaked into the SPDX document -- it is never staged by `bun install --production`", notWant)
 		}
 	}
 
@@ -121,9 +131,15 @@ func TestGenerator_CycloneDX_ValidAndListsPackages(t *testing.T) {
 		t.Fatal("PackageCount is zero -- the scan silently produced an empty catalog")
 	}
 
-	for _, want := range []string{"svelte", "vite"} {
+	// Same production-only scoping as TestGenerator_SPDX_ReproducibilityAndPackages.
+	for _, want := range []string{"@jesterkit/exe-sveltekit", "typescript"} {
 		if !bytes.Contains(doc.Content, []byte(`"`+want+`"`)) {
-			t.Errorf("expected package %q from the fixture's bun.lock to appear in the CycloneDX document", want)
+			t.Errorf("expected production package %q to appear in the CycloneDX document", want)
+		}
+	}
+	for _, notWant := range []string{`"svelte"`, `"vite"`, `"@sveltejs/kit"`} {
+		if bytes.Contains(doc.Content, []byte(notWant)) {
+			t.Errorf("dev-only package %s leaked into the CycloneDX document -- it is never staged by `bun install --production`", notWant)
 		}
 	}
 }

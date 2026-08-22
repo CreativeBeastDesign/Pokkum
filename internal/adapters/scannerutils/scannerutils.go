@@ -35,6 +35,41 @@ const (
 	PkgTypeNpm PackageType = "npm"
 )
 
+// DependencyScope classifies whether an npm CatalogPackage is reachable from
+// the project's production ("dependencies") or development-only
+// ("devDependencies") declarations -- the same distinction
+// `bun install --production` (bunexec's stageProductionDependencies) uses to
+// decide what actually gets staged into an image's node_modules.
+//
+// ScopeUnknown exists because that classification cannot always be
+// determined from what a given lockfile format records (see ParsePnpmLock),
+// and it MUST default to being kept rather than excluded wherever Scope is
+// consulted: a package this codebase is unsure about is exactly the "could
+// not determine" state Lessons.md's "found nothing vs could not check"
+// entries repeatedly warn against conflating with a confident negative.
+// Silently excluding an Unknown-scope package would misreport "we don't
+// know" as "we checked and it doesn't ship" -- a false negative that hides a
+// real dependency from a CVE scanner, which is a worse failure than one
+// extra catalogued entry.
+type DependencyScope string
+
+const (
+	// ScopeProduction means the package is confidently known to ship: it is
+	// a direct "dependencies" entry, transitively reachable from one via a
+	// resolved lockfile graph, or -- for OS/deb/apk packages, which have no
+	// project-declared dev/prod distinction -- simply present in the base
+	// image's own package database (installed is installed).
+	ScopeProduction DependencyScope = "production"
+	// ScopeDevelopment means the package is confidently known to be
+	// reachable only via "devDependencies" and therefore never reaches
+	// `bun install --production`'s staged node_modules.
+	ScopeDevelopment DependencyScope = "development"
+	// ScopeUnknown means the scope could not be determined from the
+	// available data (see the type doc comment) -- kept rather than
+	// silently dropped.
+	ScopeUnknown DependencyScope = "unknown"
+)
+
 // CatalogPackage represents a discovered dependency or OS package.
 type CatalogPackage struct {
 	Name         string      `json:"name"`
@@ -54,6 +89,13 @@ type CatalogPackage struct {
 	// entries, so an omitted assignment here silently misreports a resolved
 	// package as unresolved instead of failing loudly.
 	Resolved bool `json:"resolved"`
+	// Scope records whether this package is a production dependency, a
+	// development-only one, or unknown -- see DependencyScope. Every
+	// constructor in this file must set this explicitly, for the same
+	// reason Resolved must be: the zero value ("") is not one of the three
+	// defined constants and must never be relied upon as a stand-in for
+	// ScopeUnknown by omission.
+	Scope DependencyScope `json:"scope"`
 }
 
 // DistroInfo records basic Linux distribution identification parsed from os-release.
@@ -123,6 +165,10 @@ func ParseDPKGStatus(r io.Reader) ([]CatalogPackage, error) {
 					Architecture: arch,
 					Source:       source,
 					Resolved:     true,
+					// OS packages have no project-declared dev/prod split --
+					// a dpkg database entry is, by definition, installed in
+					// the image. See DependencyScope's doc comment.
+					Scope: ScopeProduction,
 				})
 			}
 		}
@@ -203,6 +249,8 @@ func ParseAPKInstalled(r io.Reader) ([]CatalogPackage, error) {
 				License:      license,
 				Source:       origin,
 				Resolved:     true,
+				// See the matching comment in ParseDPKGStatus.
+				Scope: ScopeProduction,
 			})
 		}
 		pkgName = ""
@@ -249,6 +297,15 @@ func ParseAPKInstalled(r io.Reader) ([]CatalogPackage, error) {
 	return packages, nil
 }
 
+// bunWorkspace mirrors one entry of a bun.lock's top-level "workspaces"
+// object: the direct dependency names declared by that workspace's own
+// package.json, split by the same dependencies/devDependencies boundary
+// `bun install --production` honours.
+type bunWorkspace struct {
+	Dependencies    map[string]string `json:"dependencies"`
+	DevDependencies map[string]string `json:"devDependencies"`
+}
+
 // ParseBunLock parses bun.lock v1 JSON format.
 //
 // Real bun.lock files are JSONC, not strict JSON: `bun install` always
@@ -261,34 +318,162 @@ func ParseAPKInstalled(r io.Reader) ([]CatalogPackage, error) {
 // ExtractProjectDependencies and sbom.Generator.scanProject do) — the
 // project's dependency versions then fall back to whatever a
 // package.json-only path can resolve instead (F6 field-test bug).
+//
+// Scope classification: every real bun.lock (bun >= 1.0) carries a
+// top-level "workspaces" object recording each workspace's direct
+// production ("dependencies") and development-only ("devDependencies")
+// names, and each "packages" entry records its own resolved dependency
+// edges ("dependencies"/"optionalDependencies"). ParseBunLock walks that
+// graph from the production roots and marks every package it reaches
+// ScopeProduction -- mirroring exactly what `bun install --production`
+// (bunexec's stageProductionDependencies, which runs against this same
+// bun.lock with --frozen-lockfile) actually stages. A package reachable
+// only through a devDependency root is ScopeDevelopment. A package this
+// walk cannot place at all -- most commonly a hand-written bun.lock in a
+// test with no "workspaces" object -- is ScopeUnknown, kept rather than
+// silently dropped; see DependencyScope's doc comment for why "unknown"
+// must default to kept.
 func ParseBunLock(data []byte) ([]CatalogPackage, error) {
 	var parsed struct {
-		Packages map[string]any `json:"packages"`
+		Workspaces map[string]bunWorkspace `json:"workspaces"`
+		Packages   map[string]any          `json:"packages"`
 	}
 	if err := json.Unmarshal(stripJSONTrailingCommas(data), &parsed); err != nil {
 		return nil, err
 	}
 
-	var packages []CatalogPackage
+	prodRoots := make(map[string]bool)
+	devRoots := make(map[string]bool)
+	for _, ws := range parsed.Workspaces {
+		for name := range ws.Dependencies {
+			prodRoots[name] = true
+		}
+		for name := range ws.DevDependencies {
+			devRoots[name] = true
+		}
+	}
+
+	type parsedEntry struct {
+		name, version string
+	}
+	entries := make(map[string]parsedEntry, len(parsed.Packages))
+	graph := make(map[string][]string, len(parsed.Packages))
 	for k, v := range parsed.Packages {
 		if k == "" {
 			continue
 		}
 		name, version := parseBunPackageEntry(k, v)
-		if name != "" && version != "" {
-			packages = append(packages, CatalogPackage{
-				Name:      name,
-				Version:   version,
-				Type:      PkgTypeNpm,
-				Ecosystem: "npm",
-				// A bun.lock "packages" entry always records the version bun
-				// actually resolved and installed, never a range.
-				Resolved: true,
-			})
+		if name == "" || version == "" {
+			continue
 		}
+		entries[name] = parsedEntry{name: name, version: version}
+		graph[name] = bunPackageDependencyNames(v)
+	}
+
+	prodReachable := bunReachableFrom(prodRoots, graph)
+	devReachable := bunReachableFrom(devRoots, graph)
+
+	packages := make([]CatalogPackage, 0, len(entries))
+	for _, e := range entries {
+		scope := ScopeUnknown
+		switch {
+		case prodReachable[e.name]:
+			scope = ScopeProduction
+		case devReachable[e.name]:
+			scope = ScopeDevelopment
+		}
+		packages = append(packages, CatalogPackage{
+			Name:      e.name,
+			Version:   e.version,
+			Type:      PkgTypeNpm,
+			Ecosystem: "npm",
+			// A bun.lock "packages" entry always records the version bun
+			// actually resolved and installed, never a range.
+			Resolved: true,
+			Scope:    scope,
+		})
 	}
 
 	return packages, nil
+}
+
+// bunPackageDependencyNames extracts the dependency names a single bun.lock
+// "packages" entry pulls in -- for ParseBunLock's reachability walk.
+// "dependencies" and "optionalDependencies" are always installed alongside
+// the parent (subject, for the latter, to platform compatibility, e.g. a
+// native binary package). "peerDependencies" is included too: bun, like
+// modern npm, auto-installs a missing peer rather than merely asserting one
+// must already be present, and a production install needs its production
+// packages' peers satisfied to actually work -- confirmed empirically
+// against a real project, where a production dependency's peer requirement
+// on "@sveltejs/kit" (itself also a root devDependency by name) was
+// genuinely staged by `bun install --production`, and treating peer edges
+// as inert would have wrongly excluded it and everything reachable only
+// through it (48 packages in that one project) from the catalogue --
+// exactly the "missed production dependency" failure DependencyScope's doc
+// comment says is worse than one extra entry.
+//
+// Deliberately NOT platform-filtered: "optionalDependencies" pulls in every
+// platform variant of a native binary package (e.g. all ~25 @esbuild/<os>-
+// <arch> stubs), even though a real `bun install --production` on any one
+// host only ever materializes the one matching that host's OS/arch. Judging
+// compatibility here would mean checking the *build host's* runtime.GOOS/
+// GOARCH, and letting that leak into which packages the SBOM lists would
+// make the document's content depend on which machine happened to run
+// `pokkum build` -- a Bit-for-bit OCI Reproducibility violation of exactly
+// the class mem:core names ("build-time process metadata must never leak
+// into content-addressed artifact bytes"), and a worse defect than a few
+// extra catalogued platform stubs. This is a deliberate, bounded trade-off,
+// not an oversight: it is why a small residual gap remains measurable
+// between the SBOM's npm package set and any one build's actual staged
+// node_modules.
+func bunPackageDependencyNames(entry any) []string {
+	arr, ok := entry.([]any)
+	if !ok || len(arr) < 3 {
+		return nil
+	}
+	meta, ok := arr[2].(map[string]any)
+	if !ok {
+		return nil
+	}
+	var names []string
+	for _, key := range []string{"dependencies", "optionalDependencies", "peerDependencies"} {
+		deps, ok := meta[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		for name := range deps {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// bunReachableFrom returns every package name reachable from roots by
+// following graph edges, including the roots themselves. Traversal order is
+// irrelevant -- reachability is a set, not a sequence -- so map iteration
+// order here has no bearing on SBOM determinism the way package ORDER
+// would; the caller re-sorts the final package list regardless.
+func bunReachableFrom(roots map[string]bool, graph map[string][]string) map[string]bool {
+	visited := make(map[string]bool, len(roots))
+	stack := make([]string, 0, len(roots))
+	for name := range roots {
+		if !visited[name] {
+			visited[name] = true
+			stack = append(stack, name)
+		}
+	}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, dep := range graph[n] {
+			if !visited[dep] {
+				visited[dep] = true
+				stack = append(stack, dep)
+			}
+		}
+	}
+	return visited
 }
 
 // stripJSONTrailingCommas returns a copy of data with any comma removed
@@ -382,11 +567,32 @@ func parseBunPackageEntry(key string, entry any) (name, version string) {
 	return key, ""
 }
 
+// packageLockEntry is the (version, scope) pair ParsePackageLock accumulates
+// per package name before converting to CatalogPackage.
+type packageLockEntry struct {
+	version string
+	scope   DependencyScope
+}
+
 // ParsePackageLock parses package-lock.json v1, v2, and v3.
+//
+// Scope classification: npm's own lockfile already computes and records
+// whether a package is reachable only through devDependencies -- v2/v3
+// "packages" entries carry a "dev": true boolean precisely when a package
+// is NOT needed for a production install (bun's `--production` honours the
+// same distinction against an npm-format lockfile, per lockfileNames in
+// bunexec/vendor_install.go), and the recursive v1 "dependencies" tree
+// carries the identical flag per entry. Absence of the flag means the
+// package is required by production: npm only sets "dev": true when a
+// package is exclusively reachable via devDependencies, so a package that
+// is production-required from one path and dev-required from another
+// correctly comes back without the flag. Unlike ParseBunLock, no separate
+// graph walk is needed here -- npm has already done it.
 func ParsePackageLock(data []byte) ([]CatalogPackage, error) {
 	var parsed struct {
 		Packages map[string]struct {
 			Version string `json:"version"`
+			Dev     bool   `json:"dev"`
 		} `json:"packages"`
 		Dependencies map[string]any `json:"dependencies"`
 	}
@@ -395,7 +601,7 @@ func ParsePackageLock(data []byte) ([]CatalogPackage, error) {
 	}
 
 	var packages []CatalogPackage
-	seen := make(map[string]string)
+	seen := make(map[string]packageLockEntry)
 
 	if len(parsed.Packages) > 0 {
 		for path, pkg := range parsed.Packages {
@@ -406,33 +612,42 @@ func ParsePackageLock(data []byte) ([]CatalogPackage, error) {
 			idx := strings.LastIndex(path, "node_modules/")
 			if idx >= 0 {
 				name := path[idx+len("node_modules/"):]
-				seen[name] = pkg.Version
+				scope := ScopeProduction
+				if pkg.Dev {
+					scope = ScopeDevelopment
+				}
+				seen[name] = packageLockEntry{version: pkg.Version, scope: scope}
 			}
 		}
 	} else if len(parsed.Dependencies) > 0 {
 		extractV1Dependencies(parsed.Dependencies, seen)
 	}
 
-	for name, ver := range seen {
+	for name, e := range seen {
 		packages = append(packages, CatalogPackage{
 			Name:      name,
-			Version:   ver,
+			Version:   e.version,
 			Type:      PkgTypeNpm,
 			Ecosystem: "npm",
 			// package-lock.json only ever records the version npm actually
 			// installed, never a range.
 			Resolved: true,
+			Scope:    e.scope,
 		})
 	}
 
 	return packages, nil
 }
 
-func extractV1Dependencies(deps map[string]any, seen map[string]string) {
+func extractV1Dependencies(deps map[string]any, seen map[string]packageLockEntry) {
 	for name, val := range deps {
 		if obj, ok := val.(map[string]any); ok {
 			if v, ok := obj["version"].(string); ok && v != "" {
-				seen[name] = v
+				scope := ScopeProduction
+				if dev, ok := obj["dev"].(bool); ok && dev {
+					scope = ScopeDevelopment
+				}
+				seen[name] = packageLockEntry{version: v, scope: scope}
 			}
 			if sub, ok := obj["dependencies"].(map[string]any); ok {
 				extractV1Dependencies(sub, seen)
@@ -442,6 +657,21 @@ func extractV1Dependencies(deps map[string]any, seen map[string]string) {
 }
 
 // ParsePnpmLock parses pnpm-lock.yaml packages section.
+//
+// Scope: pnpm-lock.yaml does not reliably mark individual "packages" entries
+// with a production/development flag across the format's versions the way
+// npm's package-lock.json does, and it does not give ParseBunLock's
+// per-package "dependencies"/"optionalDependencies" edges to walk a graph
+// with either. Every package parsed here therefore gets ScopeUnknown --
+// kept in the catalogue rather than guessed at; see DependencyScope's doc
+// comment for why "unknown" must default to kept. This is a real,
+// deliberately unclosed gap: a pnpm project does not currently get the
+// production-only filtering bun.lock and package-lock.json projects get.
+// Closing it would need pnpm-lock.yaml's "importers" section (present in
+// every real pnpm-lock.yaml, listing each importer's own
+// dependencies/devDependencies) walked the same way ParseBunLock walks
+// bun.lock's "workspaces" -- left for a follow-up, since it is a second,
+// independently-testable parser change.
 func ParsePnpmLock(data []byte) ([]CatalogPackage, error) {
 	var parsed struct {
 		Packages map[string]any `yaml:"packages"`
@@ -462,6 +692,7 @@ func ParsePnpmLock(data []byte) ([]CatalogPackage, error) {
 				// pnpm-lock.yaml keys only ever encode the resolved version,
 				// never a range.
 				Resolved: true,
+				Scope:    ScopeUnknown,
 			})
 		}
 	}
@@ -536,6 +767,9 @@ func ExtractProjectDependencies(projectDir string) ([]CatalogPackage, error) {
 					Type:      PkgTypeNpm,
 					Ecosystem: "npm",
 					Resolved:  IsConcreteVersion(resolved),
+					// A direct "dependencies" declaration is confident,
+					// definitive evidence -- no graph walk needed.
+					Scope: ScopeProduction,
 				}
 			}
 		}
@@ -551,6 +785,7 @@ func ExtractProjectDependencies(projectDir string) ([]CatalogPackage, error) {
 					Type:      PkgTypeNpm,
 					Ecosystem: "npm",
 					Resolved:  IsConcreteVersion(resolved),
+					Scope:     ScopeDevelopment,
 				}
 			}
 		}
@@ -699,10 +934,18 @@ func ExtractImagePackages(ctx context.Context, img v1.Image) ([]CatalogPackage, 
 						// itself (e.g. app/vendor/express/package.json) — its
 						// own name+version is the actual installed identity,
 						// not just a range someone else declared.
-						vendorPackages[p.Name] = CatalogPackage{Name: p.Name, Version: p.Version, Type: PkgTypeNpm, Ecosystem: "npm", Resolved: true}
+						// Found actually installed inside the image being
+						// scanned -- unambiguously ScopeProduction, since it
+						// shipped regardless of how it was originally
+						// declared.
+						vendorPackages[p.Name] = CatalogPackage{Name: p.Name, Version: p.Version, Type: PkgTypeNpm, Ecosystem: "npm", Resolved: true, Scope: ScopeProduction}
 					} else {
+						// Only p.Dependencies is read here, never
+						// p.DevDependencies -- this loop already only ever
+						// surfaces production-declared ranges from an
+						// in-image (non-vendor) package.json.
 						for k, v := range p.Dependencies {
-							otherAppPackages = append(otherAppPackages, CatalogPackage{Name: k, Version: v, Type: PkgTypeNpm, Ecosystem: "npm", Resolved: IsConcreteVersion(v)})
+							otherAppPackages = append(otherAppPackages, CatalogPackage{Name: k, Version: v, Type: PkgTypeNpm, Ecosystem: "npm", Resolved: IsConcreteVersion(v), Scope: ScopeProduction})
 						}
 					}
 				}
