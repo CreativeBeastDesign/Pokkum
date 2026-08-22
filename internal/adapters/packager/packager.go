@@ -703,6 +703,52 @@ func dedupeAttestRecordsByRel(records []attestutils.Record) []attestutils.Record
 	return out
 }
 
+// descriptorPlatform returns the platform to stamp on the index descriptor that
+// points at img, the child built for plat.
+//
+// It is read off the child image's own config rather than synthesized from the
+// requested ports.Platform, because those two are not always the same. A base
+// image may declare platform fields ports.Platform deliberately does not model
+// — gcr.io/distroless' arm64 image declares "variant": "v8", and applyRuntime
+// copies the base config's platform fields through verbatim — so a descriptor
+// built from ports.Platform's variant-less spelling disagreed with the very
+// config it points at. That disagreement is exactly what
+// go-containerregistry's pkg/v1/validate compares (with v1.Platform.Equals),
+// which is why `crane validate --remote` rejected every multi-architecture
+// image this packager produced, on platform[1], with an empty message (gcr's
+// validatePlatform has no Variant clause — it checks OSVersion twice — so it
+// finds a mismatch it cannot describe).
+//
+// The requested platform is still enforced rather than trusted away: the
+// child's OS and architecture must equal the fan-out key, so a genuinely
+// mislabelled child image remains a hard error instead of a silently wrong
+// index. Only the fields ports.Platform cannot carry — Variant (unless the
+// request pinned one), OSVersion, OSFeatures — are adopted from the config,
+// because the config is their only source of truth. Nothing here is
+// architecture- or value-specific: "v8" is never named, it is whatever the
+// resolved base image happened to declare.
+func descriptorPlatform(img v1.Image, plat ports.Platform) (*v1.Platform, error) {
+	cfg, err := img.ConfigFile()
+	if err != nil {
+		return nil, fmt.Errorf("packager: index: platform %q: read child config: %w: %w", plat, err, core.ErrPackageFailed)
+	}
+	// DeepCopy, not the returned pointer: ConfigFile.Platform aliases the
+	// config's own OSFeatures slice, and v1.Platform.Equals sorts that slice in
+	// place, so handing it out would let a comparison mutate the child image's
+	// config.
+	declared := cfg.Platform().DeepCopy()
+	if declared == nil {
+		return nil, fmt.Errorf("packager: index: platform %q: child image config declares no platform: %w", plat, core.ErrPackageFailed)
+	}
+	if declared.OS != plat.OS || declared.Architecture != plat.Arch {
+		return nil, fmt.Errorf("packager: index: platform %q: child image config declares %q: %w", plat, declared.String(), core.ErrUnsupportedPlatform)
+	}
+	if plat.Variant != "" && declared.Variant != plat.Variant {
+		return nil, fmt.Errorf("packager: index: platform %q: child image config declares variant %q: %w", plat, declared.Variant, core.ErrUnsupportedPlatform)
+	}
+	return declared, nil
+}
+
 // Index implements ports.Packager.
 //
 // The descriptor order is the sorted order of Platform.String(), never Go's map
@@ -733,14 +779,13 @@ func (p *Packager) Index(ctx context.Context, req ports.IndexRequest) (v1.ImageI
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("packager: index: %w", err)
 		}
+		descPlat, err := descriptorPlatform(img, plat)
+		if err != nil {
+			return nil, err
+		}
 		adds = append(adds, mutate.IndexAddendum{
-			Add: img,
-			Descriptor: v1.Descriptor{
-				// Set explicitly rather than left to be derived from each
-				// image's config, so that a mislabelled child image is a
-				// visible inconsistency rather than a silently wrong index.
-				Platform: plat.ToV1(),
-			},
+			Add:        img,
+			Descriptor: v1.Descriptor{Platform: descPlat},
 		})
 	}
 
