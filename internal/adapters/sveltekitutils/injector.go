@@ -314,6 +314,13 @@ func replaceViteAdapterImport(source, targetAdapter string) string {
 	return fmt.Sprintf("import adapter from '%s';\n%s", targetAdapter, source)
 }
 
+// HasLiveSvelteKitCall reports whether source contains a live, uncommented
+// sveltekit( plugin call. Exported so the compiler can decide whether a
+// project's Vite config is one Pokkum can meaningfully wrap.
+func HasLiveSvelteKitCall(source string) bool {
+	return findLiveSvelteKitCall(source) >= 0
+}
+
 // findLiveSvelteKitCall finds the byte index of a live, uncommented sveltekit( call in JS/TS source.
 func findLiveSvelteKitCall(source string) int {
 	const call = "sveltekit("
@@ -672,6 +679,7 @@ func PrepareVirtualViteConfig(projectDir, viteConfigName, viteConfigSource strin
 		return nil, fmt.Errorf("transform %s: %w", viteConfigName, err)
 	}
 	transformed = rewriteRelativeImportSpecifiers(transformed)
+	transformed = remoteManifestSortPrelude + transformed
 	transformed = shimDirnameAndImportMetaURL(transformed, filepath.Join(projectDir, viteConfigName))
 
 	pokkumDir := filepath.Join(projectDir, ".pokkum")
@@ -688,6 +696,49 @@ func PrepareVirtualViteConfig(projectDir, viteConfigName, viteConfigSource strin
 		TransformedSource: transformed,
 		VirtualConfigPath: virtualPath,
 		InjectedAdapter:   injectedAdapter,
+	}, nil
+}
+
+// PrepareVirtualViteConfigPassthrough writes a virtual Vite config that is the
+// project's own, unchanged except for the determinism prelude (and the
+// relative-specifier and __dirname fixups every virtual config needs because
+// it lives one directory deeper).
+//
+// It exists because PrepareVirtualViteConfig only runs when the adapter needs
+// injecting. A project that already configures adapter-node correctly — the
+// documented happy path — took the `bun run build` branch instead, never got a
+// Pokkum-authored config, and therefore never got the remote-manifest sort.
+// The reproducibility fix would have reached only projects whose configuration
+// was wrong, which is close to the opposite of the intended audience.
+//
+// The adapter is deliberately NOT touched here: it is already correct, and
+// rewriting the sveltekit() call would risk changing semantics (SvelteKit
+// ignores svelte.config.js the moment the plugin receives any argument) for no
+// benefit.
+func PrepareVirtualViteConfigPassthrough(projectDir, viteConfigName, viteConfigSource string) (*VirtualConfigResult, error) {
+	if viteConfigName == "" {
+		viteConfigName = "vite.config.ts"
+	}
+	if strings.TrimSpace(viteConfigSource) == "" {
+		return nil, fmt.Errorf("no vite config source to pass through")
+	}
+
+	transformed := rewriteRelativeImportSpecifiers(viteConfigSource)
+	transformed = remoteManifestSortPrelude + transformed
+	transformed = shimDirnameAndImportMetaURL(transformed, filepath.Join(projectDir, viteConfigName))
+
+	pokkumDir := filepath.Join(projectDir, ".pokkum")
+	if err := os.MkdirAll(pokkumDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create .pokkum directory: %w", err)
+	}
+	virtualPath := filepath.Join(pokkumDir, viteConfigName)
+	if err := os.WriteFile(virtualPath, []byte(transformed), 0o600); err != nil {
+		return nil, fmt.Errorf("write virtual %s: %w", viteConfigName, err)
+	}
+	return &VirtualConfigResult{
+		TransformedSource: transformed,
+		VirtualConfigPath: virtualPath,
+		InjectedAdapter:   false,
 	}, nil
 }
 
@@ -748,3 +799,72 @@ func injectExperimentalFlags(source string) string {
 
 	return source
 }
+
+// remoteManifestSortPrelude is prepended to the virtual Vite config so the
+// generated server manifest lists remote-function entries in a deterministic
+// order.
+//
+// The problem it solves: SvelteKit builds its `remotes` array by pushing each
+// remote module as Vite resolves it (src/exports/vite/index.js), and
+// generate_manifest maps over that array without sorting it. Two builds of
+// identical committed source therefore emit the same entries in a different
+// ORDER — verified identical once sorted. That changes manifest.js's bytes,
+// which changes the content hash Rollup gives its chunk, which renames the
+// chunk, which changes handler.js and index.js that import it: one differing
+// layer and a different image digest, for a project that changed nothing.
+// Confirmed on @sveltejs/kit 2.68.0 and byte-identical in the 3.0.0 release
+// candidate, so this covers both major versions.
+//
+// Why it patches fs.writeFileSync rather than post-processing the output:
+// the ordering is baked in BEFORE Rollup hashes the chunk. Sorting afterwards
+// would mean recomputing that hash, renaming the file, rewriting every
+// importer, and re-hashing those in turn — reimplementing Rollup's own
+// hash-and-rename pass. Sorting at the write keeps the fix to one place and
+// lets every downstream name fall out deterministically on its own.
+//
+// Why here rather than a Vite plugin: this runs at module scope of the config
+// Pokkum itself generates, so it is in effect before SvelteKit's plugin writes
+// anything and needs no assumption about the user's `plugins: [...]` array
+// shape. bun's --preload was measured and does NOT reach the build (bun
+// spawns vite as a child process), so that route is unavailable.
+//
+// It fails loudly. An unrecognised entry shape throws rather than writing
+// through unchanged, so a future SvelteKit release that changes the manifest
+// format surfaces as a build error naming this file — not as reproducibility
+// silently regressing while every check stays green.
+const remoteManifestSortPrelude = `// Added by Pokkum: deterministic ordering for SvelteKit's remote-function
+// manifest. See sveltekitutils.remoteManifestSortPrelude for why this exists.
+import __pokkumFs from 'node:fs';
+(() => {
+	const original = __pokkumFs.writeFileSync;
+	const entryRe = /^'[^']+':\s*__memo\(/;
+	__pokkumFs.writeFileSync = function (file, data, ...rest) {
+		if (typeof data === 'string' && /manifest(-full)?\.js$/.test(String(file)) && data.includes('remotes: {')) {
+			data = __pokkumSortRemotes(data, String(file));
+		}
+		return original.call(this, file, data, ...rest);
+	};
+	globalThis.__pokkumSortRemotes = function (source, file) {
+		const open = source.indexOf('remotes: {');
+		if (open < 0) return source;
+		const bodyStart = open + 'remotes: {'.length;
+		const close = source.indexOf('}', bodyStart);
+		if (close < 0) return source;
+		const body = source.slice(bodyStart, close);
+		const entries = body.split(',\n').map((e) => e.trim()).filter((e) => e.length > 0);
+		if (entries.length === 0) return source;
+		for (const entry of entries) {
+			if (!entryRe.test(entry)) {
+				throw new Error(
+					'pokkum: cannot sort the remote-function manifest in ' + file + ': unrecognised entry ' +
+					JSON.stringify(entry.slice(0, 80)) + '. SvelteKit\'s manifest format has changed, so Pokkum can no ' +
+					'longer guarantee a deterministic build. Refusing rather than silently producing an ' +
+					'unreproducible image.'
+				);
+			}
+		}
+		const sorted = entries.slice().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+		return source.slice(0, bodyStart) + '\n\t\t\t' + sorted.join(',\n\t\t\t') + '\n\t\t' + source.slice(close);
+	};
+})();
+`

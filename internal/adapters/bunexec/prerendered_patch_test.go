@@ -473,3 +473,50 @@ func TestPatchPrerenderedEnv_BarePackageReExportIsNotFollowed(t *testing.T) {
 		t.Fatal("expected a hard failure for a bare-package re-export")
 	}
 }
+
+// TestHandlerReExportTargets_RolldownSplitForm covers the barrel shape
+// SvelteKit 3 / adapter-node 6 emit.
+//
+// Vite 8 bundles the SSR output with Rolldown rather than Rollup, and Rolldown
+// splits `export { h as handler } from './x.js'` into a separate import and
+// export. handlerReExportPattern requires the `from` clause on the export, so
+// it matched nothing and EVERY SvelteKit 3 build failed at the handler patch
+// with "no recognizable prerendered or client path pattern" — the guard firing
+// correctly on a shape it could not read.
+func TestHandlerReExportTargets_RolldownSplitForm(t *testing.T) {
+	// Real shape, taken from an actual SvelteKit 3 RC + adapter-node 6 build.
+	const src = `import { n as handler } from "./server/chunks/handler-CKPSwPdR.js";
+import "./server/chunks/index.js-Bq1P.js";
+export { handler };
+`
+	got := handlerReExportTargets("/app/build/handler.js", src)
+	want := "/app/build/server/chunks/handler-CKPSwPdR.js"
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("handlerReExportTargets = %v, want exactly [%s]", got, want)
+	}
+}
+
+// TestHandlerReExportTargets_RollupCombinedFormStillWorks pins that adding the
+// split form did not regress the SvelteKit 2 / adapter-node 5 shape.
+func TestHandlerReExportTargets_RollupCombinedFormStillWorks(t *testing.T) {
+	const src = `export { h as handler } from './server/chunks/handler-Cl6LqmpI.js';`
+	got := handlerReExportTargets("/app/build/handler.js", src)
+	want := "/app/build/server/chunks/handler-Cl6LqmpI.js"
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("handlerReExportTargets = %v, want exactly [%s]", got, want)
+	}
+}
+
+// TestHandlerReExportTargets_ImportWithoutReExportIsNotABarrel guards the
+// false positive the split form could introduce: a file that imports a handler
+// to USE it is not re-exporting it, and patching whatever it imported would be
+// wrong. The local-export requirement is what excludes it.
+func TestHandlerReExportTargets_ImportWithoutReExportIsNotABarrel(t *testing.T) {
+	const src = `import { handler } from './server/chunks/handler-XYZ.js';
+const server = createServer(handler);
+export { server };
+`
+	if got := handlerReExportTargets("/app/build/handler.js", src); len(got) != 0 {
+		t.Errorf("handlerReExportTargets = %v, want none: the file imports handler but never re-exports it", got)
+	}
+}

@@ -361,6 +361,32 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		viteWrapperConfigPath = vcVite.VirtualConfigPath
 		log.Info("bunexec: virtual vite config injected", "path", vcVite.VirtualConfigPath)
 		warnIfRemoteFunctionsBreakReproducibility(log, req.ProjectDir, viteSource)
+	} else if !req.NoInject {
+		// The adapter is already correct, so nothing needs injecting — but the
+		// build still needs Pokkum's determinism prelude, which can only reach
+		// SvelteKit through a config Pokkum authors. Without this branch the
+		// remote-manifest sort applied ONLY to projects whose adapter was
+		// misconfigured, i.e. not to the documented happy path.
+		//
+		// Taking over the build invocation is subject to exactly the same
+		// safety condition as the injection path above: the project's build
+		// script must be precisely `vite build`, so that running
+		// `bun x vite build --config <virtual>` cannot silently skip env
+		// setup, codegen or a task runner the real script also does. When it
+		// is not, the build proceeds unchanged via `bun run build` and simply
+		// does not get the sort — correctness first, determinism second.
+		if viteSource, viteName := readViteConfigSource(req.ProjectDir); strings.TrimSpace(viteSource) != "" &&
+			sveltekitutils.HasLiveSvelteKitCall(viteSource) && buildScriptIsPlainViteBuild(req.ProjectDir) {
+			vcVite, err := sveltekitutils.PrepareVirtualViteConfigPassthrough(req.ProjectDir, viteName, viteSource)
+			if err != nil {
+				log.Warn("bunexec: could not prepare the determinism config; building without it (the image will still be correct, but two builds of identical source may differ)", "err", err)
+			} else {
+				runViteWrapper = true
+				viteWrapperConfigPath = vcVite.VirtualConfigPath
+				log.Info("bunexec: determinism config prepared (adapter already correct)", "path", vcVite.VirtualConfigPath)
+			}
+		}
+		warnIfRemoteFunctionsBreakReproducibility(log, req.ProjectDir, "")
 	}
 
 	entrypoint := filepath.Join(req.ProjectDir, "build", "index.js")
@@ -1036,4 +1062,15 @@ func projectConfigMentionsRemoteFunctions(projectDir string) bool {
 		}
 	}
 	return false
+}
+
+// buildScriptIsPlainViteBuild reports whether package.json's build script is
+// exactly `vite build`. See the Option B comment above for why taking over the
+// build invocation requires this.
+func buildScriptIsPlainViteBuild(projectDir string) bool {
+	pkg, err := sveltekitutils.ReadPackageJSON(projectDir)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(pkg.Scripts["build"]) == "vite build"
 }

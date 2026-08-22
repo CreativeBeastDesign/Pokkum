@@ -108,6 +108,32 @@ func applyPrerenderedPatch(src string) (string, bool) {
 // `export { handler } from '...'` re-export matches too.
 var handlerReExportPattern = regexp.MustCompile(`export\s*\{[^}]*\bhandler\b[^}]*\}\s*from\s*['"]([^'"]+)['"]`)
 
+// handlerSplitImportPattern and handlerLocalExportPattern together match the
+// OTHER barrel shape: an import that binds the implementation locally, and a
+// separate export statement re-exporting that local binding.
+//
+//	import { n as handler } from "./server/chunks/handler-CKPSwPdR.js";
+//	export { handler };
+//
+// This is what SvelteKit 3 / adapter-node 6 emit, because Vite 8 bundles the
+// SSR output with Rolldown rather than Rollup and Rolldown splits the combined
+// `export ... from` form into two statements. handlerReExportPattern requires
+// the `from` clause on the export itself, so it found nothing and every
+// SvelteKit 3 build failed at this step with "no recognizable prerendered or
+// client path pattern" — the guard firing correctly on a shape it simply could
+// not read.
+//
+// The two are required together deliberately. An import alone is not evidence
+// of a barrel: a file may import a handler to use it internally. Requiring a
+// local `export { ... handler ... }` with NO `from` clause (the `\}\s*;`
+// anchor excludes `export { handler } from '...'`, which the pattern above
+// already covers) keeps this to files that genuinely re-export what they
+// imported.
+var (
+	handlerSplitImportPattern = regexp.MustCompile(`import\s*\{[^}]*\bhandler\b[^}]*\}\s*from\s*['"]([^'"]+)['"]`)
+	handlerLocalExportPattern = regexp.MustCompile(`export\s*\{[^}]*\bhandler\b[^}]*\}\s*;`)
+)
+
 // handlerReExportTargets resolves every relative module specifier that
 // handlerSrc re-exports `handler` from, against handlerPath's own directory.
 // Bare package specifiers and absolute paths are skipped: only files emitted
@@ -116,7 +142,11 @@ func handlerReExportTargets(handlerPath, handlerSrc string) []string {
 	baseDir := filepath.Dir(handlerPath)
 	var targets []string
 	seen := make(map[string]bool)
-	for _, m := range handlerReExportPattern.FindAllStringSubmatch(handlerSrc, -1) {
+	matches := handlerReExportPattern.FindAllStringSubmatch(handlerSrc, -1)
+	if handlerLocalExportPattern.MatchString(handlerSrc) {
+		matches = append(matches, handlerSplitImportPattern.FindAllStringSubmatch(handlerSrc, -1)...)
+	}
+	for _, m := range matches {
 		spec := m[1]
 		if !strings.HasPrefix(spec, "./") && !strings.HasPrefix(spec, "../") {
 			continue
