@@ -117,10 +117,26 @@ All three lines are required on current Homebrew, which added two gates for thir
 
 ---
 
-### 2. NPM / NPX — _not yet published_
+### 2. NPM / NPX
+
+```bash
+# One-off, no install
+npx @pokkum/cli build .
+
+# Or install it
+npm install -g @pokkum/cli
+```
+
+`@pokkum/cli` is a thin launcher: the real binary ships in one of four platform
+packages (`@pokkum/pokkum_{linux,darwin}_{amd64,arm64}`), listed as
+`optionalDependencies` so npm downloads only the one matching your machine.
+Pin a version in CI (`npx @pokkum/cli@1.0.6`) rather than tracking `latest`.
 
 > [!NOTE]
-> `@pokkum/cli` is **not on npm yet**, so `npx @pokkum/cli` and `npm install -g @pokkum/cli` do not work today. The package name is reserved in the release pipeline and this section will describe the real commands once the first publish succeeds. Until then use Homebrew, the installer script, or a release binary below.
+> The npm packages carry no signature of their own. If you need the supply-chain
+> guarantees, use the installer script or a release archive below — both verify
+> the binary's SHA-256 against the release's `checksums.txt`, which is itself
+> Cosign-signed and covered by the release's SLSA provenance.
 
 ---
 
