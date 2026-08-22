@@ -204,13 +204,19 @@ type SBOMDocument struct {
 	PackageCount int
 }
 
-// SBOMGenerator produces a bill of materials for the SvelteKit project. It is
-// implemented by internal/adapters/sbom, which wraps anchore/syft.
+// SBOMGenerator produces a bill of materials for the image. It is implemented
+// by internal/adapters/sbom, which catalogues packages with this project's own
+// parsers in internal/adapters/scannerutils — npm lockfiles plus the base
+// image's dpkg/apk database — and depends on no external cataloguer.
 //
-// No syft type appears in this signature and none may: syft's cataloguer and
-// SBOM types are a large, fast-moving API surface, and letting them reach core
-// would mean a syft minor release could force a change to the application
-// service. The adapter converts to SBOMDocument at its boundary.
+// This comment previously said the adapter "wraps anchore/syft", and went on to
+// explain at length why no syft type may appear in the signature. Syft is not
+// and has never been a dependency: it appears nowhere in go.mod or go.sum. The
+// reasoning was sound and still applies to any future external cataloguer —
+// keep third-party SBOM types out of this signature so a dependency's minor
+// release cannot force a change on the application service — but the premise
+// was false, and a doc comment naming a dependency the project does not have
+// sends the next reader looking for code that does not exist.
 //
 // Error expectations: core.ErrSBOMFailed for a scan or serialisation failure,
 // core.ErrInvalidSBOMFormat if Format is not Valid or is SBOMFormatNone.

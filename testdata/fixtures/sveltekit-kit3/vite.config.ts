@@ -9,10 +9,10 @@ export default defineConfig({
 			// this is the only place the adapter is configured -- and because it
 			// is already correct here, Pokkum's Prepare takes the
 			// PrepareVirtualViteConfigPassthrough path rather than
-			// PrepareVirtualViteConfig, which is the only one of the two that
-			// calls injectViteVersionPin. Passthrough does not pin kit.version on
-			// its own, so a project like this one must pin it itself for a
-			// reproducible build -- exactly as sveltekit-basic's
+			// PrepareVirtualViteConfig. Both paths pin kit.version.name now
+			// (pinViteConfigVersion); pinning it explicitly here is what a real
+			// project should do, and Pokkum leaves an existing pin alone rather
+			// than duplicating it -- exactly as sveltekit-basic's
 			// svelte.config.js already does for its own (different) adapter.
 			// Left out, two builds of identical source diverge (SvelteKit falls
 			// back to Date.now(), see Lessons.md's 2026-08-21 "vite.config.ts

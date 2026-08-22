@@ -42,6 +42,15 @@ next feature ships, it belongs in `mem:state`, not here.
   default) — any new embedded or compiled artifact meant to be
   content-determined needs its non-determinism sources identified and pinned
   the same way.
+- Non-determinism can also originate in a tool Pokkum invokes rather than in
+  Pokkum's own code — the zero-clock rule alone does not cover this class.
+  SvelteKit itself writes its remote-function manifest in module-resolution
+  order and never sorts it, so two builds of identical committed source could
+  emit different bytes though Pokkum called `time.Now()` nowhere and sorted
+  every traversal it owns (see `mem:state`'s Reproducibility entry). Treat any
+  newly adopted upstream build step's own output ordering as an equally live
+  non-determinism source to audit, not only this codebase's own traversals,
+  tar headers, and map keys.
 
 ## Zero-mutation build sandbox
 - Code injection (adapter config rewriting, telemetry bootstrap) happens only

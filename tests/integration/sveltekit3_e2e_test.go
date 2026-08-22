@@ -34,10 +34,12 @@ import (
 // Passthrough with a real build assertion; every existing vite.config.ts
 // fixture (sveltekit-basic) instead configures its adapter via
 // svelte.config.js and takes the injection path's svelte.config.js branch.
-// See the fixture's README for a currently-uncovered gap this surfaced:
-// Passthrough never pins kit.version.name, unlike the injection path's
-// injectViteVersionPin — this fixture's own vite.config.ts pins it directly
-// to stay reproducible, working around the gap rather than proving it fixed.
+// Writing this fixture is what surfaced the gap that Passthrough applied the
+// remote-manifest sort but never pinned kit.version.name, unlike the injection
+// path. That is FIXED (pinViteConfigVersion, commit 80b4508): both paths now
+// pin, from one shared const so they cannot drift again. The fixture's own
+// vite.config.ts also pins it explicitly, which is what a real project should
+// do and which the pin correctly leaves alone rather than duplicating.
 //
 // This test also exercises kit.experimental.remoteFunctions: true end to
 // end through a real build: the fixture's three .remote.ts files (query,

@@ -274,6 +274,31 @@ jobs:
             ./internal/adapters/bunexec/... \
             ./internal/adapters/sveltekitutils/...
 
+      # The secret guard's false-positive measurement runs over REAL minified
+      # bundles: testdata/fixtures/*/build and .svelte-kit/output. Those are
+      # gitignored build output, so on a clean checkout they do not exist and
+      # the test skips — which is correct in the fast job, and useless as a
+      # guarantee if it is the only place the test ever runs.
+      #
+      # This step runs after the real-build e2e tests above, which is what
+      # produces that output, and sets POKKUM_REQUIRE_MINIFIED_CORPUS so an
+      # absent corpus is a hard failure rather than a skip. Without it the
+      # measurement that justifies the generic secret rule's key widening
+      # never executes in CI at all: a gate built to satisfy
+      # mem:self_review_checklist row 47 that was itself never wired up.
+      - name: Secret-Guard False-Positive Measurement (must not skip)
+        if: ${{ !cancelled() }}
+        env:
+          POKKUM_REQUIRE_MINIFIED_CORPUS: '1'
+        run: |
+          set -euo pipefail
+          go test -v -count=1 -run 'TestGenericRule_(NoFindingsOnRealMinifiedBuildCorpus|RealMinifiedCorpusCanProduceAFinding)' \
+            ./internal/adapters/secretguard/ 2>&1 | tee secretguard-corpus.log
+          if grep -q -- '--- SKIP' secretguard-corpus.log; then
+            echo "::error::the minified-corpus measurement SKIPPED in a job that builds the fixtures — the corpus is supposed to exist here"
+            exit 1
+          fi
+
   # Scoped macOS platform job: the release ships darwin amd64/arm64 binaries
   # (see .goreleaser.yaml / slsa-builder.yml) and internal/adapters/bunexec/
   # hermetic_other_test.go exists specifically to cover the non-Linux code

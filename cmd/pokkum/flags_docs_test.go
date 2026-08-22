@@ -180,6 +180,8 @@ var nonFlagDocTokens = map[string]string{
 	"--compile":           `§3a prose: "bun build --compile" is Bun's own flag, quoted verbatim while explaining pokkum's --strategy=exe.`,
 	"--preload":           `§3a prose: "bun --preload <path>" is Bun's own flag, quoted verbatim while explaining pokkum's --strategy=layered telemetry bootstrap.`,
 	"--config":            `§3's --inject description quotes the literal subprocess command line ("bunx vite build --config .pokkum/vite.config.ts") — --config there is Vite's own flag, not pokkum's.`,
+	"--production":        `§3's --sbom description quotes "bun install --production", Bun's own flag, when explaining which dependency set the SBOM's npm catalogue is scoped to.`,
+	"--type":              `§3's --sbom-attach description quotes "cosign verify-attestation --type spdxjson", cosign's own flag, when explaining how a consumer reads the signed SBOM attestation.`,
 }
 
 // TestFlagsDocumentedInVocabulary is Direction 1: every real, non-hidden CLI

@@ -115,6 +115,21 @@ func collectPokkumEnvLiterals(t *testing.T, repoRoot string) map[string]string {
 	return found
 }
 
+// testOnlyEnvVarsInDocs are POKKUM_-prefixed variables Vocabulary.md names
+// deliberately in order to say they are NOT part of the CLI or runtime
+// surface. They are read only by _test.go files, never by the pokkum binary,
+// .pokkum.yaml, or a produced image — so they correctly fail the
+// production-literal check above, and documenting the boundary is worth more
+// than the silence that omitting them would buy.
+//
+// Narrow and justified, matching flags_docs_test.go's sibling allowlists. An
+// entry here is a claim that the variable is test-only; if one ever starts
+// being read by production code, delete its entry rather than widening this.
+var testOnlyEnvVarsInDocs = map[string]string{
+	"POKKUM_REQUIRE_RUNTIME_SMOKE":   `tests/integration: turns the runtime smoke tests' environmental skips into hard failures where the preconditions are guaranteed. Set by CI, never read by the binary.`,
+	"POKKUM_REQUIRE_MINIFIED_CORPUS": `internal/adapters/secretguard: turns an absent real-minified-bundle corpus into a hard failure in jobs that build the fixtures. Set by CI, never read by the binary.`,
+}
+
 // allowlistedInternalEnvVars are real POKKUM_-prefixed literals that are
 // deliberately NOT documented as user-facing environment variables in
 // Vocabulary.md, each with its own justification. Kept narrow and
@@ -189,6 +204,9 @@ func TestEnvVarsExistInCodeFromVocabulary(t *testing.T) {
 	stale := make([]string, 0)
 	for token := range docTokens {
 		if _, ok := literals[token]; ok {
+			continue
+		}
+		if _, ok := testOnlyEnvVarsInDocs[token]; ok {
 			continue
 		}
 		stale = append(stale, token)

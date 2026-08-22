@@ -9,6 +9,129 @@ don't append prose; each bullet should stay independently editable. Every
 claim below names the file/symbol/commit that proves it — verify against code
 before trusting a claim that predates the commit it cites.
 
+## Reproducibility (vite-config injection, SvelteKit 3) — 2026-08-22
+- **Headline fix**: two builds of identical committed source used to produce
+  different image digests. Root cause was upstream, not Pokkum's own code:
+  SvelteKit builds its `remotes` array in Vite's module-resolution order and
+  `generate_manifest` maps over it without sorting, so manifest.js's bytes
+  (and therefore its Rollup chunk hash, and every file that imports that
+  chunk) differ across otherwise-identical builds. Fixed by
+  `remoteManifestSortPrelude` (`internal/adapters/sveltekitutils/injector.go`):
+  prepended to the virtual Vite config Pokkum generates, it monkey-patches
+  `fs.writeFileSync` to sort the manifest's remote entries the moment
+  SvelteKit writes them — before Rollup ever hashes the chunk, so nothing
+  downstream needs re-hashing or renaming. Fails loudly (throws) on an
+  unrecognised entry shape rather than writing through unchanged, so a future
+  SvelteKit manifest-format change surfaces as a build error naming this file
+  instead of reproducibility silently regressing.
+- **Two entry points, both required**: `PrepareVirtualViteConfig` (adapter
+  needs injecting) and `PrepareVirtualViteConfigPassthrough` (adapter already
+  correct in the project's own `vite.config.ts` — the documented happy path,
+  and the ONLY possible path on SvelteKit 3, which has no `svelte.config.js`
+  at all). The prelude alone would have reached only the injection path,
+  i.e. projects whose configuration was wrong — close to the opposite of the
+  intended audience — so Passthrough exists specifically to also cover the
+  already-correct case. Both paths also pin `kit.version.name` to
+  `SOURCE_DATE_EPOCH` (`injectViteVersionPin` for injection; a bare call is
+  deliberately left unpinned when a `svelte.config.js` exists, since
+  `sveltekit({ version: ... })` would make SvelteKit ignore that file
+  entirely — see the injection path's own doc comment; `pinViteConfigVersion`
+  for passthrough, added `80b4508`) — without it, SvelteKit falls back to
+  `Date.now()` for `_app/version.json` and reproducibility breaks a second,
+  independent way even with the manifest sorted. `pinViteConfigVersion`
+  returns whether it actually could pin; the passthrough caller logs a
+  warning (not a hard failure) on the cases it deliberately declines — a bare
+  `sveltekit()` call shadowed by an existing `svelte.config.js`, or a call
+  shape it can't safely parse — naming the reproducibility gap instead of
+  silently leaving it.
+- **Verified end to end, both majors, two builds each from an identical
+  starting state** (commit `f7e8b7d`): SvelteKit 2.68 (adapter injected) and
+  SvelteKit 3.0.0-next.25 (passthrough) both produced byte-identical image
+  digests across the two runs.
+- **SvelteKit 3 support**: every SK3 build previously failed unconditionally
+  at the handler patch step ("no recognizable prerendered or client path
+  pattern") — Vite 8 bundles the SSR output with Rolldown, which splits
+  `export { h as handler } from './x.js'` into a separate import and export.
+  `internal/adapters/bunexec/prerendered_patch.go` now also recognises the
+  split form, gated on a local re-export so a file that merely imports a
+  handler to use it isn't mistaken for a barrel. Fixture:
+  `testdata/fixtures/sveltekit-kit3` (kit@3.0.0-next.25,
+  adapter-node@6.0.0-next.10, vite@8.2.2); first fixture to exercise the
+  Passthrough path with a real build assertion
+  (`tests/integration/sveltekit3_e2e_test.go`), and it also exercises
+  `kit.experimental.remoteFunctions: true` end to end (three `.remote.ts`
+  files surviving real Vite/Rollup bundling into `app/server/`).
+- **Fixed `ca23684`**: the remote-functions reproducibility warning
+  (`internal/adapters/bunexec/compiler.go`, now `warnIfRemoteOrderingUnfixed`,
+  was `warnIfRemoteFunctionsBreakReproducibility`) used to fire
+  unconditionally whenever remote functions were enabled — including on
+  builds the prelude above already made byte-identical, falsely telling
+  operators their reproducible build was not reproducible. It now fires only
+  when the sort prelude could NOT reach the build (no live `sveltekit()` call
+  in the project's Vite config, or a build script that isn't exactly
+  `vite build`, so Pokkum can't safely take over the invocation) — evaluated
+  from `runViteWrapper` after that decision is final.
+
+## SBOM
+- Catalogues base-image OS packages (`pkg:deb`/`pkg:apk` purls, Debian/dpkg or
+  Alpine/apk via `scannerutils.ExtractImagePackages`) alongside npm packages
+  whenever `ports.SBOMRequest.BaseImages` is supplied — routed through the
+  single `GenerateForImage` path (`internal/adapters/sbom/generator.go`), so
+  omitting the base image's OS surface is no longer the silent default (an
+  SBOM missing `libc6`/`libssl3` used to look identical to a complete one).
+- npm catalogue is production-scoped by default: a package reachable only via
+  devDependencies is excluded via a `bun.lock` reachability walk
+  (`scannerutils.ScopeDevelopment`); a package whose scope couldn't be
+  determined (`ScopeUnknown`) is kept, never guessed at. Both the excluded
+  count and the scope policy are always recorded in document metadata, not
+  only when non-zero.
+- Signed as a DSSE-enveloped in-toto Statement bound to the image digest
+  (`signSBOMStatement`, `internal/core/pipeline.go`), attached as the SECOND
+  layer of the `.att` attachment via
+  `AttachAttestationRequest.AdditionalEnvelopes`. Layer 0 is a contract, not
+  an accident: `FetchAttestation` reads `layers[0]`, and the post-push
+  self-verification stage verifies exactly that envelope — so the SLSA
+  provenance statement always goes there, and the SBOM statement is always
+  appended after it.
+
+## Multi-platform index
+- Each per-platform descriptor's `platform` field is now derived from the
+  child image's own config file (`descriptorPlatform`,
+  `internal/adapters/packager/packager.go`), including `variant` — not just
+  copied from the requested `ports.Platform` — so a config/request mismatch
+  (including a missing or wrong ARM variant) fails the build instead of
+  publishing an index descriptor that misdescribes the child image it points
+  at.
+
+## Output modes
+- `--to-oci-layout <dir>` (new, `ports.OCILayoutWriter`) writes a lossless
+  OCI image layout directory to disk. Unlike `--tarball` (docker-save
+  format), which has no annotations field and flattens a multi-platform index
+  into a single manifest, `--to-oci-layout` keeps both. Mutually exclusive
+  with `--local` and `--tarball`. Like the other two non-registry output
+  modes, `--asset-overlay`'s registry-side lineage-discovery annotation is
+  unreachable from it.
+
+## SLSA provenance & source verification
+- `slsa.WorkingTreeDirty` (`internal/adapters/slsa/gitdiscovery.go`) returns
+  `(bool, error)`, not a bare `bool`, and now reports dirty when git can't be
+  consulted at all (missing binary, not a repo, command failure) — previously
+  such cases fell through to `false` ("clean"), a fail-open on exactly the
+  signal this function exists to catch.
+- `pokkum verify --expect-source repo@commit`: the commit half must be at
+  least 7 characters (`minAbbreviatedCommitLen`,
+  `internal/adapters/provenance/resolver.go`) — shorter prefixes are too
+  ambiguous to assert against real commit hashes — and a clean commit match
+  is rejected when the build's own provenance recorded a DIRTY working tree
+  (a `"<sha>-dirty"` value is prefix-matched by the clean `"<sha>"`, which
+  used to silently accept an image built from uncommitted changes).
+- Pokkum's Simple Signing verifier now accepts both payload `type` strings
+  real upstream cosign has used (`ports.CosignSimpleSigningType` — Red Hat's,
+  and Pokkum's own static-key signer's default — and
+  `ports.CosignContainerImageSignatureType`), so a signature produced under
+  either convention verifies instead of one type failing closed against a
+  correctly-signed artifact.
+
 ## Signing (`--sign`, default true)
 - Real end-to-end since 2026-08-18: SLSA v1.0 statement, DSSE-signed, Cosign-signs
   the digest, dual-published to the index AND every per-platform manifest
@@ -56,6 +179,10 @@ before trusting a claim that predates the commit it cites.
 - Escrow-mirror pulls (`--mirror-registry`) are digest-pinned against
   `pokkum.lock`'s `entry.Digest` (fixed `a149b28`) — a mirror tag retargeted to
   different content now fails closed (`core.ErrBaseSignatureInvalid`).
+- `--dry-run` no longer writes `pokkum.lock` into the user's project
+  (`ports.BaseImageRequest.LockfileReadOnly`, threaded from
+  `BuildOptions.DryRun` in `internal/core/pipeline.go`): the resolver still
+  READS the lockfile to pin against, but every write path is skipped when set.
 - Sigstore trust root: the embedded snapshot
   (`internal/adapters/sigstore/trusted-root-public-good.json`) was regenerated
   from a TUF-signature-verified fetch (fixed `9188d56`) — it had been actively
@@ -137,6 +264,14 @@ before trusting a claim that predates the commit it cites.
   guard covers both binaries).
 - Startup attestation (`POKKUM_ATTESTATION_DIGEST`, `attestutils`) only exists
   for `--strategy=layered`; `--strategy=exe` and `--strategy=static` don't attest.
+- `ports.AttestationRoots` (the fixed directory set the layered startup
+  attestation covers, mirrored independently in pokkum-init) now includes
+  `AppNodeModulesDirPrefix` (`/app/node_modules`, fixed `b439e6b`) — its
+  absence had been hashed by the packager at build time but never walked by
+  pokkum-init at runtime, so every layered image shipping node_modules
+  bricked at startup (digest mismatch, exit 125). Enforced by an AST-parsing
+  test (`TestAttestationRoots_MatchSupervisorMirror`) that compares the two
+  literals directly, not just a comment promising they match.
 
 ## Caching
 - A composite remote-cache hit (`remotecacheutils`) skips
@@ -221,7 +356,7 @@ before trusting a claim that predates the commit it cites.
   (`scripts/gen-docs/render.go`'s `findingsFromPath`), not just a citation.
 
 ## Test surface
-- Full `go test ./...` is green as of 2026-08-19 (`e4175ed`): 47 packages,
+- Full `go test ./...` is green as of 2026-08-22 (49 packages, 0 failures), and CI is green on a real runner for the first time — all three jobs, with the runtime-smoke step booting produced images and hitting its pass floor rather than skipping. Re-verify before citing: this line has been stale by weeks before (`e4175ed`): 47 packages,
   `tests/integration` 36.6s, `cmd/pokkum` 35.0s.
 - **Every package that invokes `authn.DefaultKeychain` must isolate
   `DOCKER_CONFIG` in a `TestMain`**, or it hangs for the full 10-minute timeout
@@ -239,6 +374,19 @@ before trusting a claim that predates the commit it cites.
   `tests/integration/runtime_smoke_test.go` (real Docker boot: layered, static,
   and node variants) are outside `make verify`'s scope — run explicitly for any
   change touching layer compression, tar construction, or OCI assembly.
+- CI's Runtime Smoke Tests step (`.github/workflows/ci.yml`) sets
+  `POKKUM_REQUIRE_RUNTIME_SMOKE=1` AND greps its own output for any
+  `--- SKIP` line and a minimum `--- PASS: TestRuntimeSmoke` count — a
+  silently-skipped smoke test (the exact hole that let commit `b439e6b`'s
+  startup-attestation brick ship while `go test ./...` reported all green)
+  now fails the CI step instead of passing quietly.
+- `POKKUM_REQUIRE_MINIFIED_CORPUS` is the same shape of gate for
+  `TestGenericRule_NoFindingsOnRealMinifiedBuildCorpus`
+  (`internal/adapters/secretguard/minified_corpus_test.go`) but, verified
+  2026-08-22, is **not actually set anywhere in `.github/workflows/*.yml`** —
+  the mechanism exists and works when set locally, but nothing in CI sets it
+  or builds the gitignored build-output corpus it requires first. Do not
+  describe this gate as CI-enforced; it is currently local-only.
 - Real-build tests copy their fixture into `t.TempDir()` before building and
   symlink `node_modules` (`20ba1ec`), so they no longer mutate checked-in
   `testdata/fixtures/*` in place. Order-independence proven at
