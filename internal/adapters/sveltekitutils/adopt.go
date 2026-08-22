@@ -1,8 +1,6 @@
 package sveltekitutils
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,94 +67,15 @@ type AdoptResult struct {
 // run without this — it previously had no gate at all and would happily
 // "adopt" an arbitrary Node project, injecting @jesterkit/exe-sveltekit and
 // a pokkum:build script into something that was never SvelteKit.
-func hasSvelteKitDependency(rawPkg map[string]any) bool {
+func hasSvelteKitDependency(rawPkg *orderedJSONObject) bool {
 	for _, depKey := range []string{"dependencies", "devDependencies"} {
-		if deps, ok := rawPkg[depKey].(map[string]any); ok {
-			if _, ok := deps["@sveltejs/kit"]; ok {
+		if deps, ok := rawPkg.getObject(depKey); ok {
+			if deps.has("@sveltejs/kit") {
 				return true
 			}
 		}
 	}
 	return false
-}
-
-// marshalPreservingTopLevelKeyOrder re-serializes updated (the mutated
-// package.json object) using original's own top-level key order, falling
-// back to appending genuinely new top-level keys at the end. Plain
-// json.MarshalIndent on a map[string]any alphabetizes every key — for a
-// codemod meant to build trust in its first minutes of use, a diff that
-// silently reorders "name"/"version"/"scripts" alongside the one real
-// change is noise that makes the real change harder to review.
-//
-// Nested objects (dependencies, devDependencies, scripts) are not
-// order-preserved by this — Go's map[string]any has already lost their
-// original order by the time this function sees them — only the top level,
-// which is what actually dominates a package.json diff's visual noise.
-func marshalPreservingTopLevelKeyOrder(original []byte, updated map[string]any) ([]byte, error) {
-	dec := json.NewDecoder(bytes.NewReader(original))
-	if _, err := dec.Token(); err != nil { // consume opening '{'
-		return json.MarshalIndent(updated, "", "  ")
-	}
-
-	var order []string
-	seen := make(map[string]bool)
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return json.MarshalIndent(updated, "", "  ")
-		}
-		key, ok := tok.(string)
-		if !ok {
-			return json.MarshalIndent(updated, "", "  ")
-		}
-		order = append(order, key)
-		seen[key] = true
-		var discard json.RawMessage
-		if err := dec.Decode(&discard); err != nil {
-			return json.MarshalIndent(updated, "", "  ")
-		}
-	}
-	for k := range updated {
-		if !seen[k] {
-			order = append(order, k)
-		}
-	}
-
-	type entry struct {
-		key     string
-		valJSON []byte
-	}
-	entries := make([]entry, 0, len(order))
-	for _, key := range order {
-		val, ok := updated[key]
-		if !ok {
-			continue // key was removed by the codemod
-		}
-		valJSON, err := json.MarshalIndent(val, "  ", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("marshal %q: %w", key, err)
-		}
-		entries = append(entries, entry{key: key, valJSON: valJSON})
-	}
-
-	var buf bytes.Buffer
-	buf.WriteString("{\n")
-	for i, e := range entries {
-		keyJSON, err := json.Marshal(e.key)
-		if err != nil {
-			return nil, fmt.Errorf("marshal key %q: %w", e.key, err)
-		}
-		buf.WriteString("  ")
-		buf.Write(keyJSON)
-		buf.WriteString(": ")
-		buf.Write(e.valJSON)
-		if i < len(entries)-1 {
-			buf.WriteByte(',')
-		}
-		buf.WriteByte('\n')
-	}
-	buf.WriteString("}")
-	return buf.Bytes(), nil
 }
 
 // Adopt migrates an existing SvelteKit project (Node/Vercel/Cloudflare/Dockerfile)
@@ -183,8 +102,8 @@ func Adopt(opts AdoptOptions) (*AdoptResult, error) {
 		return nil, fmt.Errorf("adopt: failed to read package.json in %s: %w", opts.Dir, err)
 	}
 
-	var rawPkg map[string]any
-	if err := json.Unmarshal(pkgData, &rawPkg); err != nil {
+	rawPkg, err := decodeOrderedJSONObject(pkgData)
+	if err != nil {
 		return nil, fmt.Errorf("adopt: failed to parse package.json: %w", err)
 	}
 
@@ -197,10 +116,10 @@ func Adopt(opts AdoptOptions) (*AdoptResult, error) {
 	var removedAdapters []string
 
 	for _, depKey := range []string{"devDependencies", "dependencies"} {
-		if depsMap, ok := rawPkg[depKey].(map[string]any); ok {
+		if depsObj, ok := rawPkg.getObject(depKey); ok {
 			for _, adapter := range LegacyAdapters {
-				if _, exists := depsMap[adapter]; exists {
-					delete(depsMap, adapter)
+				if depsObj.has(adapter) {
+					depsObj.delete(adapter)
 					removedAdapters = append(removedAdapters, adapter)
 					pkgModified = true
 				}
@@ -209,24 +128,16 @@ func Adopt(opts AdoptOptions) (*AdoptResult, error) {
 	}
 
 	// Ensure devDependencies exists and contains @jesterkit/exe-sveltekit
-	devDeps, ok := rawPkg["devDependencies"].(map[string]any)
-	if !ok {
-		devDeps = make(map[string]any)
-		rawPkg["devDependencies"] = devDeps
-	}
-	if _, exists := devDeps["@jesterkit/exe-sveltekit"]; !exists {
-		devDeps["@jesterkit/exe-sveltekit"] = "^0.2.0"
+	devDeps := rawPkg.ensureObject("devDependencies")
+	if !devDeps.has("@jesterkit/exe-sveltekit") {
+		devDeps.setString("@jesterkit/exe-sveltekit", "^0.2.0")
 		pkgModified = true
 	}
 
 	// Ensure scripts has pokkum:build
-	scripts, ok := rawPkg["scripts"].(map[string]any)
-	if !ok {
-		scripts = make(map[string]any)
-		rawPkg["scripts"] = scripts
-	}
-	if _, exists := scripts["pokkum:build"]; !exists {
-		scripts["pokkum:build"] = "pokkum build"
+	scripts := rawPkg.ensureObject("scripts")
+	if !scripts.has("pokkum:build") {
+		scripts.setString("pokkum:build", "pokkum build")
 		pkgModified = true
 	}
 
@@ -238,7 +149,7 @@ func Adopt(opts AdoptOptions) (*AdoptResult, error) {
 		result.ChangesSummary = append(result.ChangesSummary, "Configured @jesterkit/exe-sveltekit in devDependencies and added 'pokkum:build' script")
 
 		if !opts.DryRun {
-			formatted, err := marshalPreservingTopLevelKeyOrder(pkgData, rawPkg)
+			formatted, err := rawPkg.marshalIndent()
 			if err != nil {
 				return nil, fmt.Errorf("adopt: failed to format package.json: %w", err)
 			}

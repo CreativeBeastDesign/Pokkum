@@ -230,6 +230,77 @@ func TestAdoptPreservesPackageJSONTopLevelKeyOrder(t *testing.T) {
 	}
 }
 
+// TestAdoptPreservesScriptsKeyOrder guards against the exact failure mode
+// reported by a real (non-dry-run) `pokkum adopt .` run against a real
+// SvelteKit app: `git diff package.json` showed the entire "scripts" object
+// re-serialised in alphabetical order (dev, build, preview, prepare,
+// check... became build, check, check:watch, dev, pokkum:build, prepare...)
+// instead of just the new "pokkum:build" key being appended. The cause was
+// Adopt unmarshalling into map[string]any and re-marshalling -- Go maps
+// have no iteration order, so json.Marshal alphabetizes every key at every
+// depth, not just the top level TestAdoptPreservesPackageJSONTopLevelKeyOrder
+// already guards.
+//
+// This asserts actual key ORDER (via each key's byte offset), not merely
+// that every key is still present -- a test that only checked presence
+// could not fail against the reported bug, since alphabetizing never drops
+// a key.
+func TestAdoptPreservesScriptsKeyOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	packageJSON := `{
+  "name": "my-app",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "prepare": "svelte-kit sync",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-check --tsconfig ./tsconfig.json --watch"
+  },
+  "devDependencies": {
+    "@sveltejs/kit": "^2.31.0"
+  }
+}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(packageJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Adopt(AdoptOptions{Dir: tmpDir}); err != nil {
+		t.Fatalf("Adopt failed: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(tmpDir, "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotStr := string(got)
+
+	// The five pre-existing scripts must keep their original relative
+	// order. The new "pokkum:build" key added by Adopt is intentionally
+	// excluded from this ordering check -- it's a genuinely new key, and
+	// Adopt appends new keys at the end rather than claiming a position
+	// among keys that existed before it ran.
+	order := []string{"dev", "build", "preview", "prepare", "check", "check:watch"}
+	prevIdx := -1
+	prevKey := ""
+	for _, key := range order {
+		idx := strings.Index(gotStr, `"`+key+`"`)
+		if idx < 0 {
+			t.Fatalf("expected script key %q present in output:\n%s", key, gotStr)
+		}
+		if idx < prevIdx {
+			t.Errorf("expected original scripts key order preserved (%q before %q got reordered), got:\n%s", prevKey, key, gotStr)
+		}
+		prevIdx = idx
+		prevKey = key
+	}
+
+	if !strings.Contains(gotStr, `"pokkum:build"`) {
+		t.Errorf("expected new pokkum:build script present, got:\n%s", gotStr)
+	}
+}
+
 func TestAdoptNoPackageJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	_, err := Adopt(AdoptOptions{

@@ -169,21 +169,141 @@ var (
 	requireRegex           = regexp.MustCompile(`const\s+([a-zA-Z0-9_$]+)\s*=\s*require\(['"]@sveltejs/adapter-[a-z-]+['"]\);?`)
 	viteAdapterImportRegex = regexp.MustCompile(`import\s+([a-zA-Z0-9_$]+)\s+from\s+['"](@sveltejs/adapter-[a-z-]+|@jesterkit/exe-sveltekit)['"];?`)
 	viteRequireRegex       = regexp.MustCompile(`const\s+([a-zA-Z0-9_$]+)\s*=\s*require\(['"](@sveltejs/adapter-[a-z-]+|@jesterkit/exe-sveltekit)['"]\);?`)
+
+	// identUsedAsAdapterRegex finds the identifier invoked as the adapter
+	// factory in a svelte.config.js kit block, e.g. "adapter: adapterBun()"
+	// captures "adapterBun". This is the real signal for which import
+	// statement configures the project's *current* adapter: the "adapter"
+	// property key is fixed by SvelteKit's config shape, but the value
+	// bound to it can be any local identifier, imported under any local
+	// name, from any package -- not just @sveltejs/adapter-*.
+	identUsedAsAdapterRegex = regexp.MustCompile(`\badapter\s*:\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(`)
 )
 
+// replaceAdapterImport replaces the import that currently supplies the
+// project's SvelteKit adapter with an import of targetAdapter, or prepends a
+// new import if none exists.
+//
+// It first traces which *identifier* the config actually invokes as the
+// adapter factory (via identUsedAsAdapterRegex) and looks for the specific
+// import/require statement that binds that identifier, regardless of which
+// package it comes from or what local name it uses. This is what makes a
+// third-party adapter package (e.g. "svelte-adapter-bun", which does not
+// match "@sveltejs/adapter-*") get replaced instead of silently ignored --
+// ignoring it left the old import in place and prepended a second,
+// colliding "import adapter from ...", which is a duplicate-binding
+// SyntaxError at parse time, not just visual noise.
+//
+// The narrower @sveltejs/adapter-* patterns are kept as a fallback for a
+// config that doesn't wire kit.adapter to the imported binding yet (so
+// there is no "adapter: X(" to trace), and prepending remains the last
+// resort for a config with no existing adapter import at all.
 func replaceAdapterImport(source, targetAdapter string) string {
+	newImport := fmt.Sprintf("import adapter from '%s';", targetAdapter)
+
+	if m := identUsedAsAdapterRegex.FindStringSubmatch(source); m != nil {
+		local := m[1]
+		if replaced, ok := replaceImportBinding(source, local, targetAdapter); ok {
+			return replaced
+		}
+		if identAlreadyBound(source, local) {
+			// local is imported some way this function deliberately doesn't
+			// try to isolate and rewrite (e.g. one name among several in a
+			// multi-specifier named import, "{ adapter, other } from
+			// 'pkg'"). Leave the source untouched rather than prepend a
+			// second declaration of the same name -- that would trade one
+			// duplicate-binding bug for another. checkEffectiveAdapter's
+			// fail-fast validation catches the unconfigured result
+			// downstream instead of this function guessing.
+			return source
+		}
+	}
+
 	if adapterImportRegex.MatchString(source) {
-		return adapterImportRegex.ReplaceAllString(source, fmt.Sprintf("import adapter from '%s';", targetAdapter))
+		return adapterImportRegex.ReplaceAllString(source, newImport)
 	}
 	if requireRegex.MatchString(source) {
-		return requireRegex.ReplaceAllString(source, fmt.Sprintf("const adapter = require('%s');", targetAdapter))
+		return requireRegex.ReplaceAllString(source, newImport)
 	}
 
 	// If no standard adapter import was found, prepend the import at top of file
-	return fmt.Sprintf("import adapter from '%s';\n%s", targetAdapter, source)
+	return fmt.Sprintf("%s\n%s", newImport, source)
+}
+
+// replaceImportBinding finds the single import/require statement in source
+// that binds identifier local, and replaces just that statement with an
+// import (or require, for the require-form match) of targetAdapter bound to
+// "adapter" -- the local name every other transform in this file assumes
+// the config's adapter factory is called through. It recognizes every shape
+// a real adapter import realistically takes:
+//
+//   - a default import:              import local from 'pkg';
+//   - a default re-exported by name: import { default as local } from 'pkg';
+//   - a CommonJS require:            const local = require('pkg');
+//   - a solo named import:           import { local } from 'pkg';
+//   - a solo aliased named import:   import { X as local } from 'pkg';
+//
+// A named import sharing braces with other, unrelated specifiers
+// (import { local, other } from 'pkg') is deliberately left unmatched --
+// splicing one specifier out of a multi-name import without disturbing the
+// others needs real parsing, and the risk of mangling an unrelated import
+// outweighs handling that rare shape here.
+func replaceImportBinding(source, local, targetAdapter string) (string, bool) {
+	ident := regexp.QuoteMeta(local)
+	newImport := fmt.Sprintf("import adapter from '%s';", targetAdapter)
+	newRequire := fmt.Sprintf("const adapter = require('%s');", targetAdapter)
+
+	patterns := []struct {
+		re          *regexp.Regexp
+		replacement string
+	}{
+		{regexp.MustCompile(`import\s+` + ident + `\s+from\s+['"][^'"]+['"];?`), newImport},
+		{regexp.MustCompile(`import\s*\{\s*default\s+as\s+` + ident + `\s*\}\s+from\s+['"][^'"]+['"];?`), newImport},
+		{regexp.MustCompile(`const\s+` + ident + `\s*=\s*require\(['"][^'"]+['"]\)\s*;?`), newRequire},
+		{regexp.MustCompile(`import\s*\{\s*` + ident + `\s*\}\s+from\s+['"][^'"]+['"];?`), newImport},
+		{regexp.MustCompile(`import\s*\{\s*[A-Za-z_$][A-Za-z0-9_$]*\s+as\s+` + ident + `\s*\}\s+from\s+['"][^'"]+['"];?`), newImport},
+	}
+	for _, p := range patterns {
+		if p.re.MatchString(source) {
+			return p.re.ReplaceAllString(source, p.replacement), true
+		}
+	}
+	return source, false
+}
+
+// identAlreadyBound is a broad, best-effort check for whether local is
+// bound by *any* import or require statement in source, including shapes
+// (like a multi-specifier named import) that replaceImportBinding
+// deliberately does not rewrite. It exists only to decide whether
+// prepending a fresh "import adapter from ...;" is safe: if local is
+// already bound some way this file can't isolate, prepending a second
+// declaration of the same name would reintroduce the exact
+// duplicate-binding bug replaceAdapterImport exists to fix.
+func identAlreadyBound(source, local string) bool {
+	ident := regexp.QuoteMeta(local)
+	broad := regexp.MustCompile(`\bimport\b[^;]*\b` + ident + `\b[^;]*;|\bconst\s+` + ident + `\s*=\s*require\(`)
+	return broad.MatchString(source)
 }
 
 func replaceViteAdapterImport(source, targetAdapter string) string {
+	// Trace the identifier actually invoked as `adapter: X()` first, exactly as
+	// replaceAdapterImport does for svelte.config.js.
+	//
+	// Matching only the package NAME (@sveltejs/adapter-*, @jesterkit/...) is
+	// the bug that made `adopt --write-config` emit two `adapter` bindings for
+	// a project using a third-party adapter such as svelte-adapter-bun:
+	// unmatched, so a second import was prepended beside the existing one, and
+	// the config then died with "Identifier 'adapter' has already been
+	// declared". That was fixed for the svelte.config.js path; this Vite path
+	// carried the identical package-pattern-only matching and the identical
+	// failure, on the ALWAYS-ON virtual injection path rather than only under
+	// an opt-in flag. The signal is the binding the config actually uses, not
+	// the package it happens to come from.
+	if m := identUsedAsAdapterRegex.FindStringSubmatch(source); m != nil {
+		if replaced, ok := replaceImportBinding(source, m[1], targetAdapter); ok {
+			return replaced
+		}
+	}
 	if viteAdapterImportRegex.MatchString(source) {
 		return viteAdapterImportRegex.ReplaceAllString(source, fmt.Sprintf("import adapter from '%s';", targetAdapter))
 	}

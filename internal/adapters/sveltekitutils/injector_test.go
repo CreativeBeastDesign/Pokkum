@@ -2,7 +2,9 @@ package sveltekitutils
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -477,4 +479,185 @@ export default defineConfig({
 			t.Errorf("expected exactly 1 adapter: adapter() invocation, got %d:\n%s", count, out)
 		}
 	})
+}
+
+var adapterDefaultImportRegex = regexp.MustCompile(`import\s+adapter\s+from\s+['"][^'"]+['"]`)
+
+// assertValidJSSingleAdapterBinding proves source both (a) parses as valid
+// JavaScript via a real `node --check` -- not a heuristic string match --
+// and (b) declares the "adapter" binding exactly once. Written to an .mjs
+// file so Node parses the leading `import` statements as ES module syntax.
+func assertValidJSSingleAdapterBinding(t *testing.T, source string) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "svelte.config.mjs")
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatalf("write temp module: %v", err)
+	}
+
+	cmd := exec.Command("node", "--check", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("transformed config is not valid JS (node --check failed): %v\noutput: %s\nsource:\n%s", err, out, source)
+	}
+
+	if n := len(adapterDefaultImportRegex.FindAllString(source, -1)); n != 1 {
+		t.Errorf("expected exactly 1 \"adapter\" default-import binding, got %d:\n%s", n, source)
+	}
+}
+
+// TestTransformConfig_ReplacesThirdPartyAdapterImport_NoDuplicateBinding is
+// the regression test for a real bug found by an independent tester running
+// a real (non-dry-run) `pokkum adopt . --write-config` against a real
+// SvelteKit app configured with a third-party adapter package
+// (svelte-adapter-bun -- a real, widely used adapter, not a @sveltejs/*
+// package). The old replaceAdapterImport only recognized
+// "@sveltejs/adapter-[a-z-]+" import specifiers, so this import wasn't
+// matched and a second "import adapter from ...;" was PREPENDED instead of
+// replacing the existing one, producing:
+//
+//	import adapter from '@jesterkit/exe-sveltekit';
+//	import adapter from "svelte-adapter-bun";
+//
+// which is a SyntaxError at parse time ("Identifier 'adapter' has already
+// been declared"), not just visual noise -- pokkum build then failed under
+// every strategy. Asserting "contains the new import" would pass against
+// this exact buggy output (it's present, just duplicated); this test proves
+// the output is actually valid, parseable JS with exactly one binding
+// instead.
+func TestTransformConfig_ReplacesThirdPartyAdapterImport_NoDuplicateBinding(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not found on PATH; skipping real JS-syntax validation")
+	}
+
+	input := `import adapter from "svelte-adapter-bun";
+export default { kit: { adapter: adapter() } };
+`
+	transformed, err := TransformConfig(input, DefaultInjectorOptions())
+	if err != nil {
+		t.Fatalf("TransformConfig failed: %v", err)
+	}
+
+	assertValidJSSingleAdapterBinding(t, transformed)
+
+	if !strings.Contains(transformed, "@jesterkit/exe-sveltekit") {
+		t.Errorf("expected new adapter import present, got:\n%s", transformed)
+	}
+	if strings.Contains(transformed, "svelte-adapter-bun") {
+		t.Errorf("expected old third-party adapter import replaced rather than left alongside the new one, got:\n%s", transformed)
+	}
+}
+
+// TestTransformConfig_AdapterImportEdgeCases exercises the shapes flagged as
+// worth thinking through for the fix above: an adapter imported under a
+// different local name, an aliased "{ default as X }" import, a solo named
+// import, a config with no existing adapter import at all, and an unrelated
+// default import that merely happens to share part of its name with
+// "adapter". Every case must both produce valid JS and leave anything
+// genuinely unrelated untouched.
+func TestTransformConfig_AdapterImportEdgeCases(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not found on PATH; skipping real JS-syntax validation")
+	}
+	opts := DefaultInjectorOptions()
+
+	t.Run("third_party_adapter_under_a_different_local_name", func(t *testing.T) {
+		input := `import bunAdapter from "svelte-adapter-bun";
+export default { kit: { adapter: bunAdapter() } };
+`
+		out, err := TransformConfig(input, opts)
+		if err != nil {
+			t.Fatalf("TransformConfig failed: %v", err)
+		}
+		assertValidJSSingleAdapterBinding(t, out)
+		if strings.Contains(out, "svelte-adapter-bun") {
+			t.Errorf("expected old import (under its own local name) replaced, got:\n%s", out)
+		}
+	})
+
+	t.Run("aliased_default_import", func(t *testing.T) {
+		input := `import { default as adapter } from "svelte-adapter-bun";
+export default { kit: { adapter: adapter() } };
+`
+		out, err := TransformConfig(input, opts)
+		if err != nil {
+			t.Fatalf("TransformConfig failed: %v", err)
+		}
+		assertValidJSSingleAdapterBinding(t, out)
+		if strings.Contains(out, "svelte-adapter-bun") {
+			t.Errorf("expected old aliased import replaced, got:\n%s", out)
+		}
+	})
+
+	t.Run("solo_named_import", func(t *testing.T) {
+		input := `import { adapter } from "svelte-adapter-bun";
+export default { kit: { adapter: adapter() } };
+`
+		out, err := TransformConfig(input, opts)
+		if err != nil {
+			t.Fatalf("TransformConfig failed: %v", err)
+		}
+		assertValidJSSingleAdapterBinding(t, out)
+		if strings.Contains(out, "svelte-adapter-bun") {
+			t.Errorf("expected old named import replaced, got:\n%s", out)
+		}
+	})
+
+	t.Run("no_existing_adapter_import_prepends_cleanly", func(t *testing.T) {
+		input := `export default { kit: { adapter: adapter() } };
+`
+		out, err := TransformConfig(input, opts)
+		if err != nil {
+			t.Fatalf("TransformConfig failed: %v", err)
+		}
+		assertValidJSSingleAdapterBinding(t, out)
+	})
+
+	t.Run("unrelated_default_import_sharing_a_name_prefix_is_left_alone", func(t *testing.T) {
+		input := `import adapterHelpers from "./adapter-helpers.js";
+import adapter from "svelte-adapter-bun";
+export default { kit: { adapter: adapter() }, helpers: adapterHelpers };
+`
+		out, err := TransformConfig(input, opts)
+		if err != nil {
+			t.Fatalf("TransformConfig failed: %v", err)
+		}
+		assertValidJSSingleAdapterBinding(t, out)
+		if !strings.Contains(out, `import adapterHelpers from "./adapter-helpers.js";`) {
+			t.Errorf("expected unrelated adapterHelpers import left untouched, got:\n%s", out)
+		}
+	})
+}
+
+// TestTransformViteConfig_ThirdPartyAdapterImportNotDuplicated is the Vite
+// counterpart of the svelte.config.js duplicate-binding regression.
+//
+// It matters more than its sibling: --write-config is opt-in, but the virtual
+// vite.config injection runs on EVERY build of a project whose vite.config
+// calls sveltekit() itself. A project importing a third-party adapter under
+// the name `adapter` would get a second `import adapter from ...` prepended
+// and fail to parse.
+func TestTransformViteConfig_ThirdPartyAdapterImportNotDuplicated(t *testing.T) {
+	input := `import { sveltekit } from '@sveltejs/kit/vite';
+import adapter from 'svelte-adapter-bun';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+	plugins: [sveltekit({ adapter: adapter() })]
+});
+`
+	out, err := TransformViteConfig(input, InjectorOptions{TargetAdapter: "@sveltejs/adapter-node"})
+	if err != nil {
+		t.Fatalf("TransformViteConfig: %v", err)
+	}
+
+	if n := strings.Count(out, "import adapter from"); n != 1 {
+		t.Errorf("expected exactly one `adapter` import binding, got %d — a duplicate declaration "+
+			"is a SyntaxError that fails the build:\n%s", n, out)
+	}
+	if strings.Contains(out, "svelte-adapter-bun") {
+		t.Errorf("the third-party adapter import was not replaced:\n%s", out)
+	}
+	if !strings.Contains(out, "@sveltejs/adapter-node") {
+		t.Errorf("the target adapter was not injected:\n%s", out)
+	}
 }
