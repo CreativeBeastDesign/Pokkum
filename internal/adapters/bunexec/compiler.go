@@ -360,7 +360,6 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		runViteWrapper = true
 		viteWrapperConfigPath = vcVite.VirtualConfigPath
 		log.Info("bunexec: virtual vite config injected", "path", vcVite.VirtualConfigPath)
-		warnIfRemoteFunctionsBreakReproducibility(log, req.ProjectDir, viteSource)
 	} else if !req.NoInject {
 		// The adapter is already correct, so nothing needs injecting — but the
 		// build still needs Pokkum's determinism prelude, which can only reach
@@ -398,7 +397,6 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 				}
 			}
 		}
-		warnIfRemoteFunctionsBreakReproducibility(log, req.ProjectDir, "")
 	}
 
 	entrypoint := filepath.Join(req.ProjectDir, "build", "index.js")
@@ -455,6 +453,10 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		baseEnv = append(baseEnv, "BUN_OFFLINE=1", "NODE_ENV=production", "NO_UPDATE_NOTIFIER=1")
 		log.Info("bunexec: hermetic environment active", "offline", true)
 	}
+
+	// runViteWrapper is now final: it is exactly the condition under which the
+	// deterministic-ordering prelude reaches this build.
+	warnIfRemoteOrderingUnfixed(log, req.ProjectDir, readViteConfigSourceText(req.ProjectDir), runViteWrapper)
 
 	var cmd *exec.Cmd
 	if runViteWrapper {
@@ -1023,35 +1025,35 @@ func runCapture(ctx context.Context, log *slog.Logger, bunPath, dir string, extr
 	return strings.TrimSpace(string(out)), nil
 }
 
-// warnIfRemoteFunctionsBreakReproducibility warns when a project enables
-// SvelteKit's experimental remote functions, because such a build is not
-// bit-for-bit reproducible and nothing else says so.
+// warnIfRemoteOrderingUnfixed warns when a project uses SvelteKit's
+// experimental remote functions AND this build could not apply the
+// deterministic-ordering prelude, because only then is the ordering actually a
+// problem.
 //
-// SvelteKit emits the remote-function manifest by mapping over an array built
-// from a Map populated during chunk traversal
-// (@sveltejs/kit/src/core/generate_manifest/index.js's `remotes.map(...)`, fed
-// from postbuild/analyse.js's `metadata.remotes.set(...)`), and never sorts it.
-// Two builds of identical committed source therefore emit the same remote
-// entries in a different ORDER, which changes two server chunk hashes and
-// cascades into handler.js and index.js — one differing layer, and a different
-// image digest.
+// SvelteKit populates its remote-manifest array in Vite's module-resolution
+// order and never sorts it, so two builds of identical source emit the same
+// entries in a different order — which changes a chunk hash and cascades into
+// the image digest. Pokkum fixes that by sorting at the point SvelteKit writes
+// the manifest, from a prelude in the Vite config it generates. Where that
+// prelude is in effect, the build IS reproducible and there is nothing to warn
+// about.
 //
-// Verified by a two-build byte diff on a real project: the entries are
-// identical once sorted, so the difference is purely ordering. This is
-// upstream and cannot be fixed here without rewriting SvelteKit's emitted
-// output, so the honest thing is to say so rather than let README.md's
-// "bit-for-bit reproducible builds out of the box" quietly not hold. Pokkum's
-// own verifier is already correct about it: `pokkum verify --against` reports
-// ERR_COMPARISON_MISMATCH for these builds.
-func warnIfRemoteFunctionsBreakReproducibility(log *slog.Logger, projectDir, viteSource string) {
+// The earlier version of this warning fired unconditionally, having been
+// written before the prelude existed. It survived the fix and then told
+// projects with byte-identical builds that their builds were not reproducible
+// — a tool misreporting its own guarantee, which is worse than silence in
+// something whose entire value is that its claims can be trusted.
+func warnIfRemoteOrderingUnfixed(log *slog.Logger, projectDir, viteSource string, sortApplied bool) {
+	if sortApplied {
+		return
+	}
 	if !mentionsRemoteFunctions(viteSource) && !projectConfigMentionsRemoteFunctions(projectDir) {
 		return
 	}
-	log.Warn("this project enables SvelteKit's experimental remote functions, so its builds are NOT bit-for-bit reproducible: "+
-		"SvelteKit emits the remote-function manifest in map-iteration order and never sorts it, so two builds of identical "+
-		"source produce the same entries in a different order and therefore different image digests. Everything else about "+
-		"the build is still pinned; this is an upstream ordering issue, not a Pokkum one, and `pokkum verify` correctly "+
-		"reports the mismatch rather than hiding it",
+	log.Warn("this project enables SvelteKit's experimental remote functions, and Pokkum could not apply its deterministic-ordering fix to this build, "+
+		"so two builds of identical source may produce different image digests: SvelteKit emits the remote-function manifest in module-resolution order "+
+		"and never sorts it. The fix is applied through a Vite config Pokkum generates, which requires a vite.config with a live sveltekit() call and a "+
+		"package.json build script of exactly `vite build`",
 		"projectDir", projectDir)
 }
 
@@ -1085,4 +1087,12 @@ func buildScriptIsPlainViteBuild(projectDir string) bool {
 		return false
 	}
 	return strings.TrimSpace(pkg.Scripts["build"]) == "vite build"
+}
+
+// readViteConfigSourceText returns the project's Vite config source, or "" if
+// it has none. A thin wrapper so the warning above can read it without caring
+// which filename matched.
+func readViteConfigSourceText(projectDir string) string {
+	src, _ := readViteConfigSource(projectDir)
+	return src
 }
