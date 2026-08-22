@@ -33,12 +33,18 @@ export default {
 };
 `
 
+// @sveltejs/kit sits in devDependencies, where a real `sv create` scaffold
+// puts it — confirmed against testdata/fixtures/sveltekit-adapter-node and a
+// real application. The distinction is load-bearing, not cosmetic:
+// adapter-node externalises exactly `Object.keys(pkg.dependencies)` and bundles
+// everything else, so a package listed here in `dependencies` must physically
+// exist in the image's node_modules or the server 500s on first use. These
+// fixtures run against a fake bun that installs nothing, so declaring kit as a
+// production dependency described a project that could not work.
 const validPackageJSON = `{
 	"name": "sveltekit-basic",
-	"dependencies": {
-		"@sveltejs/kit": "^2.5.0"
-	},
 	"devDependencies": {
+		"@sveltejs/kit": "^2.5.0",
 		"@jesterkit/exe-sveltekit": "^0.4.0"
 	}
 }`
@@ -49,10 +55,8 @@ const validPackageJSON = `{
 // real script a genuine `sv create` scaffold's package.json has.
 const viteBuildPackageJSON = `{
 	"name": "sveltekit-basic",
-	"dependencies": {
-		"@sveltejs/kit": "^2.5.0"
-	},
 	"devDependencies": {
+		"@sveltejs/kit": "^2.5.0",
 		"@jesterkit/exe-sveltekit": "^0.4.0"
 	},
 	"scripts": {

@@ -103,6 +103,14 @@ Compiles a pure static SvelteKit site onto chainguard/static with an embedded po
   - [internal/adapters/bunexec/compiler.go](../internal/adapters/bunexec/compiler.go)
   - [testdata/fixtures/sveltekit-static](../testdata/fixtures/sveltekit-static)
 
+### [Detect dependencies that will be missing at runtime](items/unresolved-import-guard.md)
+
+A build-time check that every externalised dependency resolves inside the image, read from the manifest adapter-node itself externalises from rather than from the bundle.
+
+- Implementation:
+  - [internal/adapters/bunexec/unresolved_imports.go](../internal/adapters/bunexec/unresolved_imports.go)
+  - [internal/adapters/bunexec/compiler.go](../internal/adapters/bunexec/compiler.go)
+
 ## Developer Experience
 
 ### [pokkum adopt](items/adopt-codemod.md)
@@ -465,6 +473,9 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - Its own Cache-Control contract (immutable /_app/immutable, no-cache version.json/prerendered HTML) is genuinely tested here (server_test.go, integration_test.go) — see [Cache-Control contract, tested](items/cache-control-contract.md) for why the layered/exe strategies don't have the equivalent. ([--strategy=static](items/strategy-static.md))
 - The `--tarball` and `--local` outputs remain annotation-free by design; the fix is a lossless alternative mode plus an honest warning on the lossy ones, not a change to the docker-save format, which has no annotations field to write into. ([Tarball output silently drops every OCI annotation](items/tarball-output-drops-annotations.md))
 - `pokkum verify`'s rebuild-and-compare path for an `--asset-overlay` image can now engage against an OCI layout, since `pokkum.dev/asset-overlay-sources` survives there — but an image whose only output was `--tarball` still cannot be verified that way. ([Tarball output silently drops every OCI annotation](items/tarball-output-drops-annotations.md))
+- A production dependency that is declared but never imported still has to be installed to pass. That is a manifest that overstates its needs rather than a false positive, and the fix — move it to devDependencies — is in the error message. ([Detect dependencies that will be missing at runtime](items/unresolved-import-guard.md))
+- Scoped to the layered strategy, which is the only one with a runtime dependency tree. `exe` compiles a self-contained binary and `static` ships no JS runtime. ([Detect dependencies that will be missing at runtime](items/unresolved-import-guard.md))
+- adapter-node 6 externalises `@opentelemetry/api` unconditionally, beyond `dependencies`. A project using it without declaring it would not be caught. ([Detect dependencies that will be missing at runtime](items/unresolved-import-guard.md))
 - Build-time detection of a dependency that will be missing at runtime is **not** solved — see [Detect dependencies that will be missing at runtime](items/unresolved-import-guard.md). A static-analysis attempt was reverted for failing correctly-configured builds. ([Ship production dependencies so images are self-contained](items/vendor-production-dependencies.md))
 - `--runtime=node` images benefit automatically (they previously had no dependency store at all), but that combination has not been re-tested end to end against a real application since the fix. ([Ship production dependencies so images are self-contained](items/vendor-production-dependencies.md))
 - Pinning the version name is necessary but not sufficient: prerendered HTML containing non-deterministic component IDs (`Math.random()` rather than Svelte's `$props.id()`) still differs between builds. That is a property of the user's source, not of Pokkum. ([Pin kit.version.name so correctly-configured projects build reproducibly](items/version-name-pin.md))

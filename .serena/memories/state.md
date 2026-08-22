@@ -502,3 +502,24 @@ before trusting a claim that predates the commit it cites.
   taking the build over (that would skip the rest of the script).
 - See `Lessons.md` 2026-08-22 for both post-mortems, including the `else if`
   that bound to a different `if` than its indentation showed and never ran.
+
+## Unresolved-import guard — shipped 2026-08-22
+
+- `verifyProductionDependenciesResolvable` in
+  `internal/adapters/bunexec/unresolved_imports.go`, called from `Prepare`
+  right after `stageProductionDependencies`. Layered strategy only.
+- **The externals set is `Object.keys(package.json.dependencies)` — verbatim.**
+  adapter-node's rollup `external` is exactly that regex list (5.5.7
+  `index.js:76-79`; 6.0.0-next.10 adds `@opentelemetry/api`), and it bundles
+  every devDependency. Do NOT scan the built bundle for bare specifiers: that
+  is the approach that was written, reverted, and would be reverted again.
+  Its real failure was JSDoc comments (`/** @import { X } from 'types' */`),
+  not "type imports are indistinguishable".
+- Vite does not expose its externals list — `shouldExternalize`'s caches are
+  unexported, and the SvelteKit-forced Vite manifest holds only internal chunk
+  keys. Checked against vite 8.2.1. Don't re-investigate this.
+- Resolution test is `<modules>/<name>/package.json` exists as a file — a bare
+  directory is not resolvable, because Node resolves through the manifest.
+- **Fixture rule this established**: `@sveltejs/kit` belongs in
+  `devDependencies` in every test fixture. A fixture declaring it under
+  `dependencies` describes a project that cannot work.

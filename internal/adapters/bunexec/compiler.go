@@ -494,6 +494,21 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, vendErr)
 		}
 		nodeModulesDir = staged
+
+		// The staging step above can succeed and still under-deliver: `bun
+		// install --production` exits 0 having installed nothing when the
+		// lockfile disagrees with the manifest, and the resulting image starts
+		// cleanly with both probes passing. Checking the manifest against what
+		// was actually staged is the only thing between that and a 500 in
+		// production.
+		missing, checkErr := verifyProductionDependenciesResolvable(req.ProjectDir, nodeModulesDir)
+		if checkErr != nil {
+			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, checkErr)
+		}
+		if len(missing) > 0 {
+			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %s: %w",
+				req.ProjectDir, formatMissingDependencies(missing, nodeModulesDir), core.ErrInvalidRequest)
+		}
 	}
 
 	// path (bun run build reads the real svelte.config.js; the Option B

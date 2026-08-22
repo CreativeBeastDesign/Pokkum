@@ -8,14 +8,14 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
+| Status | shipped |
 | Kind | hardening |
 | Tier | polish |
 | Area | Build & Packaging |
 
 ## Summary
 
-A build-time check that every externalised bare import resolves inside the image — attempted with static analysis, which proved unsound; needs the bundler's own externals list.
+A build-time check that every externalised dependency resolves inside the image, read from the manifest adapter-node itself externalises from rather than from the bundle.
 
 ## Problem
 
@@ -58,6 +58,55 @@ Until then the third option is genuinely load-bearing rather than a placeholder:
 `--no-install` in the entrypoint, a gap fails at container start with "Cannot find
 package", which is loud, immediate and honest — the property that was missing when Bun
 silently downloaded the difference from npm.
+
+## Decision
+
+Shipped 2026-08-22, taking the first option but arriving at it from the other end.
+
+Vite does not expose its externals list: `shouldExternalize` caches verdicts in a
+closure-local map and a module-local WeakMap, neither exported (vite 8.2.1), and the
+manifest SvelteKit forces (`manifest: true`) contains only internal chunk keys. Neither
+adapter-node version installed here writes a metafile.
+
+It turns out not to be needed. adapter-node's rollup `external` option is literally
+
+    ...Object.keys(pkg.dependencies || {}).map(d => new RegExp(`^${d}(\/.*)?$`))
+
+(5.5.7 `index.js:76-79`; 6.0.0-next.10 adds `@opentelemetry/api`). Everything else,
+every devDependency included, is bundled into the output. So the set of specifiers that
+must resolve at runtime *is* `package.json`'s `dependencies` — read from the same file
+the bundler read it from. The guard checks each one resolves as a package directory
+(with its own `package.json`, since that is what Node resolves through) in the staged
+tree, and fails the build naming the missing packages.
+
+Both failure modes that got the previous attempt reverted are unreachable by
+construction rather than worked around: a bundled-away package is by definition absent
+from `dependencies`, and a specifier appearing only inside a JSDoc comment
+(`/** @import { X } from 'types' */` — which is what the reverted regex was actually
+tripping on) never enters a manifest.
+
+Verified on a real layered build of `testdata/fixtures/sveltekit-adapter-node`: `clsx`
+is declared in `dependencies`, adapter-node left it external (`from 'clsx'` in the built
+output), it was staged, and it shipped to `app/node_modules/clsx` — the guard passed
+without a false positive. The failure direction is covered by a Prepare-level test whose
+fake `bun install` exits 0 having staged nothing, which is exactly how the real command
+behaves when the lockfile disagrees with the manifest.
+
+Fixture correction found on the way: the in-test `validPackageJSON` declared
+`@sveltejs/kit` under `dependencies`, where no real scaffold puts it. That described a
+project that could not work — kit would have been externalised and then absent — so the
+guard was right and the fixture was wrong.
+
+## Implementation
+
+- [internal/adapters/bunexec/unresolved_imports.go](../../internal/adapters/bunexec/unresolved_imports.go)
+- [internal/adapters/bunexec/compiler.go](../../internal/adapters/bunexec/compiler.go)
+
+## Known Limitations
+
+- Scoped to the layered strategy, which is the only one with a runtime dependency tree. `exe` compiles a self-contained binary and `static` ships no JS runtime.
+- adapter-node 6 externalises `@opentelemetry/api` unconditionally, beyond `dependencies`. A project using it without declaring it would not be caught.
+- A production dependency that is declared but never imported still has to be installed to pass. That is a manifest that overstates its needs rather than a false positive, and the fix — move it to devDependencies — is in the error message.
 
 ## Related
 
