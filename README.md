@@ -12,6 +12,8 @@
 
 Think of it as `ko` for SvelteKit: zero Dockerfile, zero Docker daemon required, and bit-for-bit reproducible builds out of the box.
 
+**One caveat on reproducibility, in the same spirit as the signing note above.** SvelteKit's `kit.version.name` defaults to `Date.now()`. It lands in `_app/version.json` and feeds every hashed client chunk name, so two builds of identical source produce different files and different layers. Pokkum pins it for you wherever it authors your Vite config — which is most projects. Where it cannot, because your build script does more than `vite build` and taking it over would skip the rest, the build warns that the image is **not** bit-for-bit reproducible and names the one line that fixes it, rather than shipping a non-reproducible image quietly.
+
 ---
 
 ## Example Usages
@@ -78,6 +80,8 @@ POKKUM_DOCKER_REPO=ghcr.io/example/my-app pokkum resolve -f deployment.yaml \
 - **Security Scanning & Guardrails**: Integrated `pokkum scan` vulnerability auditing with native, zero-dependency OS package enumeration (Debian, Ubuntu, Alpine, Wolfi, Chainguard) and OSV.dev batch queries, build-time secret leak prevention, and base image CVE reactivity.
 - **Base Image Signature Verification & Escrow Mirroring**: Real keyless Sigstore verification (Fulcio certificate chain + Rekor transparency log) runs automatically against live `distroless`/`chainguard` base image signatures. Base image escrow mirroring (`pokkum base update --mirror-registry`) copies base images and Cosign `.sig` tags to project-controlled registries with automated lockfile fallback.
 - **Optional OpenTelemetry Bootstrap**: `--telemetry` compiles a real OTel NodeSDK + OTLP trace exporter directly into the image, started at container boot. Automatic HTTP/framework instrumentation isn't possible under Bun's runtime today (a Bun limitation, not Pokkum's) — real, route-templated spans need one documented line added to your own `hooks.server.ts`; see [Vocabulary.md](Vocabulary.md) §3a. OTLP metrics export is not currently functional (a Bun bundler bug); `--metrics-only` warns rather than silently doing nothing.
+- **Route Exclusion** (`--exclude-route`, `build.exclude_routes`): keep dev-only routes — a component gallery, a style guide, an internal dashboard — out of the shipped image. A `+page.svelte` is a bundle entry point, and reachability is the definition of an entry point, so no amount of tree-shaking removes one; Pokkum instead points `kit.files.routes` at a filtered mirror of your routes directory, so the route's code, imports and SBOM entries are never in the image at all. Where it cannot author your Vite config it falls back to removing the route's prerendered output and says so, rather than implying the code is gone.
+- **Missing-Dependency Build Guard**: a production dependency that will not resolve inside the image fails the build instead of surfacing as a 500 on the first request that reaches it — the container would otherwise start cleanly and pass both probes.
 - **Day-2 Lifecycle Management**: Annotation-based manifest rollbacks (`pokkum rollback`, no `--to` needed for the last change) and signed CLI self-upgrades (`pokkum upgrade`).
 
 ---
