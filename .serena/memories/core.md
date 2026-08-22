@@ -22,7 +22,8 @@ next feature ships, it belongs in `mem:state`, not here.
 - Purity enforced by `internal/architecture_test.go`, run via
   `go test ./internal/...` or `make check-arch`.
 - A utility package consumed from `internal/core` still goes through a
-  `ports` interface (e.g. `ports.EnvBakeDetector` wrapping `envbake`) — the
+  `ports` interface (e.g. `ports.EnvBakeDetector` wrapping `envbake`,
+  `ports.RouteFilter` wrapping `routefilter`/`routefilterutils`) — the
   hexagonal boundary applies to utility packages too, not only concrete
   adapters.
 

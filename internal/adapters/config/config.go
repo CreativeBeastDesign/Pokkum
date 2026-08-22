@@ -176,6 +176,9 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 	if len(profile.Platforms) > 0 {
 		merged.Platforms = append([]string{}, profile.Platforms...)
 	}
+	if len(profile.Build.ExcludeRoutes) > 0 {
+		merged.Build.ExcludeRoutes = append([]string{}, profile.Build.ExcludeRoutes...)
+	}
 	if profile.Docker.Repo != "" {
 		merged.Docker.Repo = profile.Docker.Repo
 	}
@@ -377,6 +380,9 @@ func deepCopyProjectConfig(src *ports.ProjectConfig) *ports.ProjectConfig {
 	}
 	if len(src.Docker.Tags) > 0 {
 		dst.Docker.Tags = append([]string{}, src.Docker.Tags...)
+	}
+	if len(src.Build.ExcludeRoutes) > 0 {
+		dst.Build.ExcludeRoutes = append([]string{}, src.Build.ExcludeRoutes...)
 	}
 
 	// Clone maps

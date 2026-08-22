@@ -43,6 +43,21 @@ type ImageConfig struct {
 	BodySizeLimit  string `yaml:"body_size_limit,omitempty" json:"body_size_limit,omitempty"`
 }
 
+// BuildConfig holds settings that shape what the build produces, as opposed to
+// how the resulting image is configured at runtime.
+type BuildConfig struct {
+	// ExcludeRoutes drops prerendered routes from the packaged output. Each
+	// entry is an absolute route path; a bare path covers the route and its
+	// subtree ("/storybook" excludes /storybook/button), "*" matches within a
+	// segment and "**" across segments.
+	//
+	// This filters prerendered *files*. A server-rendered route on the layered
+	// strategy is compiled into the server bundle and cannot be removed by
+	// dropping a file, so a pattern naming one is reported as unmatched rather
+	// than silently treated as excluded.
+	ExcludeRoutes []string `yaml:"exclude_routes,omitempty" json:"exclude_routes,omitempty"`
+}
+
 // SecurityConfig holds security scanning and validation policies.
 type SecurityConfig struct {
 	FailOnCVE            string               `yaml:"fail_on_cve,omitempty" json:"fail_on_cve,omitempty"`
@@ -102,6 +117,7 @@ type BuildProfile struct {
 	Sourcemap    *bool          `yaml:"sourcemap,omitempty" json:"sourcemap,omitempty"`
 	Docker       DockerConfig   `yaml:"docker,omitempty" json:"docker,omitempty"`
 	Image        ImageConfig    `yaml:"image,omitempty" json:"image,omitempty"`
+	Build        BuildConfig    `yaml:"build,omitempty" json:"build,omitempty"`
 	Security     SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
 	SBOM         SBOMConfig     `yaml:"sbom,omitempty" json:"sbom,omitempty"`
 	Cache        CacheConfig    `yaml:"cache,omitempty" json:"cache,omitempty"`
@@ -121,6 +137,7 @@ type ProjectConfig struct {
 	Base         string                  `yaml:"base,omitempty" json:"base,omitempty"`
 	Platforms    []string                `yaml:"platforms,omitempty" json:"platforms,omitempty"`
 	Image        ImageConfig             `yaml:"image,omitempty" json:"image,omitempty"`
+	Build        BuildConfig             `yaml:"build,omitempty" json:"build,omitempty"`
 	Security     SecurityConfig          `yaml:"security,omitempty" json:"security,omitempty"`
 	SBOM         SBOMConfig              `yaml:"sbom,omitempty" json:"sbom,omitempty"`
 	Cache        CacheConfig             `yaml:"cache,omitempty" json:"cache,omitempty"`

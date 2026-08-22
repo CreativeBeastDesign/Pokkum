@@ -32,6 +32,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/provenance"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registry"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/remotecacheutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/routefilter"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sbom"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scanner"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/secretguard"
@@ -127,6 +128,7 @@ type buildFlags struct {
 	baseKeylessIssuer      string
 	sigstoreTrustedRoot    string
 	allowSecretPatterns    []string
+	excludeRoutes          []string
 	showSecretValues       bool
 	hermetic               bool
 	hermeticMountIsolation bool
@@ -296,6 +298,8 @@ The project directory defaults to the current working directory.`,
 		"Path to a Sigstore trusted-root JSON file overriding the embedded public-good default")
 	cmd.Flags().StringSliceVar(&flags.allowSecretPatterns, "allow-secret-pattern", nil,
 		"Regex pattern to ignore during build-time secret scanning, repeatable")
+	cmd.Flags().StringSliceVar(&flags.excludeRoutes, "exclude-route", nil,
+		"Drop a prerendered route from the image, repeatable (e.g. --exclude-route=/storybook). A bare path covers its subtree; '*' matches within a segment and '**' across segments. Merged with build.exclude_routes in .pokkum.yaml. Filters prerendered files only: a server-rendered route is compiled into the server bundle and is reported as unmatched rather than silently kept")
 	cmd.Flags().BoolVar(&flags.showSecretValues, "show-secret-values", false,
 		"Reveal the matched text of secret-guard findings instead of redacting it. For local triage of a false positive in minified output; never set this in CI, where it would copy real credentials into build logs")
 
@@ -501,6 +505,7 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		Scanner:         scanner.NewAdapter(logger),
 		SecretGuard:     secretguard.NewAdapter(),
 		EnvBakeDetector: envbake.NewAdapter(),
+		RouteFilter:     routefilter.NewAdapter(),
 		RemoteCache: remotecacheutils.New(
 			remotecacheutils.WithLogger(logger),
 			remotecacheutils.WithCosignSigner(cosign.NewSigner(logger)),
@@ -1028,6 +1033,11 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	req.ShowSecretValues = flags.showSecretValues
 	if projCfg != nil && len(projCfg.Security.AllowSecretPatterns) > 0 {
 		req.AllowSecretPatterns = append(req.AllowSecretPatterns, projCfg.Security.AllowSecretPatterns...)
+	}
+
+	req.ExcludeRoutes = flags.excludeRoutes
+	if projCfg != nil && len(projCfg.Build.ExcludeRoutes) > 0 {
+		req.ExcludeRoutes = append(req.ExcludeRoutes, projCfg.Build.ExcludeRoutes...)
 	}
 
 	req.Hermetic = flags.hermetic

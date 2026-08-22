@@ -471,3 +471,34 @@ before trusting a claim that predates the commit it cites.
   principle `umount()` it. Closing this needs `capset(2)` to drop the
   capability before the final exec — tracked as a Roadmap follow-up, not
   attempted. See `mem:open_decisions` row 8.
+
+## Route exclusion (`--exclude-route`, `build.exclude_routes`) — shipped 2026-08-22
+
+- `ports.RouteFilter` / `internal/adapters/routefilter` over
+  `internal/adapters/routefilterutils`. Wired in `cmd/pokkum/build.go`'s Deps
+  literal; nil disables the feature.
+- Runs in `core.Build` AFTER Prepare's errgroup `Wait()` and BEFORE the packager
+  reads the tree. Do not move it inside the errgroup — it is fallible, and a
+  fallible call between a dispatch and its `Wait()` is this repo's recurring
+  goroutine-leak shape (`mem:self_review_checklist` row 1).
+- Deletes via `os.Root` scoped to the prerendered dir, and the `WalkDir`
+  callback only COLLECTS matches — nothing is removed inside it. gosec G122
+  rejects the naive shape.
+- **Scope, stated honestly**: this filters prerendered OUTPUT FILES. The route's
+  JS chunks, imports and SBOM entries still ship, and a layered server-rendered
+  route cannot be removed by deleting a file — such a pattern is reported as
+  unmatched. The build-time filter (`kit.files.routes` mirror) that would remove
+  the code is roadmap item `route-exclusion-filter`, still open.
+- Dead links and unmatched patterns WARN, never fail: removing the route is the
+  point of the flag, and failing would make it unusable for its own use case.
+
+## kit.version.name pin — fixed 2026-08-22
+
+- The pin used to live inside the adapter-injection path, so ONLY misconfigured
+  projects built reproducibly. It is now a standalone guard in
+  `bunexec.Prepare`, keyed on `!runViteWrapper`.
+- Where `package.json`'s build script is exactly `vite build`, a Vite config is
+  staged solely to pin the version. Where it does more, Pokkum warns instead of
+  taking the build over (that would skip the rest of the script).
+- See `Lessons.md` 2026-08-22 for both post-mortems, including the `else if`
+  that bound to a different `if` than its indentation showed and never ran.

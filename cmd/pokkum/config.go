@@ -12,6 +12,7 @@ import (
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/routefilterutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
@@ -177,6 +178,7 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 		imageProbePort:      cfg.Image.ProbePort,
 		shutdownTimeout:     cfg.Image.ShutdownTimeout,
 		allowSecretPatterns: cfg.Security.AllowSecretPatterns,
+		excludeRoutes:       cfg.Build.ExcludeRoutes,
 	})...)
 
 	// Every named profile, using the exact same field validation logic as the
@@ -208,6 +210,7 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 			imageProbePort:      profile.Image.ProbePort,
 			shutdownTimeout:     profile.Image.ShutdownTimeout,
 			allowSecretPatterns: profile.Security.AllowSecretPatterns,
+			excludeRoutes:       profile.Build.ExcludeRoutes,
 			output:              profile.Output,
 		})...)
 	}
@@ -271,6 +274,7 @@ type configFieldsToValidate struct {
 	imageProbePort      int
 	shutdownTimeout     string
 	allowSecretPatterns []string
+	excludeRoutes       []string
 
 	// output is BuildProfile-only (ProjectConfig has no equivalent field —
 	// see the comment at the base-config call site in runConfigValidate),
@@ -304,6 +308,7 @@ func validateGeneratedConfig(cfg *ports.ProjectConfig) []string {
 		imageProbePort:      cfg.Image.ProbePort,
 		shutdownTimeout:     cfg.Image.ShutdownTimeout,
 		allowSecretPatterns: cfg.Security.AllowSecretPatterns,
+		excludeRoutes:       cfg.Build.ExcludeRoutes,
 	})
 	// Profiles are walked in sorted order so the message is stable across runs
 	// rather than reflecting map iteration order.
@@ -331,6 +336,7 @@ func validateGeneratedConfig(cfg *ports.ProjectConfig) []string {
 			imageProbePort:      profile.Image.ProbePort,
 			shutdownTimeout:     profile.Image.ShutdownTimeout,
 			allowSecretPatterns: profile.Security.AllowSecretPatterns,
+			excludeRoutes:       profile.Build.ExcludeRoutes,
 			output:              profile.Output,
 		})...)
 	}
@@ -445,6 +451,13 @@ func validateConfigFields(f configFieldsToValidate) []string {
 		if _, err := regexp.Compile(pat); err != nil {
 			errs = append(errs, fmt.Sprintf("%sinvalid security.allow_secret_patterns[%d] %q: %v", prefix, i, pat, err))
 		}
+	}
+
+	// A route-exclusion typo is invisible at build time except as an
+	// "unmatched pattern" warning after the whole build has run, so the
+	// structural check belongs here where it costs nothing.
+	if err := routefilterutils.ValidatePatterns(f.excludeRoutes); err != nil {
+		errs = append(errs, fmt.Sprintf("%sinvalid build.exclude_routes: %v", prefix, err))
 	}
 
 	if f.output != "" {

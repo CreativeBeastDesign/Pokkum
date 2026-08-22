@@ -100,7 +100,7 @@ _None._
 
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
-| [Exclude routes from the production build](items/route-exclusion-filter.md) | Dev-only routes are bundle entry points, so tree-shaking cannot remove them; a build-time filter would keep them out of the image entirely. | feature | open |
+| [Exclude routes from the production build](items/route-exclusion-filter.md) | Dev-only routes are bundle entry points, so tree-shaking cannot remove them; a build-time filter would keep their code out of the image entirely — which output filtering cannot do. | feature | open |
 | [Detect dependencies that will be missing at runtime](items/unresolved-import-guard.md) | A build-time check that every externalised bare import resolves inside the image — attempted with static analysis, which proved unsound; needs the bundler's own externals list. | hardening | open |
 
 ### Testing & Infrastructure

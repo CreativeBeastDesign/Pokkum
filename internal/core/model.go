@@ -790,6 +790,13 @@ type BunRuntimeOptions struct {
 // other field has a documented meaning at its zero value, so a caller only sets
 // what it wants to change.
 type BuildRequest struct {
+	// ExcludeRoutes drops prerendered routes from the packaged output, from
+	// --exclude-route and .pokkum.yaml's build.exclude_routes. Patterns that
+	// match no prerendered route are reported, not silently ignored: the
+	// operator asked for a route to be absent from the image, and a typo
+	// leaves it present.
+	ExcludeRoutes []string
+
 	// ProjectDir is the SvelteKit project root, the directory holding
 	// package.json. Required. Normalize makes it absolute.
 	ProjectDir string

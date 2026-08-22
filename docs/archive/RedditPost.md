@@ -27,7 +27,7 @@ And loads of middle ground in between. Did I mention the 116-ish flags? Yeah, th
 - **Kubernetes shenanigans** \- I loathe Kubernetes, but am forced to work with it. So, pokkum should alleviate my burden as much as possible, by having `pokkum resolve`, `apply`, `rollback`: Declarative URI resolution, resolve & deploy in a single step, injects `securityContext`, and generates `NetworkPolicy` and `PodDisruptionBudget`.
 - **Hermetic builds** (if you're into that) - no network egress during build, should you need air-gapped environments.
 - **Node.js Runtime Target** \- Not only Bun is supported, but also Node.js (via `--runtime=node`). So, might be even easier to try Pokkum. Yay for adoption!
-- **Static images** \- SPA but don't want 90MB runtime? Pokkum's got you covered! `--strategy=static` adds a tiny Go file server, so no Node, no Bun, and nothing to CVE-scan in the runtime layer.
+- **Static images** \- SPA but don't want 90MB runtime? Pokkum's got you covered! `--strategy=static` adds a tiny Go file server, so no Node, no Bun, and nothing to CVE-scan in the runtime layer. As a test, my component library was built as a 12.1MB image. Currently only `chainguard-static`, but `distroless-static` is on the roadmap.
 
 # Why vibe-coded
 

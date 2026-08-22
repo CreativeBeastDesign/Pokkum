@@ -101,6 +101,11 @@ type Deps struct {
 	// packaging. Optional — nil means no detection/warning/annotation.
 	EnvBakeDetector ports.EnvBakeDetector
 
+	// RouteFilter drops prerendered routes the operator excluded, after
+	// Prepare has written the output tree and before the packager reads it.
+	// Nil disables the feature.
+	RouteFilter ports.RouteFilter
+
 	// RemoteCache queries and reconciles remote OCI input caches. Optional.
 	RemoteCache ports.RemoteCacher
 
@@ -1078,6 +1083,17 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		})
 		if err != nil {
 			return BuildResult{}, fmt.Errorf("core: resolve bun runtime for sbom/provenance: %w", err)
+		}
+	}
+
+	// Route exclusions run here: after Prepare's errgroup has been waited on
+	// (so nothing fallible sits between a dispatch and its Wait) and before
+	// the packager reads the tree. Deleting from .svelte-kit/output touches
+	// generated build output only — never user-authored source — which is the
+	// same tree Prepare already flattens.
+	if len(req.ExcludeRoutes) > 0 && deps.RouteFilter != nil {
+		if err := applyRouteExclusions(ctx, deps, req, prep); err != nil {
+			return BuildResult{}, err
 		}
 	}
 
@@ -2528,4 +2544,47 @@ func baseImagesFor(base *ports.BaseImage) map[ports.Platform]v1.Image {
 		return nil
 	}
 	return base.Images
+}
+
+// applyRouteExclusions drops prerendered routes the operator asked to keep out
+// of the image, and reports what that leaves dangling.
+//
+// Dead links warn rather than fail. An excluded route that something still
+// links to is a real defect, but it is the operator's own trade-off to make —
+// excluding an internal dashboard from a production image is worth a stale
+// link in a footer, and failing the build would make the feature unusable for
+// the case it exists to serve.
+func applyRouteExclusions(ctx context.Context, deps Deps, req BuildRequest, prep ports.PrepareResult) error {
+	log := deps.Logger
+	res, err := deps.RouteFilter.FilterRoutes(ctx, ports.RouteFilterRequest{
+		PrerenderedDir: filepath.Join(prep.OutputDir, "prerendered"),
+		Patterns:       req.ExcludeRoutes,
+	})
+	if err != nil {
+		return fmt.Errorf("core: excluding routes: %w", err)
+	}
+
+	for _, r := range res.ExcludedRoutes {
+		log.Info("route excluded from image", "route", r)
+	}
+	for _, f := range res.SkippedSymlinks {
+		log.Warn("route exclusion skipped a symlink rather than deleting through it; it is still in the image", "path", f)
+	}
+	for _, p := range res.UnmatchedPatterns {
+		// Not an error, but never silent: the operator asked for a route to be
+		// absent and it is still there. On the layered strategy this is the
+		// expected report for a server-rendered route, which is compiled into
+		// the server bundle and cannot be removed by deleting a file.
+		log.Warn("route exclusion pattern matched no prerendered route, so nothing was removed for it",
+			"pattern", p, "strategy", string(req.Compile.Strategy))
+	}
+	for _, l := range res.DeadLinks {
+		log.Warn("a page still links to an excluded route, so that link will 404",
+			"page", l.FromPage, "href", l.Href, "route", l.Route)
+	}
+	if len(res.DeadLinks) > 0 {
+		log.Warn("links to excluded routes found; the build continues because removing the route is the point, but these links are now broken",
+			"count", len(res.DeadLinks))
+	}
+	return nil
 }

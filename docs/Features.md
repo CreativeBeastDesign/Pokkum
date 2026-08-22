@@ -64,6 +64,16 @@ Merges the last N generations' immutable /_app/immutable client assets into a se
   - [internal/adapters/packager/packager.go](../internal/adapters/packager/packager.go)
   - [tests/integration/asset_overlay_e2e_test.go](../tests/integration/asset_overlay_e2e_test.go)
 
+### [Exclude prerendered routes from the packaged image](items/route-exclusion-output-filter.md)
+
+A first phase of route exclusion: --exclude-route / build.exclude_routes drops prerendered routes from the output before packaging, and warns about links left pointing at them.
+
+- Flags: `--exclude-route`
+- Implementation:
+  - [internal/adapters/routefilterutils/routefilter.go](../internal/adapters/routefilterutils/routefilter.go)
+  - [internal/adapters/routefilter/adapter.go](../internal/adapters/routefilter/adapter.go)
+  - [internal/ports/routefilter.go](../internal/ports/routefilter.go)
+
 ### [--runtime=node, the second runtime dimension](items/runtime-node.md)
 
 Targets a distroless-node base and execs adapter-node output directly under /nodejs/bin/node with no Bun layer at all, proven by a real Docker boot and, since e918c52, an automated smoke test.
@@ -444,6 +454,8 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - Lineage discovery is registry-side via a pokkum.dev/predecessor manifest annotation, deliberately independent of Kubernetes' pokkum.dev/image-history — a build-time flag cannot depend on cluster state without coupling build to Kubernetes. The annotation is only stamped when --asset-overlay is actually in use, so auto-discovery can only find a chain that opted in from the start of a rollout sequence. ([Rolling-deploy asset overlay (--asset-overlay)](items/rolling-deploy-asset-overlay.md))
 - Requires --output=push for auto-discovery (there is no current tag to inspect for --local/--tarball); --asset-overlay-from's explicit refs work regardless of output mode. ([Rolling-deploy asset overlay (--asset-overlay)](items/rolling-deploy-asset-overlay.md))
 - pokkum verify's rebuild-and-compare path does not reproduce this layer — see [pokkum verify doesn't reproduce the asset-overlay layer](items/asset-overlay-verify-gap.md). ([Rolling-deploy asset overlay (--asset-overlay)](items/rolling-deploy-asset-overlay.md))
+- Server-rendered routes on `--strategy=layered` are compiled into the server bundle and cannot be removed by deleting a file. A pattern naming one is reported as unmatched; it is not excluded. ([Exclude prerendered routes from the packaged image](items/route-exclusion-output-filter.md))
+- This filters **output**, not the build. A route's JavaScript chunks, its imports and its SBOM entries still ship — only the prerendered HTML is removed. The size and SBOM-noise win needs the build-time filter in [Exclude routes from the production build](items/route-exclusion-filter.md), which stays open. ([Exclude prerendered routes from the packaged image](items/route-exclusion-output-filter.md))
 - --telemetry is rejected outright for node, not silently ignored: the layered strategy's OTel bootstrap is a bun --preload mechanism with no Node equivalent. ([--runtime=node, the second runtime dimension](items/runtime-node.md))
 - Correction to the source docs: Roadmap.md and Feature-list.md both still read, at the time of this migration, as if no automated boot smoke test existed for this runtime. That is stale — TestRuntimeSmoke_NodeRuntime_BootsAndServes (tests/integration/runtime_smoke_node_test.go) shipped in e918c52 and also asserts the *absence* of a Bun layer two independent ways, so it is real coverage, not a manual one-off. ([--runtime=node, the second runtime dimension](items/runtime-node.md))
 - Node-core CVEs are unqueryable: distroless-node ships Node outside dpkg, invisible to the OS-package scanner, and the zero-dependency scanner has no Node-core ecosystem entry to query against OSV.dev. ([--runtime=node, the second runtime dimension](items/runtime-node.md))

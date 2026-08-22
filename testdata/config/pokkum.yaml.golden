@@ -65,6 +65,20 @@ image:
   # Grace period after SIGTERM before the supervisor sends SIGKILL.
   shutdown_timeout: 30s
 
+build:
+  # Drop prerendered routes from the image. Route paths, not file globs: a bare
+  # path also covers everything beneath it, "*" matches within one segment and
+  # "**" across segments. Merged with any --exclude-route flags rather than
+  # overridden by them.
+  #
+  # This removes prerendered output files. The route's JavaScript chunks and
+  # SBOM entries still ship, and a server-rendered route (which lives inside the
+  # layered server bundle) cannot be removed this way — Pokkum warns rather than
+  # pretending it was excluded.
+  exclude_routes:
+    - /storybook
+    - /dev/**
+
 security:
   # Fail the build if the resolved base image has a vulnerability at or
   # above this severity (low/medium/high/critical). Unset = warn-only.

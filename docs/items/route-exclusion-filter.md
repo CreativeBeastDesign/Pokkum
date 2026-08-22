@@ -15,7 +15,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 ## Summary
 
-Dev-only routes are bundle entry points, so tree-shaking cannot remove them; a build-time filter would keep them out of the image entirely.
+Dev-only routes are bundle entry points, so tree-shaking cannot remove them; a build-time filter would keep their code out of the image entirely — which output filtering cannot do.
 
 ## Problem
 
@@ -64,4 +64,5 @@ manifest lacks those routes rather than asserting on the filter's own bookkeepin
 ## Related
 
 - [`--strategy=exe` secret-scanning gap](exe-secret-scan-gap.md)
+- [Exclude prerendered routes from the packaged image](route-exclusion-output-filter.md)
 
