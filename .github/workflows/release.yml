@@ -243,3 +243,78 @@ jobs:
     with:
       base64-subjects: "${{ needs.release.outputs.hashes }}"
       upload-assets: true
+
+  # Moves the floating major tag (v1) to the commit just released, so
+  # `uses: CreativeBeastDesign/pokkum@v1` resolves.
+  #
+  # Until now only full versions existed — refs/tags/v1 was a 404 — and
+  # README.md carried a note telling readers to pin a full version because
+  # "@v1 cannot resolve". That is the opposite of what a Marketplace listing
+  # leads people to type: virtually every published action documents @v<major>,
+  # and the overwhelmingly common consumer mistake would have been a workflow
+  # that fails to resolve the action at all.
+  #
+  # `needs: [release]` without `always()` on purpose, unlike the provenance job
+  # below it. Provenance describes binaries that are already public and is
+  # worth attaching even after a later step fails; a major tag is a
+  # recommendation to users, and pointing it at a commit whose release did not
+  # complete would send everyone typing @v1 to a version that was never
+  # published. This repo has produced four such empty releases already.
+  major-tag:
+    name: Move Major Version Tag
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Move the Major Tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # A prerelease must never move the major tag: v1.1.0-rc1 is exactly
+          # what @v1 users must NOT be given. The npm publish step above makes
+          # the same distinction, routing prereleases to the 'next' dist-tag.
+          case "$RELEASE_TAG" in
+            *-*)
+              echo "$RELEASE_TAG is a prerelease; leaving the major tag where it is"
+              exit 0
+              ;;
+          esac
+
+          # Derive the major from the tag rather than hardcoding "v1", so this
+          # step does not need editing at the v2 boundary — the release that
+          # would be least well served by a stale assumption.
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::release tag '$RELEASE_TAG' is not vMAJOR.MINOR.PATCH; refusing to guess a major tag from it"
+              exit 1
+              ;;
+          esac
+          major="${RELEASE_TAG%%.*}"
+
+          echo "moving $major to $RELEASE_TAG ($RELEASE_SHA)"
+
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git tag -f -a "$major" -m "Release channel $major — currently $RELEASE_TAG" "$RELEASE_SHA"
+          git push --force origin "refs/tags/$major"
+
+          # Read it back from the remote rather than trusting the push's exit
+          # status: the tag existing at the right commit is the actual
+          # deliverable, and this job's whole purpose is that `uses: ...@v1`
+          # resolves.
+          remote_sha="$(git ls-remote origin "refs/tags/$major^{}" | cut -f1)"
+          if [ "$remote_sha" != "$RELEASE_SHA" ]; then
+            echo "::error::$major on origin points at '${remote_sha:-nothing}', expected $RELEASE_SHA"
+            exit 1
+          fi
+          echo "$major now points at $RELEASE_TAG"

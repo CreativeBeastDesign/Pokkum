@@ -5,6 +5,81 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-23 — The published GitHub Action's `digest` and `ref` outputs were empty on every run since v1.0.0, and the code path that would have populated them was reading the base image
+
+**Category:** boundary / shadow-parser drift — a hand-rolled pre-parse accepted a
+narrower input surface than the real parser it runs ahead of, and nothing executed the
+artifact that depended on it
+
+**Root cause:** three defects stacked in one ten-line block of `action.yml`, none of
+them reachable by any test, because `uses: ./` appeared in no workflow — neither
+composite action this repository publishes had ever been executed by anything.
+
+1. `cmd/pokkum/main.go`'s `flag()` pre-parses `--log-level`/`--log-format` out of raw
+   `os.Args`, because the logger must exist before cobra parses anything. It matched
+   only the attached `--flag=value` spelling. Both flags are *also* registered as
+   ordinary cobra persistent flags, so the separated `--log-format json` spelling —
+   which `action.yml` used — parsed with no error and had no effect whatsoever. Logs
+   stayed in text format. This is the shape that makes shadow parsers dangerous: the
+   real parser accepted the input, so nothing anywhere reported a problem.
+2. The step then grepped that stream for the **first** `"ref"` key. In a build log the
+   first `ref` is the resolved **base image**. Any workflow following
+   `docs/GITHUB_ACTION.md`'s own quickstart — which pipes `steps.pokkum.outputs.ref`
+   into a deploy step — would have deployed `gcr.io/distroless/cc-debian12`.
+3. Likewise the first `"digest"` key is the startup-attestation digest, a bare 64-hex
+   string with no `sha256:` prefix — not the published manifest digest.
+
+Defect 1 masked 2 and 3 completely. With text-format logs nothing matched either
+pattern, so both outputs were merely *empty* rather than wrong, and fixing the flag
+alone would have converted a visibly broken action into a silently wrong one.
+
+`cmd/pokkum/actionyml_test.go` existed and passed throughout, because it checks that
+the flag *names* `action.yml` emits exist on `pokkum build` — a string comparison
+against the cobra flag set. Every flag involved here was real. The bug was in what the
+script did with the flag's output, which no static check over flag names can see.
+
+**How it was caught:** by running the thing. Building the CI job that executes `uses: ./`
+required first establishing what a real invocation produces, so a tarball build was run
+locally with the action's exact argument list. The `--log-format json` output came back
+in text format, which surfaced defect 1 within seconds; simulating the action's own grep
+against a genuine JSON log then surfaced 2 and 3 immediately. Re-reading the script,
+which had already survived a documentation-correctness pass that rewrote every
+surrounding comment, produced none of them.
+
+**Where:** `action.yml` ("Execute Pokkum Build"), `cmd/pokkum/main.go`'s `flag()`.
+
+**Fix:** `flag()` now accepts both spellings, stopping at a bare `--` and refusing to
+consume a flag-shaped next argument (one residual case — the literal string
+`--log-format` passed as another flag's *value* — is knowingly out of reach and
+documented at the function, since resolving it needs the flag table cobra has not built
+yet). The action no longer parses logs at all: it reads the reference off **stdout**,
+whose contract `internal/core/pipeline.go` states exactly — "exactly one line is written
+here — the published `repo@sha256:…` reference — because that string is what a CI
+pipeline captures and feeds to the next step" — with the digest split off the `@`. The
+match is anchored, which is load-bearing: the dry-run summary contains an *indented*
+base-image `@sha256:` line that an unanchored pattern picks up. Two new CI jobs execute
+the action for real (a tarball build asserting the ref names the requested repository and
+agrees with the digest, and a clean-runner dry-run asserting both outputs are empty and
+the CLI actually installed), plus `setup-pokkum` on a third. Every assertion was verified
+to reject each of the three defects' actual values before being committed.
+
+**Preventative rule:** two rules, both now in `mem:self_review_checklist`.
+(a) *Shadow parser* — when code hand-parses an input that a real parser also handles
+(a flag pre-read before the flag library runs, an env-var fast path, a regex ahead of a
+full decoder), enumerate every spelling the real parser accepts and confirm the shadow
+accepts them all. Divergence here is silent by construction: the authoritative parser
+validates the input, so the user gets no error, just no effect. This is row 54's
+parallel-path drift in its most invisible form, because the two paths are not peers —
+one runs first and wins, and the other's success is what hides it. (b) *Published
+integration artifacts must be executed* — a GitHub Action, installer script, container
+entrypoint or any other file this repo ships for someone else's runtime has to be run
+by CI, not string-checked. A static guard over such a file constrains its vocabulary,
+never its behaviour, and its passing is easily mistaken for coverage: `actionyml_test.go`
+was written after an earlier `action.yml` bug and gave exactly that false assurance
+while three worse bugs shipped in the same file.
+
+---
+
 ## 2026-08-22 — Sorting the output hid a nondeterministic choice of what went into it
 
 **Category:** determinism

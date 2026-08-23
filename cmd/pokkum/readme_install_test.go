@@ -48,10 +48,19 @@ import (
 
 const readmeRepoSlug = "CreativeBeastDesign/pokkum"
 
-// releasedVersionRefRe matches the only ref shape this repo publishes: a full
-// version tag. Deliberately rejects a bare major (`v1`), a branch name, and
-// `latest`.
-var releasedVersionRefRe = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
+// releasedVersionRefRe matches the ref shapes this repo publishes: a full
+// version tag (v1.2.3) or a moving major tag (v1). Deliberately rejects a
+// branch name, `latest`, and a bare `v` or partial version.
+//
+// The bare major was rejected here until 2026-08-23, correctly: only full
+// versions were tagged, refs/tags/v1 was a 404, and the README documented
+// `setup-pokkum@v1` anyway — the bug this guard was written for. It is
+// accepted now because release.yml's major-tag job creates and moves it on
+// every non-prerelease release, and verifies against the remote that it
+// landed. If that job is ever removed, narrow this back to the full-version
+// form in the same commit: the two are a pair, and a README promising @v1
+// with nothing publishing it is exactly the original defect.
+var releasedVersionRefRe = regexp.MustCompile(`^v\d+(?:\.\d+\.\d+)?$`)
 
 func readmeBody(t *testing.T) string {
 	t.Helper()
@@ -133,8 +142,8 @@ func TestReadmeActionRefsResolve(t *testing.T) {
 		// fails on correct input in half the environments it runs in.
 		if !releasedVersionRefRe.MatchString(ref) {
 			t.Errorf("README documents `uses: %s/%s@%s`, but %q is not a released-version tag.\n"+
-				"\tThis repo publishes only full versions (v1.2.3) and no moving major tag, so a ref like `v1`, `main` or `latest` cannot resolve.\n"+
-				"\tPin a released version, and re-point it when you release.",
+				"\tThis repo publishes full versions (v1.2.3) and moving major tags (v1), so a ref like `main`, `latest` or `v1.2` cannot resolve.\n"+
+				"\tUse a major tag for the documented quickstart, or pin a full version.",
 				readmeRepoSlug, path, ref, ref)
 			continue
 		}

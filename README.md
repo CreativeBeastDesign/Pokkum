@@ -157,13 +157,48 @@ POKKUM_VERSION=v<version> POKKUM_INSTALL_DIR="$HOME/.local/bin" \
 
 ---
 
-### 4. GitHub Action for CI/CD Pipelines (`.github/workflows/ci.yml`)
+### 4. GitHub Action for CI/CD Pipelines
+
+Build and push straight from a workflow. The action installs the CLI (verifying
+its SHA-256 against the release checksums), builds the image, and hands back the
+immutable digest-pinned reference:
+
+```yaml
+- name: Log in to GitHub Container Registry
+  uses: docker/login-action@v3
+  with:
+    registry: ghcr.io
+    username: ${{ github.actor }}
+    password: ${{ secrets.GITHUB_TOKEN }}
+
+- name: Build & Push SvelteKit Container
+  id: pokkum
+  uses: CreativeBeastDesign/pokkum@v1
+  with:
+    project-dir: ./my-app
+    repo: ghcr.io/${{ github.repository }}
+    platforms: linux/amd64,linux/arm64
+
+- name: Deploy the Exact Image That Was Just Built
+  run: echo "${{ steps.pokkum.outputs.ref }}"
+```
+
+`outputs.ref` is a `repo@sha256:…` reference — prefer it over a tag for
+deployment, since it cannot drift. The job needs `packages: write` to push, and
+`id-token: write` for keyless signing. Linux and macOS runners only.
+
+**[docs/GITHUB_ACTION.md](docs/GITHUB_ACTION.md)** documents every input and
+output, plus ECR/Docker Hub login, multi-arch matrices, and Kubernetes
+deployment.
+
+<details>
+<summary>Just want the CLI on PATH, without the build step?</summary>
+
+Use the installer action directly and drive `pokkum` yourself:
 
 ```yaml
 - name: Setup Pokkum
-  # Pin a released tag. There is no moving `v1` tag — only full versions are
-  # published — so `@v1` cannot resolve. Bump this when you upgrade.
-  uses: CreativeBeastDesign/pokkum/.github/actions/setup-pokkum@v1.0.1
+  uses: CreativeBeastDesign/pokkum/.github/actions/setup-pokkum@v1
   with:
     version: "v<version>" # a released tag; omit for the default, 'latest'
 
@@ -172,6 +207,8 @@ POKKUM_VERSION=v<version> POKKUM_INSTALL_DIR="$HOME/.local/bin" \
     POKKUM_DOCKER_REPO: ghcr.io/${{ github.repository }}
   run: pokkum build ./my-app
 ```
+
+</details>
 
 ---
 
