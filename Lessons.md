@@ -5,6 +5,61 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-08-23 — The published GitHub Action never loaded at all: an example expression written as documentation inside an input's `description` failed the manifest for every consumer, in every release
+
+**Category:** boundary / evaluated-position — text intended as documentation sat in a
+position the platform evaluates, and the artifact was never executed
+
+**Root cause:** `action.yml`'s `tags` input carried, as an illustrative example in its
+`description`, the literal text `latest,v1.2.3,{{ github.sha }}` (in expression syntax).
+GitHub evaluates input descriptions while loading an action manifest, and the `github`
+context is not available in that position, so every single use of this action died with
+
+    Unrecognized named-value: 'github' ... Failed to load action.yml
+
+before one step executed. It was present from the action's first commit through v1.0.6.
+The published Marketplace action had therefore **never worked for anyone**, and the three
+defects logged in the entry below it — the ignored `--log-format` spelling, `ref` read off
+the base image, `digest` read off the startup attestation — were all downstream of code
+that had never once run.
+
+The position matters, not the syntax: the sibling `setup-pokkum` action carries
+`{{ github.token }}` in an input's `default` and loads fine, which is what identified
+`description` specifically rather than "expressions in inputs" generally.
+
+**How it was caught:** by the CI job added in the entry below, on its first execution.
+The job's purpose was to catch the three output-parsing defects; it found a fourth,
+strictly more severe one, in a line nobody had edited — including in a prior pass that
+rewrote every comment *around* that line for documentation correctness. Reading the file
+carefully, twice, with the manifest in view, found nothing. Running it found it in
+thirty seconds.
+
+**Where:** `action.yml`, `inputs.tags.description`.
+
+**Fix:** the example is now plain prose, and the explanation of why moved into a YAML
+comment, which is stripped before evaluation. The install step also stopped routing
+`github.action_ref` through an expression and reads the runner-provided
+`GITHUB_ACTION_REF` environment variable instead — no expression means no question of
+which contexts are available where. `TestActionYMLNoExpressionsOutsideEvaluatedPositions`
+walks every string in every manifest this repo ships and fails on an expression outside
+the positions observed to work, and was confirmed to fail against the actual v1.0.6
+manifest (`git show v1.0.6:action.yml`) before being committed. The injection guard was
+tightened in the same pass to stop exempting shell comments: substitution runs over the
+whole script text, so a value containing a newline ends the comment and executes.
+
+**Preventative rule:** folded into `mem:self_review_checklist` row 58, which already
+required that a published integration artifact be executed by CI rather than
+string-checked. This incident sharpens it with the reason that is easy to miss: the
+failure was not in logic, it was in a **documentation string**, in a file that had been
+reviewed for documentation accuracy. Prose is not inert. Any field a platform evaluates —
+a manifest description, a template default, a label, an annotation — is code, and an
+example written in that field's own expression syntax is an instruction, not an
+illustration. Reviewing such a file for correctness cannot substitute for loading it,
+because the reviewer reads the example as documentation exactly as the author intended,
+which is the one reading the platform will not take.
+
+---
+
 ## 2026-08-23 — The published GitHub Action's `digest` and `ref` outputs were empty on every run since v1.0.0, and the code path that would have populated them was reading the base image
 
 **Category:** boundary / shadow-parser drift — a hand-rolled pre-parse accepted a

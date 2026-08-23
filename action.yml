@@ -26,11 +26,21 @@ inputs:
     description: 'Destination container repository (e.g. ghcr.io/acme/app). Passed to the CLI via the POKKUM_DOCKER_REPO environment variable — pokkum build has no --repo flag.'
     required: false
 
+  # NO EXPRESSION MAY APPEAR IN AN INPUT DESCRIPTION. GitHub evaluates these
+  # strings while loading the manifest, and the github context is not available
+  # in that position, so an expression here does not render as documentation —
+  # it fails the whole action with "Unrecognized named-value: 'github'" before a
+  # single step runs. This description carried an illustrative github.sha
+  # expression from the first commit through v1.0.6, which is why the action
+  # had never successfully loaded for anyone. A YAML comment like this one is
+  # safe; the description text is not. Guarded by
+  # TestActionYMLNoExpressionsOutsideEvaluatedPositions.
   tags:
     description: >-
-      Comma-separated image tags to publish (e.g. "latest,v1.2.3,${{ github.sha }}").
-      Passed to the CLI as --tag, which accepts a repeatable/comma-separated list.
-      Defaults to "latest", matching the CLI's own DefaultTag.
+      Comma-separated image tags to publish, e.g. "latest,v1.2.3", or a commit
+      SHA the calling workflow supplies. Passed to the CLI as --tag, which
+      accepts a repeatable/comma-separated list. Defaults to "latest", matching
+      the CLI's own DefaultTag.
     required: false
     default: 'latest'
 
@@ -97,12 +107,6 @@ runs:
       shell: bash
       env:
         INPUT_VERSION: ${{ inputs.version }}
-        # The ref this action was invoked at (`uses: owner/pokkum@THIS`), used
-        # to install the CLI build that matches the action. Reading it here
-        # rather than baking a literal default keeps the two from drifting:
-        # the previous default was a hardcoded 'v1.0.6', so pinning the action
-        # at any later release still silently installed the v1.0.6 CLI.
-        ACTION_REF: ${{ github.action_ref }}
       run: |
         set -euo pipefail
 
@@ -126,16 +130,28 @@ runs:
         #   explicit input        -> use it verbatim
         #   empty + versioned ref -> match the action's own release
         #   empty + anything else -> latest
+        #
+        # GITHUB_ACTION_REF is the ref this action was invoked at
+        # (`uses: owner/pokkum@THIS`), set by the runner for every action step.
+        # Reading the environment variable directly, rather than routing the
+        # github context through an expression, means nothing is substituted
+        # into this script and there is no question of which contexts are
+        # available in which position — the mistake that kept this manifest
+        # from loading at all through v1.0.6.
+        #
+        # Deriving the version at all is what keeps the CLI from drifting away
+        # from the action: the previous default was a hardcoded 'v1.0.6', so
+        # pinning the action at a later release still installed the v1.0.6 CLI.
         version="${INPUT_VERSION:-}"
         if [ -z "$version" ]; then
-          case "${ACTION_REF:-}" in
+          case "${GITHUB_ACTION_REF:-}" in
             v[0-9]*.[0-9]*.[0-9]*)
-              version="$ACTION_REF"
+              version="$GITHUB_ACTION_REF"
               echo "no 'version' input given; matching the action ref: $version"
               ;;
             *)
               version="latest"
-              echo "no 'version' input given and action ref '${ACTION_REF:-unknown}' is not a full version; installing latest"
+              echo "no 'version' input given and action ref '${GITHUB_ACTION_REF:-unknown}' is not a full version; installing latest"
               ;;
           esac
         fi

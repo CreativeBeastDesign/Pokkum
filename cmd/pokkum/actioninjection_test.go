@@ -166,14 +166,13 @@ func TestActionYMLNoExpressionInjection(t *testing.T) {
 	for _, file := range sortedActionFiles(files) {
 		for _, block := range actionRunBlocks(t, file, files[file]) {
 			checked++
+			// Shell comments are NOT exempt. Substitution happens over the
+			// whole script text before bash sees any of it, so a value
+			// containing a newline ends the comment and everything after the
+			// newline runs. Discussion of expressions belongs in a YAML
+			// comment outside the run: block, which is stripped before
+			// evaluation entirely.
 			for _, line := range strings.Split(block.body, "\n") {
-				// A comment inside the script is inert — it is still
-				// substituted, but the result is never executed, and these
-				// files deliberately discuss `${{ }}` in comments explaining
-				// why it is not used.
-				if strings.HasPrefix(strings.TrimSpace(line), "#") {
-					continue
-				}
 				for _, expr := range expressionRe.FindAllString(line, -1) {
 					t.Errorf("[SCRIPT INJECTION] %s, step %q: the expression %s is interpolated directly "+
 						"into a run: script:\n    %s\n"+
@@ -251,10 +250,16 @@ func TestActionInstallStepResolvesVersionFromActionRef(t *testing.T) {
 	const file = "action.yml"
 	content := actionYMLFiles(t)[file]
 
-	if !strings.Contains(content, "github.action_ref") {
+	// Either spelling is acceptable: the runner-provided GITHUB_ACTION_REF
+	// environment variable (what the install step reads today) or a
+	// github.action_ref expression. The env var is preferred — it needs no
+	// expression at all, so it cannot land in a manifest position where the
+	// github context is unavailable, which is the failure mode
+	// TestActionYMLNoExpressionsOutsideEvaluatedPositions guards.
+	if !strings.Contains(content, "GITHUB_ACTION_REF") && !strings.Contains(content, "github.action_ref") {
 		t.Errorf("[STALE PIN] %s's 'version' input has no hardcoded default, but nothing in the file reads "+
-			"github.action_ref either — so there is no source for the version the caller pinned. The install "+
-			"step must derive it from the action ref when the input is empty.", file)
+			"GITHUB_ACTION_REF (or github.action_ref) either — so there is no source for the version the "+
+			"caller pinned. The install step must derive it from the action ref when the input is empty.", file)
 	}
 
 	blocks := actionRunBlocks(t, file, content)
@@ -272,5 +277,133 @@ func TestActionInstallStepResolvesVersionFromActionRef(t *testing.T) {
 	if !strings.Contains(installScript, "POKKUM_VERSION=") {
 		t.Errorf("[INSTALL] %s's install step never sets POKKUM_VERSION, so install.sh always resolves the "+
 			"latest release and an explicit 'version' input is silently ignored.", file)
+	}
+}
+
+// evaluatedExpressionPaths are the only positions in an action manifest where
+// a `${{ }}` expression is both evaluated and given the contexts it needs.
+//
+// Derived from observed runner behaviour, not from reading the docs: the
+// setup-pokkum job passes with `${{ github.token }}` in an input's `default`,
+// while the identical context in an input's `description` failed the entire
+// manifest load. Paths use the shape reported by walkYAMLStrings below, with
+// `*` standing for any map key or sequence index.
+var evaluatedExpressionPaths = []string{
+	"inputs.*.default",
+	"outputs.*.value",
+	"runs.steps.*.env.*",
+	"runs.steps.*.with.*",
+	"runs.steps.*.if",
+	"runs.steps.*.run",
+}
+
+// walkYAMLStrings yields every string leaf in a parsed YAML document, keyed by
+// a dotted path with sequence indices rendered as `*`.
+func walkYAMLStrings(node any, path string, out map[string]string) {
+	switch v := node.(type) {
+	case map[string]any:
+		for k, child := range v {
+			next := k
+			if path != "" {
+				next = path + "." + k
+			}
+			walkYAMLStrings(child, next, out)
+		}
+	case []any:
+		for _, child := range v {
+			next := "*"
+			if path != "" {
+				next = path + ".*"
+			}
+			walkYAMLStrings(child, next, out)
+		}
+	case string:
+		if _, exists := out[path]; !exists {
+			out[path] = v
+		} else if strings.Contains(v, "${{") {
+			// Keep the offending value rather than the first-seen one, so a
+			// failure message names the string that actually breaks.
+			out[path] = v
+		}
+	}
+}
+
+// isEvaluatedPath reports whether path matches one of the allowed patterns,
+// where a `*` segment matches exactly one path segment. Segment-wise rather
+// than a string compare because the walk emits real map keys: a step's env
+// block yields `runs.steps.*.env.INPUT_REPO`, which must match the pattern
+// `runs.steps.*.env.*`.
+func isEvaluatedPath(path string) bool {
+	got := strings.Split(path, ".")
+	for _, allowed := range evaluatedExpressionPaths {
+		want := strings.Split(allowed, ".")
+		if len(want) != len(got) {
+			continue
+		}
+		match := true
+		for i := range want {
+			if want[i] != "*" && want[i] != got[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// TestActionYMLNoExpressionsOutsideEvaluatedPositions asserts no `${{ }}`
+// expression sits in a manifest position where GitHub evaluates it without
+// providing the context it names.
+//
+// This is the guard for the most severe defect this repository's GitHub Action
+// ever had, and the one that hid all the others: `inputs.tags.description`
+// carried an illustrative `github.sha` expression, written as documentation.
+// GitHub evaluates input descriptions while loading the manifest, and the
+// github context is not available there, so every use of the action died with
+//
+//	Unrecognized named-value: 'github' ... Failed to load action.yml
+//
+// before a single step ran. It was present from the first commit through
+// v1.0.6, which means the published Marketplace action had never once loaded —
+// and nothing noticed for three releases, because no workflow ever ran it.
+//
+// A YAML comment is safe (comments are stripped before evaluation) and is the
+// right place to discuss an expression. The value of a `description:` is not.
+func TestActionYMLNoExpressionsOutsideEvaluatedPositions(t *testing.T) {
+	files := actionYMLFiles(t)
+
+	checked := 0
+	for _, file := range sortedActionFiles(files) {
+		var doc any
+		if err := yaml.Unmarshal([]byte(files[file]), &doc); err != nil {
+			t.Fatalf("[TEST SETUP] %s is not parseable YAML: %v", file, err)
+		}
+
+		strs := map[string]string{}
+		walkYAMLStrings(doc, "", strs)
+		if len(strs) == 0 {
+			t.Fatalf("[TEST SETUP] no string values walked out of %s; the walk is wrong and this guard "+
+				"examined nothing", file)
+		}
+		checked += len(strs)
+
+		for path, value := range strs {
+			if !expressionRe.MatchString(value) || isEvaluatedPath(path) {
+				continue
+			}
+			t.Errorf("[MANIFEST LOAD] %s: %s contains a `${{ }}` expression:\n    %s\n"+
+				"GitHub evaluates this position while loading the manifest but does not supply the "+
+				"contexts an expression there names, so the action fails to load entirely — every step, "+
+				"for every consumer. If the expression is meant as documentation, move it into a YAML "+
+				"comment, which is stripped before evaluation.",
+				file, path, strings.TrimSpace(value))
+		}
+	}
+
+	if checked == 0 {
+		t.Fatalf("[TEST SETUP] zero strings examined across %v", sortedActionFiles(files))
 	}
 }
