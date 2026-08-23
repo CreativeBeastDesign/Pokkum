@@ -23,6 +23,14 @@ runs:
     - name: Download and Install Pokkum
       id: install
       shell: bash
+      # Inputs arrive as environment variables and are read as quoted shell
+      # variables. A `${{ }}` expression inside the script below would be
+      # substituted into the script TEXT before bash parsed it, so a version
+      # string carrying `$(...)` would execute on the runner — see the same
+      # note in the root action.yml, and the shared Go guard
+      # TestActionYMLNoExpressionInjection in cmd/pokkum/actionyml_test.go.
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
 
@@ -39,10 +47,10 @@ runs:
 
         # install.sh resolves the newest release itself when POKKUM_VERSION is
         # unset, so "latest" means "do not pin" rather than a hardcoded tag.
-        if [ "${{ inputs.version }}" = "latest" ]; then
+        if [ "${INPUT_VERSION:-latest}" = "latest" ]; then
           POKKUM_INSTALL_DIR="$INSTALL_DIR" sh "${GITHUB_ACTION_PATH}/../../../install.sh"
         else
-          POKKUM_VERSION="${{ inputs.version }}" POKKUM_INSTALL_DIR="$INSTALL_DIR" \
+          POKKUM_VERSION="$INPUT_VERSION" POKKUM_INSTALL_DIR="$INSTALL_DIR" \
             sh "${GITHUB_ACTION_PATH}/../../../install.sh"
         fi
 
