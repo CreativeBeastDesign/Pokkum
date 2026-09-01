@@ -23,6 +23,12 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 ## v1.2
 
+### Build & Packaging
+
+| Title | Summary | Kind | Status | Commits |
+| --- | --- | --- | --- | --- |
+| [base.name annotation varied with local build state](items/base-name-annotation-varied-with-build-state.md) | The first build of a project produced a different image digest from every later build of identical source, because `org.opencontainers.image.base.name` recorded the base reference as resolved rather than an invariant one. | fix | shipped |  |
+
 ### Observability
 
 | Title | Summary | Kind | Status | Commits |

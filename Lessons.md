@@ -5,6 +5,52 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-01 — The first build of any project produced a different image digest from every later build, because a label recorded the base reference *as resolved* rather than an invariant one
+
+**Category:** determinism / build-state leakage — a value that varies with local state (a lockfile's existence, a mirror's use) written into content-addressed bytes
+
+**Root cause:** `imageLabels` set `org.opencontainers.image.base.name` from `BaseImageInfo.Ref`.
+`Ref` is documented as "the reference that was resolved, as supplied (tag or digest)" — and the
+resolver *rebinds* it: to `entry.PinnedRef` (the digest form) once `pokkum.lock` exists, and to
+`entry.MirrorRef` when an escrow mirror is in use. That string is baked into the image config, so it
+changes the config digest, then the manifest digest, then the index digest.
+
+So the FIRST build of a project recorded `gcr.io/distroless/cc-debian12:nonroot` and every build
+after it recorded `gcr.io/distroless/cc-debian12@sha256:9dac…`, for byte-identical source. Two
+colleagues building the same commit, one with an escrow mirror configured, likewise disagreed. The
+codebase already had the right value and said so: `ports.BaseImage.PinnedRef`'s doc comment reads
+"It is what gets recorded in the image labels", and `UpstreamRef`'s reads "never rebound to a mirror
+or a locked pinned-digest form". The code used neither.
+
+**How it was caught:** by `benchmarks/three-way` on its first run against a live Docker daemon —
+built to produce a marketing number, not to find bugs. Its reproducibility row read `no`. Every
+existing test passed, because every one of them exercises a single build; the bug only exists
+*between* two builds in different lockfile states, and nothing was comparing those. Localising it
+took a byte-level diff of two OCI layouts: 34 of 39 blobs identical, every layer and diffID
+identical, one annotation different. Two false starts along the way — an amd64 config compared
+against an arm64 one, and a third build that differed for an unrelated reason because a `git commit`
+landed between runs and moved `image.revision`.
+
+**Where:** `internal/core/pipeline.go`, `imageLabels`.
+
+**Fix:** `baseNameForLabel` prefers `UpstreamRef`, falls back to `PinnedRef`, and returns `""`
+otherwise. `Ref` is not eligible on any path — a fallback chain ending in it would look defensive
+and silently reintroduce the bug for exactly the inputs that caused it.
+`baselabel_internal_test.go` runs the same logical build through all three rebindings (no lockfile,
+lockfile, mirror) and asserts one value; proven to fail with the old line restored, on both the
+lockfile and the mirror case. End-to-end: `rm pokkum.lock` then two builds now produce one digest,
+where they previously produced two. **Breaking** — every image digest moves once.
+
+**Preventative rule:** before writing any value into an image config, label, annotation or other
+content-addressed artifact, ask what it varies with *besides the source*. A field whose doc comment
+says "as supplied", "as resolved", "best effort", or that the code rebinds anywhere, is disqualified
+by that fact alone. Prefer a field explicitly documented as invariant, and when the same struct
+offers both, read the doc comments before picking — this codebase had `UpstreamRef` and `PinnedRef`
+sitting beside `Ref`, each documenting exactly this distinction, and the wrong one was still chosen.
+Corollary: a reproducibility test that builds once proves nothing. The cheapest real check is
+two builds from *different starting states* (no cache/lockfile, then warm) compared byte-for-byte —
+which is exactly what the benchmark did by accident and what no unit test did on purpose.
+
 ## 2026-09-01 — `pokkum config validate` reported a config valid that `pokkum deploy` then refused, because it validated each profile's raw block instead of the merged one
 
 **Category:** boundary / validator-consumer disagreement — a cross-field validity rule checked against a fragment, while the consumer reads the composition

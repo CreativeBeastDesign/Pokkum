@@ -631,6 +631,35 @@ items:
       commits: ["cd5c7f0"]
     related: ["asset-overlay-verify-gap", "oci-layout-dev-output"]
 
+  - id: base-name-annotation-varied-with-build-state
+    title: "base.name annotation varied with local build state"
+    stage: v1.2
+    status: shipped
+    kind: fix
+    tier: foundation
+    summary: "The first build of a project produced a different image digest from every later build of identical source, because `org.opencontainers.image.base.name` recorded the base reference as resolved rather than an invariant one."
+    problem: |
+      `org.opencontainers.image.base.name` was set from the base image reference *as resolved*, which
+      the resolver rebinds with local state: to the lockfile's pinned digest form once `pokkum.lock`
+      exists, and to the escrow mirror's tag when a mirror is in use. That string is baked into the
+      image config, so it changes the config digest, then the manifest digest, then the index digest.
+
+      Observable effect: the FIRST build of a project — before `pokkum.lock` existed — produced a
+      different image digest from every build after it, for byte-identical source, and a build
+      pulling through an escrow mirror produced a different digest from one that did not. Measured on
+      the three-way benchmark: five consecutive builds, only the first differed, and the config diff
+      was this one annotation with every layer and diffID identical.
+
+      It now records `UpstreamRef`, documented as never rebound to a mirror or a locked digest form,
+      which is also what the annotation is for — `org.opencontainers.image.base.digest` carries the
+      digest separately and authoritatively. `BaseImageInfo.Ref` is deliberately not a fallback on
+      any path, since reintroducing it anywhere reintroduces the bug.
+    evidence:
+      commits: []
+    limitations:
+      - "Breaking: base.name moves from the pinned digest form back to the upstream tag for builds that had a lockfile, so every image digest changes once. `pokkum verify` against an image built before this change correctly reports a mismatch."
+    related: ["strategy-static"]
+
   - id: ecr-repo-autocreate
     title: "ECR repository auto-create"
     stage: v1.2

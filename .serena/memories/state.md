@@ -168,6 +168,26 @@ before trusting a claim that predates the commit it cites.
 - Vercel/Netlify/edge remain out of scope — they do not run OCI images
   (existing non-goal in `README.md`).
 
+## base.name annotation — fixed 2026-09-01 (BREAKING: every image digest moved)
+
+- `org.opencontainers.image.base.name` is set by `internal/core/pipeline.go`'s
+  `baseNameForLabel`: `UpstreamRef` first, `PinnedRef` as fallback, `""`
+  otherwise. **`BaseImageInfo.Ref` is NOT eligible on any path** — it is
+  rebound by the resolver to the lockfile's pinned digest once `pokkum.lock`
+  exists, and to the escrow mirror's tag when a mirror is used.
+- Before the fix it used `Ref`, so a project's FIRST build produced a
+  different image digest from every later build of identical source, and a
+  mirrored build differed from an unmirrored one. Layers and diffIDs were
+  always identical; only this annotation moved, cascading config → manifest →
+  index.
+- `org.opencontainers.image.base.digest` is independent (set in
+  `packager/config.go` from the image actually appended to), so keeping
+  base.name human-readable loses nothing.
+- Guarded by `internal/core/baselabel_internal_test.go`, which runs one
+  logical build through all three rebindings and asserts a single value.
+- Found by `benchmarks/three-way`, not by a unit test: every test builds once,
+  and this bug only exists *between* two builds in different lockfile states.
+
 ## Output modes
 - `--to-oci-layout <dir>` (new, `ports.OCILayoutWriter`) writes a lossless
   OCI image layout directory to disk. Unlike `--tarball` (docker-save

@@ -51,6 +51,10 @@ Pokkum is in active development. Features in `docs/Roadmap.md` marked as shipped
 
 ### Fixed
 
+- **First build of a project no longer differs from every later one** — `org.opencontainers.image.base.name` was recorded from the base reference *as resolved*, which the resolver rebinds to the lockfile's pinned digest once `pokkum.lock` exists and to the mirror tag when an escrow mirror is used. That annotation lives in the image config, so the first build of a project (before `pokkum.lock` existed) produced a different image digest from every build after it, for identical source — and a build through an escrow mirror differed from one without. It now records the invariant upstream reference; `org.opencontainers.image.base.digest` continues to carry the digest.
+
+  > **Breaking:** this changes `base.name` from the pinned digest form back to the upstream tag for builds that had a lockfile, so **every image digest moves once**. Rebuild and re-pin any digest you have recorded; `pokkum verify` against an image built before this change will report a mismatch it is correct to report.
+
 - **--base accepts custom image reference** — `--base` now accepts free-form custom image references
 - **cosign verify-attestation interop** — fixed missing annotation for compatibility with real cosign v3
 - **pokkum-static If-None-Match handling** — now answers 304 Not Modified instead of resending full body on repeated requests

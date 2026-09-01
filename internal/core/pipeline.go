@@ -479,10 +479,11 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		return BuildResult{}, fmt.Errorf("core: base image resolver returned no image for %q: %w", req.BaseImage.Ref, ErrInvalidBaseImage)
 	}
 	baseInfo := BaseImageInfo{
-		Preset:    req.BaseImage.Preset,
-		Ref:       base.Ref,
-		PinnedRef: base.PinnedRef,
-		Digest:    base.Digest,
+		Preset:      req.BaseImage.Preset,
+		Ref:         base.Ref,
+		UpstreamRef: base.UpstreamRef,
+		PinnedRef:   base.PinnedRef,
+		Digest:      base.Digest,
 	}
 	log.Info("base image resolved", "ref", baseInfo.Ref, "pinned", baseInfo.PinnedRef, "isIndex", base.IsIndex)
 
@@ -2010,10 +2011,36 @@ func prepareWorkDir(dir string) (string, func(), error) {
 // reference as written, and the three tool versions.
 //
 // The user's own labels are applied last and win, per PackageRequest.Labels.
+// baseNameForLabel returns the value for org.opencontainers.image.base.name.
+//
+// Only build-state-invariant references are eligible. UpstreamRef is
+// preferred because it is both invariant and human-readable
+// ("gcr.io/distroless/cc-debian12:nonroot"), which is what the annotation is
+// for — the digest lives in org.opencontainers.image.base.digest. PinnedRef
+// is the fallback for a resolver that supplies no UpstreamRef; it is
+// redundant with base.digest but still invariant. Returning "" is correct
+// when neither is available: omitting an annotation is better than baking in
+// a value that moves the image digest.
+func baseNameForLabel(base BaseImageInfo) string {
+	if base.UpstreamRef != "" {
+		return base.UpstreamRef
+	}
+	return base.PinnedRef
+}
+
 func imageLabels(req BuildRequest, base BaseImageInfo, tc Toolchain, bunToolchain ports.BunResolverResult) map[string]string {
 	out := make(map[string]string, len(req.Labels)+4)
-	if base.Ref != "" {
-		out[ports.LabelBaseName] = base.Ref
+	// base.UpstreamRef, never base.Ref: this string is baked into the image
+	// config, so a value that changes with local state changes the image
+	// digest. base.Ref is rebound to the lockfile's pinned digest once
+	// pokkum.lock exists and to the mirror tag when an escrow mirror is used,
+	// so recording it made a project's first build differ from every
+	// subsequent one, and a mirrored build differ from an unmirrored one, for
+	// identical source. PinnedRef is the fallback because it is also
+	// invariant; base.Ref is deliberately not a fallback at all, since
+	// reintroducing it on any path reintroduces the bug.
+	if ref := baseNameForLabel(base); ref != "" {
+		out[ports.LabelBaseName] = ref
 	}
 	if tc.PokkumVersion != "" {
 		out[ports.LabelPokkumVersion] = tc.PokkumVersion
