@@ -508,18 +508,19 @@ before trusting a claim that predates the commit it cites.
   with no env/CLI override, which collides with the Zero-Mutation Build
   Sandbox invariant. The real mechanisms are `PrepareVirtualTelemetryEntry`
   (exe) and `PrepareLayeredTelemetryBootstrap` (layered), above.
-- **`TransformConfig` is now reachable only from its own tests.**
-  `PrepareVirtualConfig` was its sole production caller, so deleting that left
-  the entire `svelte.config.js` rewrite path — `TransformConfig`,
-  `replaceAdapterImport`, `injectVersionPin`, `replaceImportBinding`,
-  `identAlreadyBound` — exercised by tests and nothing else. The live path is
-  the Vite one (`TransformViteConfig`, `PrepareVirtualViteConfig`,
-  `PrepareVirtualViteConfigPassthrough`). This was NOT deleted in the same
-  pass: retiring it removes a whole documented capability rather than tidying
-  an unused helper, and `Lessons.md`'s 2026-08-21/22 entries treat the two
-  paths as a matched pair whose drift caused real reproducibility bugs. Decide
-  deliberately before removing it — and if it stays, note that tests passing
-  against it prove nothing about production behaviour.
+- **`TransformConfig` IS live — do not delete it.** Its production caller is
+  `pokkum adopt --write-config` (`sveltekitutils/adopt.go`, the on-disk
+  `svelte.config.js` rewrite), NOT `pokkum build`. So the whole
+  `svelte.config.js` transform chain — `TransformConfig`,
+  `replaceAdapterImport`, `replaceImportBinding`, `identAlreadyBound`,
+  `injectVersionPin`, `kitBlockRegex` — is reachable and must stay.
+  `pokkum build` uses the Vite path instead (`TransformViteConfig`,
+  `PrepareVirtualViteConfig`, `PrepareVirtualViteConfigPassthrough`), which is
+  why the two paths coexist: build must not mutate user files, `adopt` is an
+  opt-in command whose entire job is to mutate them.
+  This memory previously claimed the opposite, on the strength of a `grep`
+  truncated by `head -10` that cut off `adopt.go` at line 11. The compiler
+  caught the attempted deletion. See `Lessons.md` 2026-09-01.
 - Two real, confirmed-by-actually-running limitations:
   `@opentelemetry/auto-instrumentations-node` produces zero spans under Bun's
   runtime (real spans need a user-added `hooks.server.ts` snippet, documented in

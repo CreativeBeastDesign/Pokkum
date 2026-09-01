@@ -21,7 +21,7 @@ At the beginning of any non-trivial task, agents **MUST**:
 
 Before writing any code, in addition to the Serena startup protocol above:
 
-- **Search `Lessons.md` for related entries.** Grep it for keywords tied to the packages/files/behavior about to be touched (function names, package names, bug categories such as `concurrency`, `resource-leak`, `multi-item`, `determinism`). A prior incident in the same area is a strong signal of being about to repeat it — read that entry's root cause and preventative rule *before* writing a line of code, not after. See the Root Cause Analysis subsection under Section 5 for how entries are structured.
+- **Route through `mem:lessons_index` first, then `Lessons.md`.** `Lessons.md` is 100+ post-mortems; grepping it works only when you guess the same word the author used. `mem:lessons_index` routes by **category** instead — ask "what kind of change am I about to make?" (a fan-out, a config field, a cache key, an outbound call, a deletion) and read the entries it lists for that class. Then grep `Lessons.md` for the specific packages/files/functions you are about to touch. A prior incident in the same area is a strong signal of being about to repeat it — read that entry's root cause and preventative rule *before* writing a line of code, not after. See the Root Cause Analysis subsection under Section 5 for how entries are structured, and regenerate the index when you add an entry.
 
 ### Keeping Serena Memories Up-to-Date
 
@@ -67,6 +67,7 @@ Use Serena's `write_memory` or `edit_memory` tools to keep memories concise, inv
 ### Toolchain Version Stability
 
 - **Never downgrade the Go version.** `go.mod`'s `go` directive and every `go-version:` pin in `.github/workflows/*.yml` must never decrease — only hold steady or raise. If a change appears to require lowering either (a tool that only supports an older Go, an editor/IDE mismatch, a dependency conflict), that is a signal to fix the actual incompatibility or ask the user, not to quietly regress the pin. Check both `git diff -- go.mod` and `git diff -- '.github/workflows/*.yml'` for a lowered version before declaring any change complete.
+- **Build and test with the toolchain `go.mod` declares, not whichever Go is installed.** CI resolves its version from `go.mod` (`go-version-file`), so a machine running a *newer* Go silently disagrees with it — and the disagreement surfaces as something else entirely. Both halves bit this repo on 2026-09-01: `make supervisor static-server` on Go 1.27 produced embedded PID-1 blobs that CI's 1.26.6 rebuild rejected, and `packager`'s golden digests failed locally while passing in CI, reading exactly like a deliberate config change nobody re-recorded. **Before bisecting a digest/golden failure, or re-recording any golden, re-run it as `GOTOOLCHAIN=go$(awk '/^go [0-9]/{print $2}' go.mod) go test ./...`.** Re-recording a golden under an unpinned toolchain hard-breaks CI and makes a digest no released build produces the canonical one. The `supervisor`/`static-server` Makefile targets pin `GOTOOLCHAIN` themselves; anything else digest-affecting must too.
 
 ---
 
@@ -113,6 +114,11 @@ When code changes have occurred, agents **MUST** execute the following 5-step ve
 Before declaring any non-trivial feature or refactor complete, review your own diff (`git diff`) line by line against the functional spec. Use the Self-Review Checklist below to do this — treat it as a set of things to *mechanically verify* against the actual diff, not a paragraph to keep in mind while skimming.
 
 If a bug or edge case failure is found during self-review, flag it explicitly, fix it, and re-run the full verification suite. **Silent patching is strictly forbidden.**
+
+> [!IMPORTANT]
+> **Every new guard must be shown to fail.** Nine separate `Lessons.md` entries are one class: a test or check that passed while verifying nothing — a fixture that fabricated the shape the buggy code assumed, a cache that returned the first build's bytes to the second, a linter that exited zero without linting, three of four race guards that passed with the fix reverted. A green run of a test you just wrote is not evidence until you have seen it go red.
+>
+> So: after writing a guard, **revert the fix (or break the input it protects), run it, and record the failure output in your final answer**; then restore and re-run. If it cannot be made to fail, the guard is measuring the wrong thing — fix the guard before trusting the fix. This is cheap, takes one command, and is the difference between a test and a decoration. `mem:self_review_checklist` rows 30, 43 and 45 cover specific instances; this is the general rule and it applies to every guard you add, not only to the ones those rows name.
 
 ### 5.1 Self-Review Checklist
 
@@ -235,7 +241,7 @@ Agents **MUST** keep the project documentation and persistent knowledge graph sy
 - **`ARCHITECTURE.md`**: Update architectural diagrams, adapter contracts, layer layouts, and boundary descriptions.
 - **`Vocabulary.md`**: Maintain the complete, human-readable reference of all CLI commands, subcommands, flags, defaults, and runtime environment variables.
 - **Package-level `README.md` files** (e.g. `internal/adapters/<name>/README.md`): update alongside the top-level docs above whenever that package's behavior changes. These are human-facing, same as `ARCHITECTURE.md`/`Vocabulary.md` (Serena `mem:*` remains the source of truth for agents) — a new flag or field documented at the top level but not in its own package's README leaves a human contributor working in that directory with a stale picture.
-- **Serena MCP Memories (`mem:*`)**: Keep the machine-readable project memory graph for agents (`mem:core`, `mem:conventions`, `mem:tech_stack`, `mem:telemetry`, `mem:task_completion`, `mem:self_review_checklist`, etc.) updated with latest invariants and decisions.
+- **Serena MCP Memories (`mem:*`)**: Keep the machine-readable project memory graph for agents (`mem:core`, `mem:conventions`, `mem:tech_stack`, `mem:telemetry`, `mem:task_completion`, `mem:self_review_checklist`, `mem:lessons_index`, etc.) updated with latest invariants and decisions. A new `Lessons.md` entry means three writes, not one: the entry itself, the matching `mem:self_review_checklist` row (§5.3), and a line in `mem:lessons_index` so the entry is findable by category rather than by guessed keyword.
 
 > [!IMPORTANT]
 > **Serena MCP is for Agents, docs are for humans.** Make sure to chose the most suitable wording, style, and tone for each document.

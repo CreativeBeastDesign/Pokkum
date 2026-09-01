@@ -5,6 +5,49 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-01 — A `head -10` on a reachability grep produced a confident, wrong recommendation to delete live code
+
+**Category:** process / truncated-evidence — a completeness question answered with a deliberately incomplete command
+
+**Root cause:** deciding whether `TransformConfig` was dead is a question of the form "does ANY caller
+exist?", which is answered only by a complete result set. The check run was
+`grep -rn "TransformConfig(" --include="*.go" . | grep -v "TransformViteConfig" | head -10`. It
+returned exactly ten lines — eight test files and two declarations — and the eleventh, cut off by
+`head`, was `internal/adapters/sveltekitutils/adopt.go:171`, the live production caller.
+
+`head` is habitual for keeping tool output small, and harmless for "show me an example of X". It is
+actively wrong for "is there any X", because it converts a negative result into an unfalsifiable one:
+a truncated listing that happens to contain no counter-example is indistinguishable from a listing
+that has none.
+
+The consequence was not a crash — the compiler refused the deletion immediately — but a *confidently
+stated wrong recommendation*: the user was told, with reasoning about parallel-path drift, that the
+entire `svelte.config.js` transform path was dead and should be removed, and two documents
+(`ARCHITECTURE.md`, `mem:state`) were updated to record that false claim before it was caught. Acting
+on it would have deleted `pokkum adopt --write-config`'s implementation.
+
+The confusion had a real basis worth recording: `pokkum build` genuinely stopped using
+`TransformConfig`, having moved to the Vite path. The remaining caller is a *different command* with
+the opposite mandate — `build` must never mutate user files, while `adopt` exists precisely to mutate
+them. "No longer used by the path I was looking at" is not "unused".
+
+**Where:** `internal/adapters/sveltekitutils/injector.go` (`TransformConfig` and its helper chain),
+caller at `internal/adapters/sveltekitutils/adopt.go:171`.
+
+**Fix:** deletion reverted; `TransformConfig`, `replaceAdapterImport`, `replaceImportBinding`,
+`identAlreadyBound`, `injectVersionPin` and `kitBlockRegex` all stay. `ARCHITECTURE.md` and
+`mem:state` corrected to say the path is live and name its caller, so the next agent does not
+re-derive the same wrong conclusion.
+
+**Preventative rule:** never pipe a reachability, usage or completeness query through `head`, `-m`,
+or any other truncation — the whole point of the query is that the absence of a match is the
+finding, and truncation makes absence unprovable. Count first (`grep -c`, or read the full list) and
+only then narrow. Corollary: before deleting any symbol, let the compiler and `golangci-lint`'s
+`unused` check be the oracle rather than a grep — attempt the deletion in a scratch commit and read
+what breaks, which is exhaustive by construction where a text search is not. And when a symbol looks
+dead because "the pipeline no longer calls it", enumerate the OTHER commands in the CLI before
+concluding: a second command with a different mandate is the most likely remaining caller.
+
 ## 2026-09-01 — The first build of any project produced a different image digest from every later build, because a label recorded the base reference *as resolved* rather than an invariant one
 
 **Category:** determinism / build-state leakage — a value that varies with local state (a lockfile's existence, a mirror's use) written into content-addressed bytes
