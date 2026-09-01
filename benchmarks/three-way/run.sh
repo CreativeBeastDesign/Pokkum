@@ -84,11 +84,11 @@ cve_count() {
   local tag="$1"
   case "$SCANNER" in
     trivy)
-      trivy image --quiet --scanners vuln --severity HIGH,CRITICAL --format json "$tag" 2>/dev/null \
-        | grep -o '"VulnerabilityID"' | wc -l | tr -d ' ' ;;
+      { trivy image --quiet --scanners vuln --severity HIGH,CRITICAL --format json "$tag" 2>/dev/null \
+        | grep -c '"VulnerabilityID"' || true ; } | tr -d ' ' ;;
     grype)
-      grype "$tag" -o json --quiet 2>/dev/null \
-        | grep -oE '"severity": *"(High|Critical)"' | wc -l | tr -d ' ' ;;
+      { grype "$tag" -o json --quiet 2>/dev/null \
+        | grep -cE '"severity": *"(High|Critical)"' || true ; } | tr -d ' ' ;;
     *) echo "n/a" ;;
   esac
 }
@@ -106,13 +106,19 @@ has_shell() {
 # is a thing that can get a CVE next Tuesday.
 os_packages() {
   case "$SCANNER" in
-    trivy) trivy image --quiet --scanners vuln --list-all-pkgs --format json "$1" 2>/dev/null \
-             | grep -o '"SrcName"' | wc -l | tr -d ' ' ;;
+    trivy) { trivy image --quiet --scanners vuln --list-all-pkgs --format json "$1" 2>/dev/null \
+             | grep -c '"SrcName"' || true ; } | tr -d ' ' ;;
     *) echo "n/a" ;;
   esac
 }
 
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+
+# zero_default turns an empty measurement into an explicit 0. `grep -c` with no
+# match legitimately yields 0, and a distroless image genuinely having zero of
+# something is the most interesting cell in the table — it must not render as a
+# blank that reads like a missing measurement.
+zero_default() { local v; v="$(cat)"; echo "${v:-0}"; }
 
 # ---------------------------------------------------------------------------
 # Lockfiles. The two Dockerfile variants are npm-based and the tuned one uses

@@ -10,6 +10,25 @@ The point is not that Pokkum wins — you can read the script and check that you
 
 That builds all three variants, measures them identically, and writes a markdown table to `results/results.md` that you can paste anywhere. It takes a few minutes, most of it the CVE scan (`--no-scan` skips it).
 
+## What it looked like on one machine
+
+Measured on an M-series Mac, 2026-09-01, with trivy. **These are one data point, not a specification** — run it yourself and you will get different numbers.
+
+| | Naive Dockerfile | Tuned multi-stage | Pokkum |
+|---|---|---|---|
+| Image size (MB) | 1138.5 | 165.3 | **137.2** |
+| OS packages | 413 | 19 | **11** |
+| HIGH+CRITICAL CVEs | 479 | 13 | **0** |
+| Shell in the image | yes | yes | **no** |
+| Reproducible build | no (by construction) | no (by construction) | **yes** |
+| SBOM | no | no | yes |
+| SLSA provenance | no | no | yes |
+| Lines of build config you maintain | 8 | 18 | **0** |
+
+The two rows worth dwelling on are not the size one. **OS packages** is the number that predicts next year: 413 packages is 413 things that can get a CVE, and the naive image's 479 HIGH+CRITICAL findings are almost all in an OS nobody chose deliberately — they came with `FROM node:22`. And **shell in the image** is the difference between an RCE that gets an interactive prompt and one that does not.
+
+The tuned Dockerfile does most of the work: 1138MB to 165MB, 479 CVEs to 13. That is the honest comparison, and it is why `Dockerfile.tuned` exists rather than only the naive one. What it cannot do — because alpine *is* a shell and a package manager — is reach zero.
+
 ## What gets built
 
 | Variant | What it represents |
@@ -42,6 +61,8 @@ Stated openly, because a benchmark whose limitations you have to discover yourse
 - **SvelteKit's `kit.version.name` is pinned in [`app/svelte.config.js`](app/svelte.config.js).** Left at its default of `Date.now()`, it renames every hashed client chunk on every build and no packaging tool could rescue any of the three. Pinning it for all three keeps the reproducibility row about the packaging step, which is the thing under comparison.
 - **Sizes are local Docker sizes, not compressed registry sizes.** Consistent across all three, but not the number your registry bill sees.
 - **One app is one data point.** A larger app with native addons or a big `static/` tree shifts every row. Point `run.sh` at your own app — change the path in the three build commands — and the numbers will be more useful to you than these are.
+- **The Pokkum row uses a warm-up build.** The first build in a tree with no `pokkum.lock` records the base image in the image config by its **tag**; every later build, reading the lockfile, records it by **digest**. That one annotation cascades into the config, manifest and index digests, so build 1 and build 2 of identical source disagree while builds 2, 3, 4… all agree. That is a real defect in Pokkum, not a measurement artefact — reproduce it with `rm app/pokkum.lock` and two builds — but the row asks "does Pokkum produce the same image twice", and answering it with a first-run-only quirk would misreport steady-state behaviour as the general case. So the benchmark warms past it and says so here rather than quietly getting a nicer number.
+- **Don't read the `revision` annotation across a commit.** Pokkum stamps the surrounding repository's git commit into `org.opencontainers.image.revision`, so two builds straddling a commit differ for that reason alone. That is correct behaviour. The two measured builds run back to back, so it cannot affect them — but it will bite you if you compare builds by hand across a `git commit`.
 - **Cold-start time is not measured.** It varies more with your host than with the image, and a number that noisy would be worse than no number.
 
 ## Running it against your own app
