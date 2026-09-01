@@ -5,6 +5,50 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-01 — `pokkum config validate` reported a config valid that `pokkum deploy` then refused, because it validated each profile's raw block instead of the merged one
+
+**Category:** boundary / validator-consumer disagreement — a cross-field validity rule checked against a fragment, while the consumer reads the composition
+
+**Root cause:** `validateConfigFields` is invoked once for the base config and once per profile, each
+time with that profile's own raw block. That is correct for every field it validated before, because
+each of those is independently valid in isolation: a bad `strategy` is bad whether or not a base
+config also sets one.
+
+A `deploy` block is not like that. Its validity is **cross-field** — the `target` determines whether
+`method`, `application` and `update_image` are legal — and those fields **inherit** from the base
+config through `ApplyProfile`. So a base configuring Dokploy with `update_image: true`, plus a
+profile that switches only `target` and `endpoint` to SwiftWave, merges into a configuration that
+`core.ResolveDeployRequest` refuses (SwiftWave cannot repoint an application) while
+`config validate` reported it valid — each half being fine on its own. The user's fix
+(`update_image: false` in the profile) is not discoverable from a validator that says the file is
+fine.
+
+**How it was caught:** not by any unit test. Every test asserted on a base block or a profile block,
+never on the interaction between them, and all of them passed. It was found by running the real
+built binary against a stub control plane through the documented flow — `config validate` printed
+"is valid", and the very next command failed on the same file. This is the value the repo's
+`paranoid-testing-guide.md` and checklist row 37 already claim for executing documentation rather
+than reading it, showing up again.
+
+**Where:** `cmd/pokkum/config.go`'s `runConfigValidate` and `validateGeneratedConfig`, the per-profile
+`validateConfigFields` call sites.
+
+**Fix:** the deploy block is now validated **merged**, via a new
+`config.MergeDeployConfig(base, profile)`. That function is exported and called by `ApplyProfile`
+itself rather than duplicated in the validator, so there is exactly one implementation of the merge
+and the validator cannot drift from what the build actually resolves — the parallel-path class of
+row 54. Both per-profile call sites (real config and generated config) use it.
+`TestConfigValidateChecksTheMergedDeployBlock` pins it, and asserts first that the base block alone
+is valid, so it cannot pass for the wrong reason; it was proven to fail with the fix reverted.
+
+**Preventative rule:** when a config field's validity depends on ANOTHER field that can be inherited
+or overridden, the validator must run against the same composition the consumer resolves, not
+against the fragment the user typed. Ask, for each new validated field: is this independently valid,
+or does its legality depend on a sibling? If the latter, validate the merged result — and reuse the
+merge function the consumer uses rather than reimplementing it, or the two will disagree exactly
+where it matters. Then check the validator and the consumer agree by executing them back to back on
+one real file, which is the only step that finds this.
+
 ## 2026-09-01 — Two new PaaS integrations both had a "200 means nothing happened" path, and one had a write that silently clears credentials — both found by reading the platforms' source before writing any code
 
 **Category:** boundary / external-contract — an outbound integration where the remote system's success status is not evidence its action occurred, and a "partial update" that is actually a full overwrite

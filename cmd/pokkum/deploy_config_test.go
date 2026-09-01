@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
+	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
@@ -264,3 +265,47 @@ func TestPrimaryTaggedRef(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigValidateChecksTheMergedDeployBlock is the regression guard for a
+// bug an end-to-end run found that every unit test had missed: `pokkum config
+// validate` reported this configuration valid, and `pokkum deploy -P sw` then
+// refused it.
+//
+// A deploy block's validity is cross-field — the target decides whether
+// update_image is legal — and those fields inherit from the base config. The
+// validator checked each profile's RAW block, so a base setting Dokploy with
+// update_image and a profile switching the target to SwiftWave (which cannot
+// honour it) passed validation and failed at deploy time. A validator that
+// accepts what its consumer refuses is the class already logged in Lessons.md
+// for `pokkum init`.
+func TestConfigValidateChecksTheMergedDeployBlock(t *testing.T) {
+	dir := writeConfig(t, `
+version: 1
+deploy:
+  target: dokploy
+  endpoint: http://127.0.0.1:1/panel
+  application: app-42
+  update_image: true
+profiles:
+  sw:
+    deploy:
+      target: swiftwave
+      endpoint: http://127.0.0.1:1/webhook/redeploy-app/app-7/tok
+`)
+	// The base block on its own is valid, so a failure here can only come from
+	// the merged profile — which is the thing under test.
+	if problems := core.ValidateDeployConfig(ports.DeployConfig{
+		Target: "dokploy", Endpoint: "http://127.0.0.1:1/panel",
+		Application: "app-42", UpdateImage: boolPtr(true),
+	}); len(problems) != 0 {
+		t.Fatalf("the base deploy block is itself invalid (%v); this test would pass for the wrong reason", problems)
+	}
+
+	if err := runConfigValidate(discardLogger(), &configValidateOptions{dir: dir}); err == nil {
+		t.Fatal("config validate accepted a profile whose MERGED deploy block the deploy path refuses: " +
+			"update_image inherited from the base config is not supported for swiftwave")
+	}
+}
+
+// boolPtr is a local helper for the pointer-valued config fields.
+func boolPtr(b bool) *bool { return &b }

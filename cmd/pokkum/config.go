@@ -213,7 +213,11 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 			allowSecretPatterns: profile.Security.AllowSecretPatterns,
 			excludeRoutes:       profile.Build.ExcludeRoutes,
 			output:              profile.Output,
-			deploy:              profile.Deploy,
+			// Merged, not raw. A deploy block's validity is cross-field and
+			// its fields inherit from the base config, so validating the
+			// profile's own block alone accepts configurations the deploy
+			// path refuses — see config.MergeDeployConfig.
+			deploy: config.MergeDeployConfig(cfg.Deploy, profile.Deploy),
 		})...)
 	}
 
@@ -349,7 +353,9 @@ func validateGeneratedConfig(cfg *ports.ProjectConfig) []string {
 			allowSecretPatterns: profile.Security.AllowSecretPatterns,
 			excludeRoutes:       profile.Build.ExcludeRoutes,
 			output:              profile.Output,
-			deploy:              profile.Deploy,
+			// Merged, matching runConfigValidate above — the two must not
+			// drift in what they accept.
+			deploy: config.MergeDeployConfig(cfg.Deploy, profile.Deploy),
 		})...)
 	}
 	return problems
