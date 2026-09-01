@@ -125,7 +125,11 @@ If a bug or edge case failure is found during self-review, flag it explicitly, f
 > [!IMPORTANT]
 > A real bug in this codebase (a goroutine leak in a fan-out resolve loop) survived an instruction that told the agent, in prose, to "scan for goroutine leaks." The instruction wasn't wrong, it just wasn't checkable — nothing forced a concrete look at the specific lines where it mattered.
 
-The checklist itself lives in Serena as `mem:self_review_checklist`, not inline here. It's a cross-harness artifact — every agent working this codebase has Serena access, and an edited-in-place shared checklist beats several drifting local copies. **Read `mem:self_review_checklist` before declaring any non-trivial diff complete, and run every row against the actual diff lines** — not from memory of having read it once. If a row doesn't apply, say so explicitly ("N/A: no concurrent dispatch in this diff") rather than skipping it silently.
+The checklist itself lives in Serena as `mem:self_review_checklist`, not inline here. It's a cross-harness artifact — every agent working this codebase has Serena access, and an edited-in-place shared checklist beats several drifting local copies.
+
+**Read `mem:self_review_checklist` before declaring any non-trivial diff complete, and run it in the two passes its own header describes:** an always-on core of 8 rows that apply to every Go diff, then only the rows whose trigger your diff actually matches (its trigger index maps "diff does X" → row numbers). A typical diff matches three to six. Run those against the actual diff lines, not from memory of having read them once. If a row doesn't apply, say so explicitly ("N/A: no concurrent dispatch in this diff") rather than skipping it silently — the explicit N/A is what proves the row was considered rather than skimmed.
+
+The two-pass structure exists because the checklist reached 57 rows, and a table too long to run mechanically gets skimmed — which is the exact failure (a prose instruction that nothing forced a concrete look at) that created this checklist in the first place. When you add a row, add it to the trigger index too, or it will not be reached.
 
 ### 5.2 Commit Discipline
 
