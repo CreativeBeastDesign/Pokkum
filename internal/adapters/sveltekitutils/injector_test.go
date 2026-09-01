@@ -79,37 +79,6 @@ export default {
 	}
 }
 
-func TestPrepareVirtualConfig(t *testing.T) {
-	tempDir := t.TempDir()
-
-	configContent := `import adapter from '@sveltejs/adapter-auto';
-export default {
-	kit: {
-		adapter: adapter()
-	}
-};`
-	if err := os.WriteFile(filepath.Join(tempDir, "svelte.config.js"), []byte(configContent), 0o644); err != nil {
-		t.Fatalf("WriteFile failed: %v", err)
-	}
-
-	opts := DefaultInjectorOptions()
-	res, err := PrepareVirtualConfig(tempDir, opts)
-	if err != nil {
-		t.Fatalf("PrepareVirtualConfig failed: %v", err)
-	}
-
-	if !res.InjectedAdapter {
-		t.Errorf("expected InjectedAdapter = true")
-	}
-	if !res.PinnedVersion {
-		t.Errorf("expected PinnedVersion = true")
-	}
-
-	if _, err := os.Stat(res.VirtualConfigPath); os.IsNotExist(err) {
-		t.Errorf("virtual config file was not created at %s", res.VirtualConfigPath)
-	}
-}
-
 func TestBuildEnv(t *testing.T) {
 	base := []string{"PATH=/usr/bin", "FOO=bar"}
 	env := BuildEnv(base, "1234567890")
@@ -128,31 +97,6 @@ func TestBuildEnv(t *testing.T) {
 	}
 	if envMap["FOO"] != "bar" {
 		t.Errorf("FOO = %q, want %q", envMap["FOO"], "bar")
-	}
-}
-
-func TestTransformConfig_TelemetryInjection(t *testing.T) {
-	input := `import adapter from '@sveltejs/adapter-auto';
-export default {
-	kit: {
-		adapter: adapter()
-	}
-};`
-
-	opts := InjectorOptions{
-		EnableTelemetry: true,
-	}
-
-	transformed, err := TransformConfig(input, opts)
-	if err != nil {
-		t.Fatalf("TransformConfig failed: %v", err)
-	}
-
-	if !strings.Contains(transformed, "tracing: { server: true }") {
-		t.Errorf("expected experimental.tracing flag in transformed config:\n%s", transformed)
-	}
-	if !strings.Contains(transformed, "instrumentation: { server: true }") {
-		t.Errorf("expected experimental.instrumentation flag in transformed config:\n%s", transformed)
 	}
 }
 

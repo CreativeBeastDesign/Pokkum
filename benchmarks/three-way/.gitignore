@@ -6,3 +6,4 @@ app/bun.lock
 app/pokkum.lock
 app/.pokkum/
 results/
+app/.dockerignore.bak

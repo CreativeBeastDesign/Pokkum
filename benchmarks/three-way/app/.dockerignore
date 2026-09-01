@@ -1,0 +1,10 @@
+# Present so BOTH Dockerfile variants get a fair shake: without it, `COPY . .`
+# drags the host's node_modules (built for the host's OS/arch) into the image,
+# which inflates the result for a reason that has nothing to do with the
+# approach being compared. Rigging the naive variant to look worse than it
+# really is would make the whole benchmark worthless.
+node_modules
+.svelte-kit
+build
+.pokkum
+pokkum.lock

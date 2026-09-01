@@ -1,8 +1,10 @@
-**Disclaimer, same as last time**: still mostly vibe-coded, still human-written post (un-edited by anything artificial, and only lightly by me). Formatting by yours truly. Bear with it, or don't.
+**Disclaimer**: unlike my last post, this one was **drafted by Claude** (the same one that wrote most of the feature it's describing), and then edited by me. Last time I said the post itself was human-written and un-edited by any intelligence artificial or otherwise; that was true then and it isn't now, so I'm saying so rather than letting you assume. The tool is still mostly vibe-coded. Formatting still mine, for whatever that's worth.
 
 # I read two PaaS codebases so you don't have to, and found two HTTP 200s that mean "no"
 
-Short version: I taught [Pokkum](https://github.com/creativebeastdesign/pokkum) (my "Ko for SvelteKit" image builder, [previous post here]) to deploy straight to **Dokploy** and **SwiftWave** after it pushes. While doing it I went and read both projects' actual source instead of their docs, and found two things that I think are worth knowing whether or not you ever touch my tool. So this post is 30% "I added a feature" and 70% "here is a footgun in software you might already be running".
+Short version: [Pokkum](https://github.com/creativebeastdesign/pokkum) (my "Ko for SvelteKit" image builder, [previous post here]) can now deploy straight to **Dokploy** and **SwiftWave** after it pushes. Building it involved reading both projects' actual source rather than their docs, which turned up two things worth knowing whether or not you ever touch my tool. So this post is 30% "I added a feature" and 70% "here is a footgun in software you might already be running".
+
+Both findings are checkable in about twenty minutes each and I've named the files, so please do go and verify rather than taking my word — or Claude's.
 
 # Gotcha 1: SwiftWave's redeploy webhook says 200 OK when it has decided to do nothing
 
@@ -33,7 +35,7 @@ So:
 
 There is no "just change the image" call. If your registry is private, the next pull fails, and the thing that broke it was an endpoint whose name says nothing about credentials.
 
-Again — not really a *bug*, it's a full-resource update and it's honest about being one if you read the handler. But "saveDockerProvider" reads like a targeted setter, and the docs don't mention it. I only found it because I went looking for whether it was a PATCH or a PUT.
+Again — not really a *bug*, it's a full-resource update and it's honest about being one if you read the handler. But "saveDockerProvider" reads like a targeted setter, and the docs don't mention it. It only turned up because the question "is this a PATCH or a PUT?" got asked before the code got written, which in hindsight is a question worth asking of every remote update endpoint.
 
 (So in Pokkum that whole feature is **off by default**, and when you turn it on you tell it where the registry credentials live, as env var names. If you don't, it still works — fine for a public image — but it warns you loudly that it just cleared them, rather than letting you discover it at 2am.)
 
@@ -78,4 +80,4 @@ It also documents where it's unfair to itself, which felt more useful than prete
 - `curl -fsSL https://raw.githubusercontent.com/CreativeBeastDesign/pokkum/main/install.sh | sh`
 - `npm install -g @pokkum/cli`
 
-If you're running Dokploy or SwiftWave and want to check the above yourself, it's `apps/dokploy/server/api/routers/application.ts` and `swiftwave_service/rest/webhook.go` respectively. Took about twenty minutes each and I'd genuinely recommend it — I'm now slightly suspicious of every webhook I've ever fired.
+If you're running Dokploy or SwiftWave and want to check the above yourself, it's `apps/dokploy/server/api/routers/application.ts` and `swiftwave_service/rest/webhook.go` respectively. Genuinely recommend it — I'm now slightly suspicious of every webhook I've ever fired.

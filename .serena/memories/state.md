@@ -481,8 +481,25 @@ before trusting a claim that predates the commit it cites.
   `otel-bootstrap.ts` into `OutputDir`, threaded via
   `PrepareResult.TelemetryPreloadRelPath`).
 - `internal/adapters/sveltekitutils/injector.go`'s `EnableTelemetry`/
-  `injectExperimentalFlags`/`PrepareVirtualConfig` are DEAD CODE — not part of
-  the real mechanism, do not assume they do anything.
+  `injectExperimentalFlags`/`PrepareVirtualConfig` were DEAD CODE and were
+  DELETED on 2026-09-01, along with `VirtualConfigResult.InjectedTelemetry`
+  (only that path ever set it). Do not reintroduce them: SvelteKit's
+  `kit.experimental.tracing`/`instrumentation` flags are on-disk-config-only
+  with no env/CLI override, which collides with the Zero-Mutation Build
+  Sandbox invariant. The real mechanisms are `PrepareVirtualTelemetryEntry`
+  (exe) and `PrepareLayeredTelemetryBootstrap` (layered), above.
+- **`TransformConfig` is now reachable only from its own tests.**
+  `PrepareVirtualConfig` was its sole production caller, so deleting that left
+  the entire `svelte.config.js` rewrite path — `TransformConfig`,
+  `replaceAdapterImport`, `injectVersionPin`, `replaceImportBinding`,
+  `identAlreadyBound` — exercised by tests and nothing else. The live path is
+  the Vite one (`TransformViteConfig`, `PrepareVirtualViteConfig`,
+  `PrepareVirtualViteConfigPassthrough`). This was NOT deleted in the same
+  pass: retiring it removes a whole documented capability rather than tidying
+  an unused helper, and `Lessons.md`'s 2026-08-21/22 entries treat the two
+  paths as a matched pair whose drift caused real reproducibility bugs. Decide
+  deliberately before removing it — and if it stays, note that tests passing
+  against it prove nothing about production behaviour.
 - Two real, confirmed-by-actually-running limitations:
   `@opentelemetry/auto-instrumentations-node` produces zero spans under Bun's
   runtime (real spans need a user-added `hooks.server.ts` snippet, documented in

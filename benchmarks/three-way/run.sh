@@ -47,6 +47,8 @@ need() {
 }
 need docker "the two Dockerfile variants have to be built by something"
 need pokkum "install it: https://github.com/CreativeBeastDesign/pokkum#installation--setup"
+need npm "the two Dockerfile variants are npm-based"
+need bun "pokkum resolves dependencies through bun"
 
 # An INDEPENDENT scanner, deliberately. Pokkum ships its own (`pokkum scan`),
 # and a comparison Pokkum wins using Pokkum's own scanner is worth nothing.
@@ -111,6 +113,23 @@ os_packages() {
 }
 
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+
+# ---------------------------------------------------------------------------
+# Lockfiles. The two Dockerfile variants are npm-based and the tuned one uses
+# `npm ci`, which requires a package-lock.json; Pokkum resolves through bun and
+# wants a bun.lock. Both are generated from the SAME package.json, so this is
+# each ecosystem's resolution of one dependency set, not two different sets.
+# Generated rather than committed so the comparison always reflects what those
+# tools do today.
+# ---------------------------------------------------------------------------
+if [ ! -f app/package-lock.json ]; then
+  log "Generating package-lock.json (needed by npm ci in the tuned variant)"
+  ( cd app && npm install --package-lock-only --silent >/dev/null )
+fi
+if [ ! -f app/bun.lock ] && [ ! -f app/bun.lockb ]; then
+  log "Generating bun.lock (needed by pokkum)"
+  ( cd app && bun install --silent >/dev/null )
+fi
 
 # ---------------------------------------------------------------------------
 # Build 1 & 2 — the Dockerfiles
