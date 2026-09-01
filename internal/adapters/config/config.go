@@ -304,6 +304,48 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 		merged.OTel.Metrics = &val
 	}
 
+	// Deploy overrides. ApplyProfile is hand-written per field, so every new
+	// DeployConfig field needs a line here or `--profile <name>` parses it,
+	// validates it, and then discards it (self-review checklist row 10).
+	if profile.Deploy.Target != "" {
+		merged.Deploy.Target = profile.Deploy.Target
+	}
+	if profile.Deploy.Method != "" {
+		merged.Deploy.Method = profile.Deploy.Method
+	}
+	if profile.Deploy.Endpoint != "" {
+		merged.Deploy.Endpoint = profile.Deploy.Endpoint
+	}
+	if profile.Deploy.EndpointEnv != "" {
+		merged.Deploy.EndpointEnv = profile.Deploy.EndpointEnv
+	}
+	if profile.Deploy.Application != "" {
+		merged.Deploy.Application = profile.Deploy.Application
+	}
+	if profile.Deploy.TokenEnv != "" {
+		merged.Deploy.TokenEnv = profile.Deploy.TokenEnv
+	}
+	if profile.Deploy.Auto != nil {
+		val := *profile.Deploy.Auto
+		merged.Deploy.Auto = &val
+	}
+	if profile.Deploy.UpdateImage != nil {
+		val := *profile.Deploy.UpdateImage
+		merged.Deploy.UpdateImage = &val
+	}
+	if profile.Deploy.RegistryURL != "" {
+		merged.Deploy.RegistryURL = profile.Deploy.RegistryURL
+	}
+	if profile.Deploy.RegistryUsernameEnv != "" {
+		merged.Deploy.RegistryUsernameEnv = profile.Deploy.RegistryUsernameEnv
+	}
+	if profile.Deploy.RegistryPasswordEnv != "" {
+		merged.Deploy.RegistryPasswordEnv = profile.Deploy.RegistryPasswordEnv
+	}
+	if profile.Deploy.Timeout != "" {
+		merged.Deploy.Timeout = profile.Deploy.Timeout
+	}
+
 	return merged, nil
 }
 
@@ -442,6 +484,15 @@ func deepCopyProjectConfig(src *ports.ProjectConfig) *ports.ProjectConfig {
 	if src.OTel.Metrics != nil {
 		v := *src.OTel.Metrics
 		dst.OTel.Metrics = &v
+	}
+
+	if src.Deploy.Auto != nil {
+		v := *src.Deploy.Auto
+		dst.Deploy.Auto = &v
+	}
+	if src.Deploy.UpdateImage != nil {
+		v := *src.Deploy.UpdateImage
+		dst.Deploy.UpdateImage = &v
 	}
 
 	if src.Profiles != nil {

@@ -96,6 +96,91 @@ type CacheConfig struct {
 	KeylessIssuer   string `yaml:"keyless_issuer,omitempty" json:"keyless_issuer,omitempty"`
 }
 
+// DeployConfig points a build at a PaaS control plane, so that a successful
+// push can hand the image straight to Dokploy or SwiftWave instead of the
+// operator wiring a separate CI step.
+//
+// The token is deliberately absent. TokenEnv names an environment variable to
+// read the credential from at deploy time; there is no field that holds the
+// secret itself, because .pokkum.yaml is a committed file and Pokkum's own
+// secretguard exists to stop exactly this. A config that tried to carry the
+// token would be a credential in source control recommended by the tool that
+// scans for credentials in source control.
+type DeployConfig struct {
+	// Target is the platform: "dokploy" or "swiftwave". Empty disables
+	// deployment entirely, and is the default.
+	Target string `yaml:"target,omitempty" json:"target,omitempty"`
+
+	// Method is "api" or "webhook". Empty means the target's default
+	// (core.DefaultDeployMethod), which is "api" for Dokploy and "webhook"
+	// for SwiftWave.
+	Method string `yaml:"method,omitempty" json:"method,omitempty"`
+
+	// Endpoint is the panel's base URL for method "api", or the complete
+	// per-application webhook URL for method "webhook".
+	//
+	// A webhook URL contains its own secret, so it belongs in EndpointEnv
+	// rather than here; both are accepted and EndpointEnv wins, so that the
+	// committed file can stay secret-free.
+	Endpoint string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+
+	// EndpointEnv names an environment variable holding Endpoint. Takes
+	// precedence over Endpoint when the variable is set and non-empty.
+	EndpointEnv string `yaml:"endpoint_env,omitempty" json:"endpoint_env,omitempty"`
+
+	// Application is the platform-side application id. Required for method
+	// "api"; ignored for "webhook", where the id is already in the URL.
+	Application string `yaml:"application,omitempty" json:"application,omitempty"`
+
+	// TokenEnv names the environment variable holding the API credential.
+	// Empty means core.DefaultDeployTokenEnv ("POKKUM_DEPLOY_TOKEN").
+	TokenEnv string `yaml:"token_env,omitempty" json:"token_env,omitempty"`
+
+	// Auto controls whether a successful `pokkum build` deploys on its own.
+	// Nil means true whenever Target is set: configuring a target is the
+	// opt-in. Set false to keep the config but require an explicit
+	// `pokkum deploy`.
+	//
+	// Auto-deploy never fires for a dry run, a non-push output mode, or a
+	// build that failed — see core.ShouldAutoDeploy.
+	Auto *bool `yaml:"auto,omitempty" json:"auto,omitempty"`
+
+	// UpdateImage repoints the application at the exact digest just pushed
+	// before triggering the rollout, instead of redeploying whatever reference
+	// the platform already holds. Nil means false.
+	//
+	// Only Dokploy's API supports it; core rejects it elsewhere rather than
+	// accepting the field and silently ignoring it.
+	//
+	// It defaults OFF because of how Dokploy implements it. Its
+	// application.saveDockerProvider endpoint is a full overwrite, not a
+	// patch: the handler writes dockerImage, username, password AND
+	// registryUrl from the request on every call, and its input schema marks
+	// all of them required — so a request that omits the credentials is
+	// rejected, and one that sends nulls CLEARS the registry credentials the
+	// application uses to pull. Enabling update_image without setting
+	// RegistryUsernameEnv/RegistryPasswordEnv is therefore only safe for an
+	// image a public pull can reach.
+	UpdateImage *bool `yaml:"update_image,omitempty" json:"update_image,omitempty"`
+
+	// RegistryURL, RegistryUsernameEnv and RegistryPasswordEnv carry the
+	// credentials the platform needs to pull the image, for targets whose
+	// image-update call rewrites them (see UpdateImage). The username and
+	// password are named indirectly, as environment variables, for the same
+	// reason TokenEnv is.
+	//
+	// Leave all three empty for a publicly pullable image; Pokkum then warns
+	// that any stored credentials are being cleared rather than clearing them
+	// silently.
+	RegistryURL         string `yaml:"registry_url,omitempty" json:"registry_url,omitempty"`
+	RegistryUsernameEnv string `yaml:"registry_username_env,omitempty" json:"registry_username_env,omitempty"`
+	RegistryPasswordEnv string `yaml:"registry_password_env,omitempty" json:"registry_password_env,omitempty"`
+
+	// Timeout bounds the deploy call, as a Go duration string ("60s", "2m").
+	// Empty means ports.DefaultDeployTimeout.
+	Timeout string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
 // OTelConfig holds OpenTelemetry sidecar and tracing options.
 type OTelConfig struct {
 	Sidecar *bool `yaml:"sidecar,omitempty" json:"sidecar,omitempty"`
@@ -122,6 +207,7 @@ type BuildProfile struct {
 	SBOM         SBOMConfig     `yaml:"sbom,omitempty" json:"sbom,omitempty"`
 	Cache        CacheConfig    `yaml:"cache,omitempty" json:"cache,omitempty"`
 	OTel         OTelConfig     `yaml:"otel,omitempty" json:"otel,omitempty"`
+	Deploy       DeployConfig   `yaml:"deploy,omitempty" json:"deploy,omitempty"`
 }
 
 // ProjectConfig represents the root .pokkum.yaml configuration structure.
@@ -142,6 +228,7 @@ type ProjectConfig struct {
 	SBOM         SBOMConfig              `yaml:"sbom,omitempty" json:"sbom,omitempty"`
 	Cache        CacheConfig             `yaml:"cache,omitempty" json:"cache,omitempty"`
 	OTel         OTelConfig              `yaml:"otel,omitempty" json:"otel,omitempty"`
+	Deploy       DeployConfig            `yaml:"deploy,omitempty" json:"deploy,omitempty"`
 	Profiles     map[string]BuildProfile `yaml:"profiles,omitempty" json:"profiles,omitempty"`
 }
 

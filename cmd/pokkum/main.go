@@ -190,6 +190,7 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 	rootCmd.AddCommand(newBaseCommand(ctx, logger))
 	rootCmd.AddCommand(newResolveCommand(ctx, logger))
 	rootCmd.AddCommand(newApplyCommand(ctx, logger))
+	rootCmd.AddCommand(newDeployCommand(ctx, logger))
 	rootCmd.AddCommand(newDoctorCommand(ctx, logger))
 	rootCmd.AddCommand(newInitCommand(ctx, logger))
 	rootCmd.AddCommand(newConfigCommand(ctx, logger))
