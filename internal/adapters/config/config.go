@@ -304,6 +304,8 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 		merged.OTel.Metrics = &val
 	}
 
+	merged.Deploy = MergeDeployConfig(merged.Deploy, profile.Deploy)
+
 	return merged, nil
 }
 
@@ -362,6 +364,70 @@ func (m *Manager) GenerateDefault(opts ports.InitConfigOptions) *ports.ProjectCo
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// MergeDeployConfig applies a profile's deploy block over a base one and
+// returns the result.
+//
+// It is exported and called by ApplyProfile rather than inlined into it
+// because `pokkum config validate` needs the SAME merge: a deploy block's
+// validity is cross-field — the target decides whether the method,
+// application and update_image settings are legal — and those fields inherit
+// from the base config. Validating a profile's raw block in isolation
+// therefore accepts configurations the deploy path then refuses (a base with
+// `update_image: true` for Dokploy, plus a profile that switches the target to
+// SwiftWave, which cannot honour it). Two implementations of this merge would
+// drift, and the drift would land exactly in the gap between what validation
+// accepts and what deploy does — so there is one.
+//
+// Like the rest of ApplyProfile this is hand-written per field: a new
+// DeployConfig field needs a line here, or `--profile <name>` parses it,
+// validates it, and then discards it (self-review checklist row 10).
+// cmd/pokkum/deploy_config_test.go walks the struct by reflection and fails
+// naming any field this function forgets.
+func MergeDeployConfig(base, profile ports.DeployConfig) ports.DeployConfig {
+	merged := base
+
+	if profile.Target != "" {
+		merged.Target = profile.Target
+	}
+	if profile.Method != "" {
+		merged.Method = profile.Method
+	}
+	if profile.Endpoint != "" {
+		merged.Endpoint = profile.Endpoint
+	}
+	if profile.EndpointEnv != "" {
+		merged.EndpointEnv = profile.EndpointEnv
+	}
+	if profile.Application != "" {
+		merged.Application = profile.Application
+	}
+	if profile.TokenEnv != "" {
+		merged.TokenEnv = profile.TokenEnv
+	}
+	if profile.Auto != nil {
+		val := *profile.Auto
+		merged.Auto = &val
+	}
+	if profile.UpdateImage != nil {
+		val := *profile.UpdateImage
+		merged.UpdateImage = &val
+	}
+	if profile.RegistryURL != "" {
+		merged.RegistryURL = profile.RegistryURL
+	}
+	if profile.RegistryUsernameEnv != "" {
+		merged.RegistryUsernameEnv = profile.RegistryUsernameEnv
+	}
+	if profile.RegistryPasswordEnv != "" {
+		merged.RegistryPasswordEnv = profile.RegistryPasswordEnv
+	}
+	if profile.Timeout != "" {
+		merged.Timeout = profile.Timeout
+	}
+
+	return merged
 }
 
 func deepCopyProjectConfig(src *ports.ProjectConfig) *ports.ProjectConfig {
@@ -442,6 +508,15 @@ func deepCopyProjectConfig(src *ports.ProjectConfig) *ports.ProjectConfig {
 	if src.OTel.Metrics != nil {
 		v := *src.OTel.Metrics
 		dst.OTel.Metrics = &v
+	}
+
+	if src.Deploy.Auto != nil {
+		v := *src.Deploy.Auto
+		dst.Deploy.Auto = &v
+	}
+	if src.Deploy.UpdateImage != nil {
+		v := *src.Deploy.UpdateImage
+		dst.Deploy.UpdateImage = &v
 	}
 
 	if src.Profiles != nil {

@@ -89,18 +89,30 @@ SUPERVISOR_BIN := ./internal/adapters/supervisor/bin
 # staging directory, compressed into $(SUPERVISOR_BIN)/pokkum-init-*.zst, and
 # never left behind: go:embed all:bin must only see .zst (plus .gitkeep) so the
 # pokkum CLI embeds ~4.7 MB instead of ~12 MB of loose ELF bytes.
+# The embedded PID-1 blobs are content-compared against a fresh rebuild by
+# TestEmbeddedPID1Binaries_MatchSource, and CI resolves its toolchain from
+# go.mod (`go-version-file`). A bare `go build` here uses whatever Go the
+# contributor happens to have installed, so regenerating on a newer toolchain
+# than go.mod declares produces blobs that CI then rebuilds differently and
+# rejects — which is how a reproducibility tool ends up with a
+# non-reproducible build of its own embedded binaries. Pin both targets to the
+# version go.mod declares, so `make supervisor static-server` produces the same
+# bytes on every machine. Read from go.mod rather than hardcoded, so a version
+# bump cannot leave this behind.
+GO_PINNED_TOOLCHAIN := go$(shell awk '/^go [0-9]/{print $$2; exit}' go.mod)
+
 supervisor:  ##  Cross-compile + zstd-compress supervisor binaries for Linux amd64/arm64
 	@echo "Building + compressing supervisor binaries..."
 	@mkdir -p $(SUPERVISOR_BIN)
 	@stage=$$(mktemp -d); \
 	for arch in amd64 arm64; do \
-		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build \
+		GOTOOLCHAIN=$(GO_PINNED_TOOLCHAIN) CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build \
 			-trimpath \
 			-buildvcs=false \
 			-ldflags "-s -w" \
 			-o $$stage/pokkum-init-linux-$$arch \
 			./supervisor/cmd/pokkum-init || { rm -rf $$stage; exit 1; }; \
-		go run ./scripts/compress-zstd.go $$stage/pokkum-init-linux-$$arch $(SUPERVISOR_BIN)/pokkum-init-linux-$$arch.zst || { rm -rf $$stage; exit 1; }; \
+		GOTOOLCHAIN=$(GO_PINNED_TOOLCHAIN) go run ./scripts/compress-zstd.go $$stage/pokkum-init-linux-$$arch $(SUPERVISOR_BIN)/pokkum-init-linux-$$arch.zst || { rm -rf $$stage; exit 1; }; \
 	done; \
 	rm -rf $$stage; \
 	rm -f $(SUPERVISOR_BIN)/pokkum-init-linux-amd64 $(SUPERVISOR_BIN)/pokkum-init-linux-arm64
@@ -120,13 +132,13 @@ static-server:  ##  Cross-compile + zstd-compress static server binaries for Lin
 	@mkdir -p $(STATIC_BIN)
 	@stage=$$(mktemp -d); \
 	for arch in amd64 arm64; do \
-		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build \
+		GOTOOLCHAIN=$(GO_PINNED_TOOLCHAIN) CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build \
 			-trimpath \
 			-buildvcs=false \
 			-ldflags "-s -w" \
 			-o $$stage/pokkum-static-linux-$$arch \
 			./supervisor/cmd/pokkum-static || { rm -rf $$stage; exit 1; }; \
-		go run ./scripts/compress-zstd.go $$stage/pokkum-static-linux-$$arch $(STATIC_BIN)/pokkum-static-linux-$$arch.zst || { rm -rf $$stage; exit 1; }; \
+		GOTOOLCHAIN=$(GO_PINNED_TOOLCHAIN) go run ./scripts/compress-zstd.go $$stage/pokkum-static-linux-$$arch $(STATIC_BIN)/pokkum-static-linux-$$arch.zst || { rm -rf $$stage; exit 1; }; \
 	done; \
 	rm -rf $$stage; \
 	rm -f $(STATIC_BIN)/pokkum-static-linux-amd64 $(STATIC_BIN)/pokkum-static-linux-arm64

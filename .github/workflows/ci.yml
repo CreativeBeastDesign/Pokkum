@@ -337,3 +337,267 @@ jobs:
             ./internal/adapters/provenance/... \
             ./internal/adapters/bunexec/... \
             ./supervisor/cmd/pokkum-init/...
+
+  # ---------------------------------------------------------------------------
+  # The two composite actions this repository publishes had never been executed
+  # by anything. `uses: ./` appeared in no workflow, and cmd/pokkum's
+  # actionyml_test.go only ever checked that the flag NAMES action.yml emits
+  # exist on `pokkum build` — a static string comparison, not a run.
+  #
+  # Three real defects were sitting behind that gap, all in the same handful of
+  # lines, and all of them shipped in the released v1.0.6 action:
+  #
+  #   1. `--log-format json` was passed in the separated form, which the CLI's
+  #      pre-parser (cmd/pokkum/main.go's flag()) did not recognise, so logs
+  #      stayed in text format and BOTH outputs came back empty on every run.
+  #   2. `ref` was parsed as the first "ref" key in the log — which is the
+  #      resolved BASE image. A deploy step consuming this action's ref output
+  #      would have deployed gcr.io/distroless/cc-debian12.
+  #   3. `digest` was parsed as the first "digest" key — the startup-attestation
+  #      digest, a bare 64-hex string with no sha256: prefix.
+  #
+  # Defect 1 masked 2 and 3: with text logs nothing matched, so both outputs
+  # were merely empty rather than wrong. Fixing the flag alone would have turned
+  # empty into confidently-wrong. See Lessons.md, 2026-08-23.
+  #
+  # This job builds a real image through the real action and asserts on what
+  # comes back out, because that is the only thing that would have caught any of
+  # the three.
+  github-action-selftest:
+    name: GitHub Action Self-Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod' # see the note on the first setup-go step
+          cache: true
+
+      - name: Build Embedded PID-1 Binaries
+        # pokkum-init and pokkum-static are gitignored, locally-built artifacts
+        # consumed via go:embed. A fresh checkout has only .gitkeep, so without
+        # this step the CLI builds fine but cannot produce a working image.
+        run: make supervisor static-server
+
+      # The action installs a RELEASED CLI when it does not find one on PATH.
+      # That is the right behaviour for a consumer and the wrong one for this
+      # job: a PR that changes `pokkum build` would be validated against the
+      # last release rather than against itself, and a flag this PR renames
+      # would go on passing until the next release broke every user at once.
+      # Putting this tree's binary on PATH first takes the action's
+      # already-installed branch, so the argument assembly below runs against
+      # the CLI in the diff. The install path itself is covered by the
+      # setup-pokkum job that follows.
+      - name: Build This Tree's CLI onto PATH
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          go build -o "$HOME/.local/bin/pokkum" ./cmd/pokkum
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Built out of a copy, never in testdata/. A build writes .svelte-kit/ and
+      # build/ into its project directory, and a fixture directory shared across
+      # packages must not be mutated by anything (Lessons.md, 2026-08-19).
+      - name: Stage a Fixture Project
+        run: |
+          set -euo pipefail
+          cp -R testdata/fixtures/sveltekit-adapter-node "$RUNNER_TEMP/app"
+          (cd "$RUNNER_TEMP/app" && bun install --frozen-lockfile)
+
+      # output: tarball is what makes this runnable on a PR at all — it
+      # exercises the whole pipeline (resolve base, build, package, index, SBOM,
+      # publish) and produces a real digest, with no registry and no
+      # credentials. `push` would need a secret no fork PR can have; `dry-run`
+      # publishes nothing and so cannot check the outputs, which is where every
+      # one of the three defects lived.
+      - name: Run the Action (tarball output)
+        id: action
+        uses: ./
+        with:
+          project-dir: ${{ runner.temp }}/app
+          repo: ghcr.io/creativebeastdesign/pokkum-action-selftest
+          tags: latest,selftest
+          platforms: linux/amd64
+          output: tarball
+          tarball-path: ${{ runner.temp }}/image.tar
+
+      - name: Assert the Action's Outputs
+        if: ${{ !cancelled() }}
+        env:
+          REF: ${{ steps.action.outputs.ref }}
+          DIGEST: ${{ steps.action.outputs.digest }}
+          REPO_INPUT: ghcr.io/creativebeastdesign/pokkum-action-selftest
+        run: |
+          set -euo pipefail
+
+          fail=0
+          note() { echo "::error::action self-test: $1"; fail=1; }
+
+          echo "ref=$REF"
+          echo "digest=$DIGEST"
+
+          # Defect 1: both outputs were empty on every real run.
+          [ -n "$REF" ]    || note "the 'ref' output is empty; the build published an image, so it must carry one"
+          [ -n "$DIGEST" ] || note "the 'digest' output is empty; the build published an image, so it must carry one"
+
+          # Defect 3: the attestation digest is a bare 64-hex string. Requiring
+          # the algorithm prefix is what distinguishes the two.
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) note "the 'digest' output '$DIGEST' is not a sha256:-prefixed digest — this is the shape the startup-attestation digest has, i.e. the wrong value was picked out" ;;
+          esac
+          echo "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$' \
+            || note "the 'digest' output '$DIGEST' is not a well-formed sha256 digest"
+
+          # Defect 2: `ref` used to be the resolved base image. Asserting it
+          # merely "looks like a ref" would have passed on distroless, so this
+          # asserts the repository is the one that was ASKED for.
+          echo "$REF" | grep -Eq "^${REPO_INPUT}@sha256:[0-9a-f]{64}$" \
+            || note "the 'ref' output '$REF' is not '${REPO_INPUT}@sha256:...' — if it names a base image (gcr.io/distroless/...), the output is being read off the wrong log line"
+
+          # The two outputs describe one image and must agree.
+          [ "${REF#*@}" = "$DIGEST" ] \
+            || note "'ref' and 'digest' disagree: ref carries '${REF#*@}' but digest is '$DIGEST'"
+
+          # And an artifact actually exists, so none of the above can be
+          # satisfied by a build that reported success and wrote nothing.
+          if [ ! -s "${RUNNER_TEMP}/image.tar" ]; then
+            note "no tarball at ${RUNNER_TEMP}/image.tar, or it is empty — the action reported success without producing an image"
+          else
+            echo "tarball: $(stat -c%s "${RUNNER_TEMP}/image.tar") bytes"
+          fi
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "action outputs verified: $REF"
+
+  # Deliberately a separate job from the one above, on a runner with no Go
+  # toolchain and no pokkum on PATH. That is the point: the job above puts this
+  # tree's binary on PATH, which takes the action's already-installed
+  # short-circuit and leaves the entire install path — the OS guard, the version
+  # resolution, install.sh's download and SHA-256 verification — unexecuted.
+  #
+  # Passing no `version` input is also deliberate. It exercises the resolution
+  # branch that replaced the old hardcoded 'v1.0.6' default: with `uses: ./`
+  # there is no action ref to match, so it must fall through to `latest` rather
+  # than installing nothing or failing. mem:self_review_checklist row 27(a) — a
+  # new branch has to be observed executing, not merely read.
+  #
+  # dry-run keeps this cheap (~20s, no compile, no base image layers) and gives
+  # the complementary output assertion: in a mode that publishes nothing, `ref`
+  # and `digest` must be EMPTY rather than stale or fabricated. That is what
+  # stops a future "fix" from defaulting them to the base image the way the
+  # original log-scraping parser did.
+  github-action-install-selftest:
+    name: GitHub Action Install-Path Self-Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Confirm the Runner Has No Pokkum
+        # Without this the job could silently degrade into a re-run of the
+        # already-installed path if some future step (or a cached tool) put a
+        # pokkum on PATH first, and the install coverage would vanish with the
+        # job still green.
+        run: |
+          set -euo pipefail
+          if command -v pokkum >/dev/null 2>&1; then
+            echo "::error::this job must start with no pokkum on PATH, but found $(command -v pokkum) — it is the only coverage of the install path"
+            exit 1
+          fi
+          echo "no pokkum on PATH, as required"
+
+      - name: Run the Action With No Version Input (installs, then dry-runs)
+        id: dryrun
+        uses: ./
+        with:
+          project-dir: testdata/fixtures/sveltekit-adapter-node
+          repo: ghcr.io/creativebeastdesign/pokkum-action-selftest
+          platforms: linux/amd64
+          dry-run: 'true'
+
+      - name: Assert the CLI Was Installed and Nothing Was Published
+        if: ${{ !cancelled() }}
+        env:
+          REF: ${{ steps.dryrun.outputs.ref }}
+          DIGEST: ${{ steps.dryrun.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          # `command -v` rather than trusting the step's exit status: the
+          # sibling setup-pokkum action once reported a successful install
+          # while downloading nothing at all.
+          command -v pokkum >/dev/null 2>&1 \
+            || { echo "::error::the action completed but pokkum is not on PATH — nothing was installed"; exit 1; }
+          echo "installed: $(pokkum --version 2>&1 | head -n 1)"
+
+          if [ -n "$REF" ] || [ -n "$DIGEST" ]; then
+            echo "::error::dry-run published nothing but reported ref='$REF' digest='$DIGEST'; these outputs must be empty when no image is published"
+            exit 1
+          fi
+          echo "dry-run correctly reported no image"
+
+  # Separate job, and deliberately on a clean runner with no pokkum on PATH:
+  # this is the only coverage of the DOWNLOAD path — install.sh resolving a
+  # release, verifying its SHA-256 against checksums.txt, and putting a working
+  # binary on PATH. That step once created an empty directory, added it to PATH
+  # and printed "installed successfully" without downloading anything, so every
+  # workflow following the README got a green install step and then failed at
+  # `pokkum: command not found`.
+  setup-action-selftest:
+    name: setup-pokkum Action Self-Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Install a Released CLI via the Action
+        id: setup
+        uses: ./.github/actions/setup-pokkum
+        with:
+          # Pinned rather than 'latest' on purpose. What is under test here is
+          # the download-verify-install mechanism, not release resolution, and
+          # 'latest' would make this job depend on an unauthenticated
+          # api.github.com call that shares a rate limit with every other
+          # runner. Old releases do not disappear, so a fixed point cannot rot.
+          version: v1.0.6
+
+      - name: Assert the CLI Is Really on PATH
+        if: ${{ !cancelled() }}
+        env:
+          REPORTED: ${{ steps.setup.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # `command -v` rather than trusting the step's own success: the
+          # original bug was a step that succeeded while installing nothing.
+          command -v pokkum >/dev/null 2>&1 \
+            || { echo "::error::setup-pokkum reported success but pokkum is not on PATH"; exit 1; }
+
+          installed="$(pokkum --version 2>&1 | head -n 1)"
+          echo "installed: $installed"
+          echo "reported:  $REPORTED"
+
+          [ -n "$REPORTED" ] \
+            || { echo "::error::setup-pokkum's 'version' output is empty"; exit 1; }
+
+          # The binary must actually run, not merely exist and be executable.
+          pokkum --help >/dev/null 2>&1 \
+            || { echo "::error::pokkum is on PATH but 'pokkum --help' failed"; exit 1; }
+
+          case "$installed" in
+            *1.0.6*) ;;
+            *) echo "::error::asked for v1.0.6 but the installed binary reports '$installed' — the version input is not reaching install.sh"; exit 1 ;;
+          esac

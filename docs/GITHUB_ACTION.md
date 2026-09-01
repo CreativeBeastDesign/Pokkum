@@ -9,7 +9,7 @@ The official **Pokkum GitHub Action** (`CreativeBeastDesign/pokkum`) enables fas
 
 ## Quickstart
 
-Add `CreativeBeastDesign/pokkum@v1.0.6` to your repository's `.github/workflows/deploy.yml`:
+Add `CreativeBeastDesign/pokkum@v1` to your repository's `.github/workflows/deploy.yml`:
 
 ```yaml
 name: Build & Publish Container
@@ -39,7 +39,7 @@ jobs:
 
       - name: Build & Push Container with Pokkum
         id: pokkum
-        uses: CreativeBeastDesign/pokkum@v1.0.6
+        uses: CreativeBeastDesign/pokkum@v1
         with:
           repo: ghcr.io/${{ github.repository }}
           platforms: linux/amd64,linux/arm64
@@ -51,6 +51,11 @@ jobs:
 ```
 
 This pushes `ghcr.io/<owner>/<repo>:latest` and exposes the immutable, digest-pinned `ref` output. Prefer that output over a tag for deployments: it cannot drift.
+
+> [!IMPORTANT]
+> **Linux and macOS runners only** (`ubuntu-latest`, `macos-latest`). Released pokkum binaries cover darwin and linux; the action fails fast with an explicit message on a Windows runner rather than part-way through the installer.
+>
+> `@v1` tracks the latest v1.x release. Pin a full version instead if you need the action and its CLI frozen.
 
 ---
 
@@ -67,7 +72,7 @@ This pushes `ghcr.io/<owner>/<repo>:latest` and exposes the immutable, digest-pi
 | `dry-run` | Resolve and validate the build without publishing anything (`--dry-run`). | `false` | No |
 | `print-manifest` | Print the generated Kubernetes manifest after build (`--print-manifest`). | `false` | No |
 | `log-level` | Logging level: `debug`, `info`, `warn`, `error`. | `info` | No |
-| `version` | Pokkum CLI version to install (e.g. `v1.0.1` or `latest`). | `v1.0.1` | No |
+| `version` | Pokkum CLI version to install (e.g. `v1.0.6`), or `latest` for the newest release. Leave unset to install the CLI matching the action ref you pinned — `@v1.0.6` installs CLI v1.0.6. A ref that is not a full version (a moving tag like `@v1`, a branch, a commit SHA) has nothing to match and falls back to `latest`. | `""` (match the action ref) | No |
 
 ### Tagging
 
@@ -88,7 +93,10 @@ outputs (`repo@sha256:...`), which are immutable.
 | `ref` | Primary, immutable image reference with digest. | `ghcr.io/acme/app@sha256:1111111...` |
 | `digest` | SHA256 digest of the published image manifest or index. | `sha256:1111111...` |
 
-Both outputs are populated by parsing the CLI's own structured `published` log line (captured with `--log-format json`) and are empty for `dry-run` or `print-manifest` runs, since those modes stop before anything is published.
+Both outputs are read from the CLI's stdout, which carries exactly one line in a normal build — the published `repo@sha256:...` reference — with all progress and diagnostics on stderr. They are empty for `dry-run` and `print-manifest` runs, since those modes stop before anything is published; check for a non-empty `ref` before feeding it to a deploy step.
+
+> [!NOTE]
+> In `v1.0.6` and earlier both outputs were parsed out of the build **log** rather than stdout, and always came back empty. If you are pinned to one of those and consuming `outputs.ref`, upgrade — those versions cannot populate it.
 
 ---
 
@@ -143,7 +151,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Verify Build & Preview Manifest
-        uses: CreativeBeastDesign/pokkum@v1.0.6
+        uses: CreativeBeastDesign/pokkum@v1
         with:
           repo: ghcr.io/${{ github.repository }}
           dry-run: "true"
@@ -157,7 +165,7 @@ Use `steps.pokkum.outputs.ref` directly in your deployment pipeline to update Ku
 ```yaml
       - name: Build & Push
         id: pokkum
-        uses: CreativeBeastDesign/pokkum@v1.0.6
+        uses: CreativeBeastDesign/pokkum@v1
         with:
           repo: ghcr.io/${{ github.repository }}
 
@@ -173,7 +181,7 @@ Use `output: tarball` for workflows that need the image artifact without pushing
 
 ```yaml
       - name: Build to OCI Tarball
-        uses: CreativeBeastDesign/pokkum@v1.0.6
+        uses: CreativeBeastDesign/pokkum@v1
         with:
           project-dir: .
           output: tarball
@@ -195,7 +203,7 @@ Pokkum automatically derives `SOURCE_DATE_EPOCH` from the last git commit timest
         with:
           fetch-depth: 0 # Ensure git history is available for SOURCE_DATE_EPOCH derivation
 
-      - uses: CreativeBeastDesign/pokkum@v1.0.6
+      - uses: CreativeBeastDesign/pokkum@v1
         with:
           repo: ghcr.io/${{ github.repository }}
 ```

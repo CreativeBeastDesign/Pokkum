@@ -177,6 +177,19 @@ Runs the project's own dev server directly on the host, skipping image construct
 - Implementation:
   - [cmd/pokkum/dev.go](../cmd/pokkum/dev.go)
 
+### [pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md)
+
+Hands a pushed image straight to a self-hosted PaaS control plane, so a `deploy:` block in `.pokkum.yaml` replaces a hand-written CI deploy step.
+
+- Flags: `--no-deploy`, `--image`
+- Implementation:
+  - [cmd/pokkum/deploy.go](../cmd/pokkum/deploy.go)
+  - [internal/core/deploy.go](../internal/core/deploy.go)
+  - [internal/ports/deploy.go](../internal/ports/deploy.go)
+  - [internal/adapters/deploy/deploy.go](../internal/adapters/deploy/deploy.go)
+  - [internal/adapters/deploy/dokploy.go](../internal/adapters/deploy/dokploy.go)
+  - [internal/adapters/deploy/swiftwave.go](../internal/adapters/deploy/swiftwave.go)
+
 ### [pokkum upgrade](items/signed-self-update.md)
 
 Checks for new releases and verifies the release binary's checksum signature via Cosign before self-replacing.
@@ -457,6 +470,7 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 ### Build & Packaging
 
 - Images whose only output is a local tarball carry no annotations at all, so this path cannot help them — see [Tarball output silently drops every OCI annotation](items/tarball-output-drops-annotations.md). ([pokkum verify doesn't reproduce the asset-overlay layer](items/asset-overlay-verify-gap.md))
+- Breaking: base.name moves from the pinned digest form back to the upstream tag for builds that had a lockfile, so every image digest changes once. `pokkum verify` against an image built before this change correctly reports a mismatch. ([base.name annotation varied with local build state](items/base-name-annotation-varied-with-build-state.md))
 - The fix was itself silently undermined until 81a6fb6: Go's default -buildvcs stamping made the pokkum-init/pokkum-static binaries' own content change every commit regardless of the tar-timestamp pin, so the two layers containing them kept churning anyway — the same failure class (build metadata leaking into a content-addressed artifact) as the first bug, a second independent source of it in the identical layers. Closed with -buildvcs=false on both embedded-binary build targets; the main CLI build deliberately keeps VCS stamping since it wants version reporting. ([Bun/supervisor layer diffID stability, pinned twice](items/bun-layer-diffid-stability.md))
 - This was a real bug, not a missing assertion: writing the stability test found the diffID derived its tar timestamp from SOURCE_DATE_EPOCH, which changes every commit, actively inverting what was supposed to be the single biggest fleet-wide size lever (fixed 1675d4c). ([Bun/supervisor layer diffID stability, pinned twice](items/bun-layer-diffid-stability.md))
 - PB-2's first-contact gap is a stated, permanent limitation, not an open TODO: the very first resolve of a genuinely new, unlisted (version, target) on a fresh cache has no independent trust anchor beyond the GPG-signed manifest itself — GitHub's Releases API shares the same trust root as the download host and exposes no per-asset digests, so it adds no real signal. Re-running scripts/pin-bun-checksums periodically narrows this; nothing closes it fully. ([Bun release checksum verification](items/bun-release-integrity.md))
@@ -504,6 +518,10 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - SBOM, signature and attestation attachment still happen only for a registry push: they are separate manifests keyed to a pushed digest, and the layout carries the image alone. A layout build reports itself as unsigned rather than silently claiming otherwise. ([--to-oci-layout for daemonless cluster loading](items/oci-layout-dev-output.md))
 - `--asset-overlay` auto-discovery still requires a registry push. The layout preserves the `pokkum.dev/predecessor` annotation, but walking a lineage backwards means fetching predecessors, which a directory on disk cannot serve. ([--to-oci-layout for daemonless cluster loading](items/oci-layout-dev-output.md))
 - `docker load` does not accept an OCI image layout, so this mode does not replace `--tarball` — anyone piping into Docker still needs the docker-save format, which is exactly why the lossy mode was kept alongside rather than fixed in place. ([--to-oci-layout for daemonless cluster loading](items/oci-layout-dev-output.md))
+- Only a registry push deploys. `--local`, `--tarball` and `--to-oci-layout` leave nothing a remote PaaS can pull, so auto-deploy is skipped with a warning naming the output mode. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
+- SwiftWave cannot be repointed at a new image reference: both its webhook and its `rebuildApplication` mutation rebuild the application's current deployment, so the application must be pinned to a mutable tag that Pokkum republishes. `update_image` is rejected for that target rather than silently ignored. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
+- The two platform contracts were verified against Dokploy's and SwiftWave's own source rather than their prose docs, but they are third-party APIs and can drift; the adapters fail closed on any response they cannot positively identify as a started rollout. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
+- Vercel and other edge/serverless platforms remain out of scope — they do not run OCI images, which is the existing non-goal stated in README.md. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
 
 ### Kubernetes & Operations
 

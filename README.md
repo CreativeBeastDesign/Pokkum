@@ -6,13 +6,37 @@
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**Pokkum** is a zero-dependency OCI container image compiler for SvelteKit applications. In a single command, Pokkum compiles your SvelteKit app into a zero-daemon, multi-layer cached OCI container image (the exact layer set and count depend on the strategy and what a given build actually produces — run `pokkum explain` for the real breakdown) complete with SBOMs, an opt-in OpenTelemetry SDK bootstrap, SLSA provenance, and hardened Kubernetes deployment manifests.
+Containerising a SvelteKit app usually means writing a Dockerfile you then own forever: a multi-stage build, a `node:22-alpine` base with a package manager and a shell in it, `npm ci` at image-build time, and a fresh crop of CVEs every time you rebuild. Then you write a second one, slightly differently, for the next project.
 
-**A signing key is required to actually get a signed image.** `--sign` defaults on and generates a real SLSA statement either way, but Pokkum only produces a cryptographic Cosign signature and DSSE attestation — and self-verifies them against the registry before reporting success — when you configure `--signing-key`/`POKKUM_SIGNING_KEY`. Without a key, a signing-enabled build pushes **unsigned**, with a loud warning; pass `--require-signed` to make that a hard failure instead of a warning. The SLSA-3 badge above describes what the pipeline is capable of producing, not an unconditional guarantee for every build — see [Vocabulary.md](Vocabulary.md) for the flag reference.
+Pokkum replaces that file with a command:
 
-Think of it as `ko` for SvelteKit: zero Dockerfile, zero Docker daemon required, and bit-for-bit reproducible builds out of the box.
+```bash
+pokkum adopt .                              # converts an existing SvelteKit project
+POKKUM_DOCKER_REPO=ghcr.io/you/app \
+  pokkum build .
+```
 
-**One caveat on reproducibility, in the same spirit as the signing note above.** SvelteKit's `kit.version.name` defaults to `Date.now()`. It lands in `_app/version.json` and feeds every hashed client chunk name, so two builds of identical source produce different files and different layers. Pokkum pins it for you wherever it authors your Vite config — which is most projects. Where it cannot, because your build script does more than `vite build` and taking it over would skip the rest, the build warns that the image is **not** bit-for-bit reproducible and names the one line that fixes it, rather than shipping a non-reproducible image quietly.
+No Dockerfile. No Docker daemon. The output is a distroless multi-arch OCI image with no shell and no package manager in it, an SBOM, SLSA provenance, and — because every timestamp derives from `SOURCE_DATE_EPOCH` rather than the clock — the same bytes every time you build the same commit.
+
+**See it for yourself:** [`benchmarks/three-way`](benchmarks/three-way) builds one identical SvelteKit app three ways — a typical hand-written Dockerfile, a tuned multi-stage one, and Pokkum — then prints image size, package count, CVE count, and whether two consecutive builds produce identical digests. It runs on your machine, against your registry, and you can read every line of it.
+
+### Why you might want this
+
+- **Nothing to exploit in the runtime layer.** Distroless by default; `--strategy=static` drops even the JS runtime for a small Go file server, which for a static site means nothing left to CVE-scan.
+- **Reproducible, and checkable.** `pokkum verify` rebuilds from source and compares against what is actually in your registry, at three levels: manifest digest, layer diffIDs, and file-level diffs. It tells you *where* two images differ, not just *that* they do.
+- **Supply chain, if you need it.** SLSA v1.0 provenance, Cosign/DSSE signing, SBOMs via the OCI Referrers API, keyless Sigstore verification of the base image, and hermetic builds with no network egress.
+- **Deploys where you already deploy.** Kubernetes (`pokkum resolve`/`apply`/`rollback`, with hardened `securityContext`, `NetworkPolicy` and probe defaults injected), or straight to a self-hosted PaaS — see [Deploying](#deploying).
+- **Your source tree is never touched.** Adapter and telemetry configuration is staged in `.pokkum/`, never written over your files.
+
+### Honest caveats, up front
+
+Three things are worth knowing before you decide, rather than after:
+
+1. **`--sign` on its own does not produce a signed image.** It generates a real SLSA statement either way, but a Cosign signature and DSSE attestation need a key (`--signing-key` / `POKKUM_SIGNING_KEY`). Without one, a signing-enabled build pushes **unsigned** with a loud warning; `--require-signed` turns that into a hard failure. The SLSA-3 badge describes what the pipeline can produce, not a guarantee for every build.
+2. **Reproducibility has one edge Pokkum cannot always close for you.** SvelteKit's `kit.version.name` defaults to `Date.now()`, which lands in `_app/version.json` and renames every hashed client chunk. Pokkum pins it wherever it authors your Vite config, which covers most projects. Where your build script does more than `vite build` — so taking it over would skip the rest — the build **warns that the image is not bit-for-bit reproducible** and names the one line that fixes it, instead of shipping a non-reproducible image quietly.
+3. **It optimises for verifiability, not for the shortest path to a running container.** The defaults are stricter than `docker build` on purpose, and there is no "build now, verify later" fast path. If time-to-first-deploy is what you are optimising, that is a deliberate trade-off here, not an oversight.
+
+Think of it as [`ko`](https://github.com/ko-build/ko) for SvelteKit.
 
 ---
 
@@ -157,13 +181,48 @@ POKKUM_VERSION=v<version> POKKUM_INSTALL_DIR="$HOME/.local/bin" \
 
 ---
 
-### 4. GitHub Action for CI/CD Pipelines (`.github/workflows/ci.yml`)
+### 4. GitHub Action for CI/CD Pipelines
+
+Build and push straight from a workflow. The action installs the CLI (verifying
+its SHA-256 against the release checksums), builds the image, and hands back the
+immutable digest-pinned reference:
+
+```yaml
+- name: Log in to GitHub Container Registry
+  uses: docker/login-action@v3
+  with:
+    registry: ghcr.io
+    username: ${{ github.actor }}
+    password: ${{ secrets.GITHUB_TOKEN }}
+
+- name: Build & Push SvelteKit Container
+  id: pokkum
+  uses: CreativeBeastDesign/pokkum@v1
+  with:
+    project-dir: ./my-app
+    repo: ghcr.io/${{ github.repository }}
+    platforms: linux/amd64,linux/arm64
+
+- name: Deploy the Exact Image That Was Just Built
+  run: echo "${{ steps.pokkum.outputs.ref }}"
+```
+
+`outputs.ref` is a `repo@sha256:…` reference — prefer it over a tag for
+deployment, since it cannot drift. The job needs `packages: write` to push, and
+`id-token: write` for keyless signing. Linux and macOS runners only.
+
+**[docs/GITHUB_ACTION.md](docs/GITHUB_ACTION.md)** documents every input and
+output, plus ECR/Docker Hub login, multi-arch matrices, and Kubernetes
+deployment.
+
+<details>
+<summary>Just want the CLI on PATH, without the build step?</summary>
+
+Use the installer action directly and drive `pokkum` yourself:
 
 ```yaml
 - name: Setup Pokkum
-  # Pin a released tag. There is no moving `v1` tag — only full versions are
-  # published — so `@v1` cannot resolve. Bump this when you upgrade.
-  uses: CreativeBeastDesign/pokkum/.github/actions/setup-pokkum@v1.0.1
+  uses: CreativeBeastDesign/pokkum/.github/actions/setup-pokkum@v1
   with:
     version: "v<version>" # a released tag; omit for the default, 'latest'
 
@@ -172,6 +231,60 @@ POKKUM_VERSION=v<version> POKKUM_INSTALL_DIR="$HOME/.local/bin" \
     POKKUM_DOCKER_REPO: ghcr.io/${{ github.repository }}
   run: pokkum build ./my-app
 ```
+
+</details>
+
+---
+
+## Deploying
+
+Pokkum's output is an ordinary OCI image in an ordinary registry, so **anything that can run a container from a registry can run it** — Fly.io, Cloud Run, App Runner, Azure Container Apps, DigitalOcean App Platform, Coolify, CapRover, Dokku, plain `docker run`. For those, Pokkum's job ends at the push and the platform pulls as usual.
+
+Two self-hosted PaaS platforms get a first-class integration, so a successful build can deploy itself instead of you wiring up a separate CI step: **Dokploy** and **SwiftWave**.
+
+```yaml
+# .pokkum.yaml
+deploy:
+  target: dokploy
+  endpoint: https://panel.example.com
+  application: <your app id>
+  token_env: DOKPLOY_API_KEY # the NAME of an env var, never the token itself
+```
+
+`pokkum build` now deploys after a successful push. `--no-deploy` skips it for one build, `deploy.auto: false` turns the automatic behaviour off permanently, and `pokkum deploy` runs it on its own — handy for a redeploy or for retrying after a failure. Put a `deploy:` block inside a profile and `-P staging` / `-P production` hit different panels.
+
+**No credential is ever stored in `.pokkum.yaml`.** Every secret is named indirectly, as the name of an environment variable to read at deploy time (`token_env`, `endpoint_env`, `registry_username_env`, `registry_password_env`). A config file is a committed file, and Pokkum ships a scanner whose whole job is stopping secrets from getting committed; it would be a bit rich to then ask you to paste an API key into one.
+
+### Two things that will bite you if nobody says them out loud
+
+Both of these come from how the platforms themselves work, not from Pokkum. They are described here because you cannot discover either one from those platforms' documentation — we found them by reading their source.
+
+**SwiftWave cannot be pointed at a new image, so give it a moving tag.** Both of SwiftWave's routes (its redeploy webhook and its `rebuildApplication` API call) tell it to *redeploy what it already has*. Neither can change *which* image it pulls. So set your SwiftWave application to a tag Pokkum keeps republishing — `:latest`, or `:main` — and the deploy makes it pull that tag again. If you point it at a fixed digest, the deploy will faithfully redeploy that same digest forever. Pokkum refuses `update_image` for SwiftWave rather than accepting the setting and quietly ignoring it.
+
+Related, and the reason Pokkum reads the reply rather than just the status code: **SwiftWave's webhook answers "200 OK" when it has decided to do nothing.** It only rebuilds if the request mentions the image that application is configured with; otherwise it replies `OK - No rebuild` and carries on. Anything checking only the HTTP status would cheerfully report a successful deployment forever. Pokkum treats that reply as a failure and tells you what to check.
+
+**Dokploy's "set the image" call also rewrites your registry login.** Turning on `update_image` lets Pokkum point the application at the exact digest it just pushed, which is the nicer setup — but the Dokploy endpoint that does it overwrites the image *and* the registry username, password and URL in one go. There is no way to change only the image. So if your registry is private, tell Pokkum where the credentials live:
+
+```yaml
+deploy:
+  target: dokploy
+  endpoint: https://panel.example.com
+  application: <your app id>
+  token_env: DOKPLOY_API_KEY
+  update_image: true                   # off by default, precisely because of this
+  registry_url: ghcr.io
+  registry_username_env: GHCR_USER
+  registry_password_env: GHCR_PAT
+```
+
+Leave those out and Dokploy's stored credentials get cleared, which is fine for a public image and quietly fatal for a private one. Pokkum warns loudly when it does it rather than letting you find out at the next pull. This is also why `update_image` is **off** unless you ask for it.
+
+### What is deliberately not supported
+
+- **Vercel, Netlify, and edge runtimes.** They do not run OCI images at all — there is nowhere to hand a digest. That is the same non-goal described under [Scope](#scope-philosophy--telemetry), and `@sveltejs/adapter-vercel` is the right tool if that is your target.
+- **Deploying anything that was not pushed.** `--local`, `--tarball` and `--to-oci-layout` leave the image on your machine, where no remote platform can pull it, so auto-deploy is skipped with a warning naming the mode rather than failing mysteriously.
+
+Full key-by-key reference: [Vocabulary.md §4b](Vocabulary.md).
 
 ---
 

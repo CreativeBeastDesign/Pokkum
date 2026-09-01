@@ -1397,7 +1397,28 @@ type BaseImageInfo struct {
 	Preset BaseImagePreset
 
 	// Ref is the reference as requested, tag or digest.
+	//
+	// It is NOT stable across builds of identical source: the resolver
+	// rebinds it to the lockfile's pinned digest form once pokkum.lock
+	// exists, and to the mirror tag when an escrow mirror is in use. Never
+	// record it in anything that ends up inside the image — use UpstreamRef
+	// or PinnedRef. See the doc on UpstreamRef.
 	Ref string
+
+	// UpstreamRef is the pristine reference naming the base image's true
+	// upstream repository, mirroring ports.BaseImage.UpstreamRef: never
+	// rebound to a mirror or to a locked pinned-digest form.
+	//
+	// It is what goes in org.opencontainers.image.base.name, because that
+	// annotation is part of the image's own bytes and must therefore be
+	// identical for two builds of identical source. Ref is not: recording it
+	// made the FIRST build of a project — before pokkum.lock exists — produce
+	// a different image digest from every build after it, and made a build
+	// through an escrow mirror differ from one without. UpstreamRef is
+	// invariant to both. org.opencontainers.image.base.digest carries the
+	// digest separately and authoritatively, so nothing is lost by keeping
+	// this one human-readable.
+	UpstreamRef string
 
 	// PinnedRef is Ref in digest form, "repo@sha256:…". This is the value to
 	// feed back into a later build to reproduce this one exactly.

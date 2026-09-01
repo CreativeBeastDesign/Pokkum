@@ -5,6 +5,279 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-01 — The first build of any project produced a different image digest from every later build, because a label recorded the base reference *as resolved* rather than an invariant one
+
+**Category:** determinism / build-state leakage — a value that varies with local state (a lockfile's existence, a mirror's use) written into content-addressed bytes
+
+**Root cause:** `imageLabels` set `org.opencontainers.image.base.name` from `BaseImageInfo.Ref`.
+`Ref` is documented as "the reference that was resolved, as supplied (tag or digest)" — and the
+resolver *rebinds* it: to `entry.PinnedRef` (the digest form) once `pokkum.lock` exists, and to
+`entry.MirrorRef` when an escrow mirror is in use. That string is baked into the image config, so it
+changes the config digest, then the manifest digest, then the index digest.
+
+So the FIRST build of a project recorded `gcr.io/distroless/cc-debian12:nonroot` and every build
+after it recorded `gcr.io/distroless/cc-debian12@sha256:9dac…`, for byte-identical source. Two
+colleagues building the same commit, one with an escrow mirror configured, likewise disagreed. The
+codebase already had the right value and said so: `ports.BaseImage.PinnedRef`'s doc comment reads
+"It is what gets recorded in the image labels", and `UpstreamRef`'s reads "never rebound to a mirror
+or a locked pinned-digest form". The code used neither.
+
+**How it was caught:** by `benchmarks/three-way` on its first run against a live Docker daemon —
+built to produce a marketing number, not to find bugs. Its reproducibility row read `no`. Every
+existing test passed, because every one of them exercises a single build; the bug only exists
+*between* two builds in different lockfile states, and nothing was comparing those. Localising it
+took a byte-level diff of two OCI layouts: 34 of 39 blobs identical, every layer and diffID
+identical, one annotation different. Two false starts along the way — an amd64 config compared
+against an arm64 one, and a third build that differed for an unrelated reason because a `git commit`
+landed between runs and moved `image.revision`.
+
+**Where:** `internal/core/pipeline.go`, `imageLabels`.
+
+**Fix:** `baseNameForLabel` prefers `UpstreamRef`, falls back to `PinnedRef`, and returns `""`
+otherwise. `Ref` is not eligible on any path — a fallback chain ending in it would look defensive
+and silently reintroduce the bug for exactly the inputs that caused it.
+`baselabel_internal_test.go` runs the same logical build through all three rebindings (no lockfile,
+lockfile, mirror) and asserts one value; proven to fail with the old line restored, on both the
+lockfile and the mirror case. End-to-end: `rm pokkum.lock` then two builds now produce one digest,
+where they previously produced two. **Breaking** — every image digest moves once.
+
+**Preventative rule:** before writing any value into an image config, label, annotation or other
+content-addressed artifact, ask what it varies with *besides the source*. A field whose doc comment
+says "as supplied", "as resolved", "best effort", or that the code rebinds anywhere, is disqualified
+by that fact alone. Prefer a field explicitly documented as invariant, and when the same struct
+offers both, read the doc comments before picking — this codebase had `UpstreamRef` and `PinnedRef`
+sitting beside `Ref`, each documenting exactly this distinction, and the wrong one was still chosen.
+Corollary: a reproducibility test that builds once proves nothing. The cheapest real check is
+two builds from *different starting states* (no cache/lockfile, then warm) compared byte-for-byte —
+which is exactly what the benchmark did by accident and what no unit test did on purpose.
+
+## 2026-09-01 — `pokkum config validate` reported a config valid that `pokkum deploy` then refused, because it validated each profile's raw block instead of the merged one
+
+**Category:** boundary / validator-consumer disagreement — a cross-field validity rule checked against a fragment, while the consumer reads the composition
+
+**Root cause:** `validateConfigFields` is invoked once for the base config and once per profile, each
+time with that profile's own raw block. That is correct for every field it validated before, because
+each of those is independently valid in isolation: a bad `strategy` is bad whether or not a base
+config also sets one.
+
+A `deploy` block is not like that. Its validity is **cross-field** — the `target` determines whether
+`method`, `application` and `update_image` are legal — and those fields **inherit** from the base
+config through `ApplyProfile`. So a base configuring Dokploy with `update_image: true`, plus a
+profile that switches only `target` and `endpoint` to SwiftWave, merges into a configuration that
+`core.ResolveDeployRequest` refuses (SwiftWave cannot repoint an application) while
+`config validate` reported it valid — each half being fine on its own. The user's fix
+(`update_image: false` in the profile) is not discoverable from a validator that says the file is
+fine.
+
+**How it was caught:** not by any unit test. Every test asserted on a base block or a profile block,
+never on the interaction between them, and all of them passed. It was found by running the real
+built binary against a stub control plane through the documented flow — `config validate` printed
+"is valid", and the very next command failed on the same file. This is the value the repo's
+`paranoid-testing-guide.md` and checklist row 37 already claim for executing documentation rather
+than reading it, showing up again.
+
+**Where:** `cmd/pokkum/config.go`'s `runConfigValidate` and `validateGeneratedConfig`, the per-profile
+`validateConfigFields` call sites.
+
+**Fix:** the deploy block is now validated **merged**, via a new
+`config.MergeDeployConfig(base, profile)`. That function is exported and called by `ApplyProfile`
+itself rather than duplicated in the validator, so there is exactly one implementation of the merge
+and the validator cannot drift from what the build actually resolves — the parallel-path class of
+row 54. Both per-profile call sites (real config and generated config) use it.
+`TestConfigValidateChecksTheMergedDeployBlock` pins it, and asserts first that the base block alone
+is valid, so it cannot pass for the wrong reason; it was proven to fail with the fix reverted.
+
+**Preventative rule:** when a config field's validity depends on ANOTHER field that can be inherited
+or overridden, the validator must run against the same composition the consumer resolves, not
+against the fragment the user typed. Ask, for each new validated field: is this independently valid,
+or does its legality depend on a sibling? If the latter, validate the merged result — and reuse the
+merge function the consumer uses rather than reimplementing it, or the two will disagree exactly
+where it matters. Then check the validator and the consumer agree by executing them back to back on
+one real file, which is the only step that finds this.
+
+## 2026-09-01 — Two new PaaS integrations both had a "200 means nothing happened" path, and one had a write that silently clears credentials — both found by reading the platforms' source before writing any code
+
+**Category:** boundary / external-contract — an outbound integration where the remote system's success status is not evidence its action occurred, and a "partial update" that is actually a full overwrite
+
+**Root cause:** the intuitive model of an HTTP integration is "2xx means it worked." That model is
+wrong for both platforms Pokkum now deploys to, in ways nothing in their prose documentation says.
+
+SwiftWave's redeploy webhook (`swiftwave_service/rest/webhook.go`) rebuilds an image-sourced
+application ONLY if the POST body contains the application's own configured image, reduced to
+`owner/name` (tag stripped, then the last two path segments). If it does not, the handler returns
+`200` with the body `OK - No rebuild`. An adapter checking only the status code would report a
+deploy that changed nothing as a success, indefinitely and silently. Worse, the handler runs
+`url.QueryUnescape` over the body first and, on failure, continues with the **empty string** — so a
+body containing a stray percent escape also degrades to a silent no-op with a 200.
+
+Dokploy's `application.saveDockerProvider`
+(`apps/dokploy/server/api/routers/application.ts`) reads as a targeted "set the image" call. It is
+not: the handler writes `dockerImage`, `username`, `password` AND `registryUrl` from the request on
+every invocation, and its zod input schema is `.required()` on all five picked fields. So the
+obvious payload `{applicationId, dockerImage}` fails validation, and the "fixed" payload that adds
+nulls **clears the registry credentials the application pulls with** — a destructive side effect of
+a call whose name says nothing about credentials.
+
+**How it was caught:** neither was caught, because neither was written wrong. Both were found before
+any adapter code existed, by following checklist row 36 — verify a third-party interop contract
+against that consumer's own source, not its error messages or its docs — and reading the two
+handlers. The prose documentation for both endpoints describes neither behaviour. A test-first or
+docs-first approach would have produced two adapters that appeared to work in every manual check
+against a correctly-configured application, and failed silently the first time one was not.
+
+**Where:** `internal/adapters/deploy/swiftwave.go` (`deployViaWebhook`),
+`internal/adapters/deploy/dokploy.go` (`saveDockerProvider`, `dokploySaveDockerProviderRequest`).
+
+**Fix:** every response is classified on its BODY, never its status alone. SwiftWave's
+`OK - No rebuild` maps to a distinct sentinel, `core.ErrDeployNotTriggered`, with a message naming
+the `owner/name` matching rule; the body is posted as `text/plain` carrying the pushed references
+and containing no percent escapes. An unrecognised 2xx is an error at both platforms, not a
+success. Dokploy's payload uses `*string` **without** `omitempty` so every required key is present
+while nullable values stay null; `deploy.update_image` defaults **off**, takes explicit pull
+credentials, and reports credential clearing in `DeployResult.Detail` plus a `Warn` log rather than
+doing it silently. `core.Deploy` backstops the adapter contract: a `DeployResult` with
+`Triggered == false` can never be returned alongside a nil error. Both guards were proven capable
+of failing by reverting the behaviour they protect (a naive `isSuccess(status)` branch, and
+`omitempty` on the nullable fields) and watching the tests fail by name.
+
+**Preventative rule:** for any call to an external system that performs a side effect, a success
+status is a claim about *delivery*, not about *the action*. Identify, from that system's own source,
+every response it emits for "received your request and deliberately did nothing" — and make each one
+an error with its own diagnosis. Separately, before writing any call that updates a remote resource,
+read the handler to determine whether it patches or overwrites: a name like `saveXProvider` or
+`updateX` says nothing about which, and an overwrite reached through a partial-looking payload
+destroys the fields the payload omitted.
+
+## 2026-08-23 — The published GitHub Action never loaded at all: an example expression written as documentation inside an input's `description` failed the manifest for every consumer, in every release
+
+**Category:** boundary / evaluated-position — text intended as documentation sat in a
+position the platform evaluates, and the artifact was never executed
+
+**Root cause:** `action.yml`'s `tags` input carried, as an illustrative example in its
+`description`, the literal text `latest,v1.2.3,{{ github.sha }}` (in expression syntax).
+GitHub evaluates input descriptions while loading an action manifest, and the `github`
+context is not available in that position, so every single use of this action died with
+
+    Unrecognized named-value: 'github' ... Failed to load action.yml
+
+before one step executed. It was present from the action's first commit through v1.0.6.
+The published Marketplace action had therefore **never worked for anyone**, and the three
+defects logged in the entry below it — the ignored `--log-format` spelling, `ref` read off
+the base image, `digest` read off the startup attestation — were all downstream of code
+that had never once run.
+
+The position matters, not the syntax: the sibling `setup-pokkum` action carries
+`{{ github.token }}` in an input's `default` and loads fine, which is what identified
+`description` specifically rather than "expressions in inputs" generally.
+
+**How it was caught:** by the CI job added in the entry below, on its first execution.
+The job's purpose was to catch the three output-parsing defects; it found a fourth,
+strictly more severe one, in a line nobody had edited — including in a prior pass that
+rewrote every comment *around* that line for documentation correctness. Reading the file
+carefully, twice, with the manifest in view, found nothing. Running it found it in
+thirty seconds.
+
+**Where:** `action.yml`, `inputs.tags.description`.
+
+**Fix:** the example is now plain prose, and the explanation of why moved into a YAML
+comment, which is stripped before evaluation. The install step also stopped routing
+`github.action_ref` through an expression and reads the runner-provided
+`GITHUB_ACTION_REF` environment variable instead — no expression means no question of
+which contexts are available where. `TestActionYMLNoExpressionsOutsideEvaluatedPositions`
+walks every string in every manifest this repo ships and fails on an expression outside
+the positions observed to work, and was confirmed to fail against the actual v1.0.6
+manifest (`git show v1.0.6:action.yml`) before being committed. The injection guard was
+tightened in the same pass to stop exempting shell comments: substitution runs over the
+whole script text, so a value containing a newline ends the comment and executes.
+
+**Preventative rule:** folded into `mem:self_review_checklist` row 58, which already
+required that a published integration artifact be executed by CI rather than
+string-checked. This incident sharpens it with the reason that is easy to miss: the
+failure was not in logic, it was in a **documentation string**, in a file that had been
+reviewed for documentation accuracy. Prose is not inert. Any field a platform evaluates —
+a manifest description, a template default, a label, an annotation — is code, and an
+example written in that field's own expression syntax is an instruction, not an
+illustration. Reviewing such a file for correctness cannot substitute for loading it,
+because the reviewer reads the example as documentation exactly as the author intended,
+which is the one reading the platform will not take.
+
+---
+
+## 2026-08-23 — The published GitHub Action's `digest` and `ref` outputs were empty on every run since v1.0.0, and the code path that would have populated them was reading the base image
+
+**Category:** boundary / shadow-parser drift — a hand-rolled pre-parse accepted a
+narrower input surface than the real parser it runs ahead of, and nothing executed the
+artifact that depended on it
+
+**Root cause:** three defects stacked in one ten-line block of `action.yml`, none of
+them reachable by any test, because `uses: ./` appeared in no workflow — neither
+composite action this repository publishes had ever been executed by anything.
+
+1. `cmd/pokkum/main.go`'s `flag()` pre-parses `--log-level`/`--log-format` out of raw
+   `os.Args`, because the logger must exist before cobra parses anything. It matched
+   only the attached `--flag=value` spelling. Both flags are *also* registered as
+   ordinary cobra persistent flags, so the separated `--log-format json` spelling —
+   which `action.yml` used — parsed with no error and had no effect whatsoever. Logs
+   stayed in text format. This is the shape that makes shadow parsers dangerous: the
+   real parser accepted the input, so nothing anywhere reported a problem.
+2. The step then grepped that stream for the **first** `"ref"` key. In a build log the
+   first `ref` is the resolved **base image**. Any workflow following
+   `docs/GITHUB_ACTION.md`'s own quickstart — which pipes `steps.pokkum.outputs.ref`
+   into a deploy step — would have deployed `gcr.io/distroless/cc-debian12`.
+3. Likewise the first `"digest"` key is the startup-attestation digest, a bare 64-hex
+   string with no `sha256:` prefix — not the published manifest digest.
+
+Defect 1 masked 2 and 3 completely. With text-format logs nothing matched either
+pattern, so both outputs were merely *empty* rather than wrong, and fixing the flag
+alone would have converted a visibly broken action into a silently wrong one.
+
+`cmd/pokkum/actionyml_test.go` existed and passed throughout, because it checks that
+the flag *names* `action.yml` emits exist on `pokkum build` — a string comparison
+against the cobra flag set. Every flag involved here was real. The bug was in what the
+script did with the flag's output, which no static check over flag names can see.
+
+**How it was caught:** by running the thing. Building the CI job that executes `uses: ./`
+required first establishing what a real invocation produces, so a tarball build was run
+locally with the action's exact argument list. The `--log-format json` output came back
+in text format, which surfaced defect 1 within seconds; simulating the action's own grep
+against a genuine JSON log then surfaced 2 and 3 immediately. Re-reading the script,
+which had already survived a documentation-correctness pass that rewrote every
+surrounding comment, produced none of them.
+
+**Where:** `action.yml` ("Execute Pokkum Build"), `cmd/pokkum/main.go`'s `flag()`.
+
+**Fix:** `flag()` now accepts both spellings, stopping at a bare `--` and refusing to
+consume a flag-shaped next argument (one residual case — the literal string
+`--log-format` passed as another flag's *value* — is knowingly out of reach and
+documented at the function, since resolving it needs the flag table cobra has not built
+yet). The action no longer parses logs at all: it reads the reference off **stdout**,
+whose contract `internal/core/pipeline.go` states exactly — "exactly one line is written
+here — the published `repo@sha256:…` reference — because that string is what a CI
+pipeline captures and feeds to the next step" — with the digest split off the `@`. The
+match is anchored, which is load-bearing: the dry-run summary contains an *indented*
+base-image `@sha256:` line that an unanchored pattern picks up. Two new CI jobs execute
+the action for real (a tarball build asserting the ref names the requested repository and
+agrees with the digest, and a clean-runner dry-run asserting both outputs are empty and
+the CLI actually installed), plus `setup-pokkum` on a third. Every assertion was verified
+to reject each of the three defects' actual values before being committed.
+
+**Preventative rule:** two rules, both now in `mem:self_review_checklist`.
+(a) *Shadow parser* — when code hand-parses an input that a real parser also handles
+(a flag pre-read before the flag library runs, an env-var fast path, a regex ahead of a
+full decoder), enumerate every spelling the real parser accepts and confirm the shadow
+accepts them all. Divergence here is silent by construction: the authoritative parser
+validates the input, so the user gets no error, just no effect. This is row 54's
+parallel-path drift in its most invisible form, because the two paths are not peers —
+one runs first and wins, and the other's success is what hides it. (b) *Published
+integration artifacts must be executed* — a GitHub Action, installer script, container
+entrypoint or any other file this repo ships for someone else's runtime has to be run
+by CI, not string-checked. A static guard over such a file constrains its vocabulary,
+never its behaviour, and its passing is easily mistaken for coverage: `actionyml_test.go`
+was written after an earlier `action.yml` bug and gave exactly that false assurance
+while three worse bugs shipped in the same file.
+
+---
+
 ## 2026-08-22 — Sorting the output hid a nondeterministic choice of what went into it
 
 **Category:** determinism

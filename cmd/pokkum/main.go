@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
@@ -43,12 +44,50 @@ func main() {
 }
 
 // flag extracts a flag value from args. Returns the default if not found.
-// This is a simple implementation for pre-parsing global flags.
+//
+// This pre-parse exists because the logger must be configured before cobra
+// parses anything, so --log-level/--log-format cannot be read back off the
+// command they are registered on. It therefore has to understand the same
+// two spellings pflag does:
+//
+//	--log-format=json   (attached form)
+//	--log-format json   (separated form)
+//
+// It handled only the attached form until 2026-08-23. Both flags are
+// registered as ordinary cobra persistent flags, so the separated form parsed
+// without error and then had no effect whatsoever — `pokkum build --log-format
+// json` silently emitted text logs. That is what made the GitHub Action's
+// digest/ref outputs come back empty on every run; see Lessons.md.
+//
+// Two restrictions bound the separated form, since this scans raw os.Args
+// with no knowledge of the flag set:
+//
+//   - a bare "--" ends flag parsing, per convention, so a project directory
+//     named like a flag cannot be mistaken for one;
+//   - the following argument must not itself look like a flag, so a trailing
+//     "--log-format" with nothing after it falls back to the default rather
+//     than consuming the next flag as its value.
+//
+// One case is knowingly out of reach: passing the literal string
+// "--log-format" as the value of some *other* value-taking flag (e.g.
+// `--exclude-route --log-format json`) is read here as a --log-format. Ruling
+// that out requires knowing which flags take values, which is precisely the
+// information cobra has not parsed yet at this point. The blast radius is one
+// wrong log format on an argument nobody has a reason to pass, so it is
+// accepted rather than papered over with a partial flag table that would
+// drift from the real one.
 func flag(args []string, name, defaultValue string) string {
-	prefix := "--" + name + "="
-	for _, arg := range args {
-		if len(arg) > len(prefix) && arg[:len(prefix)] == prefix {
-			return arg[len(prefix):]
+	attached := "--" + name + "="
+	separated := "--" + name
+	for i, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, attached) {
+			return arg[len(attached):]
+		}
+		if arg == separated && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			return args[i+1]
 		}
 	}
 	return defaultValue
@@ -151,6 +190,7 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 	rootCmd.AddCommand(newBaseCommand(ctx, logger))
 	rootCmd.AddCommand(newResolveCommand(ctx, logger))
 	rootCmd.AddCommand(newApplyCommand(ctx, logger))
+	rootCmd.AddCommand(newDeployCommand(ctx, logger))
 	rootCmd.AddCommand(newDoctorCommand(ctx, logger))
 	rootCmd.AddCommand(newInitCommand(ctx, logger))
 	rootCmd.AddCommand(newConfigCommand(ctx, logger))

@@ -7,9 +7,15 @@ branding:
 
 inputs:
   version:
-    description: 'Pokkum CLI version to install (e.g. v1.0.6, latest)'
+    description: >-
+      Pokkum CLI version to install (e.g. v1.0.6), or "latest" for the newest
+      release. Leave empty (the default) to install the CLI matching the
+      version of this action you pinned — `uses: ...@v1.0.6` installs CLI
+      v1.0.6. When the ref is not a full version (a moving tag like @v1, a
+      branch, a commit SHA) there is nothing to match, and this falls back to
+      "latest".
     required: false
-    default: 'v1.0.6'
+    default: ''
 
   project-dir:
     description: 'Path to the SvelteKit project directory'
@@ -20,11 +26,21 @@ inputs:
     description: 'Destination container repository (e.g. ghcr.io/acme/app). Passed to the CLI via the POKKUM_DOCKER_REPO environment variable — pokkum build has no --repo flag.'
     required: false
 
+  # NO EXPRESSION MAY APPEAR IN AN INPUT DESCRIPTION. GitHub evaluates these
+  # strings while loading the manifest, and the github context is not available
+  # in that position, so an expression here does not render as documentation —
+  # it fails the whole action with "Unrecognized named-value: 'github'" before a
+  # single step runs. This description carried an illustrative github.sha
+  # expression from the first commit through v1.0.6, which is why the action
+  # had never successfully loaded for anyone. A YAML comment like this one is
+  # safe; the description text is not. Guarded by
+  # TestActionYMLNoExpressionsOutsideEvaluatedPositions.
   tags:
     description: >-
-      Comma-separated image tags to publish (e.g. "latest,v1.2.3,${{ github.sha }}").
-      Passed to the CLI as --tag, which accepts a repeatable/comma-separated list.
-      Defaults to "latest", matching the CLI's own DefaultTag.
+      Comma-separated image tags to publish, e.g. "latest,v1.2.3", or a commit
+      SHA the calling workflow supplies. Passed to the CLI as --tag, which
+      accepts a repeatable/comma-separated list. Defaults to "latest", matching
+      the CLI's own DefaultTag.
     required: false
     default: 'latest'
 
@@ -44,12 +60,12 @@ inputs:
     default: 'image.tar'
 
   dry-run:
-    description: 'Dry run mode (show what would be built/pushed without side effects)'
+    description: 'Dry run mode (show what would be built/pushed without side effects). Mutually exclusive with print-manifest.'
     required: false
     default: 'false'
 
   print-manifest:
-    description: 'Print generated Kubernetes manifest after build'
+    description: 'Print generated Kubernetes manifest after build. Mutually exclusive with dry-run.'
     required: false
     default: 'false'
 
@@ -60,15 +76,28 @@ inputs:
 
 outputs:
   digest:
-    description: 'The output image manifest digest (sha256:...)'
+    description: 'The output image manifest digest (sha256:...). Empty in dry-run and print-manifest modes, which publish nothing.'
     value: ${{ steps.build.outputs.digest }}
   ref:
-    description: 'The immutable image reference (repo@sha256:...)'
+    description: 'The immutable image reference (repo@sha256:...). Empty in dry-run and print-manifest modes, which publish nothing.'
     value: ${{ steps.build.outputs.ref }}
 
 runs:
   using: 'composite'
   steps:
+    # NOTE ON INPUT HANDLING, which applies to every `run:` block below.
+    #
+    # No `${{ ... }}` expression is written inside a shell script here. Every
+    # input reaches the script through `env:` and is read as "$VARIABLE",
+    # quoted. This is not style: `${{ }}` is substituted into the script text
+    # BEFORE bash ever sees it, so an input carrying `$(...)` or a backtick
+    # would execute on the runner. Callers routinely wire attacker-influenced
+    # values into these inputs (a `tags` built from a branch name or a PR
+    # title being the obvious one), and this action cannot see where its
+    # arguments came from. A Go guard, TestActionYMLNoExpressionInjection in
+    # cmd/pokkum/actionyml_test.go, fails the build if an expression is
+    # reintroduced into a run: block.
+
     - name: Set up Bun Environment
       uses: oven-sh/setup-bun@v2
       with:
@@ -76,13 +105,57 @@ runs:
 
     - name: Install Pokkum CLI
       shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
       run: |
-        if command -v pokkum &> /dev/null; then
-          echo "pokkum CLI already installed: $(pokkum version 2>/dev/null || true)"
+        set -euo pipefail
+
+        # install.sh covers darwin and linux only. Say so here rather than
+        # letting a Windows runner fail several lines deeper inside the
+        # installer with an opaque uname message.
+        case "${RUNNER_OS:-}" in
+          Linux | macOS) ;;
+          *)
+            echo "::error::pokkum-action: unsupported runner OS '${RUNNER_OS:-unknown}'. This action requires a Linux or macOS runner (runs-on: ubuntu-latest / macos-latest); released pokkum binaries cover darwin and linux only."
+            exit 1
+            ;;
+        esac
+
+        if command -v pokkum >/dev/null 2>&1; then
+          echo "pokkum CLI already installed: $(pokkum version 2>/dev/null | head -n 1 || true)"
           exit 0
         fi
 
-        VERSION="${{ inputs.version }}"
+        # Resolve which CLI version to install:
+        #   explicit input        -> use it verbatim
+        #   empty + versioned ref -> match the action's own release
+        #   empty + anything else -> latest
+        #
+        # GITHUB_ACTION_REF is the ref this action was invoked at
+        # (`uses: owner/pokkum@THIS`), set by the runner for every action step.
+        # Reading the environment variable directly, rather than routing the
+        # github context through an expression, means nothing is substituted
+        # into this script and there is no question of which contexts are
+        # available in which position — the mistake that kept this manifest
+        # from loading at all through v1.0.6.
+        #
+        # Deriving the version at all is what keeps the CLI from drifting away
+        # from the action: the previous default was a hardcoded 'v1.0.6', so
+        # pinning the action at a later release still installed the v1.0.6 CLI.
+        version="${INPUT_VERSION:-}"
+        if [ -z "$version" ]; then
+          case "${GITHUB_ACTION_REF:-}" in
+            v[0-9]*.[0-9]*.[0-9]*)
+              version="$GITHUB_ACTION_REF"
+              echo "no 'version' input given; matching the action ref: $version"
+              ;;
+            *)
+              version="latest"
+              echo "no 'version' input given and action ref '${GITHUB_ACTION_REF:-unknown}' is not a full version; installing latest"
+              ;;
+          esac
+        fi
+
         INSTALL_DIR="$HOME/.pokkum/bin"
         mkdir -p "$INSTALL_DIR"
 
@@ -93,81 +166,134 @@ runs:
         # run and silently fell through to `go install` — slow, and with no
         # checksum verification at all. install.sh builds the real name and
         # verifies SHA-256 against the release's checksums.txt before
-        # installing.
-        if [ "$VERSION" = "latest" ]; then
+        # installing. It resolves the newest release itself when
+        # POKKUM_VERSION is unset, so "latest" means "do not pin".
+        if [ "$version" = "latest" ]; then
           POKKUM_INSTALL_DIR="$INSTALL_DIR" sh "${GITHUB_ACTION_PATH}/install.sh"
         else
-          POKKUM_VERSION="$VERSION" POKKUM_INSTALL_DIR="$INSTALL_DIR" \
+          POKKUM_VERSION="$version" POKKUM_INSTALL_DIR="$INSTALL_DIR" \
             sh "${GITHUB_ACTION_PATH}/install.sh"
         fi
 
-        echo "$INSTALL_DIR" >> $GITHUB_PATH
         chmod +x "$INSTALL_DIR/pokkum"
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
 
     - name: Execute Pokkum Build
       id: build
       shell: bash
+      env:
+        INPUT_PROJECT_DIR: ${{ inputs.project-dir }}
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_TAGS: ${{ inputs.tags }}
+        INPUT_PLATFORMS: ${{ inputs.platforms }}
+        INPUT_OUTPUT: ${{ inputs.output }}
+        INPUT_TARBALL_PATH: ${{ inputs.tarball-path }}
+        INPUT_DRY_RUN: ${{ inputs.dry-run }}
+        INPUT_PRINT_MANIFEST: ${{ inputs.print-manifest }}
+        INPUT_LOG_LEVEL: ${{ inputs.log-level }}
       run: |
+        set -euo pipefail
+
         ARGS=()
 
         # repo: pokkum build has no --repo flag. The destination repository
         # is resolved from the POKKUM_DOCKER_REPO environment variable (or
         # .pokkum.yaml's docker.repo) — never from a CLI argument.
-        export POKKUM_DOCKER_REPO="${{ inputs.repo }}"
+        export POKKUM_DOCKER_REPO="${INPUT_REPO:-}"
 
         # tags: --tag is repeatable and comma-splitting, so the comma-separated
         # input is passed through as a single argument.
-        if [ -n "${{ inputs.tags }}" ]; then
-          ARGS+=("--tag" "${{ inputs.tags }}")
+        if [ -n "$INPUT_TAGS" ]; then
+          ARGS+=("--tag" "$INPUT_TAGS")
         fi
 
-        if [ -n "${{ inputs.platforms }}" ]; then
-          ARGS+=("--platform" "${{ inputs.platforms }}")
+        if [ -n "$INPUT_PLATFORMS" ]; then
+          ARGS+=("--platform" "$INPUT_PLATFORMS")
         fi
 
         # output: push/local/tarball is a build *mode*, controlled by the
         # --local / --tarball flags — NOT the global --output flag, which is
         # only the text/json serialization format for other subcommands and
         # is not read by `pokkum build` at all.
-        case "${{ inputs.output }}" in
+        case "$INPUT_OUTPUT" in
           local)
             ARGS+=("--local")
             ;;
           tarball)
-            ARGS+=("--tarball" "${{ inputs.tarball-path }}")
+            ARGS+=("--tarball" "$INPUT_TARBALL_PATH")
             ;;
-          push|"")
+          push | "")
             : # default mode; no flag needed
             ;;
           *)
-            echo "::error::pokkum-action: invalid 'output' value \"${{ inputs.output }}\" — must be push, local, or tarball."
+            echo "::error::pokkum-action: invalid 'output' value \"$INPUT_OUTPUT\" — must be push, local, or tarball."
             exit 1
             ;;
         esac
 
-        if [ "${{ inputs.dry-run }}" = "true" ]; then
+        # The CLI rejects these two together. Catching it here names the two
+        # inputs the caller actually set, rather than surfacing a CLI error
+        # about flags they never typed.
+        if [ "$INPUT_DRY_RUN" = "true" ] && [ "$INPUT_PRINT_MANIFEST" = "true" ]; then
+          echo "::error::pokkum-action: 'dry-run' and 'print-manifest' are mutually exclusive; set at most one."
+          exit 1
+        fi
+
+        if [ "$INPUT_DRY_RUN" = "true" ]; then
           ARGS+=("--dry-run")
         fi
 
-        if [ "${{ inputs.print-manifest }}" = "true" ]; then
+        if [ "$INPUT_PRINT_MANIFEST" = "true" ]; then
           ARGS+=("--print-manifest")
         fi
 
-        if [ -n "${{ inputs.log-level }}" ]; then
-          ARGS+=("--log-level" "${{ inputs.log-level }}")
+        if [ -n "$INPUT_LOG_LEVEL" ]; then
+          # Attached form (--flag=value), not separated. The CLI pre-parses
+          # these two global flags out of os.Args before cobra runs, in order
+          # to configure the logger; that pre-parse read only the attached
+          # form until 2026-08-23, so the separated form was accepted and
+          # then silently ignored. Both work now, but the attached form is
+          # what this action pinned itself to.
+          ARGS+=("--log-level=$INPUT_LOG_LEVEL")
         fi
 
-        echo "Running: pokkum build ${ARGS[*]} ${{ inputs.project-dir }}"
+        echo "Running: pokkum build ${ARGS[*]} $INPUT_PROJECT_DIR"
 
-        # --log-format json is fixed (not user-configurable): it's how this
-        # step parses the final "published" log line for digest/ref below.
-        # It is unrelated to the --output (text/json) global flag.
-        BUILD_OUT=$(pokkum build "${ARGS[@]}" "${{ inputs.project-dir }}" --log-format json 2>&1)
-        echo "$BUILD_OUT"
+        # OUTPUT PARSING, and why it reads stdout rather than the log stream.
+        #
+        # internal/core/pipeline.go documents the contract precisely: stdout
+        # "receives program output, and nothing else does. In a normal build
+        # exactly one line is written here — the published repo@sha256:…
+        # reference — because that string is what a CI pipeline captures and
+        # feeds to the next step." Progress and diagnostics all go to stderr.
+        #
+        # This step used to instead run with --log-format json and grep the
+        # merged 2>&1 stream for the first "digest"/"ref" key. Every part of
+        # that was wrong. The first "ref" in a build log is the resolved BASE
+        # image (gcr.io/distroless/...), so a deploy step consuming this
+        # action's `ref` output would have deployed distroless rather than the
+        # application; the first "digest" is the startup-attestation digest, a
+        # bare 64-hex string with no sha256: prefix. Neither surfaced in
+        # practice only because --log-format was passed in the separated form
+        # the CLI's pre-parser ignored, so the logs stayed in text format and
+        # both outputs came back empty on every single run.
+        #
+        # stderr is deliberately left flowing to the job log, so the build's
+        # progress is visible live rather than buffered into a variable.
+        stdout_file="${RUNNER_TEMP:-/tmp}/pokkum-build-stdout.txt"
+        pokkum build "${ARGS[@]}" "$INPUT_PROJECT_DIR" | tee "$stdout_file"
 
-        # Parse digest and ref outputs
-        DIGEST=$(echo "$BUILD_OUT" | grep -o '"digest":"[^"]*' | head -n 1 | cut -d'"' -f4 || true)
-        REF=$(echo "$BUILD_OUT" | grep -o '"ref":"[^"]*' | head -n 1 | cut -d'"' -f4 || true)
+        # In dry-run and print-manifest modes stdout carries the summary or the
+        # manifest instead of a reference, and nothing is published — so no
+        # line matches and both outputs are correctly empty. Anchored, and
+        # taking the last match, so no prose line can be mistaken for a ref.
+        ref="$(tr -d '\r' < "$stdout_file" | grep -E '^[^[:space:]]+@sha256:[0-9a-f]{64}$' | tail -n 1 || true)"
+        digest=""
+        if [ -n "$ref" ]; then
+          digest="${ref#*@}"
+        fi
 
-        echo "digest=$DIGEST" >> $GITHUB_OUTPUT
-        echo "ref=$REF" >> $GITHUB_OUTPUT
+        {
+          echo "digest=$digest"
+          echo "ref=$ref"
+        } >> "$GITHUB_OUTPUT"

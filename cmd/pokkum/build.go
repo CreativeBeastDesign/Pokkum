@@ -42,19 +42,23 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/vexutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
+	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
 // buildFlags holds all command-line flags for the build command.
 type buildFlags struct {
-	platforms     []string
-	base          string
-	hardened      bool
-	sbom          string
-	sbomAttach    string
-	local         bool
-	tarball       string
-	toOCILayout   string
-	dryRun        bool
+	platforms   []string
+	base        string
+	hardened    bool
+	sbom        string
+	sbomAttach  string
+	local       bool
+	tarball     string
+	toOCILayout string
+	dryRun      bool
+	// noDeploy suppresses the automatic post-push deploy configured under
+	// deploy: in .pokkum.yaml. It never enables one.
+	noDeploy      bool
 	printManifest bool
 	logLevel      string
 	logFormat     string
@@ -222,6 +226,8 @@ The project directory defaults to the current working directory.`,
 		"Export the image as an OCI image layout into the specified directory (e.g., ./oci-out). Daemonless: needs no Docker/Podman, and unlike --tarball it preserves every OCI annotation and the full multi-platform index, so it can be imported straight into kind/k3d/minikube or read by crane/skopeo")
 	cmd.Flags().BoolVar(&flags.dryRun, "dry-run", false,
 		"Resolve everything and report what would be built and pushed, but perform no writes")
+	cmd.Flags().BoolVar(&flags.noDeploy, "no-deploy", false,
+		"Skip the automatic deploy configured under deploy: in .pokkum.yaml for this build")
 	cmd.Flags().BoolVar(&flags.printManifest, "print-manifest", false,
 		"Emit the computed OCI manifest/config without pushing")
 	cmd.Flags().StringVar(&flags.logLevel, "log-level", "INFO",
@@ -376,7 +382,15 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 
 	logger.Debug("build command started", "project_dir", projectDir)
 
-	req, err := buildRequestFromConfigAndFlags(ctx, logger, flags, projectDir)
+	// Resolved once here and threaded through both consumers — the build
+	// request and the post-push deploy — so a deploy can never target a
+	// different profile than the build it followed.
+	cfgMgr, projCfg, activeProfile, err := resolveProjectConfig(logger, projectDir, flags.profile, flags.local)
+	if err != nil {
+		return err
+	}
+
+	req, err := buildRequestFromResolvedConfig(ctx, logger, flags, projectDir, cfgMgr, projCfg, activeProfile)
 	if err != nil {
 		return err
 	}
@@ -419,7 +433,67 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 		"platforms", core.PlatformList(res.Image.Platforms),
 		"base", res.BaseImage.PinnedRef,
 		"duration", res.Duration.String())
+
+	// Deploy last, and only for a build that actually published something. A
+	// deploy is a side effect against a live system, so every veto lives in
+	// core.ShouldAutoDeploy rather than being spread across this function.
+	return maybeAutoDeploy(ctx, logger, flags, projCfg, req, opts, res)
+}
+
+// maybeAutoDeploy hands a just-published image to the configured PaaS, when
+// configuration and build mode both allow it.
+//
+// A failed deploy fails the command. The image is already in the registry at
+// that point and nothing rolls it back, but reporting success for a build whose
+// configured deployment did not happen would make `pokkum build` a command whose
+// exit code cannot be trusted in CI — which is the only place auto-deploy is
+// worth having.
+func maybeAutoDeploy(ctx context.Context, logger *slog.Logger, flags *buildFlags, projCfg *ports.ProjectConfig, req *core.BuildRequest, opts core.BuildOptions, res core.BuildResult) error {
+	// projCfg is the config the build itself was resolved from, passed in
+	// rather than re-read, so the deploy cannot address a different profile
+	// than the build it is following.
+	if projCfg == nil {
+		return nil
+	}
+
+	if !core.ShouldAutoDeploy(projCfg.Deploy, req.Output.Mode, opts.DryRun, opts.PrintManifest, flags.noDeploy) {
+		// Say why nothing happened when the project clearly expected a
+		// deploy, rather than exiting silently and leaving the operator to
+		// wonder whether it ran. "Configured but skipped" and "not configured"
+		// must not look the same.
+		if strings.TrimSpace(projCfg.Deploy.Target) != "" && !flags.noDeploy && !opts.DryRun && !opts.PrintManifest {
+			logger.Warn("skipping deploy: the configured target can only pull from a registry",
+				"target", projCfg.Deploy.Target,
+				"output_mode", req.Output.Mode.String())
+		}
+		return nil
+	}
+
+	deployRes, err := executeDeploy(ctx, logger, projCfg.Deploy, res.Image.Ref, primaryTaggedRef(req.Repo, res.Image.Tags))
+	if err != nil {
+		return fmt.Errorf("build succeeded and the image was pushed, but the deploy failed: %w", err)
+	}
+
+	fmt.Printf("✓ Deployed to %s: %s\n", deployRes.Target, describeDeployResult(deployRes))
 	return nil
+}
+
+// primaryTaggedRef renders repo:tag for the first tag a push wrote, or "" when
+// the build produced none.
+//
+// SwiftWave's webhook matches on the image name in the posted body, so sending
+// the tagged reference alongside the digest-pinned one materially raises the
+// chance of a match; see the swiftwave adapter.
+func primaryTaggedRef(repo string, tags []string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" || len(tags) == 0 {
+		return ""
+	}
+	tag := strings.TrimSpace(tags[0])
+	if tag == "" {
+		return ""
+	}
+	return repo + ":" + tag
 }
 
 // writeVEXDocument writes a real OpenVEX document covering exemptions to
@@ -564,11 +638,23 @@ func newProvenanceResolver(logger *slog.Logger) *provenance.Resolver {
 // this seam only proves this package's own wiring reaches it correctly.
 var sigstoreTUFOptionsFactory = sigstore.DefaultTUFOptions
 
-func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, flags *buildFlags, projectDir string) (*core.BuildRequest, error) {
-	// Load configuration
+// resolveProjectConfig loads .pokkum.yaml for projectDir and applies the
+// active profile.
+//
+// It is extracted rather than inlined because two consumers need the SAME
+// resolved config: buildRequestFromConfigAndFlags, which turns it into a
+// BuildRequest, and runBuild's post-push deploy step, which reads
+// projCfg.Deploy. Two copies of the profile-resolution rules would drift the
+// moment either changed, and a deploy resolved against the base config while
+// the build ran against a profile would deploy the wrong environment — the
+// parallel-path drift class in Lessons.md.
+//
+// preferLocal mirrors --local's behaviour of selecting a "local" profile when
+// one exists and --profile was not given.
+func resolveProjectConfig(logger *slog.Logger, projectDir, profileName string, preferLocal bool) (*config.Manager, *ports.ProjectConfig, string, error) {
 	cfg, err := config.New(projectDir, logger)
 	if err != nil {
-		return nil, fmt.Errorf("config loader: %w", err)
+		return nil, nil, "", fmt.Errorf("config loader: %w", err)
 	}
 
 	projCfg, err := cfg.Load(projectDir)
@@ -576,12 +662,13 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 		logger.Warn("failed to load .pokkum.yaml", "error", err)
 	}
 
-	// Active profile resolution: --profile takes precedence; if unset and --local is set, look for 'local' profile
-	activeProfile := strings.TrimSpace(flags.profile)
+	// Active profile resolution: --profile takes precedence; if unset and
+	// --local is set, look for a 'local' profile.
+	activeProfile := strings.TrimSpace(profileName)
 	if activeProfile != "" && projCfg == nil {
-		return nil, fmt.Errorf("profile %q requested but no %s found in project", activeProfile, config.ConfigFilename)
+		return nil, nil, "", fmt.Errorf("profile %q requested but no %s found in project", activeProfile, config.ConfigFilename)
 	}
-	if activeProfile == "" && flags.local && projCfg != nil {
+	if activeProfile == "" && preferLocal && projCfg != nil {
 		if _, ok := projCfg.Profiles["local"]; ok {
 			activeProfile = "local"
 		}
@@ -589,10 +676,30 @@ func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, fl
 	if activeProfile != "" && projCfg != nil {
 		merged, err := cfg.ApplyProfile(projCfg, activeProfile)
 		if err != nil {
-			return nil, fmt.Errorf("apply profile %q: %w", activeProfile, err)
+			return nil, nil, "", fmt.Errorf("apply profile %q: %w", activeProfile, err)
 		}
 		projCfg = merged
 	}
+	return cfg, projCfg, activeProfile, nil
+}
+
+// buildRequestFromConfigAndFlags resolves the project config and turns it into
+// a BuildRequest. It is the entry point for callers that do not otherwise need
+// the resolved config; runBuild uses buildRequestFromResolvedConfig directly so
+// that one build reads .pokkum.yaml exactly once (self-review checklist row 41
+// — one input feeding several consumers must be read once).
+func buildRequestFromConfigAndFlags(ctx context.Context, logger *slog.Logger, flags *buildFlags, projectDir string) (*core.BuildRequest, error) {
+	cfg, projCfg, activeProfile, err := resolveProjectConfig(logger, projectDir, flags.profile, flags.local)
+	if err != nil {
+		return nil, err
+	}
+	return buildRequestFromResolvedConfig(ctx, logger, flags, projectDir, cfg, projCfg, activeProfile)
+}
+
+// buildRequestFromResolvedConfig builds the request from an already-resolved
+// config, so the caller can reuse that same config for the post-push deploy
+// rather than re-reading and re-merging it.
+func buildRequestFromResolvedConfig(ctx context.Context, logger *slog.Logger, flags *buildFlags, projectDir string, cfg *config.Manager, projCfg *ports.ProjectConfig, activeProfile string) (*core.BuildRequest, error) {
 
 	// Build the request from flags, config, and environment
 	req := core.BuildRequest{

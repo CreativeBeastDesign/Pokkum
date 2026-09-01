@@ -1,0 +1,9 @@
+app/node_modules/
+app/.svelte-kit/
+app/build/
+app/package-lock.json
+app/bun.lock
+app/pokkum.lock
+app/.pokkum/
+results/
+app/.dockerignore.bak

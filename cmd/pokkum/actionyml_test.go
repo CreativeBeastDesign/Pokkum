@@ -49,8 +49,16 @@ import (
 // script does what it does. A whole-file scan would have to separately
 // allowlist those explanatory mentions; scoping to the two real emission
 // shapes avoids needing an allowlist at all.
-var argsAppendRe = regexp.MustCompile(`ARGS\+=\(\s*"(--[a-zA-Z][a-zA-Z0-9-]*)"`)
-var buildInvocationRe = regexp.MustCompile(`\$\(pokkum build[^\n]*\)`)
+//
+// Updated 2026-08-23: the script now emits --log-level in the attached
+// `--flag=value` form and invokes `pokkum build` as a plain pipeline rather
+// than inside a `$(...)` command substitution. Both regexes had stopped
+// matching those shapes — the extractor still returned a non-empty set from
+// the remaining ARGS+=("--flag" "value") appends, so the len()==0 floor below
+// would not have fired, and coverage of the changed lines would simply have
+// lapsed unnoticed.
+var argsAppendRe = regexp.MustCompile(`ARGS\+=\(\s*"(--[a-zA-Z][a-zA-Z0-9-]*)(?:"|=)`)
+var buildInvocationRe = regexp.MustCompile(`(?m)^\s*(?:\S+=\S+\s+)*pokkum build[^\n]*$`)
 
 func actionYMLPath() string {
 	return filepath.Join("..", "..", "action.yml")

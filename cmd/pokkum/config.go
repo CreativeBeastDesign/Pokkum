@@ -179,6 +179,7 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 		shutdownTimeout:     cfg.Image.ShutdownTimeout,
 		allowSecretPatterns: cfg.Security.AllowSecretPatterns,
 		excludeRoutes:       cfg.Build.ExcludeRoutes,
+		deploy:              cfg.Deploy,
 	})...)
 
 	// Every named profile, using the exact same field validation logic as the
@@ -212,6 +213,11 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 			allowSecretPatterns: profile.Security.AllowSecretPatterns,
 			excludeRoutes:       profile.Build.ExcludeRoutes,
 			output:              profile.Output,
+			// Merged, not raw. A deploy block's validity is cross-field and
+			// its fields inherit from the base config, so validating the
+			// profile's own block alone accepts configurations the deploy
+			// path refuses — see config.MergeDeployConfig.
+			deploy: config.MergeDeployConfig(cfg.Deploy, profile.Deploy),
 		})...)
 	}
 
@@ -280,6 +286,14 @@ type configFieldsToValidate struct {
 	// see the comment at the base-config call site in runConfigValidate),
 	// so it is only ever populated for the per-profile call.
 	output string
+
+	// deploy is checked by core.ValidateDeployConfig, which owns the
+	// target/method matrix and the endpoint/application/timeout rules. It is
+	// passed whole rather than field-by-field because the checks are
+	// interdependent (method validity depends on target, application is
+	// required only for one method), which a flattened field list cannot
+	// express.
+	deploy ports.DeployConfig
 }
 
 // validateGeneratedConfig runs the same checks as `pokkum config validate` over
@@ -309,6 +323,7 @@ func validateGeneratedConfig(cfg *ports.ProjectConfig) []string {
 		shutdownTimeout:     cfg.Image.ShutdownTimeout,
 		allowSecretPatterns: cfg.Security.AllowSecretPatterns,
 		excludeRoutes:       cfg.Build.ExcludeRoutes,
+		deploy:              cfg.Deploy,
 	})
 	// Profiles are walked in sorted order so the message is stable across runs
 	// rather than reflecting map iteration order.
@@ -338,6 +353,9 @@ func validateGeneratedConfig(cfg *ports.ProjectConfig) []string {
 			allowSecretPatterns: profile.Security.AllowSecretPatterns,
 			excludeRoutes:       profile.Build.ExcludeRoutes,
 			output:              profile.Output,
+			// Merged, matching runConfigValidate above — the two must not
+			// drift in what they accept.
+			deploy: config.MergeDeployConfig(cfg.Deploy, profile.Deploy),
 		})...)
 	}
 	return problems
@@ -464,6 +482,14 @@ func validateConfigFields(f configFieldsToValidate) []string {
 		if _, err := core.ParseOutputMode(f.output); err != nil {
 			errs = append(errs, fmt.Sprintf("%sinvalid output %q: %v", prefix, f.output, err))
 		}
+	}
+
+	// A deploy runs against a live system after a successful push, so a
+	// misconfigured deploy block must surface here rather than at the moment
+	// it would otherwise be discovered: with the image already in the
+	// registry and the rollout not happening.
+	for _, problem := range core.ValidateDeployConfig(f.deploy) {
+		errs = append(errs, prefix+problem)
 	}
 
 	return errs

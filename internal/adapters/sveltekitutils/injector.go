@@ -24,9 +24,6 @@ type InjectorOptions struct {
 	// Defaults to "server".
 	DefaultBinaryName string
 
-	// EnableTelemetry enables kit.experimental.tracing & instrumentation in svelte.config.js.
-	EnableTelemetry bool
-
 	// UserSvelteConfigFile is the project's own svelte config filename
 	// ("svelte.config.js", "svelte.config.ts") or "" when it has none.
 	//
@@ -69,9 +66,6 @@ type VirtualConfigResult struct {
 	// filtered mirror. False means excluded routes are still bundle entry
 	// points and the caller must say so rather than assume they were removed.
 	RoutesRedirected bool
-
-	// InjectedTelemetry indicates whether telemetry experimental flags were injected.
-	InjectedTelemetry bool
 }
 
 // DefaultInjectorOptions returns sensible defaults for injection.
@@ -80,12 +74,11 @@ func DefaultInjectorOptions() InjectorOptions {
 		SourceEpoch:       "pokkum-reproducible-build",
 		TargetAdapter:     "@jesterkit/exe-sveltekit",
 		DefaultBinaryName: "server",
-		EnableTelemetry:   false,
 	}
 }
 
-// TransformConfig transforms a svelte.config.js source string in a single pass to inject the
-// target adapter, pin kit.version.name, and optionally inject kit.experimental telemetry flags.
+// TransformConfig transforms a svelte.config.js source string in a single pass
+// to inject the target adapter and pin kit.version.name.
 func TransformConfig(source string, opts InjectorOptions) (string, error) {
 	if opts.TargetAdapter == "" {
 		opts.TargetAdapter = "@jesterkit/exe-sveltekit"
@@ -106,51 +99,7 @@ func TransformConfig(source string, opts InjectorOptions) (string, error) {
 		result = injectVersionPin(result)
 	}
 
-	// 3. Ensure kit.experimental tracing & instrumentation are configured if telemetry is enabled
-	if opts.EnableTelemetry && !strings.Contains(result, "tracing") {
-		result = injectExperimentalFlags(result)
-	}
-
 	return result, nil
-}
-
-// PrepareVirtualConfig inspects projectDir's svelte.config.js, applies injection
-// if needed, and writes the virtual config file to <projectDir>/.pokkum/svelte.config.js.
-func PrepareVirtualConfig(projectDir string, opts InjectorOptions) (*VirtualConfigResult, error) {
-	configPath := filepath.Join(projectDir, "svelte.config.js")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("read svelte.config.js: %w", err)
-	}
-
-	source := string(data)
-	injectedAdapter := !AdapterConfigured(source, opts.TargetAdapter)
-	pinnedVersion := !strings.Contains(source, "SOURCE_DATE_EPOCH")
-	injectedTelemetry := opts.EnableTelemetry && !strings.Contains(source, "tracing")
-
-	transformed, err := TransformConfig(source, opts)
-	if err != nil {
-		return nil, fmt.Errorf("transform svelte.config.js: %w", err)
-	}
-
-	pokkumDir := filepath.Join(projectDir, ".pokkum")
-	if err := os.MkdirAll(pokkumDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create .pokkum directory: %w", err)
-	}
-
-	virtualPath := filepath.Join(pokkumDir, "svelte.config.js")
-	if err := os.WriteFile(virtualPath, []byte(transformed), 0o600); err != nil {
-		return nil, fmt.Errorf("write virtual svelte.config.js: %w", err)
-	}
-
-	return &VirtualConfigResult{
-		TransformedSource: transformed,
-		VirtualConfigPath: virtualPath,
-		InjectedAdapter:   injectedAdapter,
-		RoutesRedirected:  opts.RoutesDir != "" && strings.Contains(transformed, "__pokkumWithRoutes"),
-		PinnedVersion:     pinnedVersion,
-		InjectedTelemetry: injectedTelemetry,
-	}, nil
 }
 
 // BuildEnv constructs an environment variable slice containing SOURCE_DATE_EPOCH
@@ -875,25 +824,6 @@ func injectVersionPin(source string) string {
 
 	if kitBlockRegex.MatchString(source) {
 		return kitBlockRegex.ReplaceAllString(source, "kit: {"+versionCode)
-	}
-
-	return source
-}
-
-var experimentalBlockRegex = regexp.MustCompile(`experimental\s*:\s*\{`)
-
-func injectExperimentalFlags(source string) string {
-	if experimentalBlockRegex.MatchString(source) {
-		return source
-	}
-	expCode := `
-		experimental: {
-			tracing: { server: true },
-			instrumentation: { server: true }
-		},`
-
-	if kitBlockRegex.MatchString(source) {
-		return kitBlockRegex.ReplaceAllString(source, "kit: {"+expCode)
 	}
 
 	return source

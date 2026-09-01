@@ -26,6 +26,19 @@ import (
 //     header pinning, the runtime config or the label/annotation assembly
 //     changed. If that was intentional, re-record; if not, it is a bug.
 //
+//     **Check your Go toolchain before concluding either.** The claim above —
+//     that goldenConfigDigest cannot move for toolchain reasons — is not quite
+//     true, and believing it costs an afternoon. On 2026-09-01 this test failed
+//     locally with goldenConfigDigest AND goldenManifestDigest moved while both
+//     asserted layer diffIDs held, which reads exactly like a deliberate
+//     config-assembly change nobody re-recorded. It was not: the machine had Go
+//     1.27.0 installed while go.mod pins 1.26.6, and CI resolves its toolchain
+//     from go.mod (`go-version-file`). `GOTOOLCHAIN=go1.26.6 go test ./...`
+//     passed on the same tree, unchanged. Run that FIRST — before bisecting,
+//     and certainly before re-recording, since re-recording under a newer
+//     toolchain than the pinned one hard-breaks CI and quietly makes a digest
+//     no released build produces the canonical one.
+//
 //   - only goldenManifestDigest or goldenIndexDigest changed. These additionally
 //     depend on the *compressed* layer digests, and therefore on the output of
 //     compress/flate at gzip.BestSpeed. Go does not promise that output is
