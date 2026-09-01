@@ -103,6 +103,71 @@ before trusting a claim that predates the commit it cites.
   publishing an index descriptor that misdescribes the child image it points
   at.
 
+## PaaS deploy targets (`deploy:`, `pokkum deploy`) — shipped 2026-09-01
+
+- `internal/ports/deploy.go` (`Deployer`, `DeployRequest`, `DeployResult`,
+  `DeployTarget`, `DeployMethod`), `internal/core/deploy.go` (policy: parse,
+  validate, resolve, `ShouldAutoDeploy`, `Deploy`), `internal/adapters/deploy`
+  (both platforms in ONE package — adapter→adapter imports are forbidden and
+  they share the whole HTTP contract), `cmd/pokkum/deploy.go`.
+- Runs AFTER the reproducible build. This is the one adapter deliberately
+  exempt from the determinism/zero-clock rules: it is a side effect against a
+  live system, invoked post-push, never inside `core.Build`.
+- **The hard-won fact: both platforms return HTTP 200 for outcomes that are not
+  deployments.** A status-code check reports a deploy that changed nothing as a
+  success. Every response is classified on its BODY.
+  - SwiftWave webhook (`ANY /webhook/redeploy-app/:app-id/:webhook-token`,
+    read from `swiftwave_service/rest/webhook.go`): for an image-sourced
+    deployment it reduces its configured image to `owner/name` (tag stripped,
+    then last two path segments) and rebuilds ONLY if the request body contains
+    that substring; otherwise `200 OK - No rebuild`. So the adapter posts the
+    pushed refs as the body, as `text/plain` with no percent escapes — the
+    handler `url.QueryUnescape`s the body and continues with the EMPTY STRING
+    on failure, which silently becomes "No rebuild" — and maps that string to
+    `core.ErrDeployNotTriggered`.
+  - SwiftWave GraphQL (`POST /graphql`, `Authorization: Bearer <jwt>`):
+    `rebuildApplication(id:)`. GraphQL answers 200 for application errors too.
+  - Dokploy (`x-api-key`): `POST /api/application.deploy` `{applicationId}`;
+    `POST /api/application.saveDockerProvider`
+    `{applicationId, dockerImage, username, password, registryUrl}`.
+- **Dokploy's `saveDockerProvider` is a FULL OVERWRITE, not a patch** (read
+  from `apps/dokploy/server/api/routers/application.ts`): the handler writes
+  `dockerImage`/`username`/`password`/`registryUrl` from the request every
+  time, and `apiSaveDockerProvider` is `.required()` on all five picked fields.
+  Omitting credentials is a validation error; sending nulls CLEARS the app's
+  pull credentials. Hence `deploy.update_image` defaults **off**, the payload
+  struct uses `*string` WITHOUT `omitempty` (keys present, values nullable),
+  and clearing is warned about and reported in `DeployResult.Detail`.
+- **SwiftWave cannot be repointed at a new image.** Both its paths rebuild the
+  current deployment; changing the image needs a full
+  `updateApplication(input: ApplicationInput!)` resupplying every field of a
+  running service. `core.SupportsImageUpdate` is dokploy+api only, and
+  `update_image` is REJECTED elsewhere rather than silently ignored. SwiftWave
+  apps must be pinned to a mutable tag Pokkum republishes.
+- No credential is ever stored in `.pokkum.yaml` — only env var NAMES
+  (`token_env`, `endpoint_env`, `registry_username_env`,
+  `registry_password_env`). Default token env `POKKUM_DEPLOY_TOKEN` (carries a
+  `//nolint:gosec` for G101; it is a variable name). A named-but-empty variable
+  FAILS rather than degrading to anonymous. A half-configured
+  username/password pair is refused.
+- Auto-deploy vetoes, all in `core.ShouldAutoDeploy`: `--no-deploy`,
+  `--dry-run`, `--print-manifest`, no target, and any output mode other than
+  `OutputPush` (local/tarball/oci-layout leave nothing remote to pull; the skip
+  logs a warning naming the mode, so "configured but skipped" ≠ "not
+  configured").
+- `core.Deploy` is the backstop: a `DeployResult` with `Triggered == false` can
+  never be returned with a nil error.
+- Config plumbing touches FOUR places for any new `DeployConfig` field —
+  `ports/config.go`, `config.ApplyProfile`, `deepCopyProjectConfig`, and the
+  four `validateConfigFields` call sites in `cmd/pokkum/config.go`.
+  `cmd/pokkum/deploy_config_test.go` walks `DeployConfig` by REFLECTION and
+  fails naming any field `ApplyProfile` forgot.
+- `cmd/pokkum/build.go`'s `resolveProjectConfig` is shared by the build request
+  and the deploy step on purpose: two copies of the profile-resolution rules
+  would let a deploy target a different environment than the build.
+- Vercel/Netlify/edge remain out of scope — they do not run OCI images
+  (existing non-goal in `README.md`).
+
 ## Output modes
 - `--to-oci-layout <dir>` (new, `ports.OCILayoutWriter`) writes a lossless
   OCI image layout directory to disk. Unlike `--tarball` (docker-save

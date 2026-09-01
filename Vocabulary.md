@@ -80,6 +80,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--tarball` | — | — | (none) | Export to the given path in the legacy **docker-save** format (not an OCI archive — the format has no annotations field at all). Mutually exclusive with `--local` and `--to-oci-layout`. Every OCI annotation is therefore dropped, and a multi-platform build is flattened into one platform-suffixed tag per architecture rather than a manifest list; a warning names the dropped keys. `docker load` accepts this format — use it when that is what you need, and `--to-oci-layout` when you need the metadata to survive. |
 | `--to-oci-layout` | — | — | (none) | Export as a standards-conformant **OCI image layout** into the given directory (`oci-layout`, `index.json`, `blobs/sha256/…`). Mutually exclusive with `--local` and `--tarball`. Needs no Docker/Podman daemon and no registry, which is what makes it the mode a hermetic CI runner or a daemonless contributor machine can use. Unlike `--tarball` it is **lossless**: every OCI annotation survives (`org.opencontainers.image.*` and `pokkum.dev/*` alike, on both the per-platform manifests and the index), and a multi-platform build is written as a real manifest list instead of being flattened. `index.json` carries one descriptor per tag annotated with both `org.opencontainers.image.ref.name` (bare tag — what skopeo's `oci:` transport and podman match on) and `io.containerd.image.name` (fully qualified — what containerd's importer, and therefore `ctr images import`/`k3d image import`/`minikube image load`, reads first). Written to a staging directory and swapped into place, so an interrupted run leaves the previous layout or nothing, and a re-run replaces rather than merges. `docker load` does **not** accept this format — use `--tarball` for that. Signing/SBOM/attestation attachment still require push output. |
 | `--dry-run` | — | — | `false` | Resolve and report; perform no writes. Mutually exclusive with `--print-manifest`. |
+| `--no-deploy` | — | — | `false` | Skip the automatic post-push deploy configured under `deploy:` in `.pokkum.yaml` for this build. Never *enables* a deploy — a project with no `deploy.target` never deploys regardless. See §4b. |
 | `--print-manifest` | — | — | `false` | Emit the computed OCI manifest/config without pushing. Mutually exclusive with `--dry-run`. |
 | `--log-level` | — | — | `INFO` | Same as global flag; redeclared for early pre-parse. |
 | `--log-format` | — | — | `auto` | Same as global flag; redeclared for early pre-parse. |
@@ -214,6 +215,48 @@ If you use the `hooks.server.ts` snippet above, `@opentelemetry/api` is also a d
 | `--no-cluster-inspect` | — | `false` | (`apply` only) Disable live cluster annotation inspection; wins over `--cluster-inspect` if both are set. |
 | `--since` | — | (none) | Git ref (commit, branch, tag) to diff against for monorepo affected-detection: a `pokkum://` project whose source tree has not changed since this ref, and for which a prior digest is known (from the manifest's `pokkum.dev/current-image` annotation or live cluster state when inspecting), skips compilation/packaging and reuses that digest. If no prior digest is known, or the project is affected, it is built normally. Fail-closed: an unknown ref or git failure errors out. |
 | `--registry-config` | — | (none) | Path to a `docker config.json`-style auth file, keyed by registry hostname; see the `pokkum build` flag table above for the exact merge behavior. |
+
+---
+
+## 4b. `pokkum deploy [dir]`
+
+Hands an image that is **already in a registry** to the PaaS control plane configured under `deploy:` in `.pokkum.yaml`. It builds nothing and pushes nothing. A successful `pokkum build` runs the same deploy automatically unless `deploy.auto` is `false` or `--no-deploy` is passed.
+
+| Flag | Shorthand | Default | Description |
+|---|---|---|---|
+| `--dir` | `-d` | `.` | Path to the project directory holding `.pokkum.yaml`. |
+| `--profile` | `-P` | (none) | Configuration profile whose `deploy:` settings to use — the same profile resolution `pokkum build` performs, so `deploy -P production` addresses the environment `build -P production` publishes to. |
+| `--image` | — | (none) | Image reference to deploy, overriding configuration. Required when the target repoints the application at a specific image (`deploy.update_image: true`). |
+
+### `deploy:` keys in `.pokkum.yaml`
+
+Available at the top level and inside any `profiles.<name>` block. **No key holds a credential** — tokens are named indirectly, as environment variables, because `.pokkum.yaml` is a committed file and Pokkum's own `secretguard` exists to stop secrets landing in source control.
+
+| Key | Default | Description |
+|---|---|---|
+| `target` | (none) | `dokploy` or `swiftwave`. Empty disables deployment entirely. |
+| `method` | per-target | `api` or `webhook`. Defaults to `api` for Dokploy and `webhook` for SwiftWave. Dokploy does not support `webhook` (its per-application webhook is a git-provider callback and redeploys from git, not from a Pokkum-built image); the combination is rejected at `pokkum config validate` time. |
+| `endpoint` | (none) | Panel base URL for `method: api` (e.g. `https://panel.example.com`), or the complete per-application webhook URL for `method: webhook`. One of `endpoint`/`endpoint_env` is required. |
+| `endpoint_env` | (none) | Name of an environment variable holding `endpoint`; wins over `endpoint` when set. Use this for a webhook URL, which carries its own secret in the path. |
+| `application` | (none) | Platform-side application id. Required for `method: api`; ignored for `webhook`, where the id is already in the URL. |
+| `token_env` | `POKKUM_DEPLOY_TOKEN` | Name of the environment variable holding the API credential — a Dokploy API key (`x-api-key`) or a SwiftWave JWT (`Authorization: Bearer`). Unused for `method: webhook`. A named-but-empty variable is an error, not a fallback to anonymous. |
+| `auto` | `true` when `target` is set | Whether a successful `pokkum build` deploys on its own. Auto-deploy never fires for `--dry-run`, `--print-manifest`, `--no-deploy`, or any output mode other than a registry push — `--local`, `--tarball` and `--to-oci-layout` leave nothing a remote PaaS can pull. |
+| `update_image` | `false` | Repoint the application at the exact digest just pushed before triggering the rollout. **Dokploy `api` only**; rejected for any other combination rather than silently ignored. See the warning below. |
+| `registry_url` | (none) | Registry hostname written alongside the image when `update_image` is on. |
+| `registry_username_env` / `registry_password_env` | (none) | Names of the environment variables holding the registry pull credentials to write when `update_image` is on. Must both be set or both be empty. |
+| `timeout` | `60s` | Go duration bounding the deploy call. |
+
+> [!WARNING]
+> **`update_image: true` overwrites Dokploy's stored registry credentials.** Dokploy's `application.saveDockerProvider` is a full overwrite, not a patch: its handler writes `dockerImage`, `username`, `password` **and** `registryUrl` from the request on every call, and its input schema marks all of them required. Pokkum therefore sends explicit values for all of them — so leaving `registry_username_env`/`registry_password_env` unset **clears** whatever credentials the application was pulling with. That is safe only for a publicly pullable image. Pokkum warns on the build log and in the deploy detail when it does this, rather than clearing them silently.
+
+> [!IMPORTANT]
+> **SwiftWave cannot be repointed at a new image, so pin its application to a mutable tag.** Both SwiftWave paths (`webhook` and the `rebuildApplication` GraphQL mutation) rebuild the application's *current* deployment; neither can change which reference it pulls. Configure the SwiftWave application with a tag Pokkum republishes (`:latest`, `:main`) and the deploy will make it pull that tag again.
+>
+> SwiftWave's webhook additionally only rebuilds when the **posted request body contains the application's own configured image**, reduced to `owner/name` — otherwise it answers `HTTP 200` with the body `OK - No rebuild` and does nothing. Pokkum posts the pushed references as the body and classifies on the response text, reporting `OK - No rebuild` as a **failure** (`ERR_DEPLOY_NOT_TRIGGERED`) rather than reading the `200` as success.
+
+### Deploy exit conditions
+
+A deploy that the platform accepts without starting a rollout fails the command. `pokkum build`'s automatic deploy fails the build the same way: the image is already pushed at that point and nothing rolls it back, but a `pokkum build` that exits `0` while its configured deployment did not happen is not usable as a CI gate. With `--output=json`, the failure carries a specific code: `ERR_DEPLOY_NOT_TRIGGERED`, `ERR_DEPLOY_TOKEN_MISSING`, `ERR_DEPLOY_NOT_CONFIGURED`, `ERR_INVALID_DEPLOY_TARGET`, `ERR_INVALID_DEPLOY_METHOD`, or `ERR_DEPLOY_FAILED`.
 
 ---
 
@@ -385,6 +428,16 @@ Both output formats show the complete annotation set and its source. (`--expect-
 | `--output` | `text` | Output format (`text` or `json`). |
 
 For a multi-platform image the ref `pokkum build` prints is the *index* digest, whose own manifest carries only a subset of the annotations; `history` descends into a child manifest to recover the rest and always discloses that it did, via `annotations_source` (`manifest`, `index+child-manifest`, or `index-only`).
+
+---
+
+## 17b. Environment Variables (CLI, Deploy)
+
+Read by `pokkum deploy` and by `pokkum build`'s automatic deploy. Only the *names* are configured in `.pokkum.yaml`; the values live in the environment.
+
+| Variable | Default | Description |
+|---|---|---|
+| `POKKUM_DEPLOY_TOKEN` | — | Default source of the PaaS API credential when `deploy.token_env` is unset: a Dokploy API key or a SwiftWave JWT. Point `deploy.token_env` at a different variable to override the name. Unused for `deploy.method: webhook`, whose secret is already inside the webhook URL. A named-but-empty variable fails the deploy rather than falling back to an unauthenticated call. |
 
 ---
 

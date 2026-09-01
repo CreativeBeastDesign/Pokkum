@@ -102,6 +102,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | [pokkum explain / explain why / explain diff](items/layer-origin-tracing.md) | Reads a real OCI image and reports its actual per-layer digests, sizes, and file origins, and diffs two images layer-by-layer. | feature | shipped |  |
 | [pokkum dev --no-container](items/no-container-dev-mode.md) | Runs the project's own dev server directly on the host, skipping image construction entirely, for the fastest possible local iteration loop. | feature | shipped | `18f056c` |
 | [--to-oci-layout for daemonless cluster loading](items/oci-layout-dev-output.md) | Writes a standards-conformant OCI image layout to a directory — no daemon, no registry — preserving every annotation and the full multi-platform index, ready for `ctr images import` / kind / k3d / minikube. | dx | shipped |  |
+| [pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md) | Hands a pushed image straight to a self-hosted PaaS control plane, so a `deploy:` block in `.pokkum.yaml` replaces a hand-written CI deploy step. | feature | shipped |  |
 | [pokkum upgrade](items/signed-self-update.md) | Checks for new releases and verifies the release binary's checksum signature via Cosign before self-replacing. | feature | shipped |  |
 | [pokkum init](items/workspace-init-wizard.md) | Guided interactive setup for `.pokkum.yaml` and `.pokkumignore`, with a non-interactive `--defaults` mode. | feature | shipped |  |
 

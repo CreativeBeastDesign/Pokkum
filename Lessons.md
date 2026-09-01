@@ -5,6 +5,59 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-01 — Two new PaaS integrations both had a "200 means nothing happened" path, and one had a write that silently clears credentials — both found by reading the platforms' source before writing any code
+
+**Category:** boundary / external-contract — an outbound integration where the remote system's success status is not evidence its action occurred, and a "partial update" that is actually a full overwrite
+
+**Root cause:** the intuitive model of an HTTP integration is "2xx means it worked." That model is
+wrong for both platforms Pokkum now deploys to, in ways nothing in their prose documentation says.
+
+SwiftWave's redeploy webhook (`swiftwave_service/rest/webhook.go`) rebuilds an image-sourced
+application ONLY if the POST body contains the application's own configured image, reduced to
+`owner/name` (tag stripped, then the last two path segments). If it does not, the handler returns
+`200` with the body `OK - No rebuild`. An adapter checking only the status code would report a
+deploy that changed nothing as a success, indefinitely and silently. Worse, the handler runs
+`url.QueryUnescape` over the body first and, on failure, continues with the **empty string** — so a
+body containing a stray percent escape also degrades to a silent no-op with a 200.
+
+Dokploy's `application.saveDockerProvider`
+(`apps/dokploy/server/api/routers/application.ts`) reads as a targeted "set the image" call. It is
+not: the handler writes `dockerImage`, `username`, `password` AND `registryUrl` from the request on
+every invocation, and its zod input schema is `.required()` on all five picked fields. So the
+obvious payload `{applicationId, dockerImage}` fails validation, and the "fixed" payload that adds
+nulls **clears the registry credentials the application pulls with** — a destructive side effect of
+a call whose name says nothing about credentials.
+
+**How it was caught:** neither was caught, because neither was written wrong. Both were found before
+any adapter code existed, by following checklist row 36 — verify a third-party interop contract
+against that consumer's own source, not its error messages or its docs — and reading the two
+handlers. The prose documentation for both endpoints describes neither behaviour. A test-first or
+docs-first approach would have produced two adapters that appeared to work in every manual check
+against a correctly-configured application, and failed silently the first time one was not.
+
+**Where:** `internal/adapters/deploy/swiftwave.go` (`deployViaWebhook`),
+`internal/adapters/deploy/dokploy.go` (`saveDockerProvider`, `dokploySaveDockerProviderRequest`).
+
+**Fix:** every response is classified on its BODY, never its status alone. SwiftWave's
+`OK - No rebuild` maps to a distinct sentinel, `core.ErrDeployNotTriggered`, with a message naming
+the `owner/name` matching rule; the body is posted as `text/plain` carrying the pushed references
+and containing no percent escapes. An unrecognised 2xx is an error at both platforms, not a
+success. Dokploy's payload uses `*string` **without** `omitempty` so every required key is present
+while nullable values stay null; `deploy.update_image` defaults **off**, takes explicit pull
+credentials, and reports credential clearing in `DeployResult.Detail` plus a `Warn` log rather than
+doing it silently. `core.Deploy` backstops the adapter contract: a `DeployResult` with
+`Triggered == false` can never be returned alongside a nil error. Both guards were proven capable
+of failing by reverting the behaviour they protect (a naive `isSuccess(status)` branch, and
+`omitempty` on the nullable fields) and watching the tests fail by name.
+
+**Preventative rule:** for any call to an external system that performs a side effect, a success
+status is a claim about *delivery*, not about *the action*. Identify, from that system's own source,
+every response it emits for "received your request and deliberately did nothing" — and make each one
+an error with its own diagnosis. Separately, before writing any call that updates a remote resource,
+read the handler to determine whether it patches or overwrites: a name like `saveXProvider` or
+`updateX` says nothing about which, and an overwrite reached through a partial-looking payload
+destroys the fields the payload omitted.
+
 ## 2026-08-23 — The published GitHub Action never loaded at all: an example expression written as documentation inside an input's `description` failed the manifest for every consumer, in every release
 
 **Category:** boundary / evaluated-position — text intended as documentation sat in a
