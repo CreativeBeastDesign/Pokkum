@@ -111,6 +111,13 @@ When code changes have occurred, agents **MUST** execute the following 5-step ve
 
 `supervisor/` (the `pokkum-init`/`pokkum-static` PID-1 binaries) shares the root `go.mod` but isn't covered by any of the five steps above. If a diff touches anything under `supervisor/`, also run `go build ./supervisor/... && go test ./supervisor/...`.
 
+> [!WARNING]
+> **The five steps do not cover `tests/integration/`, and CI does.** Steps 3 and 5 scope to `./internal/...`; CI runs `go test ./...` plus a real-build E2E job. So a green five-step run is a claim about the packages inside its scope, never that no golden fixture or E2E stub *elsewhere in the repo* depends on what changed. `tests/integration/` independently pins full OCI manifest/config/index JSON (`testdata/golden/*.json`) and carries its own stub `BaseImageResolver`s.
+>
+> **Run `GOTOOLCHAIN=go$(awk '/^go [0-9]/{print $2}' go.mod) go test -short ./...` before declaring any change complete that touches image labels/annotations, layer compression, tar construction, OCI manifest/config assembly, or any widely-depended-on primitive (hashing, serialization, a shared struct in `ports`).** It is one command and it is the difference between finding this locally and finding it in CI.
+>
+> This has now happened twice, which is why it is here rather than only in `mem:task_completion`: the rule was written after the 2026-08-17 gzip-swap incident and lived only in that memory, so an agent following §5's five steps in good faith walked into the identical trap on 2026-09-01 (a `base.name` change that two E2E stubs and one golden depended on). A verification rule that lives outside the section describing the verification suite is a rule with no matching read.
+
 Before declaring any non-trivial feature or refactor complete, review your own diff (`git diff`) line by line against the functional spec. Use the Self-Review Checklist below to do this — treat it as a set of things to *mechanically verify* against the actual diff, not a paragraph to keep in mind while skimming.
 
 If a bug or edge case failure is found during self-review, flag it explicitly, fix it, and re-run the full verification suite. **Silent patching is strictly forbidden.**

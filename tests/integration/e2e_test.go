@@ -159,11 +159,23 @@ func (m *mockBaseResolver) Resolve(_ context.Context, req ports.BaseImageRequest
 		images[p] = SyntheticBaseImage(m.t, p)
 	}
 	return &ports.BaseImage{
-		Ref:       "gcr.io/distroless/cc-debian12:nonroot",
-		PinnedRef: "gcr.io/distroless/cc-debian12:nonroot@sha256:11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
-		Digest:    v1.Hash{Algorithm: "sha256", Hex: "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"},
-		Images:    images,
-		IsIndex:   len(req.Platforms) > 1,
+		// UpstreamRef mirrors what the real resolver does (`upstreamRef := ref`
+		// in baseimage/resolver.go): it starts equal to the requested
+		// reference and is never rebound to a mirror or a locked digest. It is
+		// what org.opencontainers.image.base.name records, so a stub omitting
+		// it does not model the contract and sends the label down a fallback
+		// path production never takes.
+		//
+		// PinnedRef is the repository name plus the digest, with the TAG
+		// STRIPPED — `pinnedRef()` builds it from `parsedRef.Context().Name()`,
+		// which never yields "repo:tag@sha256:…". This stub previously
+		// fabricated that impossible shape (self-review checklist row 12).
+		Ref:         "gcr.io/distroless/cc-debian12:nonroot",
+		UpstreamRef: "gcr.io/distroless/cc-debian12:nonroot",
+		PinnedRef:   "gcr.io/distroless/cc-debian12@sha256:11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+		Digest:      v1.Hash{Algorithm: "sha256", Hex: "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"},
+		Images:      images,
+		IsIndex:     len(req.Platforms) > 1,
 	}, nil
 }
 

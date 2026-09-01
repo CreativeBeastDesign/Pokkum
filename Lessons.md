@@ -5,6 +5,50 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-01 — CI caught what the five-step suite structurally cannot, on the exact class a 2026-08-17 entry had already written a rule for
+
+**Category:** verification-scope — a rule that existed, was correct, and lived where nobody following the documented protocol would read it
+
+**Root cause:** the `base.name` fix changed a value baked into every image config. `CLAUDE.md` §5's
+five-step suite scopes steps 3 and 5 to `./internal/...`, so a full, green five-step run — reported
+as "46 packages passing" — said nothing about `tests/integration/`, which independently carries stub
+`BaseImageResolver`s and pins full OCI manifest/config/index JSON. CI runs `go test ./...` and a
+real-build E2E job, and failed on both.
+
+The rule that would have prevented this already existed. The 2026-08-17 entry ("`make verify`'s
+5-step suite doesn't cover `tests/integration/`'s own golden fixtures") ends with exactly it: any
+change touching OCI manifest/config assembly must also run `go test ./...`. It was written into
+`mem:task_completion` and nowhere else. `CLAUDE.md` §1 lists that memory as one to read "as needed
+for the task", and §5 — the section that enumerates the verification suite step by step — did not
+mention it. So an agent reading §5 and executing all five steps faithfully hits the identical trap
+the entry was written to close.
+
+The two stubs also failed on **fixture fidelity** (row 12) in a way that had been invisible while the
+production code read `Ref`: neither set `UpstreamRef`, which the real resolver always populates
+(`upstreamRef := ref`), and both fabricated a `PinnedRef` of the shape `repo:tag@sha256:…` that
+`pinnedRef()` cannot produce, since it builds from `parsedRef.Context().Name()` and thereby strips
+the tag. The unfaithful stubs sent the new label down a fallback path production never takes.
+
+Corroborating detail worth keeping: `testdata/golden/*.json` pinned `base.name` to the **tag**, which
+is what the fix produces. The goldens encoded the intended value all along and needed no
+regeneration — the disagreement was entirely between the stubs and reality.
+
+**Where:** `CLAUDE.md` §5; `tests/integration/e2e_test.go` and `static_e2e_test.go`
+(`mockBaseResolver.Resolve`).
+
+**Fix:** both stubs now set `UpstreamRef` and a correctly-shaped `PinnedRef`, with a comment naming
+the production code they mirror. The verification-scope rule is promoted out of
+`mem:task_completion` into `CLAUDE.md` §5 as an admonition adjacent to the five steps, with the
+exact command to run and the list of change categories that trigger it.
+
+**Preventative rule:** a verification rule must live in the section that describes the verification
+protocol, not only in a memory that section does not require reading. Ask of any process rule: *what
+would an agent following the documented steps literally, and nothing else, actually do?* If the rule
+is not on that path, it will be missed by exactly the diligent agent it was written for — twice now.
+Corollary for scope: "N packages passing" is a claim bounded by the package list you passed, so state
+the scope when reporting it, and before declaring done on a change to a widely-depended-on primitive,
+run the repo-wide suite once rather than trusting the fast inner loop.
+
 ## 2026-09-01 — A `head -10` on a reachability grep produced a confident, wrong recommendation to delete live code
 
 **Category:** process / truncated-evidence — a completeness question answered with a deliberately incomplete command

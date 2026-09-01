@@ -206,11 +206,23 @@ func (m *recordingBaseResolver) Resolve(_ context.Context, req ports.BaseImageRe
 		images[p] = SyntheticBaseImage(m.t, p)
 	}
 	return &ports.BaseImage{
-		Ref:       "cgr.dev/chainguard/static:latest",
-		PinnedRef: "cgr.dev/chainguard/static:latest@sha256:99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbb",
-		Digest:    v1.Hash{Algorithm: "sha256", Hex: "99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbb"},
-		Images:    images,
-		IsIndex:   len(req.Platforms) > 1,
+		// UpstreamRef mirrors what the real resolver does (`upstreamRef := ref`
+		// in baseimage/resolver.go): it starts equal to the requested
+		// reference and is never rebound to a mirror or a locked digest. It is
+		// what org.opencontainers.image.base.name records, so a stub omitting
+		// it does not model the contract and sends the label down a fallback
+		// path production never takes.
+		//
+		// PinnedRef is the repository name plus the digest, with the TAG
+		// STRIPPED — `pinnedRef()` builds it from `parsedRef.Context().Name()`,
+		// which never yields "repo:tag@sha256:…". This stub previously
+		// fabricated that impossible shape (self-review checklist row 12).
+		Ref:         "cgr.dev/chainguard/static:latest",
+		UpstreamRef: "cgr.dev/chainguard/static:latest",
+		PinnedRef:   "cgr.dev/chainguard/static@sha256:99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbb",
+		Digest:      v1.Hash{Algorithm: "sha256", Hex: "99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbb"},
+		Images:      images,
+		IsIndex:     len(req.Platforms) > 1,
 	}, nil
 }
 
