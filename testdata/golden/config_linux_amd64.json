@@ -37,7 +37,7 @@
       "POKKUM_SHUTDOWN_TIMEOUT=30s"
     ],
     "Labels": {
-      "org.opencontainers.image.base.digest": "sha256:3df3024788c6143f7d324570e8ffd63f0b084c6ae9cba2f5d32044a691505408",
+      "org.opencontainers.image.base.digest": "sha256:481b4b3140139ab8974a9e67bb230161b9841938851a9517531cf07529785850",
       "org.opencontainers.image.base.name": "gcr.io/distroless/cc-debian12:nonroot",
       "org.opencontainers.image.created": "2023-11-14T22:13:20Z",
       "org.opencontainers.image.revision": "1234567890abcdef1234567890abcdef12345678",

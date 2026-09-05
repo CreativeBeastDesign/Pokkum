@@ -4,9 +4,9 @@ Thank you for helping improve Pokkum. This guide outlines how to set up your dev
 
 ## Prerequisites
 
-**Go version:** 1.26.6 (from `go.mod`)
+**Go version:** 1.27.1 (from `go.mod`)
 
-Install Go 1.26.6 or later. Check your version:
+Install Go 1.27.1 or later. Check your version:
 
 ```bash
 go version

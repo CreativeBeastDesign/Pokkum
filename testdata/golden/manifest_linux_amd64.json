@@ -4,13 +4,13 @@
   "config": {
     "mediaType": "application/vnd.oci.image.config.v1+json",
     "size": 1321,
-    "digest": "sha256:dd1d114472519d18782b1d86e696ff93c807a6b34926049f2e37f3cc200bdaf5"
+    "digest": "sha256:7cd6fe8773aba4c8be6bc31c0516e9390d0908a89b30d6b85702a61e2e90e87d"
   },
   "layers": [
     {
       "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
-      "size": 130,
-      "digest": "sha256:03e8323a08fcab9ca4ebc456303ae274c9ab51e9b995b2e3c360280658c95588"
+      "size": 131,
+      "digest": "sha256:f6557e006e84e980fe6ab9d932b44f562c94a0f1f95e2de3f289a602c4c140d4"
     },
     {
       "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
@@ -24,7 +24,7 @@
     }
   ],
   "annotations": {
-    "org.opencontainers.image.base.digest": "sha256:3df3024788c6143f7d324570e8ffd63f0b084c6ae9cba2f5d32044a691505408",
+    "org.opencontainers.image.base.digest": "sha256:481b4b3140139ab8974a9e67bb230161b9841938851a9517531cf07529785850",
     "org.opencontainers.image.base.name": "gcr.io/distroless/cc-debian12:nonroot",
     "org.opencontainers.image.created": "2023-11-14T22:13:20Z",
     "org.opencontainers.image.revision": "1234567890abcdef1234567890abcdef12345678",

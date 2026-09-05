@@ -40,12 +40,39 @@ import (
 //     no released build produces the canonical one.
 //
 //   - only goldenManifestDigest or goldenIndexDigest changed. These additionally
-//     depend on the *compressed* layer digests, and therefore on the output of
-//     compress/flate at gzip.BestSpeed. Go does not promise that output is
-//     stable across releases. A Go toolchain upgrade can legitimately move these
-//     two while the diffID and config digest hold — which is worth knowing,
-//     because it means images rebuilt after the upgrade get new digests even
-//     though their contents are identical.
+//     depend on the *compressed* layer digests. Note that Pokkum's OWN layers are
+//     NOT a source of drift here: layer.go pins github.com/klauspost/compress/gzip
+//     (not stdlib compress/gzip) precisely so its compressed bytes are stable
+//     across Go releases, and that pin holds — see the 2026-09-05 note below,
+//     where a full Go minor bump moved neither layer digest by a single bit.
+//     What can still move them is a compressed digest produced by something
+//     other than this package, which in this fixture means the synthetic base
+//     image (below).
+//
+// # 2026-09-05 update: Go 1.26.6 -> 1.27.1, and what actually drifts
+//
+// goldenConfigDigest, goldenManifestDigest and goldenIndexDigest moved on this
+// toolchain bump. All four layer constants — supervisor AND app, diffID AND
+// compressed digest — held exactly. That split localises the cause precisely,
+// and it is worth writing down because the bullet above used to name the wrong
+// mechanism (it blamed stdlib compress/flate at gzip.BestSpeed, which this
+// package has not used since the klauspost pin landed 2026-08-17).
+//
+// The measured cause: this fixture's *synthetic base image* is built in-process
+// by go-containerregistry, which compresses with stdlib compress/gzip. Go 1.27
+// changed that output, so the synthetic base's layer digest changed, so the base
+// image's own digest changed, so the value of the
+// org.opencontainers.image.base.digest label changed
+// (71e40aed... -> 5ef56487...), so the config JSON bytes changed, and the
+// manifest and index digests followed. Diffing the config JSON under both
+// toolchains showed that label as the ONLY differing byte range; everything
+// else, including all three rootfs diff_ids, was identical.
+//
+// Consequence worth being clear about: a real build is not affected the way this
+// fixture is. A real base image's digest is whatever the registry serves, not
+// something recomputed locally, so a toolchain bump does not move it. Pokkum's
+// own layer bytes are toolchain-stable by construction (the klauspost pin), which
+// is exactly what these four unchanged layer constants demonstrate.
 //
 // # 2026-08-18 update: immutable-binary layer timestamp decoupling
 //
@@ -67,9 +94,9 @@ const (
 	goldenSupervisorLayerDigest = "sha256:8ead9ea773a6f603898992e1dbc6974ab1dfb85fcdc9ccbd95f15ae021db343d"
 	goldenAppLayerDiffID        = "sha256:444f537f1513ae1971fb23beaec92dd1fb046f8c533d411518d421ad94707602"
 	goldenAppLayerDigest        = "sha256:f145163ebb449b41bb6c46cf894839aabb2c80e937a8185c124ce234610fe62a"
-	goldenConfigDigest          = "sha256:312cf9d417c34f1998f7b43327e27ca35646463e016cb777495fdfcdbf57ab39"
-	goldenManifestDigest        = "sha256:569636395239fe8281fd2ee40fe94246de3c02a555f2af09c88a6e0cc6077bc6"
-	goldenIndexDigest           = "sha256:fc447a4349407da547eaefa3b7becb05477ea02b1b48443b92b12aeb1f1b5d16"
+	goldenConfigDigest          = "sha256:8f8ec8b8c941d1b6189abb865aa4bfa3afa721baaef89ad34e0425b793d67037"
+	goldenManifestDigest        = "sha256:e988fbeda7c518717e15cef3433b6cd4f8360ecd60a00bb7df9454501dd45ebb"
+	goldenIndexDigest           = "sha256:c1d32be58c537e4a717156f8c673adce5fafaa8611c5400ee5933a4c73b5811f"
 )
 
 func TestGoldenImageDigests(t *testing.T) {

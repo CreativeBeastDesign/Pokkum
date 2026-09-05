@@ -1,6 +1,6 @@
 module github.com/CreativeBeastDesign/pokkum
 
-go 1.26.6
+go 1.27.1
 
 require (
 	github.com/ProtonMail/go-crypto v1.4.1
