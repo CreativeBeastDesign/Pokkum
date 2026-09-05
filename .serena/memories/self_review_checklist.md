@@ -28,7 +28,7 @@ are the ones whose absence has actually shipped bugs here:
 | 8 | Did `make lint` report an issue **count** (not just exit 0)? And does your test scope cover what the change reaches? |
 | 16 | Is every capability you are about to call "done" real code you have read? |
 | 30 | Did you revert the fix and watch the new guard actually fail? |
-| 45 | If it would not fail, is your assertion looking at the wrong observable? |
+| 45 | If it would not fail, is your assertion looking at the wrong observable? **For a `-race`/concurrency guard specifically: where did its expected values come from?** If they were computed on the *same* instance the goroutines then hammer, the setup phase already walked every path and populated exactly the lazily-built state the race lives in, leaving the concurrent phase read-only — the guard passes under `-race` with a real data race present (`Lessons.md` 2026-09-05, `TestMatcherConcurrentMatch`). Derive expectations from a separate instance, a pure function, or a hard-coded table, then introduce the race and watch it go red. |
 | 47 | What does each check print when it runs *nothing*? Distinguishable from a clean pass? |
 | 60 | Deleting anything? Prove it dead with the compiler, never a truncated grep. |
 

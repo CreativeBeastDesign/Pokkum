@@ -5,6 +5,45 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-05 — A concurrency guard passed under `-race` with a real data race present, because it warmed the object it was about to hammer
+
+**Category:** test-substance / guard-measures-nothing — a specific, nameable instance of the general
+"show the guard fail" rule, worth recording because the mechanism is invisible on reading
+
+**Root cause:** a test asserting that `ignoreutils.Matcher` is safe for concurrent use computed its
+table of expected verdicts **on the same `Matcher` instance** it then hammered from many goroutines.
+Computing those expectations walked every path in the corpus sequentially, which populated the
+matcher's lazily-built internal state completely. By the time the concurrent phase began there was
+nothing left to write, so the deliberately-introduced unsynchronised memo was never exercised, and
+the test passed cleanly under `-race` with a genuine data race sitting in the code.
+
+The failure is not in the assertion, which was correct, nor in the concurrency, which was real. It is
+that the setup phase silently converted a write-heavy workload into a read-only one. Nothing about
+reading the test suggests that: warming a shared fixture before asserting on it is ordinary, careful
+test-writing everywhere else.
+
+**Where:** `internal/adapters/ignoreutils/matcher_differential_test.go`,
+`TestMatcherConcurrentMatch`, found while optimising `Matcher.Match`.
+
+**Fix:** expectations are now computed on a **separate** `Matcher` instance, leaving the one under
+concurrent test cold. Re-verified by reinstating the unsynchronised memo, at which point the guard
+reports `WARNING: DATA RACE` with both sides in `Matcher.Match`, as it always should have.
+
+(The same session's optimisation ultimately declined to add any memo — after classification a rule
+check is a few string comparisons, so a memo would buy little while turning a read-only value into
+shared mutable state on the fan-out hot path. This test is what now enforces that decision against a
+future edit.)
+
+**Preventative rule:** a `-race` test proves nothing about code paths its own setup already executed.
+When writing a concurrency guard, ask what state the assertion's *expected values* were derived from
+— if they came from the object under test, the setup has warmed exactly the lazily-initialised state
+the race lives in. Derive expectations from a separate instance, a pure function, or a hard-coded
+table. And apply the general rule that catches this without needing to foresee it: introduce the race
+you are guarding against, run the guard, and confirm it goes red. This one cost a minute to check and
+would otherwise have shipped as a permanent false assurance.
+
+---
+
 ## 2026-09-05 — The remote build cache could never hit, because the build stamped the wall clock into a file it then hashed as source
 
 **Category:** self-invalidating cache key / unobservable-by-construction — a feature that was inert

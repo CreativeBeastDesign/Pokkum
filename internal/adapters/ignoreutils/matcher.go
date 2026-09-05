@@ -50,6 +50,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -87,9 +88,61 @@ func DefaultPatterns() []string {
 	}
 }
 
+// ruleKind records the shape compile recognised in a pattern, so matchGlob
+// can answer with a string comparison instead of re-entering doublestar.
+//
+// doublestar has no compiled-pattern form: doublestar.Match re-parses its
+// pattern string on every call (v4.10.0 match.go). Match evaluates every rule
+// against every ancestor prefix of a path, so the parse cost is paid
+// depth x len(rules) times per file, on the hot path of four separate
+// directory walks per build (the pre-build secret scan, the SBOM project
+// scan, the remote-cache source-tree hash and the post-build output scan).
+// Nearly every pattern a real .pokkumignore holds -- and every entry of
+// DefaultPatterns -- is one of the shapes below, none of which needs a glob
+// engine.
+//
+// Every fast path is a claim about doublestar's OWN semantics for that
+// pattern shape, not about what the shape intuitively means; see the
+// soundness notes on each constant. TestMatchDifferential and
+// FuzzRuleDifferential check the claims against the pre-optimisation
+// implementation kept verbatim as an oracle, which is the only reason these
+// are trustworthy.
+type ruleKind uint8
+
+const (
+	// kindGlob is the residual case: hand the pattern to doublestar.
+	kindGlob ruleKind = iota
+
+	// kindPathLiteral is an anchored pattern with no glob metacharacter, e.g.
+	// "node_modules/.cache" or "/build". doublestar's matcher decodes pattern
+	// and name one rune at a time and compares them, requiring both to be
+	// exhausted together, so a metacharacter-free pattern matches exactly the
+	// identical string -- provided both decode unambiguously, which is what
+	// the utf8 guard in classify exists for.
+	kindPathLiteral
+
+	// kindBaseLiteral is "**/<lit>" with lit free of metacharacters and of
+	// '/'. A leading "**/" can only end at a segment boundary (or at position
+	// 0), and lit contains no '/', so lit must match the whole final segment:
+	// equivalent to basename(candidate) == lit.
+	kindBaseLiteral
+
+	// kindBasePrefix is "**/<lit>*" -- the final segment must start with lit,
+	// since '*' never crosses a '/'.
+	kindBasePrefix
+
+	// kindBaseSuffix is "**/*<lit>".
+	kindBaseSuffix
+
+	// kindBaseContains is "**/*<lit>*".
+	kindBaseContains
+)
+
 // rule is one compiled pattern line.
 type rule struct {
-	glob     string // the doublestar pattern to match against a candidate path
+	glob     string   // the doublestar pattern to match against a candidate path
+	lit      string   // the literal kind compares against; empty for kindGlob
+	kind     ruleKind // which comparison matchGlob uses
 	negate   bool
 	dirOnly  bool
 	anchored bool
@@ -201,7 +254,8 @@ func compile(line string) (r rule, ok bool, err error) {
 		r.anchored = true
 	}
 
-	if !r.anchored {
+	unanchored := !r.anchored
+	if unanchored {
 		s = "**/" + s
 	}
 
@@ -210,15 +264,118 @@ func compile(line string) (r rule, ok bool, err error) {
 	}
 
 	r.glob = s
+	r.classify(unanchored)
 	return r, true, nil
+}
+
+// globMeta reports whether s holds any byte doublestar treats as anything
+// other than a literal. Deliberately over-broad: ']' and '}' outside a class
+// or alternation are literals to doublestar, but counting them as meta only
+// costs a rule its fast path, whereas missing one would be a wrong verdict.
+func globMeta(s string) bool {
+	return strings.ContainsAny(s, `*?[]{}\`)
+}
+
+// literalSafe reports whether lit can be compared with ==, HasPrefix,
+// HasSuffix or Contains and agree with doublestar's rune-by-rune comparison.
+//
+// doublestar decodes both pattern and candidate with utf8.DecodeRuneInString,
+// which maps every invalid byte to U+FFFD with size 1. Two DIFFERENT invalid
+// bytes therefore compare equal inside doublestar while byte comparison says
+// they differ -- so a pattern that is not valid UTF-8, or that contains a
+// literal U+FFFD, cannot use a byte-wise fast path. Once lit is valid UTF-8
+// and U+FFFD-free, every rune it holds has exactly one valid encoding, so
+// doublestar agreeing rune-for-rune is the same statement as the bytes being
+// equal. It also means a valid-UTF-8 lit can never begin at a continuation
+// byte of the candidate, so a HasSuffix/Contains hit is always on a rune
+// boundary -- which is what makes the '*' kinds sound too.
+func literalSafe(lit string) bool {
+	return lit != "" && utf8.ValidString(lit) && !strings.ContainsRune(lit, utf8.RuneError)
+}
+
+// classify records which of the cheap comparisons in ruleKind, if any, is
+// exactly equivalent to running doublestar against r.glob. unanchored says
+// the pattern had no '/' at all and so was rewritten to "**/"+pattern by the
+// caller, which is what lets the basename kinds assume no '/' in the literal.
+//
+// Anything not recognised keeps kindGlob and goes to doublestar as before, so
+// an unrecognised shape is slow, never wrong.
+func (r *rule) classify(unanchored bool) {
+	if !unanchored {
+		if !globMeta(r.glob) && literalSafe(r.glob) {
+			r.kind, r.lit = kindPathLiteral, r.glob
+		}
+		return
+	}
+
+	// r.glob is "**/" + the original pattern, and the original had no '/'.
+	core := strings.TrimPrefix(r.glob, "**/")
+	leadingStar := strings.HasPrefix(core, "*")
+	if leadingStar {
+		core = core[1:]
+	}
+	trailingStar := strings.HasSuffix(core, "*")
+	if trailingStar {
+		core = core[:len(core)-1]
+	}
+	// core == "" covers the degenerate "*", "**" and "***" patterns, whose
+	// zero-length-match semantics are doublestar's business, not ours.
+	if globMeta(core) || strings.Contains(core, "/") || !literalSafe(core) {
+		return
+	}
+
+	switch {
+	case !leadingStar && !trailingStar:
+		r.kind = kindBaseLiteral
+	case leadingStar && !trailingStar:
+		r.kind = kindBaseSuffix
+	case !leadingStar && trailingStar:
+		r.kind = kindBasePrefix
+	default:
+		r.kind = kindBaseContains
+	}
+	r.lit = core
+}
+
+// baseName returns the final path segment of candidate, without allocating.
+// Unlike path.Base it does not special-case the empty or trailing-slash
+// forms ("" and "a/" both yield ""), because those are what doublestar's own
+// segment matching sees: a pattern ending in a non-empty literal segment
+// cannot match a name whose last segment is empty.
+func baseName(candidate string) string {
+	if i := strings.LastIndexByte(candidate, '/'); i >= 0 {
+		return candidate[i+1:]
+	}
+	return candidate
 }
 
 // matchGlob reports whether candidate (a slash-separated path, relative to
 // the matcher's root, with no leading slash) matches the rule's compiled
 // glob.
-func (r rule) matchGlob(candidate string) bool {
-	ok, _ := doublestar.Match(r.glob, candidate)
-	return ok
+//
+// For every kind but kindGlob this is a string comparison that is exactly
+// equivalent to doublestar's answer for that pattern shape (see ruleKind).
+// The residual globs use MatchUnvalidated rather than Match: compile has
+// already run the pattern through doublestar.Match once, and -- more to the
+// point -- doublestar's validate flag only ever decides whether a non-match
+// is reported as ErrBadPattern or as a plain false (v4.10.0 match.go, the
+// two `if validate` sites). The matched bool is identical for every input,
+// valid pattern or not, and matchGlob discards the error either way.
+func (r *rule) matchGlob(candidate string) bool {
+	switch r.kind {
+	case kindPathLiteral:
+		return candidate == r.lit
+	case kindBaseLiteral:
+		return baseName(candidate) == r.lit
+	case kindBasePrefix:
+		return strings.HasPrefix(baseName(candidate), r.lit)
+	case kindBaseSuffix:
+		return strings.HasSuffix(baseName(candidate), r.lit)
+	case kindBaseContains:
+		return strings.Contains(baseName(candidate), r.lit)
+	default:
+		return doublestar.MatchUnvalidated(r.glob, candidate)
+	}
 }
 
 // Match reports whether relPath — slash- or OS-separated, relative to the
@@ -242,21 +399,56 @@ func (m *Matcher) Match(relPath string, isDir bool) bool {
 	}
 	clean = strings.TrimPrefix(clean, "/")
 
-	parts := strings.Split(clean, "/")
-	for i := 1; i < len(parts); i++ {
-		if m.matchExact(strings.Join(parts[:i], "/"), true) {
+	// Walk the ancestor prefixes by index into clean rather than by
+	// Split+Join: the prefixes are literally substrings of clean, so slicing
+	// yields identical strings for zero allocations, where Join copied
+	// O(depth^2) bytes per path.
+	for i := strings.IndexByte(clean, '/'); i >= 0; {
+		if m.matchRules(clean[:i], true) {
 			return true
 		}
+		next := strings.IndexByte(clean[i+1:], '/')
+		if next < 0 {
+			break
+		}
+		i += next + 1
 	}
-	return m.matchExact(clean, isDir)
+	return m.matchRules(clean, isDir)
 }
 
-// matchExact evaluates every rule against exactly one candidate path (no
+// MatchExact reports whether relPath itself matches, WITHOUT the ancestor
+// propagation Match performs -- an excluded parent directory does not
+// exclude relPath here.
+//
+// This exists for callers that already prune excluded directories during a
+// walk (returning fs.SkipDir when Match reports a directory excluded), for
+// which Match's ancestor loop re-derives a verdict the walk has already
+// acted on. Such a caller can use MatchExact and pay one rule pass per entry
+// instead of depth-plus-one passes. A caller that does NOT prune -- one that
+// keeps descending into an excluded directory -- must keep using Match, or
+// it will collect files under a directory it was told to exclude.
+//
+// relPath is cleaned exactly as Match cleans it.
+func (m *Matcher) MatchExact(relPath string, isDir bool) bool {
+	if m == nil || len(m.rules) == 0 {
+		return false
+	}
+	clean := path.Clean(filepath.ToSlash(relPath))
+	if clean == "." || clean == "" || clean == "/" {
+		return false
+	}
+	return m.matchRules(strings.TrimPrefix(clean, "/"), isDir)
+}
+
+// matchRules evaluates every rule against exactly one candidate path (no
 // ancestor propagation), applying gitignore's last-matching-rule-wins
-// precedence.
-func (m *Matcher) matchExact(candidate string, isDir bool) bool {
+// precedence. Rules are visited in compiled order -- the file's own order --
+// which is what makes a later negation win; the loop indexes m.rules rather
+// than ranging by value only to avoid copying each rule struct per candidate.
+func (m *Matcher) matchRules(candidate string, isDir bool) bool {
 	ignored := false
-	for _, r := range m.rules {
+	for i := range m.rules {
+		r := &m.rules[i]
 		if r.dirOnly && !isDir {
 			continue
 		}
