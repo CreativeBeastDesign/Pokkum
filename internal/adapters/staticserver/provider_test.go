@@ -30,16 +30,21 @@ func TestBinaryPresentAMD64(t *testing.T) {
 	if !bytes.HasPrefix(data, []byte("\x7fELF")) {
 		t.Errorf("Binary(LinuxAMD64) does not start with ELF magic; got %v", data[:4])
 	}
-	if len(data) > 0 {
-		orig := data[0]
-		data[0] = ^data[0]
-		data2, err := p.Binary(context.Background(), ports.LinuxAMD64)
-		if err != nil {
-			t.Fatalf("second Binary(LinuxAMD64): %v", err)
-		}
-		if data2[0] != orig {
-			t.Error("mutation of returned slice affected a subsequent call")
-		}
+	// The decompressed bytes are memoised (see staticServerBlobs), so a second
+	// call returns the identical shared backing array rather than a fresh
+	// defensive copy — the contract ports.StaticServerProvider states and the
+	// packager's bytesOpener relies on. Asserted by element address rather
+	// than by writing to the slice, which would corrupt the memoised blob for
+	// every later test in this binary.
+	data2, err := p.Binary(context.Background(), ports.LinuxAMD64)
+	if err != nil {
+		t.Fatalf("second Binary(LinuxAMD64): %v", err)
+	}
+	if !bytes.Equal(data, data2) {
+		t.Error("Binary(LinuxAMD64) returned different bytes on a second call")
+	}
+	if len(data) > 0 && &data[0] != &data2[0] {
+		t.Error("Binary(LinuxAMD64) re-decompressed rather than returning the memoised blob")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sigstore/sigstore-go/pkg/root"
@@ -110,12 +111,114 @@ var (
 // evidence about the signature under inspection.
 type Verifier struct {
 	log *slog.Logger
+
+	// mu guards roots, which memoises parsed trust roots and the sigstore-go
+	// verifiers built over them. Verify runs once per candidate signature
+	// layer of a .sig manifest (see baseimage.verifyKeylessSignature's loop),
+	// so without this the same ~30-50 KB protojson document is re-parsed and
+	// the same verifier rebuilt for every layer of every image.
+	//
+	// SECURITY — why this cache cannot change a verdict, and where the line
+	// is: the trusted root is an *input* to verification, never a result. The
+	// key is the SHA-256 of the exact bytes the entry was parsed from (see
+	// loadTrustedRoot), so two different trust roots can never share an entry
+	// — not a file path, not a boolean "was one supplied", not a pointer.
+	// What is reused is only the parsed form of those bytes plus the
+	// stateless verifier over them; every Verify call still runs the full
+	// tlog, chain, SCT, timestamp and identity checks against the material in
+	// its own request. No verification outcome, bundle, certificate or
+	// identity decision is ever cached. A hit can save the parse; it can
+	// never skip a check.
+	mu    sync.Mutex
+	roots map[string]func() *trustedRootEntry
 }
 
 // NewVerifier returns a Verifier that logs to log. A nil logger is allowed
 // and means slog.Default().
+//
+// The returned Verifier carries a per-instance trust-root cache and must not
+// be copied after first use; always pass it as *Verifier.
 func NewVerifier(log *slog.Logger) *Verifier {
 	return &Verifier{log: log}
+}
+
+// trustedRootEntry is the memoised result of parsing one trusted-root JSON
+// document and constructing the sigstore-go verifier over it.
+//
+// The two failure modes are retained separately rather than collapsed into a
+// single error because Verify reports them at different steps under different
+// sentinels: a parse failure is ErrMalformedMaterial, a verifier-construction
+// failure is ErrChainInvalid. Memoising failures alongside successes is
+// deliberate and safe — both are pure functions of the input bytes, so a
+// document that fails to parse fails identically every time, and a cached
+// failure still fails closed.
+type trustedRootEntry struct {
+	root        *root.TrustedRoot
+	verifier    *verify.Verifier
+	parseErr    error
+	verifierErr error
+}
+
+// loadTrustedRoot returns the parsed trusted root and the verifier built over
+// it, memoised per distinct trusted-root document.
+//
+// The cache key is digestOf(trustedRootJSON) — the hex SHA-256 of the exact
+// bytes, the same fingerprinting form baseimage's `fingerprint` helper
+// produces. Nothing coarser is admissible here: keying on a file path, on an
+// "a root was supplied" boolean, or on a struct pointer would let two
+// genuinely different trust anchors collide onto one entry, and that is the
+// single way a cache on this path could change a verdict.
+func (v *Verifier) loadTrustedRoot(trustedRootJSON []byte) *trustedRootEntry {
+	// Empty input carries no key material to fingerprint, so it is never
+	// cached — digestOf("") is "" and an entry under the fingerprint of
+	// nothing would be a key that means nothing. It parses (and fails) on
+	// every call instead, which costs nothing because it fails immediately.
+	if len(trustedRootJSON) == 0 {
+		return parseTrustedRoot(trustedRootJSON)
+	}
+
+	key := digestOf(trustedRootJSON)
+
+	v.mu.Lock()
+	if v.roots == nil {
+		v.roots = make(map[string]func() *trustedRootEntry, 1)
+	}
+	load, ok := v.roots[key]
+	if !ok {
+		// Freeze the bytes: the entry is filed under a digest of what the
+		// caller passed *now*, and a caller that later mutates its own slice
+		// must not be able to make a cached entry disagree with its key.
+		frozen := bytes.Clone(trustedRootJSON)
+		load = sync.OnceValue(func() *trustedRootEntry { return parseTrustedRoot(frozen) })
+		v.roots[key] = load
+	}
+	v.mu.Unlock()
+
+	// The parse itself runs outside the lock. sync.OnceValue serialises the
+	// first call per key and hands every later caller the same result, so a
+	// slow parse of one root cannot block verification against a different
+	// one.
+	return load()
+}
+
+// parseTrustedRoot does the actual work memoised by loadTrustedRoot: parse the
+// protojson trust root, then build the verifier over it with this adapter's
+// fixed option set (see verifierOptions — the options are a compile-time
+// constant of this package, so they are not part of the cache key).
+func parseTrustedRoot(trustedRootJSON []byte) *trustedRootEntry {
+	trustedRoot, err := root.NewTrustedRootFromJSON(trustedRootJSON)
+	if err != nil {
+		return &trustedRootEntry{parseErr: err}
+	}
+	// verify.Verifier holds only the trusted material and the immutable
+	// VerifierConfig and never writes to either during Verify (checked
+	// against sigstore-go v1.3.0 pkg/verify/signed_entity.go), so one
+	// instance is safe to share across concurrent verifications.
+	sev, err := verify.NewVerifier(trustedRoot, verifierOptions()...)
+	if err != nil {
+		return &trustedRootEntry{root: trustedRoot, verifierErr: err}
+	}
+	return &trustedRootEntry{root: trustedRoot, verifier: sev}
 }
 
 var _ ports.KeylessVerifier = (*Verifier)(nil)
@@ -217,12 +320,19 @@ func (v *Verifier) Verify(ctx context.Context, req ports.KeylessVerifyRequest) (
 		trustedRootSource = "embedded public-good snapshot"
 		usedEmbeddedRoot = true
 	}
-	trustedRoot, err := root.NewTrustedRootFromJSON(trustedRootJSON)
-	if err != nil {
+	// The parse and the verifier construction over it are memoised together,
+	// keyed by the SHA-256 of these exact bytes — see loadTrustedRoot for why
+	// nothing coarser is admissible, and Verifier.roots for why caching a
+	// verification *input* cannot change a verdict. The verifier's own
+	// construction error is reported at step 5 where it was before, so the
+	// error a caller sees is unchanged in both wording and ordering.
+	entry := v.loadTrustedRoot(trustedRootJSON)
+	if entry.parseErr != nil {
 		return ports.KeylessVerifyResult{}, fmt.Errorf(
 			"%w: cannot parse the %s Sigstore trusted root (%d bytes): %w",
-			ErrMalformedMaterial, trustedRootSource, len(trustedRootJSON), err)
+			ErrMalformedMaterial, trustedRootSource, len(trustedRootJSON), entry.parseErr)
 	}
+	trustedRoot := entry.root
 
 	// 3b. If we fell back to the embedded snapshot, say so out loud when it is
 	// stale. A stale snapshot is NOT treated as a verification failure —
@@ -250,13 +360,15 @@ func (v *Verifier) Verify(ctx context.Context, req ports.KeylessVerifyRequest) (
 		return ports.KeylessVerifyResult{}, err
 	}
 
-	// 5. Build the verifier.
-	sev, err := verify.NewVerifier(trustedRoot, verifierOptions()...)
-	if err != nil {
+	// 5. The verifier was built alongside the parse in step 3 and memoised
+	// with it; report its construction failure here, where it was reported
+	// before, so the failure ordering relative to steps 3b and 4 is unchanged.
+	if entry.verifierErr != nil {
 		return ports.KeylessVerifyResult{}, fmt.Errorf(
 			"%w: cannot construct a Sigstore verifier from the %s trusted root: %w",
-			ErrChainInvalid, trustedRootSource, err)
+			ErrChainInvalid, trustedRootSource, entry.verifierErr)
 	}
+	sev := entry.verifier
 
 	// 6. Build the expected identity matcher. NewShortCertificateIdentity
 	// rejects an identity that constrains only the issuer or only the SAN, so

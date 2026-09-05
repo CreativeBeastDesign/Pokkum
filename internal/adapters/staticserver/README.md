@@ -18,7 +18,16 @@ zstd-compressed `linux/amd64` and `linux/arm64` cross-compiled blobs under
 - `Binary(ctx, platform)` returns the raw ELF bytes for the requested platform,
   decompressed from the embedded `.zst` blob. Empty input is treated as a corrupt
   blob (returns `core.ErrStaticServerUnavailable`).
-- `Version(ctx)` returns the embedded build version string.
+- **The returned slice is shared and read-only.** The decompressed bytes are
+  memoised per platform, so every call for the same platform hands back the same
+  backing array — a build decompresses each ~7 MB blob once instead of once per
+  call. This is what `ports.StaticServerProvider` has always documented, and what
+  the packager's `bytesOpener` relies on when it wraps the bytes in a reader
+  rather than copying them. **Do not write to it**; clone first if you must.
+- `Version(ctx)` returns the SHA-256 of the decompressed `linux/amd64` blob.
+  It is derived from the same memoised bytes `Binary` hands the packager, so the
+  version recorded in image labels and SLSA provenance cannot drift from what
+  actually shipped. Empty string means "unknown" (blob absent or corrupt).
 
 ## Building the binaries
 

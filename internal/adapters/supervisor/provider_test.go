@@ -36,19 +36,27 @@ func TestBinaryPresentAMD64(t *testing.T) {
 		t.Errorf("Binary(LinuxAMD64) does not start with ELF magic; got %v", data[:4])
 	}
 
-	// Verify defensive copy: mutating the returned slice must not affect
-	// a subsequent call.
-	if len(data) > 0 {
-		origByte := data[0]
-		data[0] = ^data[0] // Flip all bits
-		data2, err := p.Binary(context.Background(), ports.LinuxAMD64)
-		if err != nil {
-			t.Fatalf("second Binary(LinuxAMD64) after mutation: %v", err)
-		}
-		if data2[0] != origByte {
-			t.Errorf("mutation of returned slice affected subsequent call; expected %v, got %v",
-				origByte, data2[0])
-		}
+	// The decompressed bytes are memoised (see supervisorBlobs), so a second
+	// call returns the identical shared backing array rather than a fresh
+	// defensive copy. That is the contract ports.SupervisorProvider states
+	// ("the caller must not modify it, since an embedded implementation will
+	// hand out the same backing array on every call") and the one the
+	// packager's bytesOpener relies on.
+	//
+	// This asserts sharing by comparing element addresses rather than by
+	// writing to the slice to see what happens: a write here would corrupt
+	// the memoised blob for every later test in this binary, which is exactly
+	// what the previous version of this assertion did once memoisation
+	// landed.
+	data2, err := p.Binary(context.Background(), ports.LinuxAMD64)
+	if err != nil {
+		t.Fatalf("second Binary(LinuxAMD64): %v", err)
+	}
+	if !bytes.Equal(data, data2) {
+		t.Error("Binary(LinuxAMD64) returned different bytes on a second call")
+	}
+	if len(data) > 0 && &data[0] != &data2[0] {
+		t.Error("Binary(LinuxAMD64) re-decompressed rather than returning the memoised blob")
 	}
 }
 
@@ -70,18 +78,17 @@ func TestBinaryPresentARM64(t *testing.T) {
 		t.Errorf("Binary(LinuxARM64) does not start with ELF magic; got %v", data[:4])
 	}
 
-	// Verify defensive copy
-	if len(data) > 0 {
-		origByte := data[0]
-		data[0] = ^data[0]
-		data2, err := p.Binary(context.Background(), ports.LinuxARM64)
-		if err != nil {
-			t.Fatalf("second Binary(LinuxARM64) after mutation: %v", err)
-		}
-		if data2[0] != origByte {
-			t.Errorf("mutation of returned slice affected subsequent call; expected %v, got %v",
-				origByte, data2[0])
-		}
+	// Memoised, shared backing array — see TestBinaryPresentAMD64 for why this
+	// asserts identity rather than probing by mutation.
+	data2, err := p.Binary(context.Background(), ports.LinuxARM64)
+	if err != nil {
+		t.Fatalf("second Binary(LinuxARM64): %v", err)
+	}
+	if !bytes.Equal(data, data2) {
+		t.Error("Binary(LinuxARM64) returned different bytes on a second call")
+	}
+	if len(data) > 0 && &data[0] != &data2[0] {
+		t.Error("Binary(LinuxARM64) re-decompressed rather than returning the memoised blob")
 	}
 }
 

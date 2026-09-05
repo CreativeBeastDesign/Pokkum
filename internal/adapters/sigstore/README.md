@@ -31,6 +31,18 @@ falling back to another verification mode is legitimate),
 `ErrMalformedMaterial`, `ErrChainInvalid`, `ErrIdentityMismatch` and
 `ErrTlogInvalid`.
 
+`Verify` runs once per candidate signature layer of a `.sig` manifest, so a
+`Verifier` memoises the parsed trust root and the `sigstore-go` verifier built
+over it instead of re-parsing the same ~30–50 KB protojson document per layer.
+**The cache key is the SHA-256 of the trusted-root bytes** — never a file path,
+never an "a root was supplied" flag — so two different trust anchors can never
+share an entry. Only a verification *input* is cached: no verdict, bundle,
+certificate or identity decision is, and every `Verify` call still runs the full
+transparency-log, chain, SCT, timestamp and identity checks against the material
+in its own request. A cache hit can save the parse; it can never skip a check.
+The embedded-snapshot staleness warning stays outside the memoised region, so it
+still fires on every verification rather than only the first.
+
 `legacybundle.go` translates Cosign's legacy signature-tag annotations
 into a Sigstore **v0.1** protobuf bundle, which is the only bundle version
 this material can legally be expressed as: it carries a Rekor
