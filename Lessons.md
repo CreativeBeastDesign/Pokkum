@@ -5,6 +5,58 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-05 — A literal prefilter for a `(?i)` regex is unsound if it folds ASCII, and the "fast literal alternation" it was meant to replace was 26x slower than the scan it gated
+
+**Category:** prefilter-soundness / library-semantics-assumption — caught during optimisation, before
+shipping, by testing two assumptions that both turned out to be false
+
+**Root cause:** two independent wrong beliefs about `regexp`, either of which would have shipped a
+defect.
+
+The first was mine-by-instruction: the optimisation plan asserted that Go compiles a pure literal
+alternation like `(?i)password|secret|token|api_?key` into a fast literal matcher, and proposed using
+one as a cheap gate in front of `secretguard`'s expensive generic rule. It does not.
+`Regexp.LiteralPrefix()` is empty for an alternation, so the NFA walks every byte: measured at
+**12.6 MB/s** over a 4 MB bundle, i.e. 334 ms — on its own more than a third of the entire original
+scan budget it was supposed to save. A "cheap prefilter" that is slower than the thing it guards is
+worse than no prefilter, and nothing about the idea's plausibility would have revealed that. It was
+found only because the optimisation was measured rather than reasoned about.
+
+The second is the dangerous one. Go's `(?i)` is **Unicode simple case folding**, not ASCII folding.
+An ASCII-only `bytes.Contains` prefilter for a `(?i)` rule is therefore *not* a necessary condition:
+brute-forcing `unicode.SimpleFold` across the code point space shows exactly two non-ASCII runes that
+fold onto letters in these keywords — U+017F LATIN SMALL LETTER LONG S onto `s`, and U+212A KELVIN
+SIGN onto `k`. These are not theoretical. Verified against the live rules: `xſecret: "abcdefgh12345"`,
+`toKen: "abcdefgh12345"` and `paſſword="abcdefgh12345"` all match `defaultSecretRules`' generic
+pattern today. A naive ASCII fold drops the rule for exactly those files, which is a silently missed
+secret — the worst possible failure for this package, and invisible to any test corpus written in
+ASCII, which is every corpus anyone writes by hand.
+
+**Where:** `internal/adapters/secretguard/guard.go` — `activeRules`, `containsAnyFold`, and the
+`RequiredAny`/`RequiredAnyFold` fields on the rule table.
+
+**Fix:** the alternation gate was replaced with a windowed ASCII case-fold plus `bytes.Contains`
+(~330 MB/s, no per-file allocation, early exit on first hit). Fold-aware prefilters use
+`foldEscapeSequences`, which covers the two non-ASCII foldings. Crucially,
+`TestPrefilter_FoldEscapesAreComplete` **re-derives** that set from Go's own `unicode.SimpleFold`
+tables rather than trusting the hand-written list, so it fails if the Unicode tables ever grow
+another one. `TestPrefilter_CaseSensitivityMatchesLiteralKind` derives each rule's fold flag from its
+`regexp/syntax` parse tree, so a `(?i)` rule can never be given byte-exact literals. Soundness is
+additionally checked by a differential corpus against the pre-change loop kept verbatim as an oracle,
+and by three fuzz targets including one asserting the necessary-condition property directly
+(pattern matches ⟹ the rule was kept).
+
+**Preventative rule:** a literal prefilter is only sound if its notion of equality is **the matcher's
+own**, not an approximation of it — for a `(?i)` Go regex that means Unicode simple folding, and the
+test that proves it must *derive* the fold set from the standard library rather than assert a
+hand-written list, because the hand-written list is exactly the thing that will be wrong. More
+generally: when a plan asserts a performance property of a library ("the engine fast-paths this
+shape"), measure it before building on it. Both halves of this entry are the same mistake in
+different clothes — treating a confident claim about someone else's library as a fact rather than as
+the cheapest possible experiment.
+
+---
+
 ## 2026-09-05 — The `bufio.Scanner` token-limit bug was fixed once in `secretguard` and left untouched in `sveltekitutils`, where a strict wiring gates the build on it
 
 **Category:** repeated-failure-class / resource-limit-vs-realistic-input — the same defect as the

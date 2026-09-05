@@ -46,16 +46,45 @@ type rule struct {
 	// looksLikeJWTHeader below decodes the first segment and confirms it is
 	// actually JSON containing "alg" before the match counts.
 	Validate func(match string) bool
+
+	// RequiredAny lists byte sequences of which AT LEAST ONE must occur in any
+	// text Pattern is capable of matching. This is a necessary condition read
+	// straight off the regex — not a heuristic, not a sampling trick: every
+	// alternative Pattern can take contains one of these literals, so
+	// `!containsAny(data, RequiredAny)` is a *proof* that Pattern matches
+	// nowhere in data, and the rule can be dropped for that whole file. The
+	// prefilter can therefore only ever remove work, never a detection.
+	//
+	// Comparison is byte-exact, which is sound only because no rule carrying a
+	// RequiredAny is case-insensitive; a `(?i)` rule uses RequiredAnyFold
+	// instead. TestPrefilter_CaseSensitivityMatchesLiteralKind machine-checks
+	// that pairing against each Pattern's parsed flags rather than trusting
+	// this comment.
+	//
+	// An empty RequiredAny (and empty RequiredAnyFold) means "this rule has no
+	// unambiguous mandatory literal": it then stays active for every file,
+	// which is exactly the pre-prefilter behaviour.
+	RequiredAny [][]byte
+
+	// RequiredAnyFold is RequiredAny for a case-insensitive Pattern. Entries
+	// are lowercase ASCII and are compared after ASCII case folding, with the
+	// non-ASCII runes that Unicode simple case folding maps onto those ASCII
+	// letters handled separately via foldEscapeSequences — see activeRules.
+	RequiredAnyFold [][]byte
 }
 
 var defaultSecretRules = []rule{
 	{
 		Name:    "RSA Private Key",
 		Pattern: regexp.MustCompile(`-----BEGIN (?:RSA )?PRIVATE KEY-----`),
+		// The pattern opens with this literal and nothing optional precedes
+		// it, so every string it matches starts with these 11 bytes.
+		RequiredAny: [][]byte{[]byte("-----BEGIN ")},
 	},
 	{
-		Name:    "AWS Access Key ID",
-		Pattern: regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+		Name:        "AWS Access Key ID",
+		Pattern:     regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+		RequiredAny: [][]byte{[]byte("AKIA")},
 	},
 	{
 		Name: "GitHub Personal Access Token",
@@ -67,7 +96,8 @@ var defaultSecretRules = []rule{
 		// \b on both sides required an exact-length match with no partial
 		// credit). {36,255} keeps the same near-zero-false-positive prefix
 		// while accepting the real range of lengths GitHub actually issues.
-		Pattern: regexp.MustCompile(`\bghp_[a-zA-Z0-9]{36,255}\b`),
+		Pattern:     regexp.MustCompile(`\bghp_[a-zA-Z0-9]{36,255}\b`),
+		RequiredAny: [][]byte{[]byte("ghp_")},
 	},
 	{
 		Name: "GitHub App Token",
@@ -77,6 +107,12 @@ var defaultSecretRules = []rule{
 		// of GitHub credential was found, not lump every gh*_ prefix under
 		// "personal access token".
 		Pattern: regexp.MustCompile(`\bgh[osu]_[a-zA-Z0-9]{36,255}\b`),
+		// A character class, not a literal: the mandatory prefix is one of
+		// three alternatives, so all three are listed and the prefilter keeps
+		// the rule if ANY of them appears. Listing only `gh` would also be
+		// correct but far less selective; listing only `gho_` would NOT be —
+		// it would silently drop ghs_/ghu_ tokens.
+		RequiredAny: [][]byte{[]byte("gho_"), []byte("ghs_"), []byte("ghu_")},
 	},
 	{
 		Name: "Slack Token",
@@ -85,15 +121,18 @@ var defaultSecretRules = []rule{
 		// segment. The xoxb-/xoxp- literal prefix is essentially never seen
 		// outside a real Slack token, so this stays high-signal even with a
 		// fairly permissive tail.
-		Pattern: regexp.MustCompile(`\bxox[bp]-[0-9]+-[0-9]+-(?:[0-9]+-)?[a-zA-Z0-9]+\b`),
+		Pattern:     regexp.MustCompile(`\bxox[bp]-[0-9]+-[0-9]+-(?:[0-9]+-)?[a-zA-Z0-9]+\b`),
+		RequiredAny: [][]byte{[]byte("xoxb-"), []byte("xoxp-")},
 	},
 	{
-		Name:    "Stripe Live Secret Key",
-		Pattern: regexp.MustCompile(`\bsk_live_[a-zA-Z0-9]{16,99}\b`),
+		Name:        "Stripe Live Secret Key",
+		Pattern:     regexp.MustCompile(`\bsk_live_[a-zA-Z0-9]{16,99}\b`),
+		RequiredAny: [][]byte{[]byte("sk_live_")},
 	},
 	{
-		Name:    "GitLab Personal Access Token",
-		Pattern: regexp.MustCompile(`\bglpat-[a-zA-Z0-9_-]{20,50}\b`),
+		Name:        "GitLab Personal Access Token",
+		Pattern:     regexp.MustCompile(`\bglpat-[a-zA-Z0-9_-]{20,50}\b`),
+		RequiredAny: [][]byte{[]byte("glpat-")},
 	},
 	{
 		Name: "JSON Web Token (JWT)",
@@ -105,12 +144,14 @@ var defaultSecretRules = []rule{
 		// out for this format. Validate below closes that gap by actually
 		// decoding the header and checking it is JSON with an "alg" key,
 		// the one field RFC 7519 §5.1 guarantees every JWT header carries.
-		Pattern:  regexp.MustCompile(`\beyJ[a-zA-Z0-9_-]{5,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}`),
-		Validate: looksLikeJWTHeader,
+		Pattern:     regexp.MustCompile(`\beyJ[a-zA-Z0-9_-]{5,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}`),
+		Validate:    looksLikeJWTHeader,
+		RequiredAny: [][]byte{[]byte("eyJ")},
 	},
 	{
-		Name:    "Google API Key",
-		Pattern: regexp.MustCompile(`\bAIzaSy[a-zA-Z0-9_-]{33}\b`),
+		Name:        "Google API Key",
+		Pattern:     regexp.MustCompile(`\bAIzaSy[a-zA-Z0-9_-]{33}\b`),
+		RequiredAny: [][]byte{[]byte("AIzaSy")},
 	},
 	{
 		Name: "Generic Hardcoded Password Assignment",
@@ -178,6 +219,20 @@ var defaultSecretRules = []rule{
 		// named that way. The escape hatches for that case are the existing
 		// per-line `pokkum:allow-secret` marker and AllowPatterns.
 		Pattern: regexp.MustCompile(`(?i)\b[a-z0-9_]*(?:password|secret|token|api_?key)\s*[:=]\s*["']([^"'\s(){}\[\];]{8,})["']`),
+		// The one case-insensitive rule, and the most expensive one to run:
+		// case-folded with no literal prefix for the regex engine to skip
+		// ahead on, so without a gate it re-reads every line of every file.
+		// Its key alternation is mandatory — a match must contain one of these
+		// four spellings (five, since `api_?key` covers both `apikey` and
+		// `api_key`) — so a case-insensitive search for them over the whole
+		// file is a necessary condition, exactly like RequiredAny above.
+		RequiredAnyFold: [][]byte{
+			[]byte("password"),
+			[]byte("secret"),
+			[]byte("token"),
+			[]byte("apikey"),
+			[]byte("api_key"),
+		},
 	},
 }
 
@@ -196,6 +251,150 @@ var precompressedExts = map[string]bool{
 	".gz":  true,
 	".br":  true,
 	".zst": true,
+}
+
+// foldEscapeSequences are the UTF-8 encodings of every NON-ASCII rune whose
+// Unicode simple-case-fold orbit contains an ASCII letter used in any
+// RequiredAnyFold literal. Go's regexp implements `(?i)` with Unicode simple
+// case folding, not ASCII case folding, so `(?i)secret` really does match
+// "\u017fecret" and `(?i)token` really does match "to\u212Aen" — an
+// ASCII-only lowercase fold would declare the generic rule inactive for a file
+// containing exactly those, and lose a detection the old code made.
+//
+// Rather than fold these runes (which changes byte length and complicates the
+// windowed scan), their mere presence anywhere in the file keeps every folded
+// rule active. That is strictly conservative: it can only add work.
+//
+// The list is derived, not guessed — TestPrefilter_FoldEscapesAreComplete
+// re-derives it by brute-forcing unicode.SimpleFold over the whole code point
+// space and fails if Go's tables ever grow another one.
+var foldEscapeSequences = [][]byte{
+	[]byte("\u017f"), // LATIN SMALL LETTER LONG S — folds onto 's'/'S'
+	[]byte("\u212a"), // KELVIN SIGN — folds onto 'k'/'K'
+}
+
+// foldWindowBytes is the working-window size for containsAnyFold. Folding a
+// window at a time (rather than the whole file) keeps the scratch buffer at a
+// fixed 32KiB regardless of file size — a 16MiB bundle does not cost a 16MiB
+// shadow copy — and lets the search stop at the first hit instead of folding
+// bytes nobody will look at.
+const foldWindowBytes = 32 << 10
+
+// allowSecretMarkerBytes is the inline allow marker as bytes. Hoisted to a
+// package-level var because lineIsAnnotated is called once per line of every
+// scanned file, and `[]byte(constString)` inside that loop is a fresh
+// allocation and copy per call.
+var allowSecretMarkerBytes = []byte(ports.AllowSecretMarker)
+
+// containsAny reports whether data contains at least one of lits, compared
+// byte-exactly.
+func containsAny(data []byte, lits [][]byte) bool {
+	for _, lit := range lits {
+		if bytes.Contains(data, lit) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsAnyFold reports whether data contains at least one of lowered —
+// which must be all-lowercase ASCII — under ASCII case folding.
+//
+// data is walked in fixed windows that overlap by len(longest lowered)-1
+// bytes, so a literal straddling a window boundary is still seen. scratch is
+// a caller-owned reusable buffer; it is grown once and then reused for every
+// file in a scan.
+func containsAnyFold(data []byte, lowered [][]byte, scratch *[]byte) bool {
+	longest := 0
+	for _, lit := range lowered {
+		if len(lit) > longest {
+			longest = len(lit)
+		}
+	}
+	if longest == 0 {
+		return false
+	}
+	overlap := longest - 1
+
+	if cap(*scratch) < foldWindowBytes+overlap {
+		*scratch = make([]byte, foldWindowBytes+overlap)
+	}
+	buf := (*scratch)[:cap(*scratch)]
+
+	for start := 0; start < len(data); start += foldWindowBytes {
+		lo := start - overlap
+		if lo < 0 {
+			lo = 0
+		}
+		hi := start + foldWindowBytes
+		if hi > len(data) {
+			hi = len(data)
+		}
+		win := buf[:hi-lo]
+		for i, c := range data[lo:hi] {
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			win[i] = c
+		}
+		for _, lit := range lowered {
+			if bytes.Contains(win, lit) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// scanScratch holds the buffers reused across the files of a single
+// ScanDirectory walk. It is deliberately per-call state, never package state:
+// two concurrent ScanDirectory calls each get their own, so there is nothing
+// to race on. The walk callback itself is sequential, so no lock is needed.
+type scanScratch struct {
+	fold  []byte
+	rules []int
+}
+
+// activeRules returns the indices into defaultSecretRules of the rules that
+// can possibly match somewhere in data.
+//
+// Every exclusion here is backed by a proof, never by sampling: a rule is
+// dropped only when a literal that EVERY string its pattern can match must
+// contain is absent from the entire file. A literal cannot appear on a line
+// without appearing in the file, so "absent from the file" implies "absent
+// from every line", and the per-line loop below could not have matched it.
+//
+// The returned slice aliases the scratch buffer and is only valid until the
+// next call.
+func (s *scanScratch) activeRules(data []byte) []int {
+	out := s.rules[:0]
+	// -1 = not yet determined; the check is shared by every folded rule.
+	foldEscaped := -1
+	for i := range defaultSecretRules {
+		r := &defaultSecretRules[i]
+		switch {
+		case len(r.RequiredAny) > 0:
+			if containsAny(data, r.RequiredAny) {
+				out = append(out, i)
+			}
+		case len(r.RequiredAnyFold) > 0:
+			if foldEscaped < 0 {
+				foldEscaped = 0
+				if containsAny(data, foldEscapeSequences) {
+					foldEscaped = 1
+				}
+			}
+			if foldEscaped == 1 || containsAnyFold(data, r.RequiredAnyFold, &s.fold) {
+				out = append(out, i)
+			}
+		default:
+			// No mandatory literal could be derived from this pattern: it has
+			// to be run against every line, exactly as before.
+			out = append(out, i)
+		}
+	}
+	s.rules = out
+	return out
 }
 
 var _ ports.SecretGuard = (*Adapter)(nil)
@@ -246,6 +445,11 @@ func (a *Adapter) ScanDirectory(ctx context.Context, req ports.SecretScanRequest
 	var matches []ports.SecretMatch
 	var skipped []ports.SecretSkip
 
+	// One set of reusable buffers for the whole walk. WalkDir's callback runs
+	// sequentially on this goroutine, and the scratch is local to this call,
+	// so it is neither shared across goroutines nor across concurrent scans.
+	scratch := &scanScratch{}
+
 	walkErr := filepath.WalkDir(req.ProjectDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -276,7 +480,25 @@ func (a *Adapter) ScanDirectory(ctx context.Context, req ports.SecretScanRequest
 			return nil
 		}
 
-		fileMatches, skip, err := scanFile(path, rel, compiledAllow, maxSize)
+		// The walk already holds this entry; taking the size from it saves an
+		// fstat per file. Only for a regular file, though: fs.DirEntry.Info is
+		// lstat-shaped, so for a symlink it reports the length of the target
+		// path rather than the size of the file scanFile will actually open.
+		// -1 means "walk could not supply one, stat it yourself".
+		//
+		// The value can also be stale if the file changed between the walk's
+		// readdir and the open below. Both directions stay safe: too small and
+		// readRemainder still reads to EOF and scans everything; too large and
+		// the file is recorded as a ports.SecretSkip, which fails the build
+		// loudly rather than reporting a clean file nobody read.
+		entrySize := int64(-1)
+		if d.Type().IsRegular() {
+			if info, ierr := d.Info(); ierr == nil {
+				entrySize = info.Size()
+			}
+		}
+
+		fileMatches, skip, err := scanFile(path, rel, compiledAllow, maxSize, entrySize, scratch)
 		if err != nil {
 			// Consistent with the pre-existing behavior: an unreadable file
 			// (permissions, a symlink race, etc.) does not fail the whole
@@ -395,16 +617,20 @@ func lineIsAnnotated(lines [][]byte, idx int) bool {
 	if idx < 0 || idx >= len(lines) {
 		return false
 	}
-	if bytes.Contains(lines[idx], []byte(ports.AllowSecretMarker)) {
+	if bytes.Contains(lines[idx], allowSecretMarkerBytes) {
 		return true
 	}
-	if idx > 0 && bytes.Contains(lines[idx-1], []byte(ports.AllowSecretMarker)) {
+	if idx > 0 && bytes.Contains(lines[idx-1], allowSecretMarkerBytes) {
 		return true
 	}
 	return false
 }
 
-func scanFile(absPath, relPath string, allowPatterns []*regexp.Regexp, maxSize int64) ([]ports.SecretMatch, *ports.SecretSkip, error) {
+func scanFile(absPath, relPath string, allowPatterns []*regexp.Regexp, maxSize, entrySize int64, scratch *scanScratch) ([]ports.SecretMatch, *ports.SecretSkip, error) {
+	if scratch == nil {
+		scratch = &scanScratch{}
+	}
+
 	f, err := os.Open(absPath)
 	if err != nil {
 		return nil, nil, err
@@ -417,34 +643,109 @@ func scanFile(absPath, relPath string, allowPatterns []*regexp.Regexp, maxSize i
 		return nil, nil, err
 	}
 	head = head[:n]
+	// ORDER IS LOAD-BEARING: the binary sniff must stay ahead of the size
+	// check. A large binary asset is meant to be skipped silently (it was
+	// never scannable text); if the size check ran first it would instead be
+	// recorded as a ports.SecretSkip, which forces Passed=false and fails the
+	// build. See ScanDirectory's doc comment.
 	if looksBinary(head) {
 		return nil, nil, nil
 	}
 
-	info, err := f.Stat()
-	if err != nil {
-		return nil, nil, err
+	// entrySize is the size the directory walk already learned from the
+	// fs.DirEntry, saving an fstat here. It is -1 when the walk could not
+	// supply a trustworthy one (a non-regular file — notably a symlink, whose
+	// DirEntry reports the length of the link target's PATH, not the size of
+	// the file it points at), in which case fall back to stat-ing the opened
+	// descriptor exactly as before.
+	if entrySize < 0 {
+		info, err := f.Stat()
+		if err != nil {
+			return nil, nil, err
+		}
+		entrySize = info.Size()
 	}
-	if info.Size() > maxSize {
+	if entrySize > maxSize {
 		return nil, &ports.SecretSkip{
 			FilePath: relPath,
-			Reason:   fmt.Sprintf("file is %d bytes, exceeds the %d byte text-scan limit (MaxFileSizeBytes)", info.Size(), maxSize),
+			Reason:   fmt.Sprintf("file is %d bytes, exceeds the %d byte text-scan limit (MaxFileSizeBytes)", entrySize, maxSize),
 		}, nil
 	}
 
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return nil, nil, err
-	}
-	data, err := io.ReadAll(f)
+	data, err := readRemainder(f, head, entrySize)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	return scanBytes(data, relPath, allowPatterns, scratch), nil, nil
+}
+
+// readRemainder returns head followed by everything left in f, in a buffer
+// sized up front from sizeHint.
+//
+// This replaces the previous Seek-to-0 + io.ReadAll pair. Seeking back made
+// the binary-sniff bytes get read from the kernel twice, and io.ReadAll starts
+// from a 512-byte buffer and grows by repeated reallocation — for a 4MiB
+// bundle that is roughly a dozen reallocations and ~8MiB of copying per file.
+//
+// sizeHint is only a hint: the loop keeps reading until EOF and grows if the
+// file turned out longer than the directory entry claimed, so a file that
+// changed size between the walk and the open is still read in full rather
+// than truncated. Truncating there would be a silent false-clean, which is
+// the one failure mode this adapter exists to not have.
+func readRemainder(f *os.File, head []byte, sizeHint int64) ([]byte, error) {
+	capacity := sizeHint
+	if capacity < int64(len(head)) {
+		capacity = int64(len(head))
+	}
+	// +1 so the final zero-length read that reports io.EOF does not force a
+	// reallocation of the whole buffer.
+	buf := make([]byte, len(head), capacity+1)
+	copy(buf, head)
+	for {
+		if len(buf) == cap(buf) {
+			buf = append(buf, 0)[:len(buf)]
+		}
+		n, err := f.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err != nil {
+			if err == io.EOF {
+				return buf, nil
+			}
+			return nil, err
+		}
+	}
+}
+
+// scanBytes runs the rule set over one already-read file body.
+//
+// Two things happen before the per-line loop, and neither can suppress a
+// finding:
+//
+//   - activeRules drops any rule whose mandatory literal is absent from the
+//     whole file. See its doc comment for why that is a proof rather than a
+//     heuristic.
+//   - When the active set is empty, no rule can match any line, so there is
+//     nothing for the loop to find. This is a short-circuit of work, not of
+//     coverage: the file has still been read in full, and "clean" here is a
+//     statement about content the scanner actually holds in memory.
+//
+// Lines are matched as []byte throughout. The previous code did
+// `string(lineBytes)` per line, which copied the entire file a second time
+// (16MiB of extra allocation for the largest file the ceiling allows) purely
+// to reach regexp's string API; regexp's []byte API is the same matcher over
+// the same bytes, so the conversion bought nothing. Only the bytes of an
+// actual match are converted now.
+func scanBytes(data []byte, relPath string, allowPatterns []*regexp.Regexp, scratch *scanScratch) []ports.SecretMatch {
+	active := scratch.activeRules(data)
+	if len(active) == 0 {
+		return nil
 	}
 
 	var matches []ports.SecretMatch
 	lines := bytes.Split(data, []byte("\n"))
 	for i, lineBytes := range lines {
 		lineNo := i + 1
-		line := string(lineBytes)
 
 		// An inline marker exempts this line without anyone having to describe
 		// its content in a config file. Checked before the regexes because it is
@@ -455,7 +756,7 @@ func scanFile(absPath, relPath string, allowPatterns []*regexp.Regexp, maxSize i
 
 		allowed := false
 		for _, allowRE := range allowPatterns {
-			if allowRE.MatchString(line) {
+			if allowRE.Match(lineBytes) {
 				allowed = true
 				break
 			}
@@ -468,13 +769,14 @@ func scanFile(absPath, relPath string, allowPatterns []*regexp.Regexp, maxSize i
 		// minified/bundled file can legitimately be the entire file — so,
 		// unlike the previous "one match per line is enough" behavior
 		// (a single FindStringIndex + break), every rule reports every
-		// non-overlapping match on the line via FindAllStringIndex. A
-		// single first-match-only check would silently hide every secret
-		// after the first one on that line, which for a minified bundle
-		// means every secret after the first ever inlined into it.
-		for _, r := range defaultSecretRules {
-			for _, loc := range r.Pattern.FindAllStringIndex(line, -1) {
-				snippet := line[loc[0]:loc[1]]
+		// non-overlapping match on the line via FindAllIndex. A single
+		// first-match-only check would silently hide every secret after
+		// the first one on that line, which for a minified bundle means
+		// every secret after the first ever inlined into it.
+		for _, ri := range active {
+			r := &defaultSecretRules[ri]
+			for _, loc := range r.Pattern.FindAllIndex(lineBytes, -1) {
+				snippet := string(lineBytes[loc[0]:loc[1]])
 				if r.Validate != nil && !r.Validate(snippet) {
 					continue
 				}
@@ -493,5 +795,5 @@ func scanFile(absPath, relPath string, allowPatterns []*regexp.Regexp, maxSize i
 			}
 		}
 	}
-	return matches, nil, nil
+	return matches
 }

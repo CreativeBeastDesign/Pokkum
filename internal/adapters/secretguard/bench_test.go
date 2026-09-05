@@ -217,7 +217,7 @@ func BenchmarkScanFileLarge(b *testing.B) {
 	// Fixture floor. A skip (over the size ceiling) or a finding would both
 	// short-circuit the very path this benchmark claims to measure, and both
 	// would still report a healthy-looking ns/op.
-	matches, skip, err := scanFile(path, "bundle.js", nil, defaultMaxFileSizeBytes)
+	matches, skip, err := scanFile(path, "bundle.js", nil, defaultMaxFileSizeBytes, int64(len(content)), nil)
 	if err != nil {
 		b.Fatalf("scanFile: %v", err)
 	}
@@ -242,7 +242,104 @@ func BenchmarkScanFileLarge(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		got, gotSkip, err := scanFile(path, "bundle.js", nil, defaultMaxFileSizeBytes)
+		got, gotSkip, err := scanFile(path, "bundle.js", nil, defaultMaxFileSizeBytes, int64(len(content)), nil)
+		if err != nil {
+			b.Fatalf("scanFile: %v", err)
+		}
+		if gotSkip != nil || len(got) != 0 {
+			b.Fatal("unexpected skip or finding")
+		}
+	}
+}
+
+// benchMinifiedBundleWithKeywords is benchMinifiedBundle's shape with
+// credential-ish IDENTIFIERS woven through it — `accessToken`, `clientSecret`,
+// `apiKey` — but no credential VALUES, so the file is still clean.
+//
+// It exists because the rule prefilter can legitimately drop the expensive
+// generic rule for a bundle that never mentions those words, and a benchmark
+// consisting only of such bundles would report a speedup that says nothing
+// about the file shape most likely to keep every rule alive. This one keeps
+// the generic rule active for every line, so what it measures is the []byte
+// match path and the removed per-line string copy on their own.
+func benchMinifiedBundleWithKeywords(size int) []byte {
+	rng := rand.New(rand.NewSource(0x70CE12))
+	chunks := []string{
+		`function e(n,t){return n&&n.__esModule?n:{default:n}}`,
+		`const s=r.clientSecret||r.accessToken||n.apiKey`,
+		`o.exports=function(n,t,r){return n in t?Object.defineProperty(t,n,{value:r}):t[n]=r,t}`,
+		`h.setHeader("authorization","Bearer "+e.accessToken)`,
+		`class i extends s{constructor(n){super(n),this.state={apiKey:n.apiKey}}}`,
+		`const c={apiBase:"https://api.example.com",timeout:3e4,retries:3}`,
+	}
+	var b strings.Builder
+	b.Grow(size + 1024)
+	const lines = 40
+	perLine := size / lines
+	for l := 0; l < lines; l++ {
+		start := b.Len()
+		for b.Len()-start < perLine {
+			b.WriteString(chunks[rng.Intn(len(chunks))])
+			b.WriteByte(',')
+		}
+		b.WriteByte('\n')
+	}
+	return []byte(b.String())
+}
+
+// BenchmarkScanFileLargeGenericActive is BenchmarkScanFileLarge over a bundle
+// that keeps the generic rule (the expensive, case-folded one) in the active
+// set for every line — the prefilter's worst case, and the honest floor for
+// what this optimisation is worth on real bundled output.
+func BenchmarkScanFileLargeGenericActive(b *testing.B) {
+	const size = 4 << 20
+
+	dir := b.TempDir()
+	path := filepath.Join(dir, "bundle.js")
+	content := benchMinifiedBundleWithKeywords(size)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		b.Fatalf("write bundle: %v", err)
+	}
+
+	// Fixture floors. As in BenchmarkScanFileLarge: a skip or a finding would
+	// short-circuit the measured path. Plus the floor that matters HERE — the
+	// generic rule must actually be in the active set, or this benchmark is a
+	// duplicate of the one above wearing a different name.
+	matches, skip, err := scanFile(path, "bundle.js", nil, defaultMaxFileSizeBytes, int64(len(content)), nil)
+	if err != nil {
+		b.Fatalf("scanFile: %v", err)
+	}
+	if skip != nil {
+		b.Fatalf("degenerate fixture: file was skipped, not scanned (%s)", skip.Reason)
+	}
+	if len(matches) != 0 {
+		b.Fatalf("degenerate fixture: expected the no-match path, got %d findings", len(matches))
+	}
+	var genericActive bool
+	for _, i := range (&scanScratch{}).activeRules(content) {
+		if defaultSecretRules[i].Name == "Generic Hardcoded Password Assignment" {
+			genericActive = true
+		}
+	}
+	if !genericActive {
+		b.Fatal("degenerate fixture: the prefilter dropped the generic rule, so this measures the cheap path, not the worst case")
+	}
+	longest := 0
+	for _, line := range strings.Split(string(content), "\n") {
+		if len(line) > longest {
+			longest = len(line)
+		}
+	}
+	if longest < 10000 {
+		b.Fatalf("degenerate fixture: longest line is only %d bytes, this is not minified-bundle shaped", longest)
+	}
+	b.Logf("fixture: %d bytes, longest line %d bytes, generic rule active", len(content), longest)
+
+	b.SetBytes(int64(len(content)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got, gotSkip, err := scanFile(path, "bundle.js", nil, defaultMaxFileSizeBytes, int64(len(content)), nil)
 		if err != nil {
 			b.Fatalf("scanFile: %v", err)
 		}
