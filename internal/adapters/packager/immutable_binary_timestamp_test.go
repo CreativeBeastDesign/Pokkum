@@ -252,11 +252,11 @@ func TestBuildCustomFileLayer_DiffIDStableAcrossModTime(t *testing.T) {
 	ctx := context.Background()
 	sourceFile := writeBinary(t, "bun", []byte("#!/bin/sh\necho pinned-bun-fixture"))
 
-	layerA, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, ports.BunBinaryPath, sourceFile, pinnedImmutableBinaryEpoch, ports.CompressionGzip)
+	layerA, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, ports.BunBinaryPath, sourceFile, "", pinnedImmutableBinaryEpoch, ports.CompressionGzip)
 	if err != nil {
 		t.Fatalf("build A: %v", err)
 	}
-	layerB, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, ports.BunBinaryPath, sourceFile, pinnedImmutableBinaryEpoch, ports.CompressionGzip)
+	layerB, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, ports.BunBinaryPath, sourceFile, "", pinnedImmutableBinaryEpoch, ports.CompressionGzip)
 	if err != nil {
 		t.Fatalf("build B: %v", err)
 	}

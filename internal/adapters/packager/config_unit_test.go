@@ -180,7 +180,7 @@ func TestWriteTarDetectsSizeMismatch(t *testing.T) {
 		size:     100,
 		open:     bytesOpener([]byte("short")),
 	}}
-	if err := writeTar(io.Discard, entries, buildEpoch); err == nil {
+	if _, err := writeTar(io.Discard, entries, buildEpoch); err == nil {
 		t.Fatal("want an error when the entry is shorter than its header")
 	}
 }

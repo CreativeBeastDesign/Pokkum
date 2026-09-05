@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/layercacheutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/pruneutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -24,7 +25,7 @@ func TestBuildCustomFileLayer(t *testing.T) {
 	}
 
 	modTime := time.Unix(1700000000, 0)
-	layer, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/usr/local/bin/bun", sourceFile, modTime, ports.CompressionGzip)
+	layer, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/usr/local/bin/bun", sourceFile, "", modTime, ports.CompressionGzip)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -280,7 +281,7 @@ func TestBuildCustomFileLayer_LayerCaching(t *testing.T) {
 	modTime := time.Unix(1700000000, 0)
 
 	// First call builds and caches
-	layer1, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/usr/local/bin/bun", sourceFile, modTime, ports.CompressionGzip)
+	layer1, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/usr/local/bin/bun", sourceFile, "", modTime, ports.CompressionGzip)
 	if err != nil {
 		t.Fatalf("first BuildCustomFileLayer failed: %v", err)
 	}
@@ -290,7 +291,7 @@ func TestBuildCustomFileLayer_LayerCaching(t *testing.T) {
 	}
 
 	// Second call should hit the cache and return identical layer digest & diffID
-	layer2, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/usr/local/bin/bun", sourceFile, modTime, ports.CompressionGzip)
+	layer2, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/usr/local/bin/bun", sourceFile, "", modTime, ports.CompressionGzip)
 	if err != nil {
 		t.Fatalf("second BuildCustomFileLayer failed: %v", err)
 	}
@@ -308,4 +309,78 @@ func TestBuildCustomFileLayer_LayerCaching(t *testing.T) {
 	if diffID1 != diffID2 {
 		t.Errorf("expected cached layer diffID %s to equal %s", diffID2, diffID1)
 	}
+}
+
+// TestBuildCustomFileLayer_PassedDigestKeysTheSameEntry pins what the
+// contentSHA256 parameter is allowed to be: a stand-in for hashing the source
+// file, and nothing else. A caller that passes the file's real digest (which is
+// what packager.go does with req.BunRuntime.SHA256, to avoid re-reading ~90 MB)
+// must land on the byte-identical cache entry a caller that passes "" produces
+// by hashing the file itself. Anything else — a differently derived key, a
+// double-hash, an extra prefix — would silently mint a second entry for the
+// same content and quietly halve the cache's hit rate.
+//
+// The observable is the cache directory itself, not just the returned digest:
+// a wrongly derived key still returns a correct layer, so only counting the
+// blobs on disk can distinguish "hit" from "rebuilt under a second key".
+func TestBuildCustomFileLayer_PassedDigestKeysTheSameEntry(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	cacheRoot := t.TempDir()
+	t.Setenv("POKKUM_CACHE_DIR", cacheRoot)
+
+	content := []byte("#!/bin/sh\necho 'bun stand-in'")
+	sourceFile := filepath.Join(tmpDir, "bun")
+	if err := os.WriteFile(sourceFile, content, 0o755); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+	modTime := time.Unix(1700000000, 0)
+
+	// Warm the cache through the fallback path (no digest supplied).
+	warm, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, ports.BunBinaryPath, sourceFile, "", modTime, ports.CompressionGzip)
+	if err != nil {
+		t.Fatalf("warm build: %v", err)
+	}
+	warmDigest, err := warm.Digest()
+	if err != nil {
+		t.Fatalf("warm.Digest: %v", err)
+	}
+
+	blobsAfterWarm := countCacheBlobs(t, layercacheutils.ResolveCacheDir())
+	if blobsAfterWarm != 1 {
+		t.Fatalf("expected exactly 1 cached blob after the warm build, got %d", blobsAfterWarm)
+	}
+
+	// Now the production path: the digest the resolver already computed.
+	hit, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, ports.BunBinaryPath, sourceFile,
+		layercacheutils.ComputeBytesSHA256(content), modTime, ports.CompressionGzip)
+	if err != nil {
+		t.Fatalf("build with passed digest: %v", err)
+	}
+	hitDigest, err := hit.Digest()
+	if err != nil {
+		t.Fatalf("hit.Digest: %v", err)
+	}
+	if hitDigest != warmDigest {
+		t.Errorf("layer digest = %s, want %s", hitDigest, warmDigest)
+	}
+	if got := countCacheBlobs(t, layercacheutils.ResolveCacheDir()); got != 1 {
+		t.Errorf("cache holds %d blobs, want 1: the passed digest keyed a different entry than hashing the file", got)
+	}
+}
+
+// countCacheBlobs counts cached layer blobs (not their metadata sidecars).
+func countCacheBlobs(t *testing.T, cacheDir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatalf("read cache dir %s: %v", cacheDir, err)
+	}
+	n := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tar.gz") || strings.HasSuffix(e.Name(), ".tar.zst") {
+			n++
+		}
+	}
+	return n
 }

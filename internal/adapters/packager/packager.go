@@ -95,6 +95,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -296,7 +297,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		// simply starts at the supervisor. effectiveAppRuntime already
 		// rejected anything but bun/node in the entrypoint switch above.
 		if effectiveAppRuntime(req.AppRuntime) == ports.RuntimeBun {
-			bunLayer, err := BuildCustomFileLayer(ctx, req.Platform, ports.BunBinaryPath, req.BunRuntime.BinaryPath, pinnedImmutableBinaryEpoch, req.Compression)
+			bunLayer, err := BuildCustomFileLayer(ctx, req.Platform, ports.BunBinaryPath, req.BunRuntime.BinaryPath, req.BunRuntime.SHA256, pinnedImmutableBinaryEpoch, req.Compression)
 			if err != nil {
 				return nil, fmt.Errorf("packager: build %s: bun layer: %w", req.Platform, err)
 			}
@@ -370,7 +371,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		if req.AppVendorDir != "" {
 			if info, err := os.Stat(req.AppVendorDir); err == nil && info.IsDir() {
 				if !req.NoStrip {
-					stripped, skipped, stripErr := striputils.StripDirectory(ctx, req.AppVendorDir, ts)
+					stripped, skipped, stripErr := stripTreeOnce(ctx, req.AppVendorDir, ts)
 					p.warnUnstripped(req.AppVendorDir, stripped, skipped, stripErr)
 				}
 				pruneOpts := pruneutils.PruneOptions{
@@ -432,7 +433,7 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		if req.AppNativeDir != "" {
 			if info, err := os.Stat(req.AppNativeDir); err == nil && info.IsDir() {
 				if !req.NoStrip {
-					stripped, skipped, stripErr := striputils.StripDirectory(ctx, req.AppNativeDir, ts)
+					stripped, skipped, stripErr := stripTreeOnce(ctx, req.AppNativeDir, ts)
 					p.warnUnstripped(req.AppNativeDir, stripped, skipped, stripErr)
 				}
 				nativeLayer, _, nativeRecs, err := BuildDirectoryTreeLayerWithPruning(ctx, req.Platform, req.AppNativeDir, ports.AppNativeDirPrefix, ts, req.Compression, pruneutils.PruneOptions{NoPrune: true})
@@ -602,6 +603,65 @@ func (p *Packager) Build(ctx context.Context, req ports.PackageRequest) (v1.Imag
 		"created", ts.Format(time.RFC3339))
 
 	return img, nil
+}
+
+// stripDirectoryFn is the seam through which the packager reaches
+// striputils.StripDirectory. It is a var solely so a test can substitute a
+// fake that makes the timing of strip writes observable — see
+// TestStripTreeOnceRunsOncePerBuildAndNeverDuringAWalk.
+var stripDirectoryFn = striputils.StripDirectory
+
+// stripMemo is one host directory's strip result for one build.
+type stripMemo struct {
+	once     sync.Once
+	stripped int
+	skipped  []string
+	err      error
+}
+
+// stripTreeOnce runs striputils.StripDirectory at most once per (build, host
+// directory) and replays its result to every platform that asks.
+//
+// This is a CORRECTNESS fix, not only a saving. StripDirectory rewrites files
+// in place; the vendor and native directories are shared by every platform of
+// a fan-out; and the packager's tree walk reads a file's size from its dirent
+// and then copies that many bytes into the tar. A per-directory lock inside
+// striputils is not enough on its own to keep those apart, because the first
+// platform releases the lock and starts tarring exactly when the second
+// acquires it and starts writing. Doing the work once removes the second
+// write entirely: every later platform blocks on this Once until the strip has
+// finished, and only then walks. Writes therefore complete strictly before any
+// walk begins — the same argument precompressutils' dirLocks doc comment makes
+// for sidecars.
+//
+// The replayed result is the REAL one, not a blank: stripped, the full skipped
+// list and the error are all handed back to every caller, so
+// Packager.warnUnstripped reports honestly on every platform. On macOS, where
+// every strip invocation fails and every ELF file lands in skipped, all
+// platforms warn about all of them, exactly as before.
+//
+// A context with no build state (tests, direct callers) falls through to an
+// unmemoised call rather than panicking or silently doing nothing.
+func stripTreeOnce(ctx context.Context, dir string, modTime time.Time) (int, []string, error) {
+	st, ok := buildStateFrom(ctx)
+	if !ok {
+		return stripDirectoryFn(ctx, dir, modTime)
+	}
+
+	key := dir
+	if abs, err := filepath.Abs(dir); err == nil {
+		key = filepath.Clean(abs)
+	}
+	key = fmt.Sprintf("%s\x00%d", key, modTime.UTC().UnixNano())
+
+	entry, _ := st.strippedDirs.LoadOrStore(key, &stripMemo{})
+	memo := entry.(*stripMemo)
+	memo.once.Do(func() {
+		memo.stripped, memo.skipped, memo.err = stripDirectoryFn(ctx, dir, modTime)
+	})
+	// Cloned so one platform's caller cannot mutate the list another platform
+	// is about to log.
+	return memo.stripped, slices.Clone(memo.skipped), memo.err
 }
 
 // appendPrerenderedLayer appends a standalone /app/prerendered layer to

@@ -250,6 +250,13 @@ func BenchmarkBuildCustomFileLayer(b *testing.B) {
 		b.Fatalf("write source binary: %v", err)
 	}
 
+	// Production passes req.BunRuntime.SHA256 here: a digest the Bun resolver
+	// computed and verified moments earlier. The benchmark does the same, so it
+	// measures the layer build rather than a re-hash of 90 MB that no real
+	// build performs. (The cache_hit fixture floor below still derives the key
+	// from the file itself, which cross-checks that this value is the right one.)
+	contentSHA := layercacheutils.ComputeBytesSHA256(content)
+
 	cacheRoot := b.TempDir()
 	b.Setenv("POKKUM_CACHE_DIR", cacheRoot)
 	cacheDir := layercacheutils.ResolveCacheDir()
@@ -264,7 +271,7 @@ func BenchmarkBuildCustomFileLayer(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			ctx, cleanup := NewBuildContext(context.Background())
 			layer, err := BuildCustomFileLayer(
-				ctx, ports.LinuxAMD64, "/usr/local/bin/bun", srcPath, pinnedImmutableBinaryEpoch, ports.CompressionGzip)
+				ctx, ports.LinuxAMD64, "/usr/local/bin/bun", srcPath, contentSHA, pinnedImmutableBinaryEpoch, ports.CompressionGzip)
 			if err != nil {
 				cleanup()
 				b.Fatalf("BuildCustomFileLayer: %v", err)
@@ -289,7 +296,7 @@ func BenchmarkBuildCustomFileLayer(b *testing.B) {
 		// Warm the cache once, outside the measurement.
 		warmCtx, warmCleanup := NewBuildContext(context.Background())
 		if _, err := BuildCustomFileLayer(
-			warmCtx, ports.LinuxAMD64, "/usr/local/bin/bun", srcPath, pinnedImmutableBinaryEpoch, ports.CompressionGzip); err != nil {
+			warmCtx, ports.LinuxAMD64, "/usr/local/bin/bun", srcPath, contentSHA, pinnedImmutableBinaryEpoch, ports.CompressionGzip); err != nil {
 			warmCleanup()
 			b.Fatalf("warm BuildCustomFileLayer: %v", err)
 		}
@@ -313,7 +320,7 @@ func BenchmarkBuildCustomFileLayer(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			layer, err := BuildCustomFileLayer(
-				context.Background(), ports.LinuxAMD64, "/usr/local/bin/bun", srcPath, pinnedImmutableBinaryEpoch, ports.CompressionGzip)
+				context.Background(), ports.LinuxAMD64, "/usr/local/bin/bun", srcPath, contentSHA, pinnedImmutableBinaryEpoch, ports.CompressionGzip)
 			if err != nil {
 				b.Fatalf("BuildCustomFileLayer: %v", err)
 			}

@@ -3,13 +3,16 @@ package layercacheutils
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/poolutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -88,15 +91,125 @@ func layerFileExt(compression ports.CompressionAlgorithm) string {
 	return ".tar.gz"
 }
 
-func layerOptions(compression ports.CompressionAlgorithm) []tarball.LayerOption {
+// layerMeta is the on-disk sidecar written next to every cached layer blob.
+//
+// It exists so that a cache hit costs a stat plus a few hundred bytes of JSON
+// instead of a full read of the blob (to recompute the compressed digest) plus
+// a full decompression of it (to recompute the diffID), which is what
+// tarball.LayerFromFile does eagerly. Every field here is a value the builder
+// already computed exactly once while writing the blob; the sidecar just stops
+// it being thrown away.
+//
+// The sidecar is advisory, never authoritative about trust: a missing,
+// unparseable, or size-mismatched sidecar is treated as a cache MISS, so the
+// worst a damaged sidecar can do is cost a rebuild. It is never a reason to
+// serve bytes whose digest was not verified against the blob actually on disk.
+type layerMeta struct {
+	DiffID    string `json:"diffid"`
+	Digest    string `json:"digest"`
+	Size      int64  `json:"size"`
+	MediaType string `json:"mediatype"`
+}
+
+// sidecarPath returns the metadata path for a cached blob key.
+func sidecarPath(cacheDir string, key string) string {
+	return filepath.Join(cacheDir, key+".json")
+}
+
+// expectedMediaType is the media type a cached layer is served with, which is
+// derived from the requested compression rather than from whatever media type
+// the layer being cached happened to carry. This mirrors the media type
+// Get used to force via tarball.LayerFromFile's WithMediaType option.
+func expectedMediaType(compression ports.CompressionAlgorithm) types.MediaType {
 	if compression.Normalize() == ports.CompressionZstd {
-		return []tarball.LayerOption{
-			tarball.WithMediaType(types.OCILayerZStd),
+		return types.OCILayerZStd
+	}
+	return types.OCILayer
+}
+
+// cachedFileLayer is a v1.Layer backed by an on-disk compressed blob whose
+// digest, diffID and size were computed when the blob was built and recorded
+// in its sidecar. Nothing here re-reads or re-hashes the blob to answer a
+// metadata question.
+type cachedFileLayer struct {
+	path        string
+	diffID      v1.Hash
+	digest      v1.Hash
+	size        int64
+	mediaType   types.MediaType
+	compression ports.CompressionAlgorithm
+}
+
+func (l *cachedFileLayer) Digest() (v1.Hash, error)            { return l.digest, nil }
+func (l *cachedFileLayer) DiffID() (v1.Hash, error)            { return l.diffID, nil }
+func (l *cachedFileLayer) Size() (int64, error)                { return l.size, nil }
+func (l *cachedFileLayer) MediaType() (types.MediaType, error) { return l.mediaType, nil }
+
+func (l *cachedFileLayer) Compressed() (io.ReadCloser, error) {
+	return os.Open(l.path)
+}
+
+func (l *cachedFileLayer) Uncompressed() (io.ReadCloser, error) {
+	f, err := os.Open(l.path)
+	if err != nil {
+		return nil, err
+	}
+	if l.compression.Normalize() == ports.CompressionZstd {
+		zr, err := zstd.NewReader(f)
+		if err != nil {
+			_ = f.Close()
+			return nil, err
 		}
+		// IOReadCloser(), not the *zstd.Decoder itself: Decoder.Close() returns
+		// no error and therefore does NOT satisfy io.Closer, so handing the
+		// decoder over directly would leave Close below silently doing nothing
+		// and leak the decoder's goroutines (the same trap packager's own
+		// readCloserWithUnderlying documents).
+		return &readCloserWithUnderlying{Reader: zr.IOReadCloser(), closer: f}, nil
 	}
-	return []tarball.LayerOption{
-		tarball.WithMediaType(types.OCILayer),
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
 	}
+	return &readCloserWithUnderlying{Reader: gr, closer: f}, nil
+}
+
+// readCloserWithUnderlying closes the decompressor's backing file as well as
+// the decompressor itself, so an Uncompressed() reader never leaks the fd.
+type readCloserWithUnderlying struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (r *readCloserWithUnderlying) Close() error {
+	if c, ok := r.Reader.(io.Closer); ok {
+		_ = c.Close()
+	}
+	return r.closer.Close()
+}
+
+// readSidecar loads and validates the metadata sidecar for key. It returns
+// ok=false for every reason a caller must treat as a cache miss: no sidecar,
+// unreadable or unparseable JSON, a malformed digest, a media type that does
+// not match the requested compression, or a recorded size that disagrees with
+// the blob actually on disk. It never repairs or trusts partial data.
+func readSidecar(cacheDir string, key string, compression ports.CompressionAlgorithm, blobSize int64) (layerMeta, bool) {
+	raw, err := os.ReadFile(sidecarPath(cacheDir, key))
+	if err != nil {
+		return layerMeta{}, false
+	}
+	var meta layerMeta
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return layerMeta{}, false
+	}
+	if meta.Size != blobSize {
+		return layerMeta{}, false
+	}
+	if types.MediaType(meta.MediaType) != expectedMediaType(compression) {
+		return layerMeta{}, false
+	}
+	return meta, true
 }
 
 // Get returns the cached v1.Layer from disk if it exists and is readable.
@@ -137,13 +250,36 @@ func Get(cacheDir string, key string, compression ports.CompressionAlgorithm) (v
 		}
 	}
 
-	layer, err := tarball.LayerFromFile(targetPath, layerOptions(compression)...)
+	// The sidecar carries the digest/diffID/size this blob was built with, so a
+	// hit costs a stat and a few hundred bytes of JSON rather than a full read
+	// plus a full decompression (which is what tarball.LayerFromFile does
+	// eagerly). Anything wrong with it — absent, unparseable, wrong media type,
+	// or a size that disagrees with the blob on disk — is a cache MISS, never a
+	// reason to serve unverified metadata. The blob itself is deliberately NOT
+	// removed in that case: a concurrent Put renames the blob before its
+	// sidecar, so "blob without sidecar" is a legal transient state, and
+	// deleting it would sabotage the writer.
+	meta, ok := readSidecar(cacheDir, key, compression, info.Size())
+	if !ok {
+		return nil, false
+	}
+	diffID, err := v1.NewHash(meta.DiffID)
 	if err != nil {
-		_ = os.Remove(targetPath)
+		return nil, false
+	}
+	digest, err := v1.NewHash(meta.Digest)
+	if err != nil {
 		return nil, false
 	}
 
-	return layer, true
+	return &cachedFileLayer{
+		path:        targetPath,
+		diffID:      diffID,
+		digest:      digest,
+		size:        meta.Size,
+		mediaType:   expectedMediaType(compression),
+		compression: compression,
+	}, true
 }
 
 // Put writes the layer's compressed stream to the cache and returns a disk-backed v1.Layer.
@@ -173,7 +309,7 @@ func Put(cacheDir string, key string, layer v1.Layer, compression ports.Compress
 		return layer, fmt.Errorf("reading compressed layer: %w", err)
 	}
 
-	_, copyErr := poolutils.Copy(tmpFile, rc)
+	written, copyErr := poolutils.Copy(tmpFile, rc)
 	_ = rc.Close()
 	closeErr := tmpFile.Close()
 
@@ -188,9 +324,94 @@ func Put(cacheDir string, key string, layer v1.Layer, compression ports.Compress
 		return layer, nil
 	}
 
-	cachedLayer, err := tarball.LayerFromFile(targetPath, layerOptions(compression)...)
+	// Everything below reuses metadata the built layer already carries.
+	// buildSinglePassLayer computed the compressed digest, the diffID and the
+	// byte count exactly once while streaming the tar; re-deriving them here
+	// (which is what tarball.LayerFromFile did) would read the whole blob back
+	// and decompress it for values we are already holding.
+	//
+	// written is the number of bytes actually on disk and is what the sidecar
+	// records; the layer's own Size must agree with it, because layer.Digest()
+	// describes precisely the stream that was copied. If any of these is
+	// unavailable or disagrees, no sidecar is written at all and the next Get
+	// simply misses — a cheap rebuild instead of trusted-but-wrong metadata.
+	meta, ok := metaForLayer(layer, written, compression)
+	if !ok {
+		return layer, nil
+	}
+	if err := writeSidecar(cacheDir, key, meta); err != nil {
+		return layer, nil
+	}
+
+	diffID, err := v1.NewHash(meta.DiffID)
 	if err != nil {
 		return layer, nil
 	}
-	return cachedLayer, nil
+	digest, err := v1.NewHash(meta.Digest)
+	if err != nil {
+		return layer, nil
+	}
+	return &cachedFileLayer{
+		path:        targetPath,
+		diffID:      diffID,
+		digest:      digest,
+		size:        meta.Size,
+		mediaType:   expectedMediaType(compression),
+		compression: compression,
+	}, nil
+}
+
+// metaForLayer collects the sidecar values from a layer that has just been
+// written to disk, cross-checking the layer's own reported size against the
+// byte count actually copied. ok=false means "do not write a sidecar",
+// never "write a partial one".
+func metaForLayer(layer v1.Layer, written int64, compression ports.CompressionAlgorithm) (layerMeta, bool) {
+	digest, err := layer.Digest()
+	if err != nil {
+		return layerMeta{}, false
+	}
+	diffID, err := layer.DiffID()
+	if err != nil {
+		return layerMeta{}, false
+	}
+	size, err := layer.Size()
+	if err != nil {
+		return layerMeta{}, false
+	}
+	if size != written {
+		return layerMeta{}, false
+	}
+	return layerMeta{
+		DiffID:    diffID.String(),
+		Digest:    digest.String(),
+		Size:      written,
+		MediaType: string(expectedMediaType(compression)),
+	}, true
+}
+
+// writeSidecar writes the metadata file with the same temp-file-plus-rename
+// discipline the blob itself uses, so a reader never observes a half-written
+// sidecar. It is written AFTER the blob has been renamed into place: the
+// reverse order would advertise metadata for a blob that is not there yet.
+func writeSidecar(cacheDir string, key string, meta layerMeta) error {
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	tmpFile, err := os.CreateTemp(cacheDir, ".meta-tmp-*.json")
+	if err != nil {
+		return err
+	}
+	tmpName := tmpFile.Name()
+	defer func() {
+		_ = os.Remove(tmpName) // No-op once the rename below succeeded.
+	}()
+	if _, err := tmpFile.Write(raw); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, sidecarPath(cacheDir, key))
 }

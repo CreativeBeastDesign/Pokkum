@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -531,5 +532,129 @@ func TestAttestation_ImageFilesystemOracleCanFail(t *testing.T) {
 	if attestutils.RootDigest(full) == attestutils.RootDigest(withoutNodeModules) {
 		t.Fatal("omitting node_modules records did not change the aggregate digest; " +
 			"the parity assertion above cannot detect a missing attestation root")
+	}
+}
+
+// TestTreeLayerRecordsMatchIndependentFileHashes is the differential guard for
+// computing attestation record digests from the tar stream instead of from a
+// second read of the host file.
+//
+// The oracle is deliberately NOT the production code path: it re-implements
+// what the walk used to do (open the host path, hash its bytes) so that "the
+// digest teed off the archive" and "the digest of the file on disk" are
+// compared against each other rather than both being read from the same
+// function. A tee that hashed the tar header, the padding, or a truncated
+// prefix of the content would pass a self-consistent check and fail this one.
+func TestTreeLayerRecordsMatchIndependentFileHashes(t *testing.T) {
+	files := map[string]string{
+		"index.js":            "server entry",
+		"nested/deep/app.css": "body{color:red}",
+		"nested/data.json":    `{"k":"v"}`,
+		"empty.txt":           "",
+		// Big enough to cross the pooled 64 KiB copy buffer several times: a
+		// tee that only hashed the first buffer would look correct on the
+		// small files above.
+		"large.bin": strings.Repeat("pokkum-payload-", 20000),
+	}
+	dir := writeStrategyDir(t, files)
+
+	_, _, recs, err := BuildDirectoryTreeLayerWithPruning(
+		context.Background(), ports.LinuxAMD64, dir, ports.AppServerDirPrefix, buildEpoch,
+		ports.CompressionGzip, pruneutils.PruneOptions{NoPrune: true})
+	if err != nil {
+		t.Fatalf("build layer: %v", err)
+	}
+
+	// Oracle: the pre-change walk-time hashing, spelled out here in full.
+	want := make(map[string]string, len(files))
+	for rel, content := range files {
+		raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read fixture %s: %v", rel, err)
+		}
+		if string(raw) != content {
+			t.Fatalf("fixture %s was not written as expected", rel)
+		}
+		want["server/"+rel] = sha256Hex(raw)
+	}
+
+	got := make(map[string]string, len(recs))
+	for _, r := range recs {
+		if _, dup := got[r.Rel]; dup {
+			t.Fatalf("duplicate record for %q", r.Rel)
+		}
+		got[r.Rel] = r.SHA
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("records = %d, want %d; got %+v", len(got), len(want), got)
+	}
+	for rel, wantSHA := range want {
+		gotSHA, ok := got[rel]
+		if !ok {
+			t.Errorf("no record for %q", rel)
+			continue
+		}
+		if gotSHA != wantSHA {
+			t.Errorf("record %q SHA = %s, want %s (sha256 of the file's own bytes)", rel, gotSHA, wantSHA)
+		}
+	}
+
+	// The aggregate is what actually ships in the image, and it must not depend
+	// on the order records come back in (the tar walk emits them in archive
+	// order now, not filesystem-walk order).
+	shuffled := make([]attestutils.Record, len(recs))
+	copy(shuffled, recs)
+	slices.Reverse(shuffled)
+	if attestutils.RootDigest(shuffled) != attestutils.RootDigest(recs) {
+		t.Errorf("RootDigest depends on record order; it must not")
+	}
+}
+
+// TestTreeLayerWithoutRecordsSkipsHashing pins the WantRecords switch.
+//
+// The observable is exact rather than indirect: writeEntry hashes an entry if
+// and only if it returns a record for it (one branch, one condition), so an
+// empty record slice IS the statement "nothing was hashed". The second half
+// pins the other direction — asking for no records must not change a single
+// byte of the layer, so the switch is a cost switch and never a content one.
+func TestTreeLayerWithoutRecordsSkipsHashing(t *testing.T) {
+	dir := writeStrategyDir(t, map[string]string{
+		"index.js":        "server entry",
+		"nested/app.css":  "body{}",
+		"nested/data.bin": strings.Repeat("x", 100000),
+	})
+
+	withLayer, _, withRecs, err := buildDirectoryTreeLayer(
+		context.Background(), ports.LinuxAMD64, dir, ports.AppServerDirPrefix, buildEpoch,
+		ports.CompressionGzip, pruneutils.PruneOptions{NoPrune: true}, true)
+	if err != nil {
+		t.Fatalf("build with records: %v", err)
+	}
+	if len(withRecs) != 3 {
+		t.Fatalf("records with wantRecords=true = %d, want 3", len(withRecs))
+	}
+
+	withoutLayer, _, withoutRecs, err := buildDirectoryTreeLayer(
+		context.Background(), ports.LinuxAMD64, dir, ports.AppServerDirPrefix, buildEpoch,
+		ports.CompressionGzip, pruneutils.PruneOptions{NoPrune: true}, false)
+	if err != nil {
+		t.Fatalf("build without records: %v", err)
+	}
+	if len(withoutRecs) != 0 {
+		t.Fatalf("wantRecords=false still produced %d records (%+v) — the per-file hashing was not skipped",
+			len(withoutRecs), withoutRecs)
+	}
+
+	withDiffID, err := withLayer.DiffID()
+	if err != nil {
+		t.Fatalf("DiffID (with records): %v", err)
+	}
+	withoutDiffID, err := withoutLayer.DiffID()
+	if err != nil {
+		t.Fatalf("DiffID (without records): %v", err)
+	}
+	if withDiffID != withoutDiffID {
+		t.Errorf("layer diffID depends on whether records were requested: %s vs %s", withDiffID, withoutDiffID)
 	}
 }

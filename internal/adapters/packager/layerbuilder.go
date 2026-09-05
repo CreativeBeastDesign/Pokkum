@@ -27,6 +27,8 @@ var _ ports.LayerBuilder = (*LayerBuilderAdapter)(nil)
 
 // BuildLayer implements ports.LayerBuilder.
 func (b *LayerBuilderAdapter) BuildLayer(ctx context.Context, platform ports.Platform, hostDir, targetPrefix string, modTime time.Time, compression ports.CompressionAlgorithm) (v1.Layer, error) {
-	layer, _, _, err := BuildDirectoryTreeLayerWithPruning(ctx, platform, hostDir, targetPrefix, modTime, compression, pruneutils.PruneOptions{NoPrune: true})
+	// wantRecords=false: this adapter discards the attestation records, so it
+	// must not pay for them — see buildDirectoryTreeLayer's doc comment.
+	layer, _, _, err := buildDirectoryTreeLayer(ctx, platform, hostDir, targetPrefix, modTime, compression, pruneutils.PruneOptions{NoPrune: true}, false)
 	return layer, err
 }

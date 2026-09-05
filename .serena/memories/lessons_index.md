@@ -21,6 +21,10 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### shared-mutable-input in a fan-out (1)
+
+- `2026-09-05` — Two platforms stripped and tarred the same directory concurrently. `striputils` had no lock at all while `precompressutils` had one, and even the lock would not have been enough: it orders writers against writers, never writers against readers. The fix is a build-scoped memo so the work happens once. Read before adding any step that mutates a shared directory in place inside the per-platform fan-out.
+
 ### self-invalidating cache key / unobservable-by-construction (1)
 
 - `2026-09-05` — The remote build cache could never hit, on any project, since it shipped: `pokkum.lock` was hashed as project source, but the build stamps `time.Now()` into that file before computing the hash. Invisible because a cache that never hits looks exactly like one that correctly misses. Read before adding any path to a content-addressed key, and before shipping any optimisation whose failure mode is "silently does nothing".

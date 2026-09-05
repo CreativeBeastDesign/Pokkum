@@ -3,6 +3,7 @@ package packager
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -35,10 +36,6 @@ func TestBuildSinglePassLayer_TempFileCleanup(t *testing.T) {
 	// platforms this test needs to run on read it, so no further env var is
 	// necessary.
 
-	srcDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(srcDir, "file.txt"), []byte("hello world"), 0o644); err != nil {
-		t.Fatalf("write source file: %v", err)
-	}
 	modTime := time.Unix(1700000000, 0)
 
 	ctx, cleanup := NewBuildContext(context.Background())
@@ -46,9 +43,20 @@ func TestBuildSinglePassLayer_TempFileCleanup(t *testing.T) {
 	// Build several layers, the way one real image build does (supervisor,
 	// app, client, vendor, native, ...), to prove cleanup handles more than
 	// a single accidental case.
+	//
+	// Each layer gets its OWN source directory, deliberately. A build context
+	// memoises tree layers by the inputs that determine their bytes (see
+	// treeLayerMemoKey), so three builds of one identical directory are now
+	// one layer and one temp file — correct, but it would leave this test
+	// asserting cleanup over a single file while claiming to cover several.
 	const layerCount = 3
 	layers := make([]v1.Layer, layerCount)
 	for i := 0; i < layerCount; i++ {
+		srcDir := t.TempDir()
+		content := fmt.Sprintf("hello world %d", i)
+		if err := os.WriteFile(filepath.Join(srcDir, "file.txt"), []byte(content), 0o644); err != nil {
+			t.Fatalf("write source file #%d: %v", i, err)
+		}
 		layer, err := BuildDirectoryTreeLayer(ctx, ports.LinuxAMD64, srcDir, "/app/client", modTime, ports.CompressionGzip)
 		if err != nil {
 			t.Fatalf("BuildDirectoryTreeLayer #%d: %v", i, err)
@@ -179,7 +187,7 @@ func TestUncompressed_ZstdDecoderClosed(t *testing.T) {
 	}
 
 	modTime := time.Unix(1700000000, 0)
-	layer, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/payload.bin", srcFile, modTime, ports.CompressionZstd)
+	layer, err := BuildCustomFileLayer(ctx, ports.LinuxAMD64, "/payload.bin", srcFile, "", modTime, ports.CompressionZstd)
 	if err != nil {
 		t.Fatalf("BuildCustomFileLayer: %v", err)
 	}

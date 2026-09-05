@@ -3,6 +3,7 @@ package layercacheutils_test
 import (
 	"archive/tar"
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -165,5 +166,205 @@ func TestGet_CorruptFileEviction(t *testing.T) {
 	// Corrupt file should be cleaned up
 	if _, err := os.Stat(corruptFile); !os.IsNotExist(err) {
 		t.Errorf("expected corrupt cache file to be evicted from disk")
+	}
+}
+
+// putTestLayer writes a small synthetic layer into cacheDir and returns its key.
+func putTestLayer(t *testing.T, cacheDir string) string {
+	t.Helper()
+
+	data := []byte("binary payload for sidecar testing")
+	layer, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
+		buf := &bytes.Buffer{}
+		tw := tar.NewWriter(buf)
+		_ = tw.WriteHeader(&tar.Header{
+			Name:    "pokkum/init",
+			Mode:    0o555,
+			Size:    int64(len(data)),
+			ModTime: time.Unix(1700000000, 0),
+		})
+		_, _ = tw.Write(data)
+		_ = tw.Close()
+		return io.NopCloser(buf), nil
+	})
+	if err != nil {
+		t.Fatalf("failed to build test layer: %v", err)
+	}
+
+	key := layercacheutils.ComputeKey("/pokkum/init", layercacheutils.ComputeBytesSHA256(data), ports.LinuxAMD64, ports.CompressionGzip)
+	if _, err := layercacheutils.Put(cacheDir, key, layer, ports.CompressionGzip); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, ok := layercacheutils.Get(cacheDir, key, ports.CompressionGzip); !ok {
+		t.Fatalf("precondition: expected a cache hit right after Put")
+	}
+	return key
+}
+
+// TestGet_DamagedSidecarIsAMiss is the guard for the metadata sidecar that
+// makes a cache hit cheap. The sidecar is advisory: every way it can be wrong
+// must degrade to a MISS (costing a rebuild), never to a hit that serves a
+// digest nobody verified against the blob on disk. It also pins the one case
+// that must NOT delete the blob — a blob with no sidecar yet is exactly what a
+// concurrent Put looks like mid-flight.
+func TestGet_DamagedSidecarIsAMiss(t *testing.T) {
+	cases := []struct {
+		name      string
+		damage    func(t *testing.T, sidecar string)
+		keepsBlob bool
+	}{
+		{
+			name: "missing sidecar",
+			damage: func(t *testing.T, sidecar string) {
+				if err := os.Remove(sidecar); err != nil {
+					t.Fatalf("remove sidecar: %v", err)
+				}
+			},
+			keepsBlob: true,
+		},
+		{
+			name: "unparseable sidecar",
+			damage: func(t *testing.T, sidecar string) {
+				if err := os.WriteFile(sidecar, []byte("{not json"), 0o644); err != nil {
+					t.Fatalf("write sidecar: %v", err)
+				}
+			},
+		},
+		{
+			name: "size disagrees with the blob on disk",
+			damage: func(t *testing.T, sidecar string) {
+				rewriteSidecar(t, sidecar, func(m map[string]any) { m["size"] = float64(1) })
+			},
+		},
+		{
+			name: "media type does not match the compression",
+			damage: func(t *testing.T, sidecar string) {
+				rewriteSidecar(t, sidecar, func(m map[string]any) {
+					m["mediatype"] = "application/vnd.oci.image.layer.v1.tar+zstd"
+				})
+			},
+		},
+		{
+			name: "malformed digest",
+			damage: func(t *testing.T, sidecar string) {
+				rewriteSidecar(t, sidecar, func(m map[string]any) { m["digest"] = "not-a-digest" })
+			},
+		},
+		{
+			name: "malformed diffid",
+			damage: func(t *testing.T, sidecar string) {
+				rewriteSidecar(t, sidecar, func(m map[string]any) { m["diffid"] = "sha256:zzzz" })
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cacheDir := t.TempDir()
+			key := putTestLayer(t, cacheDir)
+			blob := filepath.Join(cacheDir, key+".tar.gz")
+			tc.damage(t, filepath.Join(cacheDir, key+".json"))
+
+			layer, ok := layercacheutils.Get(cacheDir, key, ports.CompressionGzip)
+			if ok || layer != nil {
+				t.Fatalf("expected a cache MISS for a %s, got ok=%v layer=%v", tc.name, ok, layer != nil)
+			}
+			if tc.keepsBlob {
+				if _, err := os.Stat(blob); err != nil {
+					t.Errorf("blob must survive a missing sidecar (a concurrent Put looks exactly like this): %v", err)
+				}
+			}
+		})
+	}
+}
+
+// rewriteSidecar mutates one field of an existing sidecar in place.
+func rewriteSidecar(t *testing.T, sidecar string, mutate func(map[string]any)) {
+	t.Helper()
+	raw, err := os.ReadFile(sidecar)
+	if err != nil {
+		t.Fatalf("read sidecar: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal sidecar: %v", err)
+	}
+	mutate(m)
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal sidecar: %v", err)
+	}
+	if err := os.WriteFile(sidecar, out, 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+}
+
+// TestGet_SidecarMetadataMatchesTheBlob proves the fast path is not merely
+// fast: the digest, diffID and size it serves without reading the blob are the
+// same values a full tarball.LayerFromFile read of that blob computes.
+func TestGet_SidecarMetadataMatchesTheBlob(t *testing.T) {
+	cacheDir := t.TempDir()
+	key := putTestLayer(t, cacheDir)
+	blob := filepath.Join(cacheDir, key+".tar.gz")
+
+	cached, ok := layercacheutils.Get(cacheDir, key, ports.CompressionGzip)
+	if !ok {
+		t.Fatalf("expected cache hit")
+	}
+
+	fromDisk, err := tarball.LayerFromFile(blob)
+	if err != nil {
+		t.Fatalf("LayerFromFile: %v", err)
+	}
+
+	gotDigest, err := cached.Digest()
+	if err != nil {
+		t.Fatalf("cached.Digest: %v", err)
+	}
+	wantDigest, err := fromDisk.Digest()
+	if err != nil {
+		t.Fatalf("fromDisk.Digest: %v", err)
+	}
+	if gotDigest != wantDigest {
+		t.Errorf("digest = %s, want %s (recomputed from the blob)", gotDigest, wantDigest)
+	}
+
+	gotDiffID, err := cached.DiffID()
+	if err != nil {
+		t.Fatalf("cached.DiffID: %v", err)
+	}
+	wantDiffID, err := fromDisk.DiffID()
+	if err != nil {
+		t.Fatalf("fromDisk.DiffID: %v", err)
+	}
+	if gotDiffID != wantDiffID {
+		t.Errorf("diffID = %s, want %s (recomputed from the blob)", gotDiffID, wantDiffID)
+	}
+
+	gotSize, err := cached.Size()
+	if err != nil {
+		t.Fatalf("cached.Size: %v", err)
+	}
+	info, err := os.Stat(blob)
+	if err != nil {
+		t.Fatalf("stat blob: %v", err)
+	}
+	if gotSize != info.Size() {
+		t.Errorf("size = %d, want %d (bytes on disk)", gotSize, info.Size())
+	}
+
+	// Uncompressed() must still yield the real tar stream, decompressed.
+	rc, err := cached.Uncompressed()
+	if err != nil {
+		t.Fatalf("cached.Uncompressed: %v", err)
+	}
+	defer rc.Close() //nolint:errcheck // read-only
+	tr := tar.NewReader(rc)
+	hdr, err := tr.Next()
+	if err != nil {
+		t.Fatalf("read tar header from cached layer: %v", err)
+	}
+	if hdr.Name != "pokkum/init" {
+		t.Errorf("tar member = %q, want %q", hdr.Name, "pokkum/init")
 	}
 }

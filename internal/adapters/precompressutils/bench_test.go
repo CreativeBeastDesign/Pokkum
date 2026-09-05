@@ -159,15 +159,18 @@ var benchModTime = time.Unix(1700000000, 0).UTC()
 //	        every measured iteration really is cold.
 //	fresh — every sidecar already present and newer than its source, which is
 //	        what every subsequent platform of a multi-platform build pays. It
-//	        writes nothing, but it is NOT free: PrecompressFile os.ReadFile's
-//	        each source in full before it consults isStale, so this path still
-//	        moves the whole tree through memory. That is precisely the sort of
-//	        thing this baseline exists to make visible.
+//	        writes nothing, and it no longer reads anything either:
+//	        PrecompressFile used to os.ReadFile each source in full BEFORE it
+//	        consulted isStale, moving the whole tree through memory to
+//	        discover it had nothing to do. Making that visible is what this
+//	        baseline was for, and the staleness check now runs first — see
+//	        TestPrecompressFileSkipsReadWhenEverySidecarIsFresh, which proves
+//	        the read is genuinely gone rather than merely cheaper.
 //
-// The cold path is dominated by brotli at BestCompression (~0.5 MB/s), so one
-// iteration takes tens of seconds and b.N will be 1. That is the real cost a
-// build pays, not a fixture artefact — do not shrink the tree to make the
-// number look better.
+// The cold path is dominated by brotli at BestCompression, so one iteration
+// takes seconds and b.N will be 1. It is now spread across a bounded worker
+// pool rather than run one file at a time, but it is still the real cost a
+// build pays — do not shrink the tree to make the number look better.
 func BenchmarkPrecompressDirectory(b *testing.B) {
 	opts := precompressutils.PrecompressOptions{Gzip: true, Brotli: true, Zstd: true}
 

@@ -5,6 +5,55 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-05 — Two platforms stripped and tarred the same directory at once; a per-directory lock deduplicates work but does not order it against a reader
+
+**Category:** concurrency / determinism — a latent bit-for-bit reproducibility hazard in the
+multi-platform fan-out, found while optimising rather than from a failure report
+
+**Root cause:** `Packager.Build` runs once per platform, concurrently, and every platform is handed
+the *same* host directories — `.pokkum/vendor`, the native addon directory, the client tree. Two of
+the steps that operate on those directories mutate them **in place**: `striputils.StripDirectory`
+forks `strip --strip-unneeded` and rewrites each ELF file, and precompression writes sidecars beside
+each asset.
+
+`precompressutils` had a per-directory mutex for exactly this reason. `striputils` had no
+synchronisation at all — `grep "sync\." internal/adapters/striputils/` returned nothing. So platform
+B could rewrite a file while platform A's tree walk had already recorded that file's size and was
+mid-copy into the tar. The visible outcome is a size-mismatch error; the invisible one is worse, a
+layer whose recorded attestation digest and tar bytes disagree, or two platforms' "identical" layers
+differing.
+
+**The subtler half, and the reason a mutex alone is not the fix.** A per-directory lock makes the two
+strips *sequential*, which stops them corrupting each other — but it does not stop the second strip
+from running *at all*, and the second strip still rewrites files while another platform's tar walk
+may be reading them. Serialising writers against writers says nothing about writers against readers.
+The property actually needed is that after the first platform finishes, **no further mutation
+happens**, so every later reader sees a stable tree. That requires the work to be done once per
+build, not merely one-at-a-time: a memo, not a mutex. The lock is still necessary — it is what makes
+the memo's critical section safe — but on its own it would have looked like a fix while leaving the
+reader race open.
+
+**Where:** `internal/adapters/striputils/striputils.go` (no locking), and the two call sites in
+`internal/adapters/packager/packager.go` that invoke it once per platform against a shared directory.
+
+**Fix:** `striputils` gains the per-directory `sync.Map` mutex `precompressutils` already had, and the
+packager gains a per-build memo so the strip runs exactly once regardless of platform count. Both
+halves are guarded, and both guards were shown red: bypassing the memo reports `StripDirectory ran 3
+times for 3 platforms, want 1` *and* `2 platform(s) began their tree walk while a strip was still
+rewriting the tree`; deleting the lock reports `StripDirectory returned while the per-directory lock
+was held`. The same per-build memo now also covers directory-tree layer construction, which was
+independently rebuilding byte-identical layers once per platform.
+
+**Preventative rule:** when concurrent workers share a mutable resource, ask two separate questions,
+because one lock only answers the first: *can two writers corrupt each other* (a mutex fixes this),
+and *can a writer still be running while a reader reads* (only doing the work once, or an explicit
+happens-before, fixes this). Any step that mutates a directory in place inside a per-platform fan-out
+needs the second answer. And the general form: **if N identical workers each transform a shared input
+the same way, the transformation belongs before the fan-out or behind a build-scoped memo** — running
+it N times is not merely wasted work, it is N-1 extra opportunities to race a reader.
+
+---
+
 ## 2026-09-05 — Replacing a `map[string]any` decode with a typed struct silently widened what matched, because `encoding/json` compares struct tags case-insensitively
 
 **Category:** library-semantics-assumption / narrowing-a-type-widens-behaviour — plus a measured
