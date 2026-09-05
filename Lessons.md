@@ -5,6 +5,51 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-05 — A credential cache that stored only its successes re-spawned the helper subprocess forever for the one answer that repeats most
+
+**Category:** cache-completeness — a memo that caches the positive result and silently drops the
+negative one, so the cheapest-to-recompute case is cached and the most common case is not
+
+**Root cause:** `CustomConfigFileKeychain.Resolve` memoised a resolved `authn.Authenticator` per
+registry, but only on the paths that found a credential. When a registry had no stored credential it
+returned `authn.Anonymous` **without writing it into the cache**. So on any machine with a
+`credsStore` configured (`desktop`, `ecr-login`, `gcloud`), every registry the user has no credential
+for re-ran the credential-helper subprocess on every single call, for the life of the process — at
+100-500 ms per exec.
+
+The shape is worth naming because it looks harmless in review: the cache is clearly correct, in that
+it never returns a wrong credential, and the missing write is on the branch that "has nothing to
+store". But "no credential for this registry" is an answer, and it is the answer most likely to be
+asked for repeatedly — a build touching a public base image registry asks it once per registry
+operation. Caching only the interesting branch inverts the cost: the expensive-to-obtain answer is
+kept, the free-looking one is recomputed forever, and the recomputation is a process spawn.
+
+It was invisible because nothing measured helper invocations. Correctness tests pass either way, and
+the cost only appears on a developer machine with a helper configured — never in CI, which uses
+static credentials or none.
+
+**Where:** `internal/adapters/registryutils/keychain.go`, `CustomConfigFileKeychain.Resolve`. A
+second instance of the same class sat one level up: `ResolveKeychain` re-opened and re-parsed the
+config file and constructed a **brand-new** keychain (with an empty cache) on every call, so the
+per-registry cache never survived a single registry operation regardless.
+
+**Fix:** `Resolve` now caches the `Anonymous` result alongside the credentialed ones, and
+`ResolveKeychain` is memoised per config-file identity so the per-registry cache accumulates across
+the build. Both are covered by tests that count credential-helper executions rather than asserting
+on returned values — 20 resolutions of one registry now cost exactly 1 exec, and 9 interleaved
+resolutions across 3 registries cost 3. A guard also proves the memo never hands one registry's
+credential to another, which is the failure a coarser key would introduce.
+
+**Preventative rule:** when adding a memo, enumerate **every** return path of the function being
+memoised and confirm each one writes to the cache — a `return defaultValue` or `return zero, nil`
+that skips the store is the easiest one to miss, and it is usually the hottest path. State the
+cache's hit rate as a testable claim: assert on the number of times the *expensive underlying
+operation* ran (exec count, request count, file reads), not on the values returned, because a cache
+that never stores anything returns perfectly correct values. That assertion is also what makes the
+memo's benefit visible at all — this defect survived because nothing counted the subprocesses.
+
+---
+
 ## 2026-09-05 — A literal prefilter for a `(?i)` regex is unsound if it folds ASCII, and the "fast literal alternation" it was meant to replace was 26x slower than the scan it gated
 
 **Category:** prefilter-soundness / library-semantics-assumption — caught during optimisation, before

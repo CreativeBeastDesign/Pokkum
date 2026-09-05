@@ -3,17 +3,16 @@ package registry
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/static"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -73,10 +72,11 @@ func (a *Adapter) AttachSBOM(ctx context.Context, req ports.AttachSBOMRequest) (
 	// Jobs and Stats are left at their zero values deliberately: an SBOM is a
 	// single small layer, so there is nothing to parallelise and no mount
 	// accounting worth paying an extra transport hop for.
-	opts, err := remoteOptions(ctx, remoteConfig{
+	cfg := remoteConfig{
 		Insecure:           req.Insecure,
 		RegistryConfigPath: req.RegistryConfigPath,
-	})
+	}
+	sess, err := a.remoteSession(cfg)
 	if err != nil {
 		return ports.PublishResult{}, err
 	}
@@ -87,14 +87,20 @@ func (a *Adapter) AttachSBOM(ctx context.Context, req ports.AttachSBOMRequest) (
 	}
 
 	if attachMode == ports.SBOMAttachTag {
-		return a.attachSBOMTag(req, repo, img, opts)
+		return a.attachSBOMTag(ctx, sess, req, repo, img)
 	}
 
 	// referrer and auto both start by actually attempting the real
 	// Referrers API, with go-containerregistry's own silent-fallback-to-a-
-	// different-tag-scheme disabled.
-	referrerOpts := append(slices.Clone(opts), remote.WithReferrersTagFallback(false))
-	res, refErr := a.attachSBOMReferrer(req, repo, img, referrerOpts)
+	// different-tag-scheme disabled. That is a different option set, so it
+	// gets its own session rather than borrowing the one above.
+	referrerCfg := cfg
+	referrerCfg.NoReferrersTagFallback = true
+	referrerSess, err := a.remoteSession(referrerCfg)
+	if err != nil {
+		return ports.PublishResult{}, err
+	}
+	res, refErr := a.attachSBOMReferrer(ctx, referrerSess, req, repo, img)
 	if refErr == nil {
 		return res, nil
 	}
@@ -103,18 +109,18 @@ func (a *Adapter) AttachSBOM(ctx context.Context, req ports.AttachSBOMRequest) (
 	}
 
 	a.logger().Info("registry does not support OCI 1.1 referrers, falling back to tag mode", "repo", req.Repo, "subject", req.Subject.String())
-	return a.attachSBOMTag(req, repo, img, opts)
+	return a.attachSBOMTag(ctx, sess, req, repo, img)
 }
 
 // attachSBOMTag publishes img tagged per the cosign/ko convention
 // (ports.SBOMTag: the subject digest's algorithm and hex joined by '-',
 // suffixed ".sbom") — readable by every registry, including ones that
 // predate the referrers API.
-func (a *Adapter) attachSBOMTag(req ports.AttachSBOMRequest, repo name.Repository, img v1.Image, opts []remote.Option) (ports.PublishResult, error) {
+func (a *Adapter) attachSBOMTag(ctx context.Context, sess *registryutils.Session, req ports.AttachSBOMRequest, repo name.Repository, img v1.Image) (ports.PublishResult, error) {
 	tagStr := ports.SBOMTag(req.Subject)
 	tagRef := repo.Tag(tagStr)
 
-	if err := remote.Write(tagRef, img, opts...); err != nil {
+	if err := sess.Push(ctx, tagRef, img); err != nil {
 		return ports.PublishResult{}, classifyPushErr(req.Repo, err)
 	}
 
@@ -138,9 +144,10 @@ func (a *Adapter) attachSBOMTag(req ports.AttachSBOMRequest, repo name.Repositor
 }
 
 // attachSBOMReferrer publishes img as an OCI 1.1 referrer of req.Subject.
-// opts must already include remote.WithReferrersTagFallback(false) — see
-// AttachSBOM's doc comment for why the caller, not this function, owns that.
-func (a *Adapter) attachSBOMReferrer(req ports.AttachSBOMRequest, repo name.Repository, img v1.Image, opts []remote.Option) (ports.PublishResult, error) {
+// sess must already have been built with remote.WithReferrersTagFallback(false)
+// — see AttachSBOM's doc comment for why the caller, not this function, owns
+// that.
+func (a *Adapter) attachSBOMReferrer(ctx context.Context, sess *registryutils.Session, req ports.AttachSBOMRequest, repo name.Repository, img v1.Image) (ports.PublishResult, error) {
 	img = mutate.Subject(img, v1.Descriptor{Digest: req.Subject}).(v1.Image)
 
 	digest, err := img.Digest()
@@ -149,7 +156,7 @@ func (a *Adapter) attachSBOMReferrer(req ports.AttachSBOMRequest, repo name.Repo
 	}
 
 	digestRef := repo.Digest(digest.String())
-	if err := remote.Write(digestRef, img, opts...); err != nil {
+	if err := sess.Push(ctx, digestRef, img); err != nil {
 		return ports.PublishResult{}, classifyPushErr(req.Repo, err)
 	}
 

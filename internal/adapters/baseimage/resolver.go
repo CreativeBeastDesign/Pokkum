@@ -165,6 +165,24 @@ type Resolver struct {
 	pulls         map[pullKey]pullEntry
 	images        map[imageKey]imageEntry
 	verifications map[verifyKey]struct{}
+
+	// sessions memoises one authenticated registry session per distinct
+	// remote option set. Without it every pull, signature fetch and escrow
+	// mirror write re-ran authn.Resolve plus a /v2/ ping and a token request;
+	// the pull memo above already stopped the *manifest* being re-fetched but
+	// not the session being rebuilt around it.
+	sessions registryutils.SessionCache
+}
+
+// sessionKey identifies one distinct remote option set for session
+// memoisation. It carries exactly the two dimensions sessionOptions varies on
+// (transport and credentials), so two resolves can share a session only when
+// both match — a resolve against an insecure registry can never borrow the
+// secure session's transport, and a resolve using a custom config.json can
+// never borrow another config's credentials.
+type sessionKey struct {
+	insecure           bool
+	registryConfigPath string
 }
 
 // pullKey identifies one top-level manifest pull.
@@ -513,17 +531,20 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 			return nil, fmt.Errorf("baseimage: parse mirror reference %q: %w: %w", mirrorTarget, mErr, core.ErrInvalidBaseImage)
 		}
 
-		remoteOpts, rErr := r.remoteOptions(ctx, req.Insecure, req.RegistryConfigPath)
+		// One session for all four operations below (index/image write, the
+		// upstream signature GET, the signature write) instead of one
+		// authenticated session apiece.
+		sess, rErr := r.remoteSession(req.Insecure, req.RegistryConfigPath)
 		if rErr != nil {
 			return nil, fmt.Errorf("baseimage: resolve mirror remote options: %w", rErr)
 		}
 
 		if pull.isIndex {
-			if err := remote.WriteIndex(mirrorParsed, pull.index, remoteOpts...); err != nil {
+			if err := sess.Push(ctx, mirrorParsed, pull.index); err != nil {
 				return nil, classifyMirrorErr(mirrorTarget, err)
 			}
 		} else {
-			if err := remote.Write(mirrorParsed, pull.image, remoteOpts...); err != nil {
+			if err := sess.Push(ctx, mirrorParsed, pull.image); err != nil {
 				return nil, classifyMirrorErr(mirrorTarget, err)
 			}
 		}
@@ -532,12 +553,12 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BaseImageRequest) (*po
 		sigTag := fmt.Sprintf("sha256-%s.sig", pull.digest.Hex)
 		upstreamSigRef := parsedRef.Context().Tag(sigTag)
 		mirrorSigRef := mirrorParsed.Context().Tag(sigTag)
-		if sigDesc, sErr := remote.Get(upstreamSigRef, remoteOpts...); sErr == nil {
+		if sigDesc, sErr := sess.Get(ctx, upstreamSigRef); sErr == nil {
 			sigImg, iErr := sigDesc.Image()
 			if iErr != nil {
 				return nil, fmt.Errorf("baseimage: escrow mirror get signature image %s: %w: %w", upstreamSigRef.Name(), iErr, core.ErrPushFailed)
 			}
-			if wErr := remote.Write(mirrorSigRef, sigImg, remoteOpts...); wErr != nil {
+			if wErr := sess.Push(ctx, mirrorSigRef, sigImg); wErr != nil {
 				return nil, classifyMirrorErr(mirrorSigRef.Name(), wErr)
 			}
 			r.logger().Info("escrow mirrored base image and signatures", "mirror_ref", mirrorTarget, "sig_ref", mirrorSigRef.Name())
@@ -755,11 +776,15 @@ func (r *Resolver) pull(ctx context.Context, parsedRef name.Reference, rawRef st
 	r.mu.Unlock()
 
 	r.logger().Debug("pulling base image manifest", "ref", rawRef, "insecure", insecure)
-	opts, err := r.remoteOptions(ctx, insecure, registryConfigPath)
+	sess, err := r.remoteSession(insecure, registryConfigPath)
 	if err != nil {
 		return nil, err
 	}
-	desc, err := remote.Get(parsedRef, opts...)
+	// A real manifest GET every time this is reached: the session shares only
+	// the resolved authenticator and http.Client, never manifest bytes. The
+	// memo that avoids a second network round trip is r.pulls above, and it is
+	// keyed on the same (ref, insecure, config) tuple it always was.
+	desc, err := sess.Get(ctx, parsedRef)
 
 	var (
 		pulled *pulledManifest
@@ -901,21 +926,41 @@ func staticBaseReason(ref string) (string, bool) {
 	return "", false
 }
 
-// remoteOptions builds the go-containerregistry options common to every pull:
-// context threading (so a cancelled build stops pulling mid-transfer) and keychain resolution.
-func (r *Resolver) remoteOptions(ctx context.Context, insecure bool, registryConfigPath string) ([]remote.Option, error) {
+// sessionOptions builds the go-containerregistry options common to every
+// registry operation this package performs: keychain resolution, plus the
+// insecure transport when the caller opted into one.
+//
+// It deliberately carries no remote.WithContext. Context is not part of an
+// option set here: every registryutils.Session method takes the caller's
+// context per call and passes it straight through to the Puller/Pusher, which
+// is what go-containerregistry uses both for the request and for the one-time
+// fetcher/writer construction. Leaving it out is what makes a session safe to
+// memoise across operations — see registryutils.SessionCache.
+func sessionOptions(insecure bool, registryConfigPath string) ([]remote.Option, error) {
 	kc, err := registryutils.ResolveKeychain(registryConfigPath)
 	if err != nil {
 		return nil, err
 	}
-	opts := []remote.Option{
-		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(kc),
-	}
+	opts := []remote.Option{remote.WithAuthFromKeychain(kc)}
 	if insecure {
 		opts = append(opts, remote.WithTransport(insecureTransport))
 	}
 	return opts, nil
+}
+
+// remoteSession returns the memoised session for (insecure,
+// registryConfigPath), so that the manifest pull, the Cosign signature fetch
+// and any escrow mirror write in one resolve share a single authenticated
+// session instead of opening three.
+func (r *Resolver) remoteSession(insecure bool, registryConfigPath string) (*registryutils.Session, error) {
+	opts, err := sessionOptions(insecure, registryConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return registryutils.NewSession(opts...), nil
+	}
+	return r.sessions.Session(sessionKey{insecure: insecure, registryConfigPath: registryConfigPath}, opts...), nil
 }
 
 // classifyPullErr maps a go-containerregistry transport error onto a core
@@ -1246,11 +1291,11 @@ func (r *Resolver) fetchCosignSigLayers(ctx context.Context, ref string, pull *p
 		return repo, sigRefStr, nil, fmt.Errorf("baseimage: parse signature reference %s: %w: %w", sigRefStr, err, core.ErrBaseSignatureInvalid)
 	}
 
-	opts, err := r.remoteOptions(ctx, insecure, registryConfigPath)
+	sess, err := r.remoteSession(insecure, registryConfigPath)
 	if err != nil {
 		return repo, sigRefStr, nil, fmt.Errorf("baseimage: resolve auth for signature %s: %w: %w", ref, err, core.ErrBaseSignatureInvalid)
 	}
-	sigImg, err := remote.Image(sigRef, opts...)
+	sigImg, err := sess.Image(ctx, sigRef)
 	if err != nil {
 		return repo, sigRefStr, nil, fmt.Errorf("baseimage: fetch Cosign signature for %s (%s): %w: %w", ref, sigRefStr, err, core.ErrBaseSignatureInvalid)
 	}

@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -218,7 +219,7 @@ func TestDigestExists_NotFound(t *testing.T) {
 	digestRef := repo.Digest("sha256:" + strings.Repeat("0", 64))
 
 	a := NewAdapter(nil)
-	exists, err := a.digestExists(digestRef, []remote.Option{remote.WithContext(context.Background())})
+	exists, err := a.digestExists(context.Background(), registryutils.NewSession(), digestRef)
 	if err != nil {
 		t.Fatalf("digestExists: %v", err)
 	}
@@ -240,7 +241,7 @@ func TestDigestExists_Unauthorized(t *testing.T) {
 	digestRef := repo.Digest("sha256:" + strings.Repeat("1", 64))
 
 	a := NewAdapter(nil)
-	_, err = a.digestExists(digestRef, []remote.Option{remote.WithContext(context.Background())})
+	_, err = a.digestExists(context.Background(), registryutils.NewSession(), digestRef)
 	if !errors.Is(err, core.ErrRegistryAuth) {
 		t.Fatalf("err = %v, want core.ErrRegistryAuth", err)
 	}
@@ -259,7 +260,7 @@ func TestDigestExists_Forbidden(t *testing.T) {
 	digestRef := repo.Digest("sha256:" + strings.Repeat("1", 64))
 
 	a := NewAdapter(nil)
-	_, err = a.digestExists(digestRef, []remote.Option{remote.WithContext(context.Background())})
+	_, err = a.digestExists(context.Background(), registryutils.NewSession(), digestRef)
 	if !errors.Is(err, core.ErrRegistryAuth) {
 		t.Fatalf("err = %v, want core.ErrRegistryAuth", err)
 	}
@@ -286,7 +287,7 @@ func TestDigestExists_NetworkError(t *testing.T) {
 	digestRef := repo.Digest("sha256:" + strings.Repeat("2", 64))
 
 	a := NewAdapter(nil)
-	_, err = a.digestExists(digestRef, []remote.Option{remote.WithContext(context.Background())})
+	_, err = a.digestExists(context.Background(), registryutils.NewSession(), digestRef)
 	if err == nil {
 		t.Fatal("digestExists: want error for an unreachable host, got nil")
 	}

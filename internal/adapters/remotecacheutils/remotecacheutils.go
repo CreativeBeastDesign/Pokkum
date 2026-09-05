@@ -15,8 +15,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -41,6 +44,64 @@ type Cacher struct {
 	log     *slog.Logger
 	signer  ports.CosignSigner
 	keyless ports.KeylessVerifier
+
+	// sessions memoises one authenticated registry session per distinct
+	// remote option set, so that the three network phases of a single Check —
+	// the cache-tag probe, the signature fetch, and the tag reconciliation —
+	// share one session instead of opening one each. See
+	// registryutils.SessionCache.
+	sessions registryutils.SessionCache
+}
+
+// sessionKey identifies one distinct remote option set. It carries every
+// dimension sessionOptions varies on, so a probe against an insecure registry
+// can never borrow the secure session's transport and a probe using a custom
+// config.json can never borrow another config's credentials.
+type sessionKey struct {
+	insecure           bool
+	userAgent          string
+	registryConfigPath string
+}
+
+// sessionOptions builds the option set every registry operation in this
+// package runs on. It deliberately carries no remote.WithContext: every
+// registryutils.Session method takes the caller's context per call, which is
+// what makes a session safe to memoise across operations.
+func sessionOptions(insecure bool, userAgent, registryConfig string) ([]remote.Option, error) {
+	kc, err := registryutils.ResolveKeychain(registryConfig)
+	if err != nil {
+		return nil, err
+	}
+	opts := []remote.Option{remote.WithAuthFromKeychain(kc)}
+	if userAgent != "" {
+		opts = append(opts, remote.WithUserAgent(userAgent))
+	}
+	if insecure {
+		opts = append(opts, remote.WithTransport(transportutils.InsecureTransport()))
+	}
+	return opts, nil
+}
+
+// remoteSession returns the Cacher's memoised session for this option set.
+func (c *Cacher) remoteSession(insecure bool, userAgent, registryConfig string) (*registryutils.Session, error) {
+	opts, err := sessionOptions(insecure, userAgent, registryConfig)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return registryutils.NewSession(opts...), nil
+	}
+	return c.sessions.Session(sessionKey{insecure: insecure, userAgent: userAgent, registryConfigPath: registryConfig}, opts...), nil
+}
+
+// nameOptions builds the reference-parsing options every reference in this
+// package is parsed with.
+func nameOptions(insecure bool) []name.Option {
+	opts := []name.Option{name.WeakValidation}
+	if insecure {
+		opts = append(opts, name.Insecure)
+	}
+	return opts
 }
 
 // Option configures a Cacher instance.
@@ -208,21 +269,102 @@ func ComputeSourceTreeHash(projectDir string) (string, error) {
 
 	slices.Sort(files)
 
+	entries, err := hashTreeEntries(projectDir, files)
+	if err != nil {
+		return "", err
+	}
+
+	// The fold below is the cache key's wire format and MUST NOT change: it
+	// runs over `files` in its already-sorted order, reading the per-entry
+	// results positionally, and writes path\0kind\0digest\0 exactly as the
+	// original single-threaded loop did. Parallelism above changes only *when*
+	// each entry's digest is computed, never the order or framing in which the
+	// results are folded — anything else silently invalidates every remote
+	// cache tag that exists in the wild. TestComputeSourceTreeHash_Golden
+	// pins the resulting digest for a fixed fixture tree.
 	h := sha256.New()
-	for _, rel := range files {
-		digestHex, kind, err := hashTreeEntry(filepath.Join(projectDir, rel))
-		if err != nil {
-			return "", fmt.Errorf("hashing project file %q: %w", rel, err)
-		}
+	for i, rel := range files {
 		h.Write([]byte(filepath.ToSlash(rel)))
 		h.Write([]byte{0})
-		h.Write([]byte(kind))
+		h.Write([]byte(entries[i].kind))
 		h.Write([]byte{0})
-		h.Write([]byte(digestHex))
+		h.Write([]byte(entries[i].digestHex))
 		h.Write([]byte{0})
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// treeEntry is one file's contribution to the source tree hash, held in the
+// caller's sorted-file-list position.
+type treeEntry struct {
+	digestHex string
+	kind      string
+	err       error
+}
+
+// hashTreeEntries computes the per-entry digest and kind for every path in
+// files, in parallel, and returns them indexed by files' own (already sorted)
+// order.
+//
+// Hashing a ~1000-file / 6MB SvelteKit source tree is a pure Lstat + read +
+// SHA-256 workload with no cross-entry dependencies, and it sits on the
+// critical path of every build: nothing else can start until the remote cache
+// key is known. Running it one file at a time left the machine's other cores
+// idle for the whole of it.
+//
+// Concurrency is bounded by GOMAXPROCS, and work is handed out by an atomic
+// cursor rather than by pre-slicing the list, so the handful of large files in
+// a typical tree do not strand one worker while the others finish early.
+//
+// Ordering is not a concern here by construction: nothing is appended, every
+// worker writes only to out[i] for the i it claimed, and the caller folds
+// out in index order. The error returned is the one belonging to the
+// lowest-indexed failing file, which is the same error the previous serial
+// loop would have returned — a tree with two unreadable files reports the same
+// one every time rather than whichever goroutine happened to lose the race.
+func hashTreeEntries(projectDir string, files []string) ([]treeEntry, error) {
+	out := make([]treeEntry, len(files))
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(files) {
+		workers = len(files)
+	}
+
+	if workers <= 1 {
+		for i, rel := range files {
+			out[i].digestHex, out[i].kind, out[i].err = hashTreeEntry(filepath.Join(projectDir, rel))
+		}
+	} else {
+		var (
+			next atomic.Int64
+			wg   sync.WaitGroup
+		)
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				for {
+					i := int(next.Add(1)) - 1
+					if i >= len(files) {
+						return
+					}
+					out[i].digestHex, out[i].kind, out[i].err = hashTreeEntry(filepath.Join(projectDir, files[i]))
+				}
+			}()
+		}
+		// Every worker is joined before out is read: no goroutine outlives
+		// this call, and there is no path that returns while one is still
+		// writing into out.
+		wg.Wait()
+	}
+
+	for i := range out {
+		if out[i].err != nil {
+			return nil, fmt.Errorf("hashing project file %q: %w", files[i], out[i].err)
+		}
+	}
+	return out, nil
 }
 
 // hashTreeEntry hashes one filesystem entry's identity for
@@ -383,10 +525,26 @@ func CacheTag(inputHash string) string {
 // If present and verified, it reconciles req.Tags and returns the result.
 func (c *Cacher) Check(ctx context.Context, req ports.RemoteCacheRequest) (ports.RemoteCacheResult, error) {
 	cacheTag := CacheTag(req.InputHash)
-	digest, hit, err := CheckRemoteCache(ctx, req.Repo, cacheTag, req.Insecure, req.UserAgent, req.RegistryConfigPath)
+
+	// One session for all three network phases below. Each phase still issues
+	// its own requests — a Puller memoises the authenticated fetcher, never a
+	// manifest — but they no longer re-authenticate against the same registry
+	// three times over.
+	sess, err := c.remoteSession(req.Insecure, req.UserAgent, req.RegistryConfigPath)
+	if err != nil {
+		return ports.RemoteCacheResult{Hit: false}, err
+	}
+
+	cacheRef, err := name.ParseReference(req.Repo+":"+cacheTag, nameOptions(req.Insecure)...)
+	if err != nil {
+		return ports.RemoteCacheResult{Hit: false}, err
+	}
+
+	desc, hit, err := checkRemoteCache(ctx, sess, cacheRef)
 	if err != nil || !hit {
 		return ports.RemoteCacheResult{Hit: false}, err
 	}
+	digest := desc.Digest
 
 	var (
 		verified       bool
@@ -399,7 +557,7 @@ func (c *Cacher) Check(ctx context.Context, req ports.RemoteCacheRequest) (ports
 	// is active and fails, the cache hit must be rejected so release tags
 	// are never promoted to unverified or poisoned bytes.
 	if req.Verify.VerifySignature || (req.Verify.VerifyMode != "" && req.Verify.VerifyMode != ports.CacheVerifyNone) {
-		v, id, vErr := c.verifyCandidate(ctx, req.Repo, digest, req)
+		v, id, vErr := c.verifyCandidate(ctx, sess, req.Repo, digest, req)
 		if vErr != nil {
 			return ports.RemoteCacheResult{Hit: false}, vErr
 		}
@@ -418,7 +576,11 @@ func (c *Cacher) Check(ctx context.Context, req ports.RemoteCacheRequest) (ports
 	// Hit: false makes the caller run a real build instead, which publishes
 	// the tags itself through the normal, already-correct publish path.
 	if len(req.Tags) > 0 {
-		if err := ReconcileTags(ctx, req.Repo, digest, req.Tags, req.Insecure, req.UserAgent, req.RegistryConfigPath); err != nil {
+		// desc is the descriptor checkRemoteCache already fetched, and its
+		// digest is the digest just verified — so the tags are pointed at
+		// exactly the manifest this Check validated, and the redundant
+		// re-fetch of that same manifest by digest is gone.
+		if err := reconcileTags(ctx, sess, cacheRef.Context(), desc, req.Tags); err != nil {
 			return ports.RemoteCacheResult{Hit: false}, fmt.Errorf("remote cache hit but reconciling tags failed: %w", err)
 		}
 	}
@@ -447,35 +609,14 @@ func (c *Cacher) Check(ctx context.Context, req ports.RemoteCacheRequest) (ports
 // images whose cache entries can never pass this check (core.Build logs that
 // state explicitly at build time rather than letting the misses look like
 // mysterious cache churn).
-func (c *Cacher) verifyCandidate(ctx context.Context, repo string, digest v1.Hash, req ports.RemoteCacheRequest) (bool, string, error) {
-	nameOpts := []name.Option{name.WeakValidation}
-	if req.Insecure {
-		nameOpts = append(nameOpts, name.Insecure)
-	}
-
-	kc, err := registryutils.ResolveKeychain(req.RegistryConfigPath)
-	if err != nil {
-		return false, "", err
-	}
-
-	remoteOpts := []remote.Option{
-		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(kc),
-	}
-	if req.UserAgent != "" {
-		remoteOpts = append(remoteOpts, remote.WithUserAgent(req.UserAgent))
-	}
-	if req.Insecure {
-		remoteOpts = append(remoteOpts, remote.WithTransport(transportutils.InsecureTransport()))
-	}
-
+func (c *Cacher) verifyCandidate(ctx context.Context, sess *registryutils.Session, repo string, digest v1.Hash, req ports.RemoteCacheRequest) (bool, string, error) {
 	sigTagStr := fmt.Sprintf("%s:%s-%s.sig", repo, digest.Algorithm, digest.Hex)
-	sigRef, err := name.ParseReference(sigTagStr, nameOpts...)
+	sigRef, err := name.ParseReference(sigTagStr, nameOptions(req.Insecure)...)
 	if err != nil {
 		return false, "", err
 	}
 
-	sigImg, err := remote.Image(sigRef, remoteOpts...)
+	sigImg, err := sess.Image(ctx, sigRef)
 	if err != nil {
 		var terr *transport.Error
 		if errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
@@ -828,80 +969,79 @@ func checkSimpleSigningClaims(payloadBytes []byte, expectedRepo string, expected
 }
 
 // CheckRemoteCache queries repo for cacheTag, returning the cached digest if present.
+//
+// Cacher.Check does not go through this wrapper: it needs the full descriptor
+// so that the reconcile phase does not re-fetch the manifest this probe
+// already has. This entry point remains for callers that only want the digest.
 func CheckRemoteCache(ctx context.Context, repo string, cacheTag string, insecure bool, userAgent string, registryConfig string) (v1.Hash, bool, error) {
-	nameOpts := []name.Option{name.WeakValidation}
-	if insecure {
-		nameOpts = append(nameOpts, name.Insecure)
-	}
-	ref, err := name.ParseReference(repo+":"+cacheTag, nameOpts...)
+	ref, err := name.ParseReference(repo+":"+cacheTag, nameOptions(insecure)...)
 	if err != nil {
 		return v1.Hash{}, false, err
 	}
 
-	kc, err := registryutils.ResolveKeychain(registryConfig)
+	opts, err := sessionOptions(insecure, userAgent, registryConfig)
 	if err != nil {
 		return v1.Hash{}, false, err
 	}
 
-	remoteOpts := []remote.Option{
-		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(kc),
-	}
-	if userAgent != "" {
-		remoteOpts = append(remoteOpts, remote.WithUserAgent(userAgent))
-	}
-	if insecure {
-		remoteOpts = append(remoteOpts, remote.WithTransport(transportutils.InsecureTransport()))
-	}
-
-	desc, err := remote.Get(ref, remoteOpts...)
-	if err != nil {
-		var terr *transport.Error
-		if errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
-			return v1.Hash{}, false, nil
-		}
+	desc, hit, err := checkRemoteCache(ctx, registryutils.NewSession(opts...), ref)
+	if err != nil || !hit {
 		return v1.Hash{}, false, err
 	}
-
 	return desc.Digest, true, nil
 }
 
+// checkRemoteCache issues the cache-tag manifest GET and returns the full
+// descriptor, so its caller can reuse the already-fetched manifest instead of
+// re-fetching it by digest a moment later.
+//
+// A 404 is "no cache entry", not an error. Every other failure is surfaced:
+// a probe that could not reach the registry must never be reported as a miss
+// that a build then silently proceeds past.
+func checkRemoteCache(ctx context.Context, sess *registryutils.Session, ref name.Reference) (*remote.Descriptor, bool, error) {
+	desc, err := sess.Get(ctx, ref)
+	if err != nil {
+		var terr *transport.Error
+		if errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return desc, true, nil
+}
+
 // ReconcileTags points target tags to an existing digest in the remote registry.
+//
+// Cacher.Check does not go through this wrapper either: it already holds the
+// descriptor for the digest it verified and threads that straight into
+// reconcileTags, which removes this function's manifest GET entirely.
 func ReconcileTags(ctx context.Context, repo string, digest v1.Hash, tags []string, insecure bool, userAgent string, registryConfig string) error {
-	nameOpts := []name.Option{name.WeakValidation}
-	if insecure {
-		nameOpts = append(nameOpts, name.Insecure)
-	}
-	parsedRepo, err := name.NewRepository(repo, nameOpts...)
+	parsedRepo, err := name.NewRepository(repo, nameOptions(insecure)...)
 	if err != nil {
 		return err
 	}
 
-	kc, err := registryutils.ResolveKeychain(registryConfig)
+	opts, err := sessionOptions(insecure, userAgent, registryConfig)
+	if err != nil {
+		return err
+	}
+	sess := registryutils.NewSession(opts...)
+
+	desc, err := sess.Get(ctx, parsedRepo.Digest(digest.String()))
 	if err != nil {
 		return err
 	}
 
-	remoteOpts := []remote.Option{
-		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(kc),
-	}
-	if userAgent != "" {
-		remoteOpts = append(remoteOpts, remote.WithUserAgent(userAgent))
-	}
-	if insecure {
-		remoteOpts = append(remoteOpts, remote.WithTransport(transportutils.InsecureTransport()))
-	}
+	return reconcileTags(ctx, sess, parsedRepo, desc, tags)
+}
 
-	digestRef := parsedRepo.Digest(digest.String())
-	desc, err := remote.Get(digestRef, remoteOpts...)
-	if err != nil {
-		return err
-	}
-
+// reconcileTags PUTs desc's manifest under every tag. desc must be the
+// descriptor of the manifest the caller intends the tags to resolve to — it is
+// the sole source of the bytes written, so pointing tags somewhere other than
+// the verified digest is not expressible here.
+func reconcileTags(ctx context.Context, sess *registryutils.Session, repo name.Repository, desc *remote.Descriptor, tags []string) error {
 	for _, tag := range tags {
-		tagRef := parsedRepo.Tag(tag)
-		if err := remote.Tag(tagRef, desc, remoteOpts...); err != nil {
+		if err := sess.Put(ctx, repo.Tag(tag), desc); err != nil {
 			return err
 		}
 	}

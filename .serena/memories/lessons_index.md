@@ -21,6 +21,10 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### cache-completeness (1)
+
+- `2026-09-05` — A credential cache stored only its successes, so the "no credential for this registry" answer — the most frequently requested one — re-spawned a 100-500ms helper subprocess on every call forever. Read before adding any memo: enumerate every return path, and assert the memo's benefit by counting the underlying operation, because a cache that stores nothing still returns correct values.
+
 ### prefilter-soundness / library-semantics-assumption (1)
 
 - `2026-09-05` — A literal prefilter for a `(?i)` regex is unsound if it folds ASCII (Go's `(?i)` is Unicode simple folding; U+017F and U+212A really do match `secretguard`'s live rules), and the "fast literal alternation" it was meant to replace measured 26x SLOWER than the scan it gated. Read before adding any fast path, prefilter or short-circuit in front of an existing check, or before building on a stated performance property of a library.

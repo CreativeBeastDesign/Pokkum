@@ -51,7 +51,6 @@
 package registry
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -110,10 +109,20 @@ var (
 // and ports.OCILayoutWriter. The zero value is not usable; construct with
 // NewAdapter.
 //
-// Adapter is safe for concurrent use: it holds no mutable state of its own,
-// every method builds what it needs from its arguments.
+// Adapter is safe for concurrent use: its only mutable state is a
+// concurrency-safe cache of authenticated registry sessions, and every method
+// otherwise builds what it needs from its arguments.
 type Adapter struct {
 	log *slog.Logger
+
+	// sessions memoises one registryutils.Session per distinct remote option
+	// set, so that the several registry operations a single build performs
+	// (push, signature attach, attestation attach, SBOM attach, self-verify
+	// fetch) share one authenticated session per option set instead of each
+	// re-running authn.Resolve + a /v2/ ping + a token request. It is the only
+	// mutable state on Adapter; sync.Map makes it safe for concurrent use, and
+	// its zero value is ready without NewAdapter.
+	sessions registryutils.SessionCache
 }
 
 // NewAdapter constructs an Adapter. A nil logger defaults to slog.Default().
@@ -183,17 +192,32 @@ type remoteConfig struct {
 	//
 	// A non-nil value must be scoped to a single operation; see mountStats.
 	Stats *mountStats
+
+	// NoReferrersTagFallback disables go-containerregistry's fallback-tag
+	// scheme for OCI 1.1 referrers. Only the additive referrer write in
+	// attachSupplyChainImage/AttachSBOM sets it; it is part of remoteConfig
+	// rather than an option appended at the call site so that it is part of
+	// the session cache key, and a referrer write can never be handed the
+	// session built for the tag write.
+	NoReferrersTagFallback bool
 }
 
-// remoteOptions builds the remote.Option set common to every registry
-// operation: context threading (so a cancelled build aborts a 90MB upload
-// rather than leaking it into the background) and keychain resolution (supporting custom config.json).
+// sessionOptions builds the remote.Option set common to every registry
+// operation: keychain resolution (supporting a custom config.json), the
+// transport, and the optional user-agent / jobs knobs.
 //
 // The transport is always set explicitly, on the secure path as well as the
 // insecure one. Leaving it unset would fall through to remote's own
 // DefaultTransport, which is equivalent today but leaves the two paths running
 // on transports this package does not own — see defaultTransport above.
-func remoteOptions(ctx context.Context, cfg remoteConfig) ([]remote.Option, error) {
+//
+// It deliberately carries no remote.WithContext. Context is not part of an
+// option set here: a registryutils.Session is memoised across operations, so
+// it must not capture any one operation's context, and every Session method
+// takes the caller's context per call and passes it straight through to the
+// Puller/Pusher. Cancelling a build still aborts a 90MB upload, because that
+// upload runs under the context Push was called with.
+func sessionOptions(cfg remoteConfig) ([]remote.Option, error) {
 	kc, err := registryutils.ResolveKeychain(cfg.RegistryConfigPath)
 	if err != nil {
 		return nil, err
@@ -208,7 +232,6 @@ func remoteOptions(ctx context.Context, cfg remoteConfig) ([]remote.Option, erro
 		rt = &mountObserver{base: rt, stats: cfg.Stats}
 	}
 	opts := []remote.Option{
-		remote.WithContext(ctx),
 		remote.WithAuthFromKeychain(kc),
 		remote.WithTransport(rt),
 	}
@@ -218,7 +241,29 @@ func remoteOptions(ctx context.Context, cfg remoteConfig) ([]remote.Option, erro
 	if cfg.Jobs > 0 {
 		opts = append(opts, remote.WithJobs(cfg.Jobs))
 	}
+	if cfg.NoReferrersTagFallback {
+		opts = append(opts, remote.WithReferrersTagFallback(false))
+	}
 	return opts, nil
+}
+
+// remoteSession returns the Adapter's memoised session for cfg.
+//
+// The cache key is remoteConfig itself, which is comparable and carries every
+// dimension sessionOptions reads — including the *mountStats pointer, so a
+// push that installs a per-operation mount observer can never be handed a
+// session running on someone else's transport. Two operations share a session
+// only when their entire option set is identical.
+func (a *Adapter) remoteSession(cfg remoteConfig) (*registryutils.Session, error) {
+	opts, err := sessionOptions(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if a == nil {
+		// Defensive, matching logger(): a zero-value Adapter still works.
+		return registryutils.NewSession(opts...), nil
+	}
+	return a.sessions.Session(cfg, opts...), nil
 }
 
 // payloadDigest returns the digest of whichever of Image or Index is set. It

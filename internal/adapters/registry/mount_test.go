@@ -769,14 +769,15 @@ func TestMountObserver_ConcurrentRoundTrips_RaceFree(t *testing.T) {
 // TestRemoteOptions_JobsZero_OmittedAndWriteSucceeds proves Jobs: 0 does not
 // cause remote.Write to fail — i.e. remote.WithJobs(0) was correctly omitted
 // from the option set rather than passed through and rejected.
-func TestRemoteOptions_JobsZero_OmittedAndWriteSucceeds(t *testing.T) {
+func TestSessionOptions_JobsZero_OmittedAndWriteSucceeds(t *testing.T) {
 	s, _ := newTestRegistry(t)
 	repo := registryRepo(t, s, "app/jobs-zero")
 
-	opts, err := remoteOptions(t.Context(), remoteConfig{Jobs: 0})
+	opts, err := sessionOptions(remoteConfig{Jobs: 0})
 	if err != nil {
-		t.Fatalf("remoteOptions: %v", err)
+		t.Fatalf("sessionOptions: %v", err)
 	}
+	opts = append(opts, remote.WithContext(t.Context()))
 
 	ref, err := name.NewTag(repo+":v1", nameOptions(false)...)
 	if err != nil {
@@ -806,14 +807,15 @@ func TestRemoteOptions_JobsZero_OmittedAndWriteSucceeds(t *testing.T) {
 // that remote.WithJobs(4) was the option actually applied — remote.Option is
 // an opaque functional option — so a successful real write/round-trip is the
 // available proof that passing it through didn't regress anything.
-func TestRemoteOptions_JobsPositive_AppliedAndWriteSucceeds(t *testing.T) {
+func TestSessionOptions_JobsPositive_AppliedAndWriteSucceeds(t *testing.T) {
 	s, _ := newTestRegistry(t)
 	repo := registryRepo(t, s, "app/jobs-positive")
 
-	opts, err := remoteOptions(t.Context(), remoteConfig{Jobs: 4})
+	opts, err := sessionOptions(remoteConfig{Jobs: 4})
 	if err != nil {
-		t.Fatalf("remoteOptions: %v", err)
+		t.Fatalf("sessionOptions: %v", err)
 	}
+	opts = append(opts, remote.WithContext(t.Context()))
 
 	ref, err := name.NewTag(repo+":v1", nameOptions(false)...)
 	if err != nil {

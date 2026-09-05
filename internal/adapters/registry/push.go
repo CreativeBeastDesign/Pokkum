@@ -12,6 +12,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/registryutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
@@ -45,7 +46,7 @@ func (a *Adapter) Push(ctx context.Context, req ports.PushRequest) (ports.Publis
 	// issue manifest HEADs/PUTs — so on the idempotent-skip branch stats stays
 	// empty by construction, and its summary is deliberately never read there.
 	stats := &mountStats{}
-	opts, err := remoteOptions(ctx, remoteConfig{
+	sess, err := a.remoteSession(remoteConfig{
 		Insecure:           req.Insecure,
 		UserAgent:          req.UserAgent,
 		RegistryConfigPath: req.RegistryConfigPath,
@@ -58,7 +59,7 @@ func (a *Adapter) Push(ctx context.Context, req ports.PushRequest) (ports.Publis
 
 	digestRef := repo.Digest(digest.String())
 
-	exists, err := a.digestExists(digestRef, opts)
+	exists, err := a.digestExists(ctx, sess, digestRef)
 	if err != nil {
 		return ports.PublishResult{}, fmt.Errorf("registry: push %s: check existing digest %s: %w", req.Repo, digest, err)
 	}
@@ -71,7 +72,7 @@ func (a *Adapter) Push(ctx context.Context, req ports.PushRequest) (ports.Publis
 		// digest, so skipping outright would leave the new tag uncreated while
 		// still reporting success, and anything downstream that resolved
 		// repo:<tag> would 404.
-		reconciled, err := a.reconcileTags(repo, digest, tags, req.Payload, opts)
+		reconciled, err := a.reconcileTags(ctx, sess, repo, digest, tags, req.Payload)
 		if err != nil {
 			return ports.PublishResult{}, fmt.Errorf("registry: push %s: reconcile tags: %w", req.Repo, err)
 		}
@@ -79,7 +80,7 @@ func (a *Adapter) Push(ctx context.Context, req ports.PushRequest) (ports.Publis
 			"repo", req.Repo, "digest", digest.String(), "tags", tags,
 			"tags_created", reconciled)
 	} else {
-		if err := a.writePayload(repo, req.Payload, tags, opts); err != nil {
+		if err := a.writePayload(ctx, sess, repo, req.Payload, tags); err != nil {
 			return ports.PublishResult{}, classifyPushErr(req.Repo, err)
 		}
 		size, err = payloadSize(req.Payload)
@@ -129,8 +130,8 @@ func (a *Adapter) Push(ctx context.Context, req ports.PushRequest) (ports.Publis
 // what populates it from the raw *http.Response. errors.As is therefore the
 // correct way to recover the status code here — a bare string match against
 // err.Error() would be fragile across registry implementations.
-func (a *Adapter) digestExists(digestRef name.Digest, opts []remote.Option) (bool, error) {
-	_, err := remote.Head(digestRef, opts...)
+func (a *Adapter) digestExists(ctx context.Context, sess *registryutils.Session, digestRef name.Digest) (bool, error) {
+	_, err := sess.Head(ctx, digestRef)
 	if err == nil {
 		return true, nil
 	}
@@ -164,24 +165,24 @@ func (a *Adapter) digestExists(digestRef name.Digest, opts []remote.Option) (boo
 // even without this package's own digest check), and every remaining tag via
 // remote.Tag, which PUTs only the manifest against blobs already confirmed
 // present by the first write.
-func (a *Adapter) writePayload(repo name.Repository, p ports.Payload, tags []string, opts []remote.Option) error {
+func (a *Adapter) writePayload(ctx context.Context, sess *registryutils.Session, repo name.Repository, p ports.Payload, tags []string) error {
 	primary := repo.Tag(tags[0])
 
 	var taggable remote.Taggable
 	if p.Index != nil {
-		if err := remote.WriteIndex(primary, p.Index, opts...); err != nil {
+		if err := sess.Push(ctx, primary, p.Index); err != nil {
 			return err
 		}
 		taggable = p.Index
 	} else {
-		if err := remote.Write(primary, p.Image, opts...); err != nil {
+		if err := sess.Push(ctx, primary, p.Image); err != nil {
 			return err
 		}
 		taggable = p.Image
 	}
 
 	for _, t := range tags[1:] {
-		if err := remote.Tag(repo.Tag(t), taggable, opts...); err != nil {
+		if err := sess.Put(ctx, repo.Tag(t), taggable); err != nil {
 			return err
 		}
 	}
@@ -197,7 +198,7 @@ func (a *Adapter) writePayload(repo name.Repository, p ports.Payload, tags []str
 // uncreated while Push still reported it as published. Creating a tag over
 // already-present blobs is a single manifest PUT, so this stays cheap and the
 // idempotent path remains free when the tags already resolve correctly.
-func (a *Adapter) reconcileTags(repo name.Repository, digest v1.Hash, tags []string, p ports.Payload, opts []remote.Option) (int, error) {
+func (a *Adapter) reconcileTags(ctx context.Context, sess *registryutils.Session, repo name.Repository, digest v1.Hash, tags []string, p ports.Payload) (int, error) {
 	var taggable remote.Taggable = p.Image
 	if p.Index != nil {
 		taggable = p.Index
@@ -207,7 +208,12 @@ func (a *Adapter) reconcileTags(repo name.Repository, digest v1.Hash, tags []str
 	for _, t := range tags {
 		tagRef := repo.Tag(t)
 
-		desc, err := remote.Head(tagRef, opts...)
+		// Both calls run on the caller's shared session, so the HEAD and the
+		// PUT for every tag reuse one authenticated connection instead of
+		// each re-pinging /v2/ and re-fetching a token. The HEAD is still a
+		// real request per tag: a Puller caches the fetcher, never a manifest,
+		// so a tag that moved since the last iteration is still observed.
+		desc, err := sess.Head(ctx, tagRef)
 		if err == nil && desc.Digest == digest {
 			continue // already points where we want it
 		}
@@ -217,7 +223,7 @@ func (a *Adapter) reconcileTags(repo name.Repository, digest v1.Hash, tags []str
 
 		// Either the tag is absent, or it resolves to different content and
 		// must be moved onto this digest.
-		if err := remote.Tag(tagRef, taggable, opts...); err != nil {
+		if err := sess.Put(ctx, tagRef, taggable); err != nil {
 			return created, fmt.Errorf("tag %q: %w: %w", t, err, core.ErrPushFailed)
 		}
 		created++

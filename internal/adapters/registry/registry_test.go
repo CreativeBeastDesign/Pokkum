@@ -612,10 +612,11 @@ func TestRemoteOptions_AlwaysWiresPackageTransport(t *testing.T) {
 				t.Cleanup(func() { defaultTransport = orig })
 			}
 
-			opts, err := remoteOptions(t.Context(), remoteConfig{Insecure: tc.insecure})
+			opts, err := sessionOptions(remoteConfig{Insecure: tc.insecure})
 			if err != nil {
-				t.Fatalf("remoteOptions: %v", err)
+				t.Fatalf("sessionOptions: %v", err)
 			}
+			opts = append(opts, remote.WithContext(t.Context()))
 
 			ref, err := name.NewRepository(repo, nameOptions(tc.insecure)...)
 			if err != nil {
@@ -630,7 +631,7 @@ func TestRemoteOptions_AlwaysWiresPackageTransport(t *testing.T) {
 			}
 
 			if got := spy.calls.Load(); got == 0 {
-				t.Fatalf("spy transport recorded 0 requests: remoteOptions(insecure=%v) did not wire the package transport into the request", tc.insecure)
+				t.Fatalf("spy transport recorded 0 requests: sessionOptions(insecure=%v) did not wire the package transport into the request", tc.insecure)
 			}
 		})
 	}

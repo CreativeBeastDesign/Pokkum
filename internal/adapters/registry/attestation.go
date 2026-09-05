@@ -8,14 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/google/go-containerregistry/pkg/v1/static"
 	"github.com/google/go-containerregistry/pkg/v1/types"
@@ -112,16 +110,17 @@ func (a *Adapter) attachSupplyChainImage(ctx context.Context, att supplyChainAtt
 		return ports.PublishResult{}, fmt.Errorf("registry: attach %s: parse repository %q: %w: %w", att.kind, att.repo, err, core.ErrSigningFailed)
 	}
 
-	opts, err := remoteOptions(ctx, remoteConfig{
+	cfg := remoteConfig{
 		Insecure:           att.insecure,
 		RegistryConfigPath: att.registryConfigPath,
-	})
+	}
+	sess, err := a.remoteSession(cfg)
 	if err != nil {
 		return ports.PublishResult{}, err
 	}
 
 	tagRef := repo.Tag(att.tag)
-	if err := remote.Write(tagRef, att.img, opts...); err != nil {
+	if err := sess.Push(ctx, tagRef, att.img); err != nil {
 		return ports.PublishResult{}, fmt.Errorf("registry: attach %s %s: %w: %w", att.kind, att.repo, err, core.ErrSigningFailed)
 	}
 
@@ -139,8 +138,13 @@ func (a *Adapter) attachSupplyChainImage(ctx context.Context, att supplyChainAtt
 	refImg := mutate.Subject(att.img, v1.Descriptor{Digest: att.subject}).(v1.Image)
 	refDigest, err := refImg.Digest()
 	if err == nil {
-		referrerOpts := append(slices.Clone(opts), remote.WithReferrersTagFallback(false))
-		if werr := remote.Write(repo.Digest(refDigest.String()), refImg, referrerOpts...); werr != nil {
+		referrerCfg := cfg
+		referrerCfg.NoReferrersTagFallback = true
+		referrerSess, sErr := a.remoteSession(referrerCfg)
+		if sErr != nil {
+			return ports.PublishResult{}, sErr
+		}
+		if werr := referrerSess.Push(ctx, repo.Digest(refDigest.String()), refImg); werr != nil {
 			if strings.Contains(werr.Error(), referrersUnsupportedSubstring) {
 				a.logger().Info("registry does not support OCI 1.1 referrers; "+att.kind+" attached by tag only", "repo", att.repo, "tag", att.tag)
 			} else {
@@ -249,7 +253,7 @@ func (a *Adapter) fetchAttachmentImage(ctx context.Context, req ports.FetchAttac
 		return nil, nil, fmt.Errorf("registry: fetch %s: parse repository %q: %w: %w", kind, req.Repo, err, core.ErrSignatureMissing)
 	}
 
-	opts, err := remoteOptions(ctx, remoteConfig{
+	sess, err := a.remoteSession(remoteConfig{
 		Insecure:           req.Insecure,
 		RegistryConfigPath: req.RegistryConfigPath,
 	})
@@ -257,7 +261,7 @@ func (a *Adapter) fetchAttachmentImage(ctx context.Context, req ports.FetchAttac
 		return nil, nil, err
 	}
 
-	img, err := remote.Image(repo.Tag(tag), opts...)
+	img, err := sess.Image(ctx, repo.Tag(tag))
 	if err != nil {
 		var terr *transport.Error
 		if errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
