@@ -52,3 +52,6 @@ testdata/fixtures/*/pokkum.lock
 # (//registry.npmjs.org/:_authToken=npm_xxx) and the generic secret rule
 # requires a quoted value.
 .npmrc
+
+# Codegraph index — derived, regenerable, machine-local (see CLAUDE.md §1)
+.codegraph/

@@ -1,4 +1,4 @@
-.PHONY: help build supervisor static-server test test-short test-integration test-race coverage check-coverage fuzz-smoke check-arch check-embedded-blobs lint fmt verify clean e2e-runtime-smoke docs check-docs-freshness
+.PHONY: help build supervisor static-server test test-short test-integration test-race bench coverage check-coverage fuzz-smoke check-arch check-embedded-blobs lint fmt verify clean e2e-runtime-smoke docs check-docs-freshness
 
 check-arch:  ##  Run hexagonal architecture purity test suite
 	@echo "Checking hexagonal architecture purity..."
@@ -166,6 +166,41 @@ RACE_PACKAGES := ./internal/adapters/registry/... ./internal/core/... ./internal
 test-race:  ##  Run go test -race, scoped to packages with real concurrency
 	@echo "Running race detector on concurrency-bearing packages..."
 	@go test -race $(RACE_PACKAGES)
+
+# Packages carrying Go benchmarks. These are the hot paths of a build: layer
+# assembly and pruning (packager), the on-disk immutable-binary layer cache
+# (layercacheutils), static asset pre-compression (precompressutils), the
+# per-file prune/ignore decisions those two walks make millions of times
+# (pruneutils, ignoreutils), the pre-build secret scan (secretguard), the
+# remote-cache input hash (remotecacheutils), and lockfile parsing for the
+# SBOM (scannerutils). Listed explicitly rather than run as ./... so a package
+# with no BenchmarkXxx does not have its test binary built and started for
+# nothing.
+BENCH_PACKAGES := \
+	./internal/adapters/packager/ \
+	./internal/adapters/layercacheutils/ \
+	./internal/adapters/precompressutils/ \
+	./internal/adapters/pruneutils/ \
+	./internal/adapters/ignoreutils/ \
+	./internal/adapters/secretguard/ \
+	./internal/adapters/remotecacheutils/ \
+	./internal/adapters/scannerutils/ \
+	./supervisor/cmd/pokkum-init/ \
+	./supervisor/cmd/pokkum-static/
+
+# GOTOOLCHAIN is pinned for the same reason `supervisor`/`static-server` pin
+# it: a benchmark run on whatever Go the developer happens to have installed
+# is not comparable with one CI (or the next agent) produces from go.mod's
+# toolchain, and a performance baseline that is not comparable is not a
+# baseline. -run '^$$' selects no tests, so only benchmarks execute.
+#
+# -timeout is explicit and generous: precompressutils' cold path runs brotli
+# at BestCompression over a ~10 MB asset tree, which is tens of seconds for a
+# SINGLE iteration, and packager builds real 50 MB layers. go test's 10m
+# default is not comfortable for that.
+bench:  ##  Run Go benchmarks over the build's hot paths (baseline for performance work)
+	@echo "Running benchmarks (GOTOOLCHAIN=$(GO_PINNED_TOOLCHAIN))..."
+	@GOTOOLCHAIN=$(GO_PINNED_TOOLCHAIN) go test -run '^$$' -bench . -benchmem -timeout=30m $(BENCH_PACKAGES)
 
 COVERAGE_OUT := coverage.out
 
