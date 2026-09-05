@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -30,14 +34,22 @@ func writeTree(t *testing.T, files map[string]string) string {
 func newTestServer(t *testing.T, roots ...string) *staticServer {
 	t.Helper()
 	// Use a discarding logger to keep output quiet.
-	return newStaticServer(roots, "", nil)
+	return newTestServerFallback(t, roots, "", nil)
 }
 
 // newTestServerFallback builds a test server with an opt-in SPA fallback file
 // path configured.
+//
+// Every server built here is closed on test cleanup: a staticServer now holds
+// one open os.Root descriptor per served root for its whole life (that is what
+// makes a request cost one openat), so a suite building dozens of servers
+// would otherwise accumulate descriptors. Production never closes — the roots
+// are meant to outlive every request.
 func newTestServerFallback(t *testing.T, roots []string, fallback string, log *slog.Logger) *staticServer {
 	t.Helper()
-	return newStaticServer(roots, fallback, log)
+	s := newStaticServer(roots, fallback, log)
+	t.Cleanup(s.close)
+	return s
 }
 
 func TestStaticServer_ServesIndexFromRoot(t *testing.T) {
@@ -735,7 +747,7 @@ func TestStaticServer_Fallback_WarnOnceOn404WhenUnset(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	// Each server owns its own one-per-server (one-per-process) once, so a
 	// fresh instance warns exactly once regardless of prior servers/tests.
-	srv := newStaticServer([]string{root}, "", logger)
+	srv := newTestServerFallback(t, []string{root}, "", logger)
 
 	// Extensionless: looks like a client-side route, so the SPA-fallback
 	// hint is the relevant remedy here (see
@@ -996,8 +1008,9 @@ func TestStaticServer_HTMLFallback_MultiRootOrdering(t *testing.T) {
 // TestStaticServer_HTMLFallback_TraversalRejected is an empirical
 // containment proof (Serena mem:self_review_checklist row 22: prove nothing
 // was written/served outside the root, don't just assert an error came
-// back) that the new ".html" candidate goes through the exact same
-// EvalSymlinks + withinRoot checks as the pre-existing candidates. A
+// back) that the ".html" candidate goes through the exact same containment
+// check as the other candidates — openInRoot, i.e. os.Root's per-component
+// openat (it went through EvalSymlinks + withinRoot when written). A
 // symlink named "escape.html" pointing outside the served root must never
 // be served through the new candidate.
 func TestStaticServer_HTMLFallback_TraversalRejected(t *testing.T) {
@@ -1067,7 +1080,7 @@ func TestStaticServer_404Hint_SkippedForAssetLikePath(t *testing.T) {
 	root := writeTree(t, map[string]string{"a.txt": "x"})
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	srv := newStaticServer([]string{root}, "", logger)
+	srv := newTestServerFallback(t, []string{root}, "", logger)
 
 	rec := httptest.NewRecorder()
 	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/missing-asset.js", nil))
@@ -1086,7 +1099,7 @@ func TestStaticServer_404Hint_ShownForRouteLikePath(t *testing.T) {
 	root := writeTree(t, map[string]string{"a.txt": "x"})
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	srv := newStaticServer([]string{root}, "", logger)
+	srv := newTestServerFallback(t, []string{root}, "", logger)
 
 	for i := 0; i < 3; i++ {
 		rec := httptest.NewRecorder()
@@ -1097,5 +1110,744 @@ func TestStaticServer_404Hint_ShownForRouteLikePath(t *testing.T) {
 	}
 	if got := strings.Count(buf.String(), "SPA fallback is available"); got != 1 {
 		t.Errorf("route-like miss: hint logged %d time(s), want exactly 1", got)
+	}
+}
+
+// --- os.Root containment (Change 2) --------------------------------------
+
+// TestStaticServer_SymlinkEscapeShapesAllRejected is the containment proof for
+// the switch from EvalSymlinks + withinRoot to os.Root. It enumerates the
+// shapes a symlink can take rather than the single absolute-target case the
+// pre-existing TestStaticServer_SymlinkEscapeRejected covered, because os.Root
+// refuses them by a different mechanism (per-component openat/O_NOFOLLOW in
+// the kernel) and each shape has to be shown to still be refused:
+//
+//   - an absolute symlink to a file outside the root
+//   - a RELATIVE symlink climbing out with ".."
+//   - a symlink to a DIRECTORY outside the root, requested through
+//   - the same, reached through the "<rel>.html" candidate
+//   - the same, reached through a directory's index.html candidate
+//
+// Every case asserts the outside content is not in the body — an empirical
+// containment check, not merely "an error came back"
+// (mem:self_review_checklist row 22).
+func TestStaticServer_SymlinkEscapeShapesAllRejected(t *testing.T) {
+	outside := writeTree(t, map[string]string{
+		"leak.txt":       "OUTSIDE-SECRET",
+		"secret.html":    "OUTSIDE-SECRET",
+		"sub/index.html": "OUTSIDE-SECRET",
+	})
+	root := writeTree(t, map[string]string{"ok.txt": "fine"})
+
+	links := map[string]string{
+		"abs.txt":     filepath.Join(outside, "leak.txt"),           // absolute target
+		"rel.txt":     "../" + filepath.Base(outside) + "/leak.txt", // relative climb-out
+		"escape.html": filepath.Join(outside, "secret.html"),        // reached via ".html"
+		"outdir":      outside,                                      // directory symlink
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(root, name)); err != nil {
+			t.Fatalf("creating symlink %s: this containment test must never be silently skipped (checklist rows 39/47): %v", name, err)
+		}
+	}
+
+	srv := newTestServer(t, root)
+	// The relative link's target only resolves if outside is a sibling of
+	// root; both come from t.TempDir() under the same parent, so it is.
+	for _, p := range []string{
+		"/abs.txt",
+		"/rel.txt",
+		"/escape",      // the "<rel>.html" candidate
+		"/escape.html", // the exact-path candidate
+		"/outdir/leak.txt",
+		"/outdir/sub", // directory symlink + index.html candidate
+		"/outdir/sub/index.html",
+	} {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code == http.StatusOK {
+			t.Errorf("GET %s = 200, want the escape to be refused", p)
+		}
+		if strings.Contains(rec.Body.String(), "OUTSIDE-SECRET") {
+			t.Errorf("GET %s leaked content from outside the root: %q", p, rec.Body.String())
+		}
+	}
+
+	// And the root still serves its own files, so the refusals above are not
+	// a server that simply serves nothing (checklist row 47).
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ok.txt", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "fine" {
+		t.Fatalf("GET /ok.txt = %d %q, want 200 \"fine\" — the escape assertions above prove nothing if the server serves nothing", rec.Code, rec.Body.String())
+	}
+}
+
+// TestStaticServer_CachedDirHandleStillRefusesEscape guards the directory
+// handle cache specifically (servedRoot.dirs). Once a directory has served a
+// file, later requests resolve one component through the cached sub-root
+// instead of walking from the top-level root — a different code path, and
+// therefore a place a containment bypass could hide. A symlink escaping the
+// root from inside a WARMED directory must still be refused.
+func TestStaticServer_CachedDirHandleStillRefusesEscape(t *testing.T) {
+	outside := writeTree(t, map[string]string{"leak.txt": "OUTSIDE-SECRET"})
+	root := writeTree(t, map[string]string{"deep/a/b/real.txt": "real"})
+	if err := os.Symlink(filepath.Join(outside, "leak.txt"), filepath.Join(root, "deep", "a", "b", "esc.txt")); err != nil {
+		t.Fatalf("creating the test symlink failed; this containment test must never be silently skipped: %v", err)
+	}
+	srv := newTestServer(t, root)
+
+	// Warm the cache for deep/a/b by serving a real file out of it.
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/deep/a/b/real.txt", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("warming request = %d, want 200", rec.Code)
+	}
+	if h := srv.roots[0].cachedDir("deep/a/b"); h == nil {
+		t.Fatal("directory handle was not cached after a successful serve; this test would then exercise the uncached path and prove nothing (checklist row 45)")
+	}
+
+	// Now the escape, resolved through that cached handle.
+	rec2 := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/deep/a/b/esc.txt", nil))
+	if rec2.Code == http.StatusOK {
+		t.Errorf("escaping symlink served 200 through a cached directory handle")
+	}
+	if strings.Contains(rec2.Body.String(), "OUTSIDE-SECRET") {
+		t.Errorf("cached directory handle leaked outside-root content: %q", rec2.Body.String())
+	}
+
+	// A ".." inside the final component cannot be smuggled either: os.Root
+	// refuses it even one component deep.
+	if _, err := srv.roots[0].cachedDir("deep/a/b").Open("../real.txt"); err == nil {
+		t.Error("cached directory handle followed \"..\" out of its directory")
+	}
+}
+
+// TestStaticServer_DirHandleCacheOnlyPopulatedByHits pins the property that
+// keeps the cache's key space bounded and out of an attacker's reach: a 404
+// must never mint an entry.
+//
+// Two shapes, because only one of them is ordering-sensitive and the first
+// alone would be a decoration:
+//
+//   - a miss into a directory that does not exist. This cannot cache under any
+//     ordering, since OpenRoot on the missing directory fails — pinned because
+//     it is the property, not because the code could plausibly break it.
+//   - a miss into a directory that DOES exist. This is the real one: caching
+//     before knowing the open succeeded would mint an entry (and pay an extra
+//     OpenRoot) for every 404 under any real directory.
+func TestStaticServer_DirHandleCacheOnlyPopulatedByHits(t *testing.T) {
+	root := writeTree(t, map[string]string{"real/a.txt": "a"})
+	srv := newTestServer(t, root)
+	sr := srv.roots[0]
+
+	get := func(p string, wantCode int) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != wantCode {
+			t.Fatalf("GET %s = %d, want %d", p, rec.Code, wantCode)
+		}
+	}
+
+	for i := 0; i < 50; i++ {
+		get("/nope"+strconv.Itoa(i)+"/deep"+strconv.Itoa(i)+"/x.js", http.StatusNotFound)
+	}
+	if n := sr.dirCount.Load(); n != 0 {
+		t.Errorf("misses into absent directories cached %d handles, want 0", n)
+	}
+
+	// Misses inside a directory that really exists.
+	for i := 0; i < 50; i++ {
+		get("/real/missing"+strconv.Itoa(i)+".js", http.StatusNotFound)
+	}
+	if n := sr.dirCount.Load(); n != 0 {
+		t.Errorf("misses inside an existing directory cached %d handles, want 0 — entries must be minted only by a successful open", n)
+	}
+
+	// A hit does populate it, so the assertions above are not just "the cache
+	// never works" (checklist row 47).
+	get("/real/a.txt", http.StatusOK)
+	if n := sr.dirCount.Load(); n != 1 {
+		t.Errorf("after one hit dirCount = %d, want 1", n)
+	}
+	if sr.cachedDir("real") == nil {
+		t.Error("hit did not cache a handle for its directory")
+	}
+}
+
+// TestStaticServer_DirHandleCacheRespectsCap pins the file-descriptor bound.
+// Every cached entry costs an fd, and a container's limit is commonly 1024, so
+// the cache must stop growing at maxCachedDirHandles — and, past the cap, must
+// keep serving correctly by resolving from the top-level root again.
+func TestStaticServer_DirHandleCacheRespectsCap(t *testing.T) {
+	const dirs = maxCachedDirHandles + 20
+	files := make(map[string]string, dirs)
+	for i := 0; i < dirs; i++ {
+		files["d"+strconv.Itoa(i)+"/f.txt"] = "body" + strconv.Itoa(i)
+	}
+	root := writeTree(t, files)
+	srv := newTestServer(t, root)
+	sr := srv.roots[0]
+
+	for i := 0; i < dirs; i++ {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/d"+strconv.Itoa(i)+"/f.txt", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /d%d/f.txt = %d, want 200 (serving must not depend on the cache having room)", i, rec.Code)
+		}
+		if want := "body" + strconv.Itoa(i); rec.Body.String() != want {
+			t.Fatalf("GET /d%d/f.txt body = %q, want %q — past the cap the uncached path must still serve the RIGHT file", i, rec.Body.String(), want)
+		}
+	}
+	n := sr.dirCount.Load()
+	if n > maxCachedDirHandles {
+		t.Errorf("dirCount = %d, exceeds the cap of %d; each entry is a file descriptor", n, maxCachedDirHandles)
+	}
+	if n != maxCachedDirHandles {
+		t.Errorf("dirCount = %d, want the cap %d to have actually been reached — otherwise this test never exercised the over-cap path", n, maxCachedDirHandles)
+	}
+}
+
+// --- Sidecar index (Change 3) --------------------------------------------
+
+// TestStaticServer_SidecarIndexServesIndexedSidecar is the positive case the
+// staleness tests below need in order to mean anything: an indexed sidecar is
+// actually chosen, and its bytes are what the ETag describes.
+func TestStaticServer_SidecarIndexServesIndexedSidecar(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"app.js":    "IDENTITY-BYTES",
+		"app.js.br": "BROTLI-BYTES",
+	})
+	srv := newTestServer(t, root)
+	if !srv.roots[0].sidecarsIndexed {
+		t.Fatal("sidecar index was not built; every assertion below would then be testing the stat-probe fallback")
+	}
+	if got := srv.roots[0].sidecars["app.js"]; got&sidecarBrotli == 0 {
+		t.Fatalf("index mask for app.js = %b, want the brotli bit set", got)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	req.Header.Set("Accept-Encoding", "br, gzip")
+	srv.handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /app.js = %d, want 200", rec.Code)
+	}
+	if enc := rec.Header().Get("Content-Encoding"); enc != "br" {
+		t.Errorf("Content-Encoding = %q, want br", enc)
+	}
+	if rec.Body.String() != "BROTLI-BYTES" {
+		t.Errorf("body = %q, want the sidecar bytes", rec.Body.String())
+	}
+}
+
+// TestStaticServer_StaleSidecarIndexFallsBackToIdentity is the correctness
+// guard for making the index a startup snapshot. If a sidecar the index
+// recorded has since gone, the request must serve the IDENTITY file — the
+// right bytes, no Content-Encoding, and an ETag over what was actually sent —
+// never a 500 and never a truncated or mislabelled body.
+//
+// This is the failure mode a filesystem cache has to be shown to survive: the
+// index says "there is a .br here" and there is not.
+func TestStaticServer_StaleSidecarIndexFallsBackToIdentity(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"app.js":    "IDENTITY-BYTES",
+		"app.js.br": "BROTLI-BYTES",
+	})
+	srv := newTestServer(t, root)
+
+	// The index recorded the sidecar at startup...
+	if got := srv.roots[0].sidecars["app.js"]; got&sidecarBrotli == 0 {
+		t.Fatal("fixture did not index the .br sidecar; the staleness assertion below would be vacuous")
+	}
+	// ...and now it is gone, without the index knowing.
+	if err := os.Remove(filepath.Join(root, "app.js.br")); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.roots[0].sidecars["app.js"]; got&sidecarBrotli == 0 {
+		t.Fatal("index self-healed; this test must exercise a genuinely stale entry")
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	req.Header.Set("Accept-Encoding", "br, gzip")
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /app.js with a stale index entry = %d, want 200 serving identity", rec.Code)
+	}
+	if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+		t.Errorf("Content-Encoding = %q, want empty — a stale index entry must not label an identity body as compressed", enc)
+	}
+	if rec.Body.String() != "IDENTITY-BYTES" {
+		t.Errorf("body = %q, want the identity bytes", rec.Body.String())
+	}
+	// The ETag must describe the bytes actually served, or a cache will pair
+	// this body with the sidecar's validator.
+	sum := sha256.Sum256([]byte("IDENTITY-BYTES"))
+	if want := `"` + hex.EncodeToString(sum[:]) + `"`; rec.Header().Get("ETag") != want {
+		t.Errorf("ETag = %s, want %s (the hash of the bytes served)", rec.Header().Get("ETag"), want)
+	}
+	if cl := rec.Header().Get("Content-Length"); cl != strconv.Itoa(len("IDENTITY-BYTES")) {
+		t.Errorf("Content-Length = %q, want %d", cl, len("IDENTITY-BYTES"))
+	}
+}
+
+// TestStaticServer_IndexNeverGatesPrimaryAssetExistence pins the scoping rule
+// that makes a startup snapshot safe at all: the index records SIDECARS only.
+// A primary asset that appears after startup must still be served, because its
+// existence is decided by an openat at request time, not by the index.
+//
+// A sidecar appearing after startup is, symmetrically, simply not used —
+// suboptimal, never incorrect.
+func TestStaticServer_IndexNeverGatesPrimaryAssetExistence(t *testing.T) {
+	root := writeTree(t, map[string]string{"seed.js": "seed"})
+	srv := newTestServer(t, root)
+
+	// A primary asset created after the index was built.
+	if err := os.WriteFile(filepath.Join(root, "late.js"), []byte("LATE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/late.js", nil)
+	req.Header.Set("Accept-Encoding", "br, gzip")
+	srv.handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /late.js = %d, want 200 — the sidecar index must never turn a present file into a 404", rec.Code)
+	}
+	if rec.Body.String() != "LATE" {
+		t.Errorf("body = %q, want LATE", rec.Body.String())
+	}
+
+	// A sidecar created after the index was built: identity, not a 500.
+	if err := os.WriteFile(filepath.Join(root, "late.js.br"), []byte("BR"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/late.js", nil)
+	req2.Header.Set("Accept-Encoding", "br")
+	srv.handler().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK || rec2.Body.String() != "LATE" {
+		t.Errorf("GET /late.js after a late sidecar = %d %q, want 200 with the identity body", rec2.Code, rec2.Body.String())
+	}
+	if enc := rec2.Header().Get("Content-Encoding"); enc != "" {
+		t.Errorf("Content-Encoding = %q, want empty for an unindexed sidecar", enc)
+	}
+}
+
+// TestStaticServer_NonCompressibleExtensionSkipsSidecarProbe pins the
+// extension gate, which is a deliberate behaviour change as well as the
+// optimisation: precompression only ever emits sidecars for
+// precompressibleExtensions, so a ".png.br" cannot exist in an image Pokkum
+// built. A hand-placed one is therefore NOT served — the request stops at the
+// extension check before any lookup happens.
+func TestStaticServer_NonCompressibleExtensionSkipsSidecarProbe(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"pic.png":    "PNGBYTES",
+		"pic.png.br": "BRBYTES",
+		"app.js":     "JSBYTES",
+		"app.js.br":  "JSBR",
+	})
+	srv := newTestServer(t, root)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/pic.png", nil)
+	req.Header.Set("Accept-Encoding", "br, gzip, zstd")
+	srv.handler().ServeHTTP(rec, req)
+	if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+		t.Errorf("png Content-Encoding = %q, want empty: .png is not an extension precompression emits sidecars for", enc)
+	}
+	if rec.Body.String() != "PNGBYTES" {
+		t.Errorf("png body = %q, want the identity bytes", rec.Body.String())
+	}
+
+	// The gate must not be "never negotiate": an eligible extension still does.
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	req2.Header.Set("Accept-Encoding", "br")
+	srv.handler().ServeHTTP(rec2, req2)
+	if enc := rec2.Header().Get("Content-Encoding"); enc != "br" {
+		t.Fatalf("js Content-Encoding = %q, want br — the extension gate has swallowed everything", enc)
+	}
+}
+
+// --- Cache-correctness headers (Change 4) --------------------------------
+
+// TestStaticServer_VaryOnEveryEligibleAsset is the cache-correctness guard.
+// Vary: Accept-Encoding used to be sent only when a sidecar was actually
+// chosen, so the identity representation of a compressible asset went out
+// without it. A shared cache is then entitled to serve that stored identity
+// response — and its identity ETag — to a brotli-capable client, whose
+// If-None-Match can never match the brotli body the origin would serve, so
+// every revalidation costs a full 200 instead of a 304.
+//
+// The header must therefore be present on every sidecar-ELIGIBLE response
+// (compressed, identity, and 304 alike) and absent on assets that can never
+// have a sidecar, so those are not needlessly split across cache keys.
+func TestStaticServer_VaryOnEveryEligibleAsset(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"app.js":    "JSBYTES",
+		"app.js.br": "JSBR",
+		"plain.js":  "NOSIDECAR",
+		"pic.png":   "PNGBYTES",
+	})
+	srv := newTestServer(t, root)
+
+	cases := []struct {
+		name     string
+		path     string
+		accept   string
+		wantVary bool
+	}{
+		{"compressible served compressed", "/app.js", "br", true},
+		{"compressible served identity (no Accept-Encoding)", "/app.js", "", true},
+		{"compressible served identity (encoding not accepted)", "/app.js", "identity", true},
+		{"compressible with no sidecar at all", "/plain.js", "br, gzip", true},
+		{"never-compressible asset", "/pic.png", "br, gzip", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, c.path, nil)
+			if c.accept != "" {
+				req.Header.Set("Accept-Encoding", c.accept)
+			}
+			rec := httptest.NewRecorder()
+			srv.handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s = %d, want 200", c.path, rec.Code)
+			}
+			got := rec.Header().Values("Vary")
+			has := len(got) > 0 && strings.Contains(strings.Join(got, ","), "Accept-Encoding")
+			if has != c.wantVary {
+				t.Errorf("Vary = %v, want Accept-Encoding present = %v", got, c.wantVary)
+			}
+			if len(got) > 1 {
+				t.Errorf("Vary sent %d times (%v); it must be set once, not appended per representation", len(got), got)
+			}
+		})
+	}
+
+	// A 304 carries the same cache-relevant headers a 200 would.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	srv.handler().ServeHTTP(rec, req)
+	etag := rec.Header().Get("ETag")
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	req2.Header.Set("If-None-Match", etag)
+	srv.handler().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusNotModified {
+		t.Fatalf("conditional GET = %d, want 304", rec2.Code)
+	}
+	if v := rec2.Header().Get("Vary"); !strings.Contains(v, "Accept-Encoding") {
+		t.Errorf("304 Vary = %q, want to include Accept-Encoding", v)
+	}
+}
+
+// TestStaticServer_AcceptRangesAdvertised pins that a server which fully
+// implements Range says so. Clients that probe for the header before issuing a
+// ranged request (video players, resumable downloaders, some CDNs) otherwise
+// refetch whole files even though 206 would have worked — which the second
+// half of this test proves it does.
+func TestStaticServer_AcceptRangesAdvertised(t *testing.T) {
+	root := writeTree(t, map[string]string{"data.bin": "0123456789"})
+	srv := newTestServer(t, root)
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(method, "/data.bin", nil))
+		if got := rec.Header().Get("Accept-Ranges"); got != "bytes" {
+			t.Errorf("%s Accept-Ranges = %q, want \"bytes\"", method, got)
+		}
+	}
+
+	// And the advertisement is honest.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/data.bin", nil)
+	req.Header.Set("Range", "bytes=2-5")
+	srv.handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("ranged GET = %d, want 206 — advertising Accept-Ranges without honouring it is worse than not advertising", rec.Code)
+	}
+	if rec.Body.String() != "2345" {
+		t.Errorf("range body = %q, want 2345", rec.Body.String())
+	}
+	if got := rec.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Errorf("206 Accept-Ranges = %q, want \"bytes\"", got)
+	}
+}
+
+// --- cleanRelPath double-decode (Change 5) -------------------------------
+
+// TestStaticServer_PercentInFilenameIsNotDecodedTwice covers the bug removing
+// url.PathUnescape from cleanRelPath fixes. net/http has already decoded
+// r.URL.Path by the time the handler runs, so decoding again turned a file
+// legitimately named "a%2e.js" into "a..js", which then tripped the traversal
+// check and returned 400 for a file that exists.
+func TestStaticServer_PercentInFilenameIsNotDecodedTwice(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"a%2e.js":     "PERCENT-DOT",
+		"b%2Fc.js":    "PERCENT-SLASH",
+		"plain%20.js": "PERCENT-SPACE",
+	})
+	srv := newTestServer(t, root)
+
+	// The client double-encodes so that after net/http's decode the path is
+	// the literal filename.
+	for target, want := range map[string]string{
+		"/a%252e.js":     "PERCENT-DOT",
+		"/b%252Fc.js":    "PERCENT-SLASH",
+		"/plain%2520.js": "PERCENT-SPACE",
+	} {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200 for a file whose name legitimately contains a percent sign", target, rec.Code)
+			continue
+		}
+		if rec.Body.String() != want {
+			t.Errorf("GET %s body = %q, want %q", target, rec.Body.String(), want)
+		}
+	}
+}
+
+// TestCleanRelPath_TraversalStillRejectedWithoutSecondDecode enumerates the
+// traversal shapes directly against cleanRelPath, after removing its second
+// percent-decode, and pins that every one is still refused. Removing a decode
+// can only reduce what an attacker can express, but "can only" is exactly the
+// kind of reasoning this table exists to replace with evidence.
+//
+// Note the %2e / %2E rows: those arrive at cleanRelPath already decoded by
+// net/http (see the handler-level test below), so what is asserted here is the
+// literal-string behaviour of the function itself.
+func TestCleanRelPath_TraversalStillRejectedWithoutSecondDecode(t *testing.T) {
+	rejected := []string{
+		"/../etc/passwd",
+		"/..",
+		"/a/../../b",
+		"/./x",
+		"/a/./b",
+		"..",
+		"/a/..",
+		"/foo/../../../etc/shadow",
+		"/a..b/c", // the pre-existing conservative substring check
+	}
+	for _, p := range rejected {
+		if got, err := cleanRelPath(p); err == nil {
+			t.Errorf("cleanRelPath(%q) = %q, nil; want a traversal rejection", p, got)
+		}
+	}
+
+	accepted := map[string]string{
+		"/":                    "",
+		"":                     "",
+		"/index.html":          "index.html",
+		"/a/b/c.js":            "a/b/c.js",
+		"/a%2e.js":             "a%2e.js", // NOT decoded into "a..js" any more
+		"/a%2E.js":             "a%2E.js",
+		"/%2e%2e/x":            "%2e%2e/x", // literal, not "../x"
+		"/name with space.txt": "name with space.txt",
+	}
+	for p, want := range accepted {
+		got, err := cleanRelPath(p)
+		if err != nil {
+			t.Errorf("cleanRelPath(%q) error = %v, want %q", p, err, want)
+			continue
+		}
+		if got != want {
+			t.Errorf("cleanRelPath(%q) = %q, want %q", p, got, want)
+		}
+	}
+}
+
+// TestStaticServer_EncodedTraversalStillRejectedEndToEnd is the handler-level
+// half: %2e%2e and %2F traversal attempts must still be refused after the
+// second decode is gone, because net/http's own decode already turns them into
+// real "../" segments before cleanRelPath sees them.
+func TestStaticServer_EncodedTraversalStillRejectedEndToEnd(t *testing.T) {
+	outside := writeTree(t, map[string]string{"passwd": "OUTSIDE-SECRET"})
+	root := writeTree(t, map[string]string{"index.html": "home"})
+	sibling := filepath.Base(outside)
+
+	for _, p := range []string{
+		"/../" + sibling + "/passwd",
+		"/%2e%2e/" + sibling + "/passwd",
+		"/%2E%2E/" + sibling + "/passwd",
+		"/..%2F" + sibling + "%2Fpasswd",
+		"/%2e%2e%2f" + sibling + "%2fpasswd",
+		"/a/%2e%2e/%2e%2e/" + sibling + "/passwd",
+		"/....//" + sibling + "/passwd",
+	} {
+		rec := httptest.NewRecorder()
+		srv := newTestServer(t, root)
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code == http.StatusOK {
+			t.Errorf("GET %q = 200, want the traversal refused", p)
+		}
+		if strings.Contains(rec.Body.String(), "OUTSIDE-SECRET") {
+			t.Errorf("GET %q leaked outside-root content: %q", p, rec.Body.String())
+		}
+	}
+}
+
+// TestStaticServer_ConcurrentRequestsShareStateSafely exercises the state this
+// change made shared and mutable — the per-root directory-handle cache
+// (sync.Map + atomic counter, written on the first hit in each directory) and
+// the process-wide ETag cache — from many goroutines at once, which is how a
+// real server uses them. Run under -race it is the guard for the fan-in half
+// of this change; run without, it still catches a handle closed out from under
+// a concurrent request or a wrong body served under contention.
+//
+// Every response is checked for the RIGHT body, not merely a 200: a cache that
+// handed one request another's directory handle would still return 200
+// (mem:self_review_checklist row 38 — a coarse key yields wrong output, not a
+// visible miss).
+func TestStaticServer_ConcurrentRequestsShareStateSafely(t *testing.T) {
+	files := map[string]string{}
+	for i := 0; i < 24; i++ {
+		d := "d" + strconv.Itoa(i)
+		files[d+"/app.js"] = "BODY-" + d
+		files[d+"/app.js.br"] = "BR-" + d
+		files[d+"/sub/page.html"] = "PAGE-" + d
+	}
+	root := writeTree(t, files)
+	srv := newTestServer(t, root)
+	h := srv.handler()
+
+	var wg sync.WaitGroup
+	for g := 0; g < 16; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for n := 0; n < 40; n++ {
+				i := (g*7 + n) % 24
+				d := "d" + strconv.Itoa(i)
+
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, "/"+d+"/app.js", nil)
+				req.Header.Set("Accept-Encoding", "br")
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusOK || rec.Body.String() != "BR-"+d {
+					t.Errorf("GET /%s/app.js = %d %q, want 200 %q", d, rec.Code, rec.Body.String(), "BR-"+d)
+					return
+				}
+
+				rec2 := httptest.NewRecorder()
+				h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/"+d+"/sub/page", nil))
+				if rec2.Code != http.StatusOK || rec2.Body.String() != "PAGE-"+d {
+					t.Errorf("GET /%s/sub/page = %d %q, want 200 %q", d, rec2.Code, rec2.Body.String(), "PAGE-"+d)
+					return
+				}
+
+				rec3 := httptest.NewRecorder()
+				h.ServeHTTP(rec3, httptest.NewRequest(http.MethodGet, "/"+d+"/missing-"+strconv.Itoa(n)+".js", nil))
+				if rec3.Code != http.StatusNotFound {
+					t.Errorf("GET /%s/missing = %d, want 404", d, rec3.Code)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	// The concurrent run must actually have populated the shared state, or
+	// this test raced nothing (checklist row 47).
+	if n := srv.roots[0].dirCount.Load(); n < 24 {
+		t.Errorf("dirCount = %d after concurrent serving, want at least 24 (one per directory) — the shared state under test was never exercised", n)
+	}
+}
+
+// TestStaticServer_ExplicitTrailingSlashServesIndex covers a request shape no
+// existing test exercised and that the os.Root rewrite routes differently: a
+// URL with an explicit trailing slash. cleanRelPath keeps the slash, so the
+// path has an empty final component, which bypasses the directory-handle
+// shortcut in servedRoot.openAt and resolves from the top-level root. It must
+// still find the directory and serve its index.html.
+func TestStaticServer_ExplicitTrailingSlashServesIndex(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"index.html":           "<h1>home</h1>",
+		"blog/index.html":      "<h1>blog</h1>",
+		"blog/post/index.html": "<h1>post</h1>",
+	})
+	srv := newTestServer(t, root)
+
+	for p, want := range map[string]string{
+		"/":           "<h1>home</h1>",
+		"/blog/":      "<h1>blog</h1>",
+		"/blog":       "<h1>blog</h1>",
+		"/blog/post/": "<h1>post</h1>",
+		"/blog/post":  "<h1>post</h1>",
+	} {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200", p, rec.Code)
+			continue
+		}
+		if rec.Body.String() != want {
+			t.Errorf("GET %s body = %q, want %q", p, rec.Body.String(), want)
+		}
+	}
+}
+
+// TestStaticServer_SidecarProbeFallbackWhenIndexUnavailable drives the branch
+// pickEncoding takes when the startup index could not be built at all (an
+// unreadable tree, or one past maxSidecarIndexEntries): it must fall back to
+// probing the filesystem with root.Stat and still negotiate correctly.
+//
+// Nothing in the ordinary test fixtures reaches that branch, so without this it
+// would ship never having executed once (mem:self_review_checklist row 27a:
+// assert an effect that exists only inside the new branch). The index is
+// disabled directly on the constructed server, which is the only way to reach
+// the state deterministically.
+func TestStaticServer_SidecarProbeFallbackWhenIndexUnavailable(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"app.js":     "IDENTITY",
+		"app.js.gz":  "GZIPPED",
+		"plain.js":   "NOSIDECAR",
+		"pic.png":    "PNG",
+		"pic.png.br": "PNGBR",
+	})
+	srv := newTestServer(t, root)
+
+	// Simulate buildSidecarIndex having failed or overflowed.
+	sr := srv.roots[0]
+	sr.sidecars, sr.sidecarsIndexed = nil, false
+
+	get := func(p, accept string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, p, nil)
+		req.Header.Set("Accept-Encoding", accept)
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// The probe finds the real sidecar.
+	rec := get("/app.js", "br, gzip")
+	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip from the stat-probe fallback", enc)
+	}
+	if rec.Body.String() != "GZIPPED" {
+		t.Errorf("body = %q, want the sidecar bytes", rec.Body.String())
+	}
+
+	// No sidecar: identity, not an error.
+	rec2 := get("/plain.js", "br, gzip, zstd")
+	if enc := rec2.Header().Get("Content-Encoding"); enc != "" {
+		t.Errorf("Content-Encoding = %q, want empty", enc)
+	}
+	if rec2.Body.String() != "NOSIDECAR" {
+		t.Errorf("body = %q, want NOSIDECAR", rec2.Body.String())
+	}
+
+	// The extension gate still runs first, so a never-compressible type does
+	// not probe at all even with the index gone.
+	rec3 := get("/pic.png", "br, gzip, zstd")
+	if enc := rec3.Header().Get("Content-Encoding"); enc != "" {
+		t.Errorf("png Content-Encoding = %q, want empty: the extension gate must precede the probe fallback", enc)
+	}
+	if rec3.Body.String() != "PNG" {
+		t.Errorf("png body = %q, want PNG", rec3.Body.String())
 	}
 }

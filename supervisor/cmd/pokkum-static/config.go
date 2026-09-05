@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -37,6 +38,54 @@ const (
 	// from the serve port so probes keep answering independently of traffic.
 	defaultProbePort = 8081
 )
+
+// precompressibleExtensions mirrors
+// precompressutils.CompressibleExtensions — the closed set of extensions the
+// build-time precompression step will ever emit .br/.gz/.zst sidecars for.
+//
+// It is duplicated rather than imported for the same reason as the constants
+// above: pokkum-static is go:embed'ed into the pokkum CLI, and importing
+// precompressutils would pull brotli, klauspost/compress and zstd into a
+// program whose entire job is to serve bytes off disk.
+//
+// A duplicated constant kept in sync by a comment is not a control
+// (mem:self_review_checklist row 51). TestPrecompressibleExtensions_
+// MatchPrecompressutils in config_test.go imports the real
+// precompressutils.CompressibleExtensions and compares the two sets
+// element-for-element; that test, not this comment, is what keeps them equal.
+//
+// Consequence of drift in each direction, so the failure mode is on the record:
+// an extension present there and missing here means the sidecar is built into
+// the image and never served (a size regression, not a correctness one); an
+// extension present here and missing there means requests for that type do the
+// negotiation work for a sidecar that cannot exist (the cost this set exists to
+// avoid). Neither can serve wrong bytes.
+var precompressibleExtensions = map[string]bool{
+	".js":   true,
+	".mjs":  true,
+	".cjs":  true,
+	".css":  true,
+	".html": true,
+	".htm":  true,
+	".json": true,
+	".svg":  true,
+	".xml":  true,
+	".txt":  true,
+	".wasm": true,
+	".ttf":  true,
+	".otf":  true,
+	".eot":  true,
+	".map":  true,
+}
+
+// isPrecompressibleExt reports whether name's extension is one precompression
+// emits sidecars for, mirroring precompressutils.IsCompressible (including its
+// case-insensitivity). It is the first gate in pickEncoding: a ".png" or
+// ".woff2" request stops here instead of probing for three sidecars that can
+// never exist.
+func isPrecompressibleExt(name string) bool {
+	return precompressibleExtensions[strings.ToLower(path.Ext(name))]
+}
 
 // StaticServerRoots returns the default serve roots, mirroring
 // ports.AppClientDirPrefix and ports.AppPrerenderedDirPrefix. A function rather

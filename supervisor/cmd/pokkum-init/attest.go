@@ -4,11 +4,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // Startup attestation (layered hardening Option C).
@@ -111,14 +116,94 @@ func verifyAttestation(log *slog.Logger, expected string) error {
 	return nil
 }
 
+// attestHashBufSize is the read buffer one hashing worker streams a file
+// through. Files are hashed with a fixed-size buffer rather than read whole
+// (the previous root.ReadFile + sha256.Sum256 shape), so peak memory is
+// workers x this constant instead of "the largest file in /app", and the
+// 128 MB/op a 100 MB tree used to allocate collapses to a few hundred KB.
+const attestHashBufSize = 128 << 10
+
+// attestHashBufPool recycles those buffers across walks and across workers.
+// Held as *[]byte so putting one back does not allocate a slice header on the
+// heap (staticcheck SA6002).
+var attestHashBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, attestHashBufSize)
+		return &b
+	},
+}
+
+// attestTask is one file the hashing phase must read: which open root handle
+// to resolve it against, its path relative to that root, and the /app-relative
+// path that goes into the record.
+type attestTask struct {
+	root int    // index into the []*os.Root the walk phase opened
+	sub  string // path relative to that root, e.g. "chunks/index.js"
+	rel  string // slash-separated, relative to /app, e.g. "server/chunks/index.js"
+}
+
 // walkAttestTree walks every attestation root that exists and returns the
 // records for all regular files under it. Absent roots contribute nothing,
 // matching the packager which only archives roots whose staging directory
 // existed. Only regular files are hashed; directories and any non-regular
 // entries (sockets, devices) are ignored, as the packager archives only
 // regular files too.
+//
+// It runs in two phases, deliberately separated:
+//
+//  1. Walk every root and collect the (root, sub, rel) triples. This phase is
+//     the only one that can fail for a reason other than reading a file, and
+//     it runs with zero goroutines in flight — so no fallible decision ever
+//     sits between a dispatch and its Wait (mem:self_review_checklist row 1,
+//     the validate-then-dispatch shape).
+//  2. Hash the collected triples across GOMAXPROCS workers.
+//
+// Splitting them is also what makes the fan-out balanced: one fan-out covers
+// every root at once, so a tiny /app/native cannot leave workers idle while
+// /app/node_modules is still being hashed by one goroutine.
+//
+// The digest is unaffected by any of this: records are returned in walk order
+// and attestRootDigest sorts globally by rel before folding, so worker count
+// and completion order cannot change the result. TestAttestParallelHashing_
+// DigestStableAcrossWorkerCounts pins that.
 func walkAttestTree() ([]attestRecord, error) {
-	var records []attestRecord
+	roots, tasks, err := collectAttestTasks()
+	// Close every handle on every return path, including the error paths
+	// below — registered immediately after collectAttestTasks returns them
+	// (mem:self_review_checklist row 2: cleanup at allocation, not at
+	// confirmed success; collectAttestTasks returns the handles it managed to
+	// open even when it then fails).
+	defer func() {
+		for _, r := range roots {
+			if r != nil {
+				_ = r.Close()
+			}
+		}
+	}()
+	if err != nil {
+		return nil, err
+	}
+	return hashAttestTasks(roots, tasks)
+}
+
+// collectAttestTasks opens an os.Root per existing attestation root and walks
+// each one, returning the open handles and the flat task list. The handles are
+// returned even on error so the caller's deferred close covers the ones that
+// were opened before the failure.
+//
+// filepath.WalkDir does not follow symlinks, and the d.Info().Mode().IsRegular()
+// filter excludes any symlink the walk reports, so no statically-present
+// symlink is ever hashed. What the os.Root handle adds is closing the TOCTOU
+// window that filter cannot: between the lstat behind d.Info() and the read,
+// the entry can be replaced by a symlink pointing out of /app. openAttestFile
+// resolves against the root handle, so such a replacement is refused instead
+// of silently hashing foreign bytes into the digest the container's startup
+// gate trusts. See gosec G122.
+func collectAttestTasks() ([]*os.Root, []attestTask, error) {
+	var (
+		roots []*os.Root
+		tasks []attestTask
+	)
 	for _, root := range attestRoots {
 		dir := filepath.FromSlash(root)
 		fi, err := os.Stat(dir)
@@ -128,78 +213,171 @@ func walkAttestTree() ([]attestRecord, error) {
 		// baseRel is root relative to /app without the leading slash, e.g.
 		// "server" for "/app/server".
 		baseRel := strings.TrimPrefix(root, attestAppDir+"/")
-		rootRecords, err := walkAttestRoot(dir, baseRel)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, rootRecords...)
-	}
-	return records, nil
-}
 
-// walkAttestRoot walks one attestation root and returns its records. It is a
-// separate function purely so the os.Root handle below can be closed by defer
-// on every return path rather than by hand inside walkAttestTree's loop.
-//
-// The walk itself is unchanged: filepath.WalkDir does not follow symlinks, and
-// the d.Info().Mode().IsRegular() filter already excludes any symlink the walk
-// reports, so no statically-present symlink is ever hashed. What os.Root adds
-// is closing the TOCTOU window that filter cannot: between the lstat behind
-// d.Info() and the read, the entry can be replaced by a symlink pointing out
-// of /app. readAttestFile resolves against the root handle, so such a
-// replacement is refused instead of silently hashing foreign bytes into the
-// digest the container's startup gate trusts. See gosec G122.
-func walkAttestRoot(dir, baseRel string) ([]attestRecord, error) {
-	// A directory that os.Stat reported as a directory but that cannot be
-	// opened would fail the walk below with the same error, since WalkDir has
-	// to open it to read its entries — so this is not a new way for a
-	// container to refuse to boot, just an earlier report of the same one.
-	rootHandle, err := os.OpenRoot(dir)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rootHandle.Close() }()
-
-	var records []attestRecord
-	err = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		// A directory that os.Stat reported as a directory but that cannot be
+		// opened would fail the walk below with the same error, since WalkDir
+		// has to open it to read its entries — so this is not a new way for a
+		// container to refuse to boot, just an earlier report of the same one.
+		rootHandle, err := os.OpenRoot(dir)
 		if err != nil {
-			return err
+			return roots, nil, err
 		}
-		if d.IsDir() {
+		roots = append(roots, rootHandle)
+		idx := len(roots) - 1
+
+		err = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			// d.Type(), not d.Info(): Type() serves the mode bits the
+			// directory read already carried (falling back to an lstat only
+			// when the filesystem reported DT_UNKNOWN), so the common case
+			// costs neither a syscall nor a FileInfo allocation per file.
+			// Mode().IsRegular() and Type().IsRegular() test the same bits.
+			if !d.Type().IsRegular() {
+				return nil // skip non-regular entries, matching the packager
+			}
+			sub, rerr := filepath.Rel(dir, p)
+			if rerr != nil {
+				return rerr
+			}
+			tasks = append(tasks, attestTask{
+				root: idx,
+				sub:  sub,
+				rel:  filepath.ToSlash(filepath.Join(baseRel, sub)),
+			})
 			return nil
+		})
+		if err != nil {
+			return roots, nil, err
 		}
-		info, ierr := d.Info()
-		if ierr != nil || !info.Mode().IsRegular() {
-			return nil // skip non-regular entries, matching the packager
+	}
+	return roots, tasks, nil
+}
+
+// hashAttestTasks hashes every task across runtime.GOMAXPROCS(0) workers,
+// each streaming its file through a pooled buffer, and returns the records in
+// task order.
+//
+// Fail-closed contract, which is the whole reason this function exists in this
+// shape: ANY worker error aborts the WHOLE verification. It is recorded as the
+// returned error and no records are returned at all, so a partial result can
+// never be folded into a digest and can never be compared against the expected
+// value. A file that cannot be opened or read is a verification failure, not a
+// file that contributes nothing.
+func hashAttestTasks(roots []*os.Root, tasks []attestTask) ([]attestRecord, error) {
+	if len(tasks) == 0 {
+		return nil, nil
+	}
+
+	records := make([]attestRecord, len(tasks))
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(tasks) {
+		workers = len(tasks)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	var (
+		next     atomic.Int64
+		aborted  atomic.Bool
+		errMu    sync.Mutex
+		firstErr error
+		wg       sync.WaitGroup
+	)
+	fail := func(err error) {
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
 		}
-		sub, rerr := filepath.Rel(dir, p)
-		if rerr != nil {
-			return rerr
-		}
-		rel := filepath.ToSlash(filepath.Join(baseRel, sub))
-		data, rerr := readAttestFile(rootHandle, sub)
-		if rerr != nil {
-			return rerr
-		}
-		sum := sha256.Sum256(data)
-		records = append(records, attestRecord{rel: rel, sha: hex.EncodeToString(sum[:])})
-		return nil
-	})
-	if err != nil {
-		return nil, err
+		errMu.Unlock()
+		aborted.Store(true)
+	}
+
+	// Nothing fallible sits between this dispatch loop and wg.Wait(): every
+	// error is routed through fail() and read only after the join, so there is
+	// no return path that can leak a worker (row 1).
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			bufp, _ := attestHashBufPool.Get().(*[]byte)
+			defer attestHashBufPool.Put(bufp)
+			h := sha256.New()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(tasks) {
+					return
+				}
+				if aborted.Load() {
+					return
+				}
+				t := tasks[i]
+				sum, err := hashAttestFile(roots[t.root], t.sub, *bufp, h)
+				if err != nil {
+					fail(fmt.Errorf("hashing %s: %w", t.rel, err))
+					return
+				}
+				// Exactly one goroutine ever writes records[i] (indices are
+				// handed out by a single atomic counter), so this needs no
+				// lock and is race-clean under -race.
+				records[i] = attestRecord{rel: t.rel, sha: sum}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return records, nil
 }
 
-// readAttestFile reads one attested file's bytes through root, where sub is the
-// file's path relative to root. Resolution cannot leave root: a component (or
-// the final element) that is a symlink whose target escapes the attestation
-// root is an error, not a followed link, while a symlink resolving back inside
-// the root is followed exactly as os.ReadFile would follow it. Kept as its own
-// function so the containment property has a direct, testable seam — see
-// TestReadAttestFile_RefusesEscapingSymlink.
-func readAttestFile(root *os.Root, sub string) ([]byte, error) {
-	return root.ReadFile(sub)
+// hashAttestFile streams one attested file through h and returns its lowercase
+// hex SHA-256. buf is the caller's reusable read buffer and h is reset before
+// use, so hashing a file allocates nothing but the returned digest string —
+// the digest is byte-identical to the previous sha256.Sum256(wholeFile) shape
+// because SHA-256 is a streaming construction and chunking cannot change it.
+func hashAttestFile(root *os.Root, sub string, buf []byte, h hash.Hash) (string, error) {
+	f, err := openAttestFile(root, sub)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+
+	h.Reset()
+	for {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			h.Write(buf[:n])
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			return "", rerr
+		}
+	}
+	var sum [sha256.Size]byte
+	return hex.EncodeToString(h.Sum(sum[:0])), nil
+}
+
+// openAttestFile opens one attested file through root, where sub is the file's
+// path relative to root. Resolution cannot leave root: a component (or the
+// final element) that is a symlink whose target escapes the attestation root
+// is an error, not a followed link, while a relative symlink resolving back
+// inside the root is followed exactly as os.Open would follow it. Kept as its
+// own function so the containment property has a direct, testable seam — see
+// TestOpenAttestFile_RefusesEscapingSymlink.
+//
+// The caller owns the returned handle and must close it.
+func openAttestFile(root *os.Root, sub string) (*os.File, error) {
+	return root.Open(sub)
 }
 
 // attestRootDigest mirrors attestutils.RootDigest: the deterministic SHA-256

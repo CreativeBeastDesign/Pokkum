@@ -65,16 +65,6 @@ func main() {
 		log.Warn(w)
 	}
 
-	// Startup attestation (layered hardening Option C): if the packager stamped
-	// an expected digest, verify the live /app tree matches it before the child
-	// ever runs. This is the tamper-evidence gate — a modified /app fails fast
-	// here, before resolveChildPath, before the probe binds and before any app
-	// code is reached. A mismatch is a hard refusal to start (fail closed).
-	if err := verifyAttestation(log, cfg.AttestationDigest); err != nil {
-		log.Error("startup attestation failed", "error", err)
-		os.Exit(exitAttestationMismatch)
-	}
-
 	// Resolve the child executable to an absolute path up front, so the fork in
 	// Run never waits on a PATH walk. This is the parallelization the probe
 	// server's own goroutine rides on: once Run is entered, start() forks
@@ -105,11 +95,38 @@ func main() {
 	// being forked/exec'd. That overlap is the "fast sub-millisecond supervisor
 	// startup" the roadmap item names, guarded by the startup-overlap test.
 	//
+	// The bind is deliberately ordered BEFORE verifyAttestation below. On a
+	// real image the attestation hashes every byte of /app/node_modules and
+	// /app/vendor — hundreds of milliseconds — and for that entire window the
+	// probe port used to be connection-refused, which is indistinguishable
+	// from a crashed container to anything looking at it. Binding first means
+	// a probe gets a real HTTP status throughout. It changes nothing about
+	// what is gated on attestation: /healthz still answers purely from the
+	// supervisor's own child bookkeeping (503 until the child is running,
+	// exactly as before), and BeginAttestation below holds /readyz at 503 for
+	// the whole verification window so no load balancer can be told "ready"
+	// before the verdict.
+	//
 	// A probe server that fails to bind its port logs and returns rather than
 	// exiting the process; it must never be able to take the application down.
 	probeSrv := NewProbeServer(sup, sup.ProbePort(), sup.AppPort(), log)
+	probeSrv.BeginAttestation()
 	go probeSrv.Serve(context.Background())
 	defer probeSrv.Shutdown()
+
+	// Startup attestation (layered hardening Option C): if the packager stamped
+	// an expected digest, verify the live /app tree matches it before the child
+	// ever runs. This is the tamper-evidence gate — a modified /app fails fast
+	// here, before any app code is reached, and above all before sup.Run below
+	// forks and execs anything. A mismatch is a hard refusal to start (fail
+	// closed): os.Exit here means Run is never entered and no child process is
+	// ever created. Moving the probe bind above this call does not weaken that
+	// — the probe server observes state, it never starts anything.
+	if err := verifyAttestation(log, cfg.AttestationDigest); err != nil {
+		log.Error("startup attestation failed", "error", err)
+		os.Exit(exitAttestationMismatch)
+	}
+	probeSrv.AttestationPassed()
 
 	// context.Background, not signal.NotifyContext: signals are the
 	// supervisor's subject matter, not its plumbing, and they are handled

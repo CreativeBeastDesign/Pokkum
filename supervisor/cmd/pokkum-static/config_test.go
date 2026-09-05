@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/precompressutils"
 )
 
 func TestParseConfig(t *testing.T) {
@@ -183,5 +185,64 @@ func TestParseConfig_FallbackEmptyByDefault(t *testing.T) {
 	}
 	if cfg.Fallback != "" {
 		t.Errorf("Fallback = %q, want empty default (plain-404 behavior preserved)", cfg.Fallback)
+	}
+}
+
+// TestPrecompressibleExtensions_MatchPrecompressutils is the control that keeps
+// pokkum-static's hand-copied precompressibleExtensions equal to the packager's
+// authoritative precompressutils.CompressibleExtensions.
+//
+// The set is duplicated because pokkum-static is go:embed'ed into the pokkum
+// CLI and must not link brotli/zstd just to decide which extensions might have
+// a sidecar. A doc comment saying "keep in sync" is not a control — it fails
+// silently, at runtime, in the shipped artifact, after every green check
+// (mem:self_review_checklist row 51, and the /app/node_modules attestation-root
+// drift that bricked every layered image).
+//
+// This test imports the real declaration rather than restating it, so it cannot
+// itself become a third copy that drifts. That is legal here and nowhere else:
+// a _test.go file is not compiled into the embedded binary, so the dependency
+// does not reach the shipped artifact. integration_test.go in this package
+// already imports precompressutils on the same basis.
+func TestPrecompressibleExtensions_MatchPrecompressutils(t *testing.T) {
+	want := precompressutils.CompressibleExtensions
+
+	// Row 47: a comparison of two empty sets must not read as a clean pass.
+	if len(want) == 0 {
+		t.Fatal("precompressutils.CompressibleExtensions is empty; this parity test has gone blind rather than found parity")
+	}
+	if len(precompressibleExtensions) == 0 {
+		t.Fatal("pokkum-static's precompressibleExtensions is empty")
+	}
+
+	for ext, on := range want {
+		if !on {
+			continue
+		}
+		if !precompressibleExtensions[ext] {
+			t.Errorf("precompressutils emits sidecars for %q but pokkum-static's mirror does not list it: "+
+				"the sidecar is built into the image and then never served", ext)
+		}
+	}
+	for ext, on := range precompressibleExtensions {
+		if !on {
+			continue
+		}
+		if !want[ext] {
+			t.Errorf("pokkum-static lists %q as sidecar-eligible but precompressutils never emits one for it: "+
+				"every request for that type does negotiation work for a sidecar that cannot exist", ext)
+		}
+	}
+
+	// isPrecompressibleExt must agree with precompressutils.IsCompressible on
+	// real filenames, including the case-insensitivity, not merely on the set.
+	for _, name := range []string{
+		"app.js", "app.JS", "style.css", "page.html", "chunk.mjs", "data.json",
+		"icon.svg", "font.ttf", "bundle.js.map", "img.png", "font.woff2",
+		"movie.mp4", "noext", "archive.tar.gz", ".hidden", "a.JSON",
+	} {
+		if got, expected := isPrecompressibleExt(name), precompressutils.IsCompressible(name); got != expected {
+			t.Errorf("isPrecompressibleExt(%q) = %v, precompressutils.IsCompressible = %v", name, got, expected)
+		}
 	}
 }

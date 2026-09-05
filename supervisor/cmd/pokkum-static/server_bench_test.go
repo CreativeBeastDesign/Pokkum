@@ -179,6 +179,7 @@ func BenchmarkStaticServer_Request(b *testing.B) {
 		b.Fatalf("fixture has %d files, want at least 300", fx.files)
 	}
 	srv := newStaticServer([]string{fx.clientRoot, fx.prerenderedRoot}, "", nil)
+	defer srv.close()
 	h := srv.handler()
 
 	// Grab the ETag the server actually serves for the js asset under full

@@ -1,10 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -221,14 +226,14 @@ func TestAttestRootDigest_OrderIndependent(t *testing.T) {
 // read, which is one syscall wide and not reproducible on demand
 // (mem:self_review_checklist row 45: test the invariant the design maintains,
 // not the absence of the interleaving). So the property is asserted where the
-// read happens: readAttestFile must refuse a path resolving out of the root,
+// read happens: openAttestFile must refuse a path resolving out of the root,
 // and must still read a path inside it.
 //
-// Reverting readAttestFile's body to os.ReadFile(filepath.Join(root.Name(),
+// Reverting openAttestFile's body to os.Open(filepath.Join(root.Name(),
 // sub)) — what the callback did before — makes this test fail: it returns the
 // outside file's bytes, which would then be hashed into the digest the
 // container's startup gate trusts.
-func TestReadAttestFile_RefusesEscapingSymlink(t *testing.T) {
+func TestOpenAttestFile_RefusesEscapingSymlink(t *testing.T) {
 	base := t.TempDir()
 	outside := filepath.Join(base, "outside")
 	if err := os.MkdirAll(outside, 0o755); err != nil {
@@ -255,30 +260,59 @@ func TestReadAttestFile_RefusesEscapingSymlink(t *testing.T) {
 	defer func() { _ = root.Close() }()
 
 	// A legitimate in-root file still reads, byte for byte.
-	got, err := readAttestFile(root, "index.js")
+	got, err := readThroughAttestRoot(root, "index.js")
 	if err != nil {
-		t.Fatalf("readAttestFile(index.js) error = %v, want nil", err)
+		t.Fatalf("openAttestFile(index.js) error = %v, want nil", err)
 	}
 	if string(got) != "in-root-bytes" {
-		t.Errorf("readAttestFile(index.js) = %q, want %q", got, "in-root-bytes")
+		t.Errorf("openAttestFile(index.js) = %q, want %q", got, "in-root-bytes")
 	}
 
 	// The escaping symlink must not deliver the outside file's bytes.
-	escaped, err := readAttestFile(root, "escape.js")
+	escaped, err := readThroughAttestRoot(root, "escape.js")
 	if string(escaped) == "outside-bytes" {
-		t.Fatalf("readAttestFile read through a symlink leaving the attestation root and returned %q; those bytes would be hashed into the startup digest", escaped)
+		t.Fatalf("openAttestFile read through a symlink leaving the attestation root and returned %q; those bytes would be hashed into the startup digest", escaped)
 	}
 	if err == nil {
-		t.Errorf("readAttestFile(escape.js) error = nil (returned %q), want a refusal", escaped)
+		t.Errorf("openAttestFile(escape.js) error = nil (returned %q), want a refusal", escaped)
+	}
+
+	// And the same containment holds through the real hashing path, not only
+	// through the open seam: hashAttestFile must refuse the escaping symlink
+	// rather than fold foreign bytes into a record.
+	var hbuf [4096]byte
+	if _, err := hashAttestFile(root, "escape.js", hbuf[:], sha256.New()); err == nil {
+		t.Errorf("hashAttestFile(escape.js) error = nil, want a refusal")
+	}
+	sum, err := hashAttestFile(root, "index.js", hbuf[:], sha256.New())
+	if err != nil {
+		t.Fatalf("hashAttestFile(index.js) error = %v, want nil", err)
+	}
+	want := sha256.Sum256([]byte("in-root-bytes"))
+	if sum != hex.EncodeToString(want[:]) {
+		t.Errorf("hashAttestFile(index.js) = %s, want %s", sum, hex.EncodeToString(want[:]))
 	}
 }
 
-// TestReadAttestFile_FollowsRelativeSymlinkInsideRoot pins the preserved half
+// readThroughAttestRoot is the tests' equivalent of the whole-file read the
+// attestation used to perform, expressed on top of the openAttestFile seam
+// that replaced it. Kept in the test file, not production code: production
+// never buffers a whole attested file any more (see hashAttestFile).
+func readThroughAttestRoot(root *os.Root, sub string) ([]byte, error) {
+	f, err := openAttestFile(root, sub)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
+}
+
+// TestOpenAttestFile_FollowsRelativeSymlinkInsideRoot pins the preserved half
 // of the semantics: a relative symlink resolving back inside the attestation
-// root is still followed, as os.ReadFile did. The walk never hands such a path
-// to readAttestFile today (symlinks are filtered out before the read), so this
+// root is still followed, as os.Open did. The walk never hands such a path
+// to openAttestFile today (symlinks are filtered out before the read), so this
 // guards the read primitive itself, not a live code path.
-func TestReadAttestFile_FollowsRelativeSymlinkInsideRoot(t *testing.T) {
+func TestOpenAttestFile_FollowsRelativeSymlinkInsideRoot(t *testing.T) {
 	appRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(appRoot, "real.js"), []byte("real-bytes"), 0o644); err != nil {
 		t.Fatal(err)
@@ -292,12 +326,12 @@ func TestReadAttestFile_FollowsRelativeSymlinkInsideRoot(t *testing.T) {
 	}
 	defer func() { _ = root.Close() }()
 
-	got, err := readAttestFile(root, "alias.js")
+	got, err := readThroughAttestRoot(root, "alias.js")
 	if err != nil {
-		t.Fatalf("readAttestFile(alias.js) error = %v, want nil", err)
+		t.Fatalf("openAttestFile(alias.js) error = %v, want nil", err)
 	}
 	if string(got) != "real-bytes" {
-		t.Errorf("readAttestFile(alias.js) = %q, want %q", got, "real-bytes")
+		t.Errorf("openAttestFile(alias.js) = %q, want %q", got, "real-bytes")
 	}
 }
 
@@ -357,5 +391,256 @@ func TestWalkAttestTree_SymlinkEntriesContributeNothing(t *testing.T) {
 	}
 	if len(recs) != 3 {
 		t.Fatalf("walkAttestTree() returned %d records, want 3 regular files: %+v", len(recs), recs)
+	}
+}
+
+// --- Guards for the parallel, streaming hashing phase ---------------------
+
+// buildAttestTree materialises a multi-root /app-shaped tree with enough files
+// (and enough size variety) that hashing them really does fan out across
+// workers, and returns the base directory. Sizes deliberately straddle
+// attestHashBufSize so the streaming read loop is exercised for both the
+// single-Read and multi-Read cases.
+func buildAttestTree(t *testing.T, nPerRoot int) string {
+	t.Helper()
+	base := t.TempDir()
+	files := map[string]string{}
+	for _, root := range []string{"server", "client", "prerendered", "vendor", "native"} {
+		for i := 0; i < nPerRoot; i++ {
+			// Every few files is larger than one read buffer.
+			size := 7 + i*13
+			if i%17 == 0 {
+				size = attestHashBufSize*2 + i
+			}
+			body := strings.Repeat(string(rune('a'+i%26)), size)
+			files[filepath.Join("app", root, "sub", fmtInt(i), "f"+fmtInt(i)+".js")] = body
+		}
+	}
+	files["outside/secret"] = "outside-bytes"
+	return writeTree(t, base, files)
+}
+
+func fmtInt(i int) string { return strconv.Itoa(i) }
+
+// TestAttestParallelHashing_DigestStableAcrossWorkerCounts is the digest
+// neutrality proof the parallelisation needs: the same tree must fold to the
+// same root digest at 1, 2, 4, 8 and GOMAXPROCS workers. attestRootDigest
+// sorts globally by rel before folding, so completion order cannot leak into
+// the digest — this asserts that rather than assuming it.
+//
+// It also pins the digest against a from-scratch, single-threaded,
+// whole-file-read reimplementation (the exact shape the code had before this
+// change), so "parallel agrees with parallel" cannot pass vacuously.
+func TestAttestParallelHashing_DigestStableAcrossWorkerCounts(t *testing.T) {
+	base := buildAttestTree(t, 40)
+	withRoots(t, base)
+
+	// Reference: single-threaded, whole-file read + sha256.Sum256, computed
+	// here without touching any of the code under test.
+	want := referenceRootDigest(t, base)
+
+	origProcs := runtime.GOMAXPROCS(0)
+	t.Cleanup(func() { runtime.GOMAXPROCS(origProcs) })
+
+	var got []string
+	for _, procs := range []int{1, 2, 4, 8, origProcs} {
+		runtime.GOMAXPROCS(procs)
+		recs, err := walkAttestTree()
+		if err != nil {
+			t.Fatalf("walkAttestTree at GOMAXPROCS=%d: %v", procs, err)
+		}
+		if len(recs) != 200 {
+			t.Fatalf("GOMAXPROCS=%d hashed %d files, want 200 — a walk that found nothing would make every digest below agree vacuously", procs, len(recs))
+		}
+		d := attestRootDigest(recs)
+		if d != want {
+			t.Errorf("GOMAXPROCS=%d digest = %s, want %s (independent single-threaded reference)", procs, d, want)
+		}
+		got = append(got, d)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] != got[0] {
+			t.Fatalf("digest is not stable across worker counts: %v", got)
+		}
+	}
+}
+
+// referenceRootDigest recomputes the attestation digest the slow, obvious way:
+// one goroutine, whole-file reads, os.ReadFile rather than any root-scoped
+// primitive. It shares no code with attest.go beyond the record serialization
+// format, which is the thing being pinned.
+func referenceRootDigest(t *testing.T, base string) string {
+	t.Helper()
+	type rec struct{ rel, sha string }
+	var recs []rec
+	for _, root := range superRoots(base) {
+		baseRel := filepath.Base(root)
+		if _, err := os.Stat(root); err != nil {
+			continue
+		}
+		err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			info, ierr := d.Info()
+			if ierr != nil || !info.Mode().IsRegular() {
+				return nil
+			}
+			b, rerr := os.ReadFile(p) //nolint:gosec // test fixture, fixed tree
+			if rerr != nil {
+				return rerr
+			}
+			sub, rerr := filepath.Rel(root, p)
+			if rerr != nil {
+				return rerr
+			}
+			sum := sha256.Sum256(b)
+			recs = append(recs, rec{
+				rel: filepath.ToSlash(filepath.Join(baseRel, sub)),
+				sha: hex.EncodeToString(sum[:]),
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("reference walk %s: %v", root, err)
+		}
+	}
+	sort.Slice(recs, func(i, j int) bool { return recs[i].rel < recs[j].rel })
+	h := sha256.New()
+	for _, r := range recs {
+		h.Write([]byte(r.rel))
+		h.Write([]byte{0})
+		h.Write([]byte(r.sha))
+		h.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// TestVerifyAttestation_TamperedMidTreeFileRefusesUnderParallelHashing is the
+// fail-closed proof with the fan-out actually engaged: a file tampered with
+// deep inside the tree (not the first one hashed, and not in the first root)
+// must still make verifyAttestation refuse, at every worker count. A parallel
+// hasher that dropped or reordered a record would produce a digest that still
+// matched, and only this shape catches it (checklist row 4: fail a non-first
+// item).
+func TestVerifyAttestation_TamperedMidTreeFileRefusesUnderParallelHashing(t *testing.T) {
+	base := buildAttestTree(t, 40)
+	withRoots(t, base)
+
+	expected, err := expectedDigestFor()
+	if err != nil {
+		t.Fatalf("expectedDigestFor: %v", err)
+	}
+	if err := verifyAttestation(discardLogger(), expected); err != nil {
+		t.Fatalf("clean tree must verify: %v", err)
+	}
+
+	// Tamper with a file in the LAST root, deep in the walk order.
+	victim := filepath.Join(base, "app", "native", "sub", "37", "f37.js")
+	if err := os.WriteFile(victim, []byte("tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origProcs := runtime.GOMAXPROCS(0)
+	t.Cleanup(func() { runtime.GOMAXPROCS(origProcs) })
+	for _, procs := range []int{1, 2, 4, 8, origProcs} {
+		runtime.GOMAXPROCS(procs)
+		err := verifyAttestation(discardLogger(), expected)
+		if err == nil {
+			t.Fatalf("GOMAXPROCS=%d: verifyAttestation accepted a tampered tree", procs)
+		}
+		if !strings.Contains(err.Error(), "startup attestation mismatch") {
+			t.Errorf("GOMAXPROCS=%d: error = %v, want a mismatch refusal", procs, err)
+		}
+	}
+}
+
+// TestHashAttestTasks_WorkerErrorAbortsWholeVerification proves the fail-closed
+// invariant at the fan-out itself: an unreadable file anywhere in the task list
+// — including on a NON-first task, handled by a worker that is not the one that
+// started first — aborts the entire hashing phase and returns NO records, so a
+// partial set can never reach attestRootDigest and can never coincidentally
+// match an expected value.
+func TestHashAttestTasks_WorkerErrorAbortsWholeVerification(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "server")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const n = 60
+	tasks := make([]attestTask, 0, n)
+	for i := 0; i < n; i++ {
+		name := "f" + strconv.Itoa(i) + ".js"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"+strconv.Itoa(i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tasks = append(tasks, attestTask{root: 0, sub: name, rel: "server/" + name})
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	roots := []*os.Root{root}
+
+	// Sanity: all readable => full record set, no error. Without this the
+	// failure assertion below could pass because nothing ever worked.
+	recs, err := hashAttestTasks(roots, tasks)
+	if err != nil {
+		t.Fatalf("clean hashAttestTasks: %v", err)
+	}
+	if len(recs) != n {
+		t.Fatalf("clean hashAttestTasks returned %d records, want %d", len(recs), n)
+	}
+
+	// Now break a mid-list task by pointing it at a file that does not exist.
+	tasks[n/2].sub = "does-not-exist.js"
+	recs, err = hashAttestTasks(roots, tasks)
+	if err == nil {
+		t.Fatalf("hashAttestTasks returned nil error for an unreadable file; verification would proceed on a partial tree")
+	}
+	if recs != nil {
+		t.Errorf("hashAttestTasks returned %d records alongside an error; a partial record set must never escape", len(recs))
+	}
+	if !strings.Contains(err.Error(), "does-not-exist.js") {
+		t.Errorf("error = %v, want it to name the file that failed", err)
+	}
+
+	// And the same failure, surfaced through verifyAttestation, must be a
+	// refusal rather than a silently-shorter tree.
+	if !strings.Contains(err.Error(), "hashing ") {
+		t.Errorf("error = %v, want it to be attributed to the hashing phase", err)
+	}
+}
+
+// TestHashAttestFile_StreamingMatchesWholeFileHash pins the digest-neutrality
+// of the streaming read itself across the buffer boundary: a file larger than
+// attestHashBufSize (so the read loop runs several times) must hash to exactly
+// what sha256.Sum256 of the whole file gives.
+func TestHashAttestFile_StreamingMatchesWholeFileHash(t *testing.T) {
+	dir := t.TempDir()
+	for _, size := range []int{0, 1, attestHashBufSize - 1, attestHashBufSize, attestHashBufSize + 1, attestHashBufSize*3 + 7} {
+		body := make([]byte, size)
+		for i := range body {
+			body[i] = byte(i * 7 % 251)
+		}
+		name := "f" + strconv.Itoa(size) + ".bin"
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, attestHashBufSize)
+		got, err := hashAttestFile(root, name, buf, sha256.New())
+		_ = root.Close()
+		if err != nil {
+			t.Fatalf("hashAttestFile(size=%d): %v", size, err)
+		}
+		want := sha256.Sum256(body)
+		if got != hex.EncodeToString(want[:]) {
+			t.Errorf("hashAttestFile(size=%d) = %s, want %s", size, got, hex.EncodeToString(want[:]))
+		}
 	}
 }

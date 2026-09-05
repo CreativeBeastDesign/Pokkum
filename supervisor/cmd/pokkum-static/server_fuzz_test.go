@@ -79,13 +79,19 @@ func FuzzParseSingleRange(f *testing.F) {
 	})
 }
 
-// FuzzParseAcceptEncoding exercises parseAcceptEncoding against hostile
+// FuzzAcceptsEncoding exercises acceptsEncoding against hostile
 // Accept-Encoding header values (also client-controlled, also
-// network-reachable in every shipped static image). Only asserts no panic
-// and no obviously-malformed output (a non-empty token never maps through
-// to an empty-string key), since the function's whole contract is "best
-// effort negotiation, defaults to identity on anything it can't parse".
-func FuzzParseAcceptEncoding(f *testing.F) {
+// network-reachable in every shipped static image).
+//
+// Two properties, both cheap and both real:
+//   - it never panics, whatever the header;
+//   - it never claims an encoding the header does not mention at all. That is
+//     the safety-relevant half: claiming acceptance of an encoding the client
+//     did not offer would serve a brotli body to a client that cannot decode
+//     it. A token's mere presence is a necessary condition for acceptance, so
+//     a "true" for an absent token is unambiguously wrong regardless of how
+//     the q-parameters parse.
+func FuzzAcceptsEncoding(f *testing.F) {
 	f.Add("gzip")
 	f.Add("br;q=1.0, gzip;q=0.8, *;q=0.1")
 	f.Add("gzip;q=0")
@@ -98,20 +104,20 @@ func FuzzParseAcceptEncoding(f *testing.F) {
 	f.Add(strings.Repeat("gzip,", 10000))
 	f.Add("\x00\x01\x02")
 	f.Add("GZIP;Q=1")
+	f.Add("gzip;q=0, gzip")
+	f.Add("  br  ;  q = 1  ")
 
 	f.Fuzz(func(t *testing.T, header string) {
 		defer func() {
 			if r := recover(); r != nil {
-				t.Fatalf("parseAcceptEncoding(%q) panicked: %v", header, r)
+				t.Fatalf("acceptsEncoding(%q) panicked: %v", header, r)
 			}
 		}()
-		accepted := parseAcceptEncoding(header)
-		for token := range accepted {
-			if token == "" {
-				t.Fatalf("parseAcceptEncoding(%q) produced an empty-string token key", header)
-			}
-			if token != strings.ToLower(token) {
-				t.Fatalf("parseAcceptEncoding(%q) produced non-lowercased token %q", header, token)
+		lower := strings.ToLower(header)
+		for _, enc := range []string{"br", "gzip", "zstd"} {
+			got := acceptsEncoding(header, enc)
+			if got && !strings.Contains(lower, enc) {
+				t.Fatalf("acceptsEncoding(%q, %q) = true but the header does not mention %q at all", header, enc, enc)
 			}
 		}
 	})

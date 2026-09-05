@@ -70,6 +70,28 @@ type ProbeServer struct {
 	// dial of its own.
 	ready atomic.Bool
 
+	// attestationPending, while set, forces /readyz to answer 503 regardless
+	// of the dial result. It exists because the probe listener now binds
+	// BEFORE startup attestation runs (see main.go): the container answers
+	// /healthz with a real HTTP status while /app is being hashed instead of
+	// refusing the connection, and this flag is what keeps the earlier bind
+	// from also meaning "ready".
+	//
+	// The zero value is deliberately "not pending": readiness is gated only
+	// when a caller explicitly declares an attestation in flight
+	// (BeginAttestation). A ProbeServer nobody tells about attestation — every
+	// test that constructs one directly, and any future embedder — behaves
+	// exactly as it did before this field existed.
+	//
+	// This is defence in depth, NOT the fail-closed gate. The gate is
+	// unchanged and lives in main: verifyAttestation's error exits the process
+	// with exitAttestationMismatch before Supervisor.Run is ever entered, so
+	// the child is never exec'd on a mismatch. Nothing here can let a
+	// mismatched tree start an application; the flag only stops a load
+	// balancer from being told "ready" during the window where the answer is
+	// still unknown.
+	attestationPending atomic.Bool
+
 	srv *http.Server
 }
 
@@ -105,6 +127,17 @@ func NewProbeServer(state ProcessState, probePort, appPort int, log *slog.Logger
 
 	return p
 }
+
+// BeginAttestation marks startup attestation as in flight, which makes
+// /readyz answer 503 until AttestationPassed is called. Call it before
+// starting Serve so no readiness answer can be given for the window between
+// the bind and the verdict.
+func (p *ProbeServer) BeginAttestation() { p.attestationPending.Store(true) }
+
+// AttestationPassed clears the readiness gate BeginAttestation set. It is only
+// ever called on the success path — a failed attestation exits the process, so
+// the flag is never cleared by a failure.
+func (p *ProbeServer) AttestationPassed() { p.attestationPending.Store(false) }
 
 // Serve binds the probe port and serves until Shutdown is called or ctx is
 // cancelled. It is meant to be run on its own goroutine:
@@ -171,13 +204,13 @@ func (p *ProbeServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleReadyz answers readiness from the cached result of the readiness
-// loop, plus an immediate check of ShuttingDown. ShuttingDown is read fresh on
+// loop, plus an immediate check of attestationPending and of ShuttingDown. ShuttingDown is read fresh on
 // every request rather than folded into the cached ready flag so that a pod
 // leaves the load balancer the instant a termination signal lands, without
 // waiting for the next dial tick.
 func (p *ProbeServer) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	st := p.state.State()
-	if st.ShuttingDown || !st.Running || !p.ready.Load() {
+	if p.attestationPending.Load() || st.ShuttingDown || !st.Running || !p.ready.Load() {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}

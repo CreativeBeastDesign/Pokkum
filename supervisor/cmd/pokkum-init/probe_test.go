@@ -243,3 +243,84 @@ func TestServeAndShutdown(t *testing.T) {
 		t.Fatal("serve did not return after Shutdown")
 	}
 }
+
+// TestReadyzGatedOnStartupAttestation covers the readiness half of moving the
+// probe bind ahead of verifyAttestation (see main.go). The listener now binds
+// before /app is hashed, so the container answers probes with real HTTP
+// statuses instead of refusing the connection for the whole verification
+// window — but nothing may report READY inside that window, because the
+// verdict is not in yet.
+//
+// The three states are asserted in the order main produces them:
+//
+//	BeginAttestation      -> /readyz 503 even with a live child and a live dial
+//	AttestationPassed     -> /readyz 200
+//	(default, never told)  -> unchanged pre-existing behaviour
+//
+// Deliberately driven with a state and dialer that would otherwise answer 200,
+// so a 503 here can only come from the attestation gate — an assertion against
+// a server that was going to answer 503 anyway would prove nothing (checklist
+// row 45).
+func TestReadyzGatedOnStartupAttestation(t *testing.T) {
+	// A real listener the readiness dialer can connect to, so p.ready latches
+	// true for genuine reasons.
+	appLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = appLn.Close() }()
+	appPort := appLn.Addr().(*net.TCPAddr).Port
+
+	state := newFakeState(State{Started: true, Running: true})
+	p := NewProbeServer(state, reservePort(t), appPort, nil)
+	p.interval = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.runReadinessLoop(ctx)
+
+	// Baseline: with no attestation declared at all, this server is ready.
+	// Without this the gate assertions below could pass on a server that was
+	// never going to be ready in the first place.
+	waitReadyz(t, p, http.StatusOK, 2*time.Second)
+	if rec := doRequest(t, p, "/healthz"); rec.Code != http.StatusOK {
+		t.Fatalf("baseline /healthz = %d, want 200", rec.Code)
+	}
+
+	// Verification in flight: readiness must be withheld.
+	p.BeginAttestation()
+	if rec := doRequest(t, p, "/readyz"); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("/readyz during startup attestation = %d, want 503", rec.Code)
+	}
+	// ...but liveness must NOT be gated on attestation. /healthz answers only
+	// from the supervisor's own child bookkeeping, exactly as before; making
+	// it depend on attestation would be the "gate something other than
+	// readiness" that moving the bind earlier must not do.
+	if rec := doRequest(t, p, "/healthz"); rec.Code != http.StatusOK {
+		t.Errorf("/healthz during startup attestation = %d, want 200 (liveness must not be gated on attestation)", rec.Code)
+	}
+
+	// Verdict in: readiness resumes.
+	p.AttestationPassed()
+	waitReadyz(t, p, http.StatusOK, 2*time.Second)
+}
+
+// TestReadyzAttestationGateOutranksALiveDial pins the gate's precedence: even
+// if the readiness loop has already latched ready=true (the application port
+// happens to be answering — a stale sidecar, a port reused by something else),
+// a pending attestation still wins. Split from the test above because that one
+// sets the gate after ready latched but does not state that ordering is the
+// point.
+func TestReadyzAttestationGateOutranksALiveDial(t *testing.T) {
+	state := newFakeState(State{Started: true, Running: true})
+	p := NewProbeServer(state, reservePort(t), 1, nil)
+	p.ready.Store(true) // pretend the dial already succeeded
+	p.BeginAttestation()
+	if rec := doRequest(t, p, "/readyz"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz = %d with ready=true and attestation pending, want 503", rec.Code)
+	}
+	p.AttestationPassed()
+	if rec := doRequest(t, p, "/readyz"); rec.Code != http.StatusOK {
+		t.Fatalf("/readyz = %d after attestation passed, want 200", rec.Code)
+	}
+}

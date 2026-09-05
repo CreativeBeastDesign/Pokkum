@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
 	"net/http"
 	"os"
@@ -203,4 +206,76 @@ func waitHealthz(t *testing.T, addr string, want int, d time.Duration) int {
 	defer resp.Body.Close()
 	t.Fatalf("healthz = %d, want %d within %s", resp.StatusCode, want, d)
 	return 0
+}
+
+// TestMainOrdersProbeBindBeforeAttestation pins main's startup ORDER, which is
+// the entire substance of moving the probe bind ahead of verifyAttestation:
+// the property is not "these calls exist" but "they happen in this sequence",
+// and no unit test of either function can observe that.
+//
+// It parses main() out of main.go with go/ast — the same technique
+// TestAttestationRoots_MatchSupervisorMirror uses to keep a hand-copied
+// declaration honest — and asserts the relative positions of five calls:
+//
+//	NewProbeServer -> BeginAttestation -> go Serve -> verifyAttestation -> AttestationPassed -> sup.Run
+//
+// The last pair is the fail-closed invariant in source form: verifyAttestation
+// is called before sup.Run, and its failure branch exits the process, so no
+// reordering can put a child fork in front of the attestation verdict.
+func TestMainOrdersProbeBindBeforeAttestation(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing main.go: %v", err)
+	}
+
+	var mainFn *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "main" && fn.Recv == nil {
+			mainFn = fn
+		}
+	}
+	if mainFn == nil {
+		t.Fatal("no func main in main.go")
+	}
+
+	// Record the source offset of the first occurrence of each call.
+	want := []string{"NewProbeServer", "BeginAttestation", "Serve", "verifyAttestation", "AttestationPassed", "Run"}
+	pos := map[string]int{}
+	ast.Inspect(mainFn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		var name string
+		switch f := call.Fun.(type) {
+		case *ast.Ident:
+			name = f.Name
+		case *ast.SelectorExpr:
+			name = f.Sel.Name
+		}
+		for _, w := range want {
+			if name == w {
+				if _, seen := pos[w]; !seen {
+					pos[w] = fset.Position(call.Pos()).Offset
+				}
+			}
+		}
+		return true
+	})
+
+	// Row 47: a parse that found nothing must not read as a clean pass.
+	for _, w := range want {
+		if _, ok := pos[w]; !ok {
+			t.Fatalf("main() contains no call to %s; this test parsed %d of %d expected calls and cannot vouch for the ordering", w, len(pos), len(want))
+		}
+	}
+
+	for i := 1; i < len(want); i++ {
+		prev, cur := want[i-1], want[i]
+		if pos[prev] >= pos[cur] {
+			t.Errorf("main() calls %s (offset %d) at or after %s (offset %d); required order is %v",
+				prev, pos[prev], cur, pos[cur], want)
+		}
+	}
 }
