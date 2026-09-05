@@ -21,6 +21,14 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### prefilter-soundness / library-semantics-assumption (1)
+
+- `2026-09-05` — A literal prefilter for a `(?i)` regex is unsound if it folds ASCII (Go's `(?i)` is Unicode simple folding; U+017F and U+212A really do match `secretguard`'s live rules), and the "fast literal alternation" it was meant to replace measured 26x SLOWER than the scan it gated. Read before adding any fast path, prefilter or short-circuit in front of an existing check, or before building on a stated performance property of a library.
+
+### repeated-failure-class (1)
+
+- `2026-09-05` — The `bufio.Scanner` token-limit bug was fixed once in `secretguard` and left untouched in `sveltekitutils`, where a strict wiring gates the build on it. A 102KB single-line minified bundle was reported as having zero dynamic imports. Root cause is not the scanner limit (already logged 2026-08-18) but that a post-mortem rule stated over a *class* was acted on for exactly one instance, with nothing enumerating the rest. Read this before writing any entry whose preventative rule generalises past the file the bug was found in.
+
 ### boundary (33)
 
 - `2026-09-01` — `pokkum config validate` reported a config valid that `pokkum deploy` then refused, because it 
