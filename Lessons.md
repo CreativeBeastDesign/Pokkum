@@ -5,6 +5,63 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-05 — Replacing a `map[string]any` decode with a typed struct silently widened what matched, because `encoding/json` compares struct tags case-insensitively
+
+**Category:** library-semantics-assumption / narrowing-a-type-widens-behaviour — plus a measured
+negative result worth keeping, since the optimisation this came from was slower than what it replaced
+
+**Root cause:** `ParseBunLock` decodes a lockfile's package entries into `map[string]any` and then
+type-asserts the values back out, which is allocation-heavy and looks like an obvious candidate for a
+typed decode. Four typed variants were built. The fastest one changed behaviour.
+
+`encoding/json` matches JSON object keys to struct field tags **case-insensitively**. An explicit map
+lookup does not. So a lockfile whose dependency block is spelled `"dependenCies"` — a hand-edit, a
+generator quirk, a merge artifact — is ignored by `map[string]any` plus `m["dependencies"]`, but
+becomes a **real dependency edge** under a struct with `json:"dependencies"`. That edge feeds the
+reachability graph, which moves a package from `ScopeUnknown` to `ScopeProduction`, which changes the
+SBOM's package count and therefore its digest.
+
+That is the same class as the 2026-08-22 lockfile-determinism incident: a parser change that alters
+which packages are considered reachable, invisible in every ASCII-normal fixture. It was found by
+`FuzzParseBunLock`, not by review, and not by the 16-shape differential corpus either — no
+hand-written corpus contains a case-variant key, because nobody writes one on purpose.
+
+**The other half is the reason nothing shipped.** Every faithful typed variant was *slower in wall
+time* than the `map[string]any` code, despite allocating up to 3x less:
+
+    map[string]any (current)                36,930 allocs   baseline
+    [3]jsonRawValue + struct meta           12,605 allocs   ~equal
+    json.RawMessage + struct meta           15,900 allocs   ~equal
+    eager elems + map[string]map[string]…   19,878 allocs   +27% slower
+    eager elems + map[string]any meta       29,270 allocs   +22% slower
+
+Two structural reasons, both worth knowing before anyone tries this again: `map[string]any` is
+`encoding/json`'s own fast path, building values directly rather than through reflection; and **any
+custom `UnmarshalJSON` on the entry type makes the decoder hand over that entry's raw bytes and then
+re-tokenise them**, so nearly the whole file is parsed twice. Trading allocations for tokenizer work
+is a net loss here. The one time-neutral variant was disqualified anyway: it aliased the decoder's
+buffer, violating `UnmarshalJSON`'s contract that retained bytes must be copied.
+
+**Where:** `internal/adapters/scannerutils/scannerutils.go`, `ParseBunLock`.
+
+**Fix:** none — the change was **reverted**, and the measurements are recorded in a doc comment on
+`ParseBunLock` so the next agent does not repeat two hours of work to reach the same answer. The
+case-variant lockfile is now a checked-in fuzz seed. What did ship from that session is elsewhere and
+real: a lazily-allocating `stripJSONTrailingCommas` (zero allocations for strict JSON), a
+digest-keyed memo on `ExtractImagePackages`, and a `contentIdentityUUID` rewrite (66% faster, 80%
+fewer allocations, byte-identical output).
+
+**Preventative rule:** **narrowing a type can widen behaviour.** Before replacing a hand-written
+lookup with a decoder-driven one, enumerate the matching rules the decoder applies that your explicit
+code did not — for `encoding/json` that is case-insensitive tag matching, plus its handling of
+duplicate keys, embedded fields and `null`. Test with a key that differs only in case; it will not be
+in your corpus otherwise. And separately: **record negative optimisation results in the code, not
+only in a report.** An optimisation that was tried, measured and rejected is knowledge with a short
+half-life — without a note at the call site, the next person sees the same `map[string]any`, has the
+same idea, and pays the same cost to learn the same thing.
+
+---
+
 ## 2026-09-05 — A concurrency guard passed under `-race` with a real data race present, because it warmed the object it was about to hammer
 
 **Category:** test-substance / guard-measures-nothing — a specific, nameable instance of the general

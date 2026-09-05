@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -866,24 +867,57 @@ func renderCycloneDXJSON(name, version string, id uuid.UUID, created string, pac
 }
 
 func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPackage, bunVersion, bunSHA256 string, distro scannerutils.DistroInfo, osScanned bool, npmDevExcluded int) uuid.UUID {
+	// The formatted string IS the sort key, so every byte below must match
+	// what fmt.Sprintf("%s@%s@%s@resolved=%v@scope=%s", ...) produced: %s on
+	// PackageType/DependencyScope (both defined string types) is the bare
+	// string, and %v on a bool is "true"/"false" -- exactly what appending
+	// the value and strconv.AppendBool yield. TestContentIdentityUUID_Golden
+	// pins the resulting UUID against a fixed multi-package fixture so a
+	// divergence here cannot pass silently.
 	ids := make([]string, 0, len(packages))
+	scratch := make([]byte, 0, 128)
 	for _, p := range packages {
-		ids = append(ids, fmt.Sprintf("%s@%s@%s@resolved=%v@scope=%s", p.Name, p.Version, p.Type, p.Resolved, p.Scope))
+		scratch = scratch[:0]
+		scratch = append(scratch, p.Name...)
+		scratch = append(scratch, '@')
+		scratch = append(scratch, p.Version...)
+		scratch = append(scratch, '@')
+		scratch = append(scratch, p.Type...)
+		scratch = append(scratch, "@resolved="...)
+		scratch = strconv.AppendBool(scratch, p.Resolved)
+		scratch = append(scratch, "@scope="...)
+		scratch = append(scratch, p.Scope...)
+		ids = append(ids, string(scratch))
 	}
 	sort.Strings(ids)
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "pokkum-sbom\n%s@%s\n", name, version)
+	// One []byte grown once and hashed directly, rather than a
+	// strings.Builder whose String() is then copied again by []byte(...).
+	total := len("pokkum-sbom\n") + len(name) + 1 + len(version) + 1
 	for _, id := range ids {
-		b.WriteString(id)
-		b.WriteByte('\n')
+		total += len(id) + 1
+	}
+	total += 96 // the fixed-shape bun/osScanned/npmDevExcluded tails below
+	b := make([]byte, 0, total)
+	b = append(b, "pokkum-sbom\n"...)
+	b = append(b, name...)
+	b = append(b, '@')
+	b = append(b, version...)
+	b = append(b, '\n')
+	for _, id := range ids {
+		b = append(b, id...)
+		b = append(b, '\n')
 	}
 	if bunVersion != "" {
 		// Appended after the sorted npm ids at a fixed position, so a change
 		// in the resolved Bun version/hash changes the document identity
 		// (matching how an npm package version bump does) without needing
 		// to fold "bun" into the same sort as npm package names.
-		fmt.Fprintf(&b, "bun@%s@%s\n", bunVersion, bunSHA256)
+		b = append(b, "bun@"...)
+		b = append(b, bunVersion...)
+		b = append(b, '@')
+		b = append(b, bunSHA256...)
+		b = append(b, '\n')
 	}
 	// osScanned/distro are folded into identity even though every package
 	// they produced is already present in ids above: a "scanned this
@@ -891,15 +925,23 @@ func contentIdentityUUID(name, version string, packages []scannerutils.CatalogPa
 	// looked at a base image" document can otherwise hash identical (same
 	// packages list, same Bun component) despite making a materially
 	// different claim about what was checked.
-	fmt.Fprintf(&b, "osScanned=%v@distro=%s:%s\n", osScanned, distro.ID, distro.VersionID)
+	b = append(b, "osScanned="...)
+	b = strconv.AppendBool(b, osScanned)
+	b = append(b, "@distro="...)
+	b = append(b, distro.ID...)
+	b = append(b, ':')
+	b = append(b, distro.VersionID...)
+	b = append(b, '\n')
 	// npmDevExcluded is folded in for the identical reason: two builds
 	// whose kept package sets happen to be identical (e.g. the excluded
 	// devDependency set changed but every package's Scope survives kept)
 	// but whose excluded COUNT differs would otherwise hash identical
 	// despite the document's own "pokkum:npmDevDependenciesExcluded"
 	// metadata differing between them.
-	fmt.Fprintf(&b, "npmDevExcluded=%d\n", npmDevExcluded)
-	return uuid.NewSHA1(pokkumSBOMNamespace, []byte(b.String()))
+	b = append(b, "npmDevExcluded="...)
+	b = strconv.AppendInt(b, int64(npmDevExcluded), 10)
+	b = append(b, '\n')
+	return uuid.NewSHA1(pokkumSBOMNamespace, b)
 }
 
 // purlFor derives the Package URL for a catalogued component. distro is the
