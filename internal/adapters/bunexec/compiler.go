@@ -298,6 +298,11 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		targetAdapter = "@sveltejs/adapter-static"
 	}
 
+	// One read of the project's own config files for the whole of the
+	// pre-build phase. Everything below consults this rather than re-reading
+	// from disk — see projectSnapshot.
+	snap := readProjectSnapshot(req.ProjectDir)
+
 	// If target adapter is not configured, either apply Option B (zero-config
 	// virtual Vite config injection) or fail fast if --no-inject is set or
 	// injection fails.
@@ -308,12 +313,12 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	// branch below can point kit.files.routes at the mirror. Output filtering
 	// in core covers whatever this could not.
 	var routesRedirected bool
-	routesMirror, mirrorErr := stageRoutesMirror(req.ProjectDir, req.ExcludeRoutes, kitVersionForProject(req.ProjectDir), log)
+	routesMirror, mirrorErr := stageRoutesMirror(req.ProjectDir, req.ExcludeRoutes, snap.kitVersion(req.ProjectDir), log)
 	if mirrorErr != nil {
 		return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, mirrorErr)
 	}
 
-	if checkErr := checkEffectiveAdapter(req.ProjectDir, req.Strategy, targetAdapter); checkErr != nil {
+	if checkErr := checkEffectiveAdapter(req.ProjectDir, snap, req.Strategy, targetAdapter); checkErr != nil {
 		if req.NoInject {
 			return ports.PrepareResult{}, checkErr
 		}
@@ -325,8 +330,8 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		// runner, pre-build codegen). Require the script to be exactly
 		// `vite build` before taking over the build invocation; anything
 		// else falls back to Option C's clear, actionable error.
-		pkg, pkgErr := sveltekitutils.ReadPackageJSON(req.ProjectDir)
-		if pkgErr != nil || strings.TrimSpace(pkg.Scripts["build"]) != "vite build" {
+		pkg, pkgErr := snap.pkg, snap.pkgErr
+		if !snap.buildScriptIsPlainViteBuild() {
 			// Injection was available and declined, and saying so turns a dead
 			// end into a choice. Without this the operator gets Option C's
 			// "fix it in vite.config.ts" with no hint that Pokkum would have
@@ -347,14 +352,13 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 			}
 		}
 
-		viteSource, viteName := readViteConfigSource(req.ProjectDir)
 		opts := sveltekitutils.DefaultInjectorOptions()
 		// Tell the injector which svelte config to merge, if any. Without this it
 		// would rewrite a bare sveltekit() into sveltekit({ adapter: adapter() }),
 		// and SvelteKit skips svelte.config.js the moment the plugin receives any
 		// argument — silently discarding the project's aliases, csp, prerender
 		// settings and kit.experimental flags.
-		opts.UserSvelteConfigFile = findUserSvelteConfig(req.ProjectDir)
+		opts.UserSvelteConfigFile = snap.svelteConfigName
 		opts.TargetAdapter = targetAdapter
 		opts.RoutesDir = routesMirror.RoutesDir
 		opts.SourceEpoch = req.SourceDateEpoch.Format("20060102150405")
@@ -362,7 +366,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 			opts.SourceEpoch = "pokkum-reproducible-build"
 		}
 
-		vcVite, err := sveltekitutils.PrepareVirtualViteConfig(req.ProjectDir, viteName, viteSource, opts)
+		vcVite, err := sveltekitutils.PrepareVirtualViteConfig(req.ProjectDir, snap.viteName, snap.viteSource, opts)
 		if err != nil {
 			log.Warn("bunexec: failed to prepare virtual vite config; falling back to error", "err", err)
 			return ports.PrepareResult{}, checkErr
@@ -385,9 +389,9 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		// setup, codegen or a task runner the real script also does. When it
 		// is not, the build proceeds unchanged via `bun run build` and simply
 		// does not get the sort — correctness first, determinism second.
-		if viteSource, viteName := readViteConfigSource(req.ProjectDir); strings.TrimSpace(viteSource) != "" &&
-			sveltekitutils.HasLiveSvelteKitCall(viteSource) && buildScriptIsPlainViteBuild(req.ProjectDir) {
-			vcVite, err := sveltekitutils.PrepareVirtualViteConfigPassthrough(req.ProjectDir, viteName, viteSource, routesMirror.RoutesDir)
+		if strings.TrimSpace(snap.viteSource) != "" &&
+			sveltekitutils.HasLiveSvelteKitCall(snap.viteSource) && snap.buildScriptIsPlainViteBuild() {
+			vcVite, err := sveltekitutils.PrepareVirtualViteConfigPassthrough(req.ProjectDir, snap.viteName, snap.viteSource, routesMirror.RoutesDir)
 			if err != nil {
 				log.Warn("bunexec: could not prepare the determinism config; building without it (the image will still be correct, but two builds of identical source may differ)", "err", err)
 			} else {
@@ -418,8 +422,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	// an hour of a build-instrument-rebuild loop to notice. `runViteWrapper` is
 	// the honest condition anyway — what matters is whether a config was staged,
 	// not which branch decided that.
-	if pinViteSource, pinViteName := readViteConfigSource(req.ProjectDir); !runViteWrapper &&
-		!sveltekitutils.VersionNamePinned(readConfigSource(req.ProjectDir), pinViteSource) {
+	if !runViteWrapper && !sveltekitutils.VersionNamePinned(snap.svelteSource, snap.viteSource) {
 		// The adapter is already correct, so nothing above ran — and the version
 		// pin lives inside that injection path. That inverts the property this
 		// tool sells: a project configured correctly gets no injection, no pin,
@@ -433,12 +436,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		// build` — because swapping in `bun x vite build` silently skips
 		// anything else the script does. Where that holds, pin it. Where it does
 		// not, say so rather than shipping a quietly unreproducible image.
-		pinnable := false
-		if !req.NoInject {
-			if pkgForPin, pkgErr := sveltekitutils.ReadPackageJSON(req.ProjectDir); pkgErr == nil {
-				pinnable = strings.TrimSpace(pkgForPin.Scripts["build"]) == "vite build"
-			}
-		}
+		pinnable := !req.NoInject && snap.buildScriptIsPlainViteBuild()
 
 		switch {
 		case pinnable:
@@ -449,8 +447,8 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 			if req.SourceDateEpoch.IsZero() {
 				opts.SourceEpoch = "pokkum-reproducible-build"
 			}
-			opts.UserSvelteConfigFile = findUserSvelteConfig(req.ProjectDir)
-			vcPin, pinErr := sveltekitutils.PrepareVirtualViteConfig(req.ProjectDir, pinViteName, pinViteSource, opts)
+			opts.UserSvelteConfigFile = snap.svelteConfigName
+			vcPin, pinErr := sveltekitutils.PrepareVirtualViteConfig(req.ProjectDir, snap.viteName, snap.viteSource, opts)
 			if pinErr != nil {
 				log.Warn("kit.version.name is not pinned and Pokkum could not stage a config to pin it, so this build is NOT bit-for-bit reproducible: "+
 					"SvelteKit falls back to a Date.now() version name that lands in _app/version.json and renames every client chunk. "+
@@ -519,41 +517,40 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	// testdata/fixtures/sveltekit-basic's convention) — this is not the same
 	// as the .pokkum/svelte.config.js virtual-config write PrepareVirtualConfig
 	// used to also perform here: that output is never read by either build
-	// Vendor the project's production dependencies for layered builds, before
-	// the build rather than after: Vite externalises dependencies during the SSR
-	// build, so the server bundle keeps bare imports that resolve to nothing
-	// inside the image unless the tree ships alongside it — and if the install
-	// is going to fail, failing here costs seconds instead of a full build.
-	//
-	// Only layered needs it. exe compiles a single self-contained binary, and
-	// static serves files with no JS runtime at all.
-	var nodeModulesDir string
-	if req.Strategy == ports.StrategyLayered {
-		staged, vendErr := stageProductionDependencies(ctx, req.ProjectDir, req.Hermetic, log)
-		if vendErr != nil {
-			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, vendErr)
-		}
-		nodeModulesDir = staged
-
-		// The staging step above can succeed and still under-deliver: `bun
-		// install --production` exits 0 having installed nothing when the
-		// lockfile disagrees with the manifest, and the resulting image starts
-		// cleanly with both probes passing. Checking the manifest against what
-		// was actually staged is the only thing between that and a 500 in
-		// production.
-		missing, checkErr := verifyProductionDependenciesResolvable(req.ProjectDir, nodeModulesDir)
-		if checkErr != nil {
-			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, checkErr)
-		}
-		if len(missing) > 0 {
-			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %s: %w",
-				req.ProjectDir, formatMissingDependencies(missing, nodeModulesDir), core.ErrInvalidRequest)
-		}
-	}
-
 	// path (bun run build reads the real svelte.config.js; the Option B
 	// wrapper points Vite at .pokkum/vite.config.ts instead), so it's dropped.
 	baseEnv := buildEnvWithEpoch(req.Env, req.SourceDateEpoch)
+
+	// Vendor the project's production dependencies for layered builds. Vite
+	// externalises dependencies during the SSR build, so the server bundle
+	// keeps bare imports that resolve to nothing inside the image unless the
+	// tree ships alongside it.
+	//
+	// Started here and joined after the build, not run to completion here. The
+	// install reads package.json and the lockfile and writes only into
+	// .pokkum/vendor; the Vite build reads src/ and node_modules/ and writes
+	// build/. They share nothing, so serializing them put a 3-10s install in
+	// front of a 20-60s build for no reason at all.
+	//
+	// Dispatch deliberately sits *below* checkEffectiveAdapter and the
+	// injection block rather than at the very top of Prepare: a misconfigured
+	// project must still fail before any subprocess is spawned or anything is
+	// written into .pokkum/ (see TestPrepare_FailsFastWhenAdapterNotConfigured).
+	// Nothing between here and the build takes measurable time, so the overlap
+	// with the build — the only part worth overlapping — is unaffected.
+	//
+	// Only layered needs it. exe compiles a single self-contained binary, and
+	// static serves files with no JS runtime at all.
+	var vendor *vendorJob
+	if req.Strategy == ports.StrategyLayered {
+		vendor = startVendorInstall(ctx, req.ProjectDir, req.Hermetic, log)
+		// Registered at dispatch, not at the join, so every return between
+		// here and there — hermetic verification failures, a cmd.Start
+		// failure, a failed build — tears the install down instead of leaving
+		// a bun process and a goroutine behind. join() is a nil-safe no-op for
+		// the non-layered strategies that never dispatch.
+		defer vendor.stop()
+	}
 
 	if !req.NoInject {
 		sourceEpoch := req.SourceDateEpoch.Format("20060102150405")
@@ -571,7 +568,7 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 
 	// runViteWrapper is now final: it is exactly the condition under which the
 	// deterministic-ordering prelude reaches this build.
-	warnIfRemoteOrderingUnfixed(log, req.ProjectDir, readViteConfigSourceText(req.ProjectDir), runViteWrapper)
+	warnIfRemoteOrderingUnfixed(log, req.ProjectDir, snap.viteSource, runViteWrapper)
 
 	var cmd *exec.Cmd
 	if runViteWrapper {
@@ -665,14 +662,59 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 
 	runErr := cmd.Wait()
 
+	// Join the concurrent vendor install before deciding anything about the
+	// build's outcome — including before returning a build failure. The
+	// install ran alongside the build, so its result is not optional
+	// information: a build that succeeded while the install failed produced
+	// output that cannot run in the image.
+	nodeModulesDir, vendErr := vendor.join()
+
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, ctxErr)
+	}
+
+	// The vendor error wins when both failed, deliberately and for a reason
+	// that outlives this comment: before the install was made concurrent it ran
+	// to completion *first* and its failure returned before `bun run build` was
+	// ever spawned, so a failing install was always the error an operator saw.
+	// Running the two in parallel is a scheduling change, and a scheduling
+	// change must not silently change which of two failures gets reported. The
+	// build's own failure is folded into the message rather than dropped, so
+	// nothing that was previously visible becomes invisible.
+	if vendErr != nil {
+		if runErr != nil {
+			return ports.PrepareResult{}, fmt.Errorf(
+				"bunexec: prepare %s: %w (the SvelteKit build, which ran concurrently, also failed: %v: %s)",
+				req.ProjectDir, vendErr, runErr, strings.TrimSpace(stderrBuf.String()),
+			)
+		}
+		return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, vendErr)
 	}
 	if runErr != nil {
 		return ports.PrepareResult{}, fmt.Errorf(
 			"bunexec: prepare %s: bun run build failed: %s: %w: %w",
 			req.ProjectDir, strings.TrimSpace(stderrBuf.String()), runErr, core.ErrPrepareFailed,
 		)
+	}
+
+	// The staging step can succeed and still under-deliver: `bun install
+	// --production` exits 0 having installed nothing when the lockfile
+	// disagrees with the manifest, and the resulting image starts cleanly with
+	// both probes passing. Checking the manifest against what was actually
+	// staged is the only thing between that and a 500 in production.
+	//
+	// Checked against the pre-build manifest snapshot rather than a fresh read:
+	// the install resolved that exact content, so verifying against anything
+	// else would be comparing a tree to a manifest it was never installed from.
+	if req.Strategy == ports.StrategyLayered {
+		missing, checkErr := verifyStagedProductionDependencies(snap.pkg, snap.pkgErr, nodeModulesDir)
+		if checkErr != nil {
+			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %w", req.ProjectDir, checkErr)
+		}
+		if len(missing) > 0 {
+			return ports.PrepareResult{}, fmt.Errorf("bunexec: prepare %s: %s: %w",
+				req.ProjectDir, formatMissingDependencies(missing, nodeModulesDir), core.ErrInvalidRequest)
+		}
 	}
 
 	if req.Strategy.ApplyStatic() {
@@ -708,6 +750,14 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 		// of truth for WHAT WAS EMITTED is the staged output, verified below.
 		// A fallback that was configured but not emitted is a hard failure — the
 		// packager would otherwise silently drop the SPA shell from the image.
+		// Deliberately re-read rather than taken from snap: this is the one
+		// consultation of svelte.config.js that happens *after* the SvelteKit
+		// build has run in the project directory, and it reconciles what the
+		// config asks for against what the build emitted. Answering it from a
+		// snapshot taken before the build would assert a fallback was "not
+		// configured" for any project whose build step generates or rewrites
+		// svelte.config.js, silently dropping the SPA shell from the image —
+		// exactly the failure the hard error below exists to prevent.
 		if rel, configured := sveltekitutils.StaticFallbackFilename(readConfigSource(req.ProjectDir)); configured {
 			emitted := filepath.Join(outputDir, "client", rel)
 			// Guard against a config-escape: a fallback name containing a path
@@ -914,6 +964,73 @@ func readViteConfigSource(projectDir string) (source, name string) {
 	return "", ""
 }
 
+// projectSnapshot is one read of the project's own configuration files, taken
+// once at the top of Prepare and threaded through every decision that consults
+// them.
+//
+// Prepare used to re-read the Vite config four separate times, package.json
+// four times and svelte.config.js twice, each a fresh os.ReadFile plus parse.
+// The parsing cost was never the point — it is microseconds. The point is that
+// a decision made from one read and acted on after another is a TOCTOU
+// surface: whether the adapter is configured, whether the build script is
+// exactly `vite build`, and which file the adapter was read from are answers
+// that must all describe the same project state, and eight independent reads
+// interleaved with `bun` subprocesses do not guarantee that.
+//
+// This snapshot deliberately covers only the reads taken *before* the
+// SvelteKit build runs. The adapter-static fallback check reads
+// svelte.config.js again afterwards, on purpose — see its call site.
+type projectSnapshot struct {
+	// svelteSource is svelte.config.js's raw source, "" when it has none.
+	svelteSource string
+	// svelteConfigName is the svelte config *filename* the injector should
+	// merge (svelte.config.js or .ts), "" when the project has neither.
+	svelteConfigName string
+	// viteSource/viteName are the raw source and filename of the Vite config
+	// Vite itself would load, ("", "") when the project has none.
+	viteSource string
+	viteName   string
+	// pkg is the parsed package.json; pkgErr records a read/parse failure,
+	// which several call sites treat as "assume nothing" rather than fatal.
+	pkg    sveltekitutils.PackageJSON
+	pkgErr error
+}
+
+// readProjectSnapshot reads every config file Prepare consults before the
+// build, once.
+func readProjectSnapshot(projectDir string) projectSnapshot {
+	viteSource, viteName := readViteConfigSource(projectDir)
+	pkg, pkgErr := sveltekitutils.ReadPackageJSON(projectDir)
+	return projectSnapshot{
+		svelteSource:     readConfigSource(projectDir),
+		svelteConfigName: findUserSvelteConfig(projectDir),
+		viteSource:       viteSource,
+		viteName:         viteName,
+		pkg:              pkg,
+		pkgErr:           pkgErr,
+	}
+}
+
+// buildScriptIsPlainViteBuild reports whether package.json's build script is
+// exactly `vite build`. See the Option B comment in Prepare for why taking
+// over the build invocation requires this. An unreadable package.json is
+// false: Pokkum does not take over a build script it could not read.
+func (s projectSnapshot) buildScriptIsPlainViteBuild() bool {
+	if s.pkgErr != nil {
+		return false
+	}
+	return strings.TrimSpace(s.pkg.Scripts["build"]) == "vite build"
+}
+
+// kitVersion resolves the project's installed @sveltejs/kit version, falling
+// back to its declared range when node_modules has not been installed.
+func (s projectSnapshot) kitVersion(projectDir string) string {
+	if s.pkgErr != nil {
+		return ""
+	}
+	return sveltekitutils.ResolveVersion(projectDir, kitPackage, s.pkg)
+}
+
 // checkEffectiveAdapter fails the build when targetAdapter — the adapter this
 // strategy's post-build contract depends on — is not configured in the file
 // SvelteKit will actually read for this project.
@@ -929,11 +1046,10 @@ func readViteConfigSource(projectDir string) (source, name string) {
 //     — including a svelte.config.js that already names the package correctly —
 //     accomplishes nothing at all. This is the shape current `sv create`
 //     scaffolds produce.
-func checkEffectiveAdapter(projectDir string, strategy ports.BuildStrategy, targetAdapter string) error {
-	svelteSource := readConfigSource(projectDir)
-	viteSource, viteName := readViteConfigSource(projectDir)
+func checkEffectiveAdapter(projectDir string, snap projectSnapshot, strategy ports.BuildStrategy, targetAdapter string) error {
+	svelteSource := snap.svelteSource
 
-	configured, readFrom, overridden := sveltekitutils.EffectiveAdapterConfigured(svelteSource, viteSource, viteName, targetAdapter)
+	configured, readFrom, overridden := sveltekitutils.EffectiveAdapterConfigured(svelteSource, snap.viteSource, snap.viteName, targetAdapter)
 	if configured {
 		return nil
 	}
@@ -1192,23 +1308,4 @@ func projectConfigMentionsRemoteFunctions(projectDir string) bool {
 		}
 	}
 	return false
-}
-
-// buildScriptIsPlainViteBuild reports whether package.json's build script is
-// exactly `vite build`. See the Option B comment above for why taking over the
-// build invocation requires this.
-func buildScriptIsPlainViteBuild(projectDir string) bool {
-	pkg, err := sveltekitutils.ReadPackageJSON(projectDir)
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(pkg.Scripts["build"]) == "vite build"
-}
-
-// readViteConfigSourceText returns the project's Vite config source, or "" if
-// it has none. A thin wrapper so the warning above can read it without caring
-// which filename matched.
-func readViteConfigSourceText(projectDir string) string {
-	src, _ := readViteConfigSource(projectDir)
-	return src
 }

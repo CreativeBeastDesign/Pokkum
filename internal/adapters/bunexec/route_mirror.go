@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/routefilterutils"
-	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekitutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 )
 
@@ -168,14 +167,4 @@ func parseSemverPrefix(v string) ([3]int, bool) {
 		out[i] = n
 	}
 	return out, true
-}
-
-// kitVersionForProject resolves the project's installed @sveltejs/kit version,
-// falling back to its declared range when node_modules has not been installed.
-func kitVersionForProject(projectDir string) string {
-	pkg, err := sveltekitutils.ReadPackageJSON(projectDir)
-	if err != nil {
-		return ""
-	}
-	return sveltekitutils.ResolveVersion(projectDir, kitPackage, pkg)
 }

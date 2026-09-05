@@ -33,8 +33,22 @@ import (
 // construction absent from `dependencies`.
 func verifyProductionDependenciesResolvable(projectDir, stagedModulesDir string) ([]string, error) {
 	pkg, err := sveltekitutils.ReadPackageJSON(projectDir)
-	if err != nil {
-		return nil, fmt.Errorf("bunexec: reading package.json for dependency check: %w", err)
+	return verifyStagedProductionDependencies(pkg, err, stagedModulesDir)
+}
+
+// verifyStagedProductionDependencies is verifyProductionDependenciesResolvable
+// against an already-parsed manifest.
+//
+// Prepare uses this form rather than the path-taking one above because the
+// vendor install runs concurrently with the SvelteKit build and is verified
+// after it: re-reading package.json at that point would compare the staged
+// tree against a manifest that is not necessarily the one the install
+// resolved. pkgErr is threaded in rather than swallowed so an unreadable
+// manifest is still a hard error here, exactly as it was when this function
+// did the reading itself.
+func verifyStagedProductionDependencies(pkg sveltekitutils.PackageJSON, pkgErr error, stagedModulesDir string) ([]string, error) {
+	if pkgErr != nil {
+		return nil, fmt.Errorf("bunexec: reading package.json for dependency check: %w", pkgErr)
 	}
 	if len(pkg.Dependencies) == 0 {
 		return nil, nil

@@ -872,7 +872,12 @@ func TestPrepare_ZeroConfigAutoInjection_EngagesViteWrapper(t *testing.T) {
 	// and invokes vite build with --config.
 	dir := newProjectDirWithVite(t, viteBuildPackageJSON, "", realSvCreateDefaultViteConfigTS)
 	argsSentinel := filepath.Join(t.TempDir(), "bun-args.txt")
-	putFakeBunOnPath(t, `echo "$@" > `+argsSentinel+`; mkdir -p build; touch build/index.js; echo 'path.join(dir, "prerendered")' > build/handler.js; exit 0`)
+	// Appended, not overwritten: the production-dependency install now runs
+	// concurrently with the build and invokes this same fake bun, so a
+	// truncating redirect would race and whichever invocation finished last
+	// would be the only one recorded. The assertion below is a Contains over
+	// the whole log, so capturing both argv lines is strictly better.
+	putFakeBunOnPath(t, `echo "$@" >> `+argsSentinel+`; mkdir -p build; touch build/index.js; echo 'path.join(dir, "prerendered")' > build/handler.js; exit 0`)
 	c := NewCompiler(discardLogger())
 
 	res, err := c.Prepare(context.Background(), ports.PrepareRequest{ProjectDir: dir, Strategy: ports.StrategyLayered, SourceDateEpoch: time.Unix(0, 0)})
