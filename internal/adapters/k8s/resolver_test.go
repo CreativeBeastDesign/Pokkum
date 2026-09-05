@@ -1367,6 +1367,80 @@ spec:
 		}
 	})
 
+	// Every other subtest here asserts a probe is *present*. None asserted
+	// what its values were, so the readiness probe carried
+	// initialDelaySeconds: 5 on top of a startupProbe that already gates
+	// readiness — a guaranteed 5s of pod-not-Ready per container, invisible
+	// to a presence check. This subtest parses the values, so a regression
+	// in the numbers fails rather than passing quietly.
+	t.Run("readiness is not delayed behind the startup probe", func(t *testing.T) {
+		doc := ports.Document{
+			Name: "deploy.yaml",
+			Content: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+      - name: main
+        image: pokkum://./src/app
+`),
+		}
+		res, err := r.Resolve(ctx, ports.ResolveRequest{
+			Documents:     []ports.Document{doc},
+			ProbeDefaults: true,
+			Build:         buildFn,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var parsed struct {
+			Spec struct {
+				Template struct {
+					Spec struct {
+						Containers []struct {
+							ReadinessProbe struct {
+								InitialDelaySeconds int `yaml:"initialDelaySeconds"`
+								PeriodSeconds       int `yaml:"periodSeconds"`
+							} `yaml:"readinessProbe"`
+							StartupProbe struct {
+								PeriodSeconds    int `yaml:"periodSeconds"`
+								FailureThreshold int `yaml:"failureThreshold"`
+							} `yaml:"startupProbe"`
+						} `yaml:"containers"`
+					} `yaml:"spec"`
+				} `yaml:"template"`
+			} `yaml:"spec"`
+		}
+		if err := yaml.Unmarshal(res.Documents[0].Content, &parsed); err != nil {
+			t.Fatalf("parse resolved manifest: %v", err)
+		}
+		if len(parsed.Spec.Template.Spec.Containers) != 1 {
+			t.Fatalf("expected exactly 1 container, got %d", len(parsed.Spec.Template.Spec.Containers))
+		}
+		c := parsed.Spec.Template.Spec.Containers[0]
+
+		// The startupProbe must still be the thing providing startup grace,
+		// otherwise dropping the readiness delay would be trading one gate
+		// for none.
+		if c.StartupProbe.PeriodSeconds*c.StartupProbe.FailureThreshold < 60 {
+			t.Errorf("startupProbe grace = %ds (%d * %d), want at least 60s; readiness relies on it",
+				c.StartupProbe.PeriodSeconds*c.StartupProbe.FailureThreshold,
+				c.StartupProbe.PeriodSeconds, c.StartupProbe.FailureThreshold)
+		}
+		if c.ReadinessProbe.InitialDelaySeconds != 0 {
+			t.Errorf("readinessProbe.initialDelaySeconds = %d, want 0: the startupProbe already gates readiness, so an upfront delay only postpones Ready",
+				c.ReadinessProbe.InitialDelaySeconds)
+		}
+		if c.ReadinessProbe.PeriodSeconds > 3 {
+			t.Errorf("readinessProbe.periodSeconds = %d, want <= 3: a longer period pushes a missed probe's retry that many seconds further out",
+				c.ReadinessProbe.PeriodSeconds)
+		}
+	})
+
 	t.Run("does not inject when ProbeDefaults is false", func(t *testing.T) {
 		doc := ports.Document{
 			Name: "deploy.yaml",

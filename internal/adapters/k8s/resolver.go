@@ -878,7 +878,26 @@ func injectContainerProbeDefaults(container *yaml.Node) {
 		return
 	}
 	if _, ok := mapGet(container, "readinessProbe"); !ok {
-		mapAppend(container, "readinessProbe", probeNode(ports.ProbePathReady, 10, 3, 5))
+		// No initialDelaySeconds, and a short period, both for the same
+		// reason the paragraph above gives: liveness and readiness do not
+		// begin counting until startupProbe has succeeded once, so the
+		// startupProbe IS the "has it started yet" gate and an upfront
+		// readiness delay guards nothing that is not already guarded.
+		//
+		// It does cost, though. initialDelaySeconds is measured from
+		// container start, so a 5s delay meant a container whose
+		// startupProbe succeeded at t=2s still could not be marked Ready
+		// before t=5s; and at periodSeconds: 10 a single missed probe
+		// pushed the next attempt to t=15s. That is 5-13s of
+		// pod-not-Ready on every pod of every rollout, spent waiting
+		// rather than checking.
+		//
+		// periodSeconds: 3 is affordable here specifically because
+		// /readyz is not a dial-on-demand endpoint — pokkum-init serves
+		// it from a cached atomic refreshed by its own ticker (see
+		// supervisor/cmd/pokkum-init/probe.go), so probe traffic cannot
+		// be turned into load against the application.
+		mapAppend(container, "readinessProbe", probeNode(ports.ProbePathReady, 3, 3, 0))
 	}
 	if _, ok := mapGet(container, "livenessProbe"); !ok {
 		mapAppend(container, "livenessProbe", probeNode(ports.ProbePathLive, 10, 3, 10))
