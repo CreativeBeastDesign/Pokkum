@@ -4,7 +4,6 @@ import (
 	"context"
 	"debug/elf"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -48,58 +47,77 @@ func NewClosuredAdapter() *ClosuredNativeAdapter {
 
 // Inspect scans projectDir, inspects target ELF binaries, builds the .so closure,
 // and checks glibc symbol versions.
-func (a *ClosuredNativeAdapter) Inspect(_ context.Context, projectDir string, targetPlatform ports.Platform) (ports.NativeInspectionResult, error) {
+//
+// node_modules is traversed exactly ONCE: sveltekitutils.ScanNativeModules
+// classifies every entry for both the native-module verdict and the ELF
+// candidate list in a single filepath.WalkDir pass. This function previously
+// called CheckNativeModules (one full filepath.Walk of node_modules) and then
+// ran a second, independent filepath.Walk of the same tree for ELF binaries.
+//
+// ctx is honoured: both the node_modules traversal and the per-binary ELF
+// inspection loop below stop on cancellation, so a cancelled build no longer
+// walks a 40k-file tree to completion. sbom.Generator and secretguard.Adapter
+// already did this; this adapter was the outlier.
+func (a *ClosuredNativeAdapter) Inspect(ctx context.Context, projectDir string, targetPlatform ports.Platform) (ports.NativeInspectionResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ports.NativeInspectionResult{}, err
+	}
+
 	pkg, err := sveltekitutils.ReadPackageJSON(projectDir)
 	if err != nil {
 		pkg = sveltekitutils.PackageJSON{}
 	}
 
-	nativeRes := sveltekitutils.CheckNativeModules(projectDir, pkg)
-	dynamicRes := sveltekitutils.CheckDynamicImports(projectDir)
+	scan, err := sveltekitutils.ScanNativeModules(ctx, projectDir, pkg)
+	if err != nil {
+		return ports.NativeInspectionResult{}, fmt.Errorf("nativeinspect closured: scan node_modules under %s: %w", projectDir, err)
+	}
+	nativeRes := scan.Native
+
+	dynamicRes, err := sveltekitutils.ScanDynamicImports(ctx, projectDir, 0)
+	if err != nil {
+		return ports.NativeInspectionResult{}, fmt.Errorf("nativeinspect closured: scan dynamic imports under %s: %w", projectDir, err)
+	}
 
 	result := ports.NativeInspectionResult{
 		HasNativeModules:             nativeRes.HasNativeModules,
 		HasUnsupportedDynamicImports: dynamicRes.HasUnsupportedDynamicImports,
 		DetectedModules:              nativeRes.DetectedModules,
 		DetectedDynamicImports:       dynamicRes.DetectedLocations,
-		Reasons:                      append(append([]string{}, nativeRes.Reasons...), dynamicRes.Reasons...),
-		GlibcVersionMax:              "2.17",
+		// dynamicRes.Reasons already carries a line per skipped file, so a file
+		// the scan could not read is reported here rather than silently folded
+		// into "found nothing".
+		Reasons:         append(append([]string{}, nativeRes.Reasons...), dynamicRes.Reasons...),
+		GlibcVersionMax: "2.17",
 	}
 
 	seenLibs := make(map[string]bool)
 
-	nodeModulesDir := filepath.Join(projectDir, "node_modules")
-	if info, err := os.Stat(nodeModulesDir); err == nil && info.IsDir() {
-		_ = filepath.Walk(nodeModulesDir, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
-				return nil
+	for _, path := range scan.ELFCandidates {
+		if err := ctx.Err(); err != nil {
+			return ports.NativeInspectionResult{}, err
+		}
+
+		needed, maxGlibc, err := InspectELFBinary(path)
+		if err != nil {
+			continue
+		}
+
+		for _, lib := range needed {
+			if !standardBaseLibs[lib] && !seenLibs[lib] {
+				seenLibs[lib] = true
+				result.RequiredSOLibs = append(result.RequiredSOLibs, lib)
 			}
+		}
 
-			ext := strings.ToLower(filepath.Ext(path))
-			if ext == ".node" || ext == ".so" || strings.Contains(info.Name(), ".so.") {
-				needed, maxGlibc, err := InspectELFBinary(path)
-				if err != nil {
-					return nil
-				}
+		if CompareGlibcVersions(maxGlibc, result.GlibcVersionMax) > 0 {
+			result.GlibcVersionMax = maxGlibc
+		}
 
-				for _, lib := range needed {
-					if !standardBaseLibs[lib] && !seenLibs[lib] {
-						seenLibs[lib] = true
-						result.RequiredSOLibs = append(result.RequiredSOLibs, lib)
-					}
-				}
-
-				if CompareGlibcVersions(maxGlibc, result.GlibcVersionMax) > 0 {
-					result.GlibcVersionMax = maxGlibc
-				}
-
-				if a.MaxGlibcVersion != "" && CompareGlibcVersions(maxGlibc, a.MaxGlibcVersion) > 0 {
-					relPath, _ := filepath.Rel(projectDir, path)
-					result.Reasons = append(result.Reasons, fmt.Sprintf("%s requires GLIBC %s, which exceeds base image limit (%s)", relPath, maxGlibc, a.MaxGlibcVersion))
-				}
-			}
-			return nil
-		})
+		if a.MaxGlibcVersion != "" && CompareGlibcVersions(maxGlibc, a.MaxGlibcVersion) > 0 {
+			relPath, _ := filepath.Rel(projectDir, path)
+			result.Reasons = append(result.Reasons, fmt.Sprintf("%s requires GLIBC %s, which exceeds base image limit (%s)", relPath, maxGlibc, a.MaxGlibcVersion))
+		}
 	}
 
 	return result, nil

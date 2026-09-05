@@ -5,6 +5,74 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-05 — The `bufio.Scanner` token-limit bug was fixed once in `secretguard` and left untouched in `sveltekitutils`, where a strict wiring gates the build on it
+
+**Category:** repeated-failure-class / resource-limit-vs-realistic-input — the same defect as the
+2026-08-18 `secretguard` entry, in a second file, found by reading that entry rather than by anything
+that checks for it
+
+**Root cause:** `CheckDynamicImports` read each candidate `.js`/`.mjs`/`.cjs`/`.ts` file through a
+`bufio.Scanner`, whose default token buffer is 64KiB, and never checked `scanner.Err()`. A minified
+bundle emits a single line far longer than that — a bundler's whole purpose is fewer, longer lines —
+so `Scan()` returned false with `bufio.ErrTooLong` on the first call, the loop body never ran, and
+the file was reported as containing no dynamic imports at all. Run standalone against a 102,454-byte
+single-line fixture containing `import('./routes/'+routeName)`, the old loop reports
+`lines scanned=0  computed imports found=0  scanner.Err()=bufio.Scanner: token too long`.
+
+That mechanism is not the lesson; it was already written down. The 2026-08-18 entry describes this
+exact failure in `secretguard`, and its preventative rule is stated over a *class* — "any
+text-scanning code bounded by a fixed token/line/buffer-size constant" — not over the one file it was
+found in. What acted on that rule, though, was a single fix to `guard.go`. Nothing enumerated the
+repo's other `bufio.Scanner` users at the time, and nothing checks a new one on the way in, so a
+class-level rule ended up protecting exactly one instance of the class. The second instance sat
+untouched for two and a half weeks in a package whose entire job is to decide whether a bundle is
+compilable.
+
+Two things kept it invisible. `ClosuredNativeAdapter` — the adapter the shipped pipeline wires in —
+discards this verdict entirely (`internal/core/pipeline.go` calls `Inspect` for its error only), so
+under the default wiring the check is inert. `StrictNativeAdapter` does gate the build on
+`HasUnsupportedDynamicImports`, and under that wiring the check silently passed exactly the minified
+bundles it exists to reject. "Currently inert" is a property of the wiring, not of the defect, and it
+changes without anyone touching the defective code — the `secretguard` bug was likewise inert until
+the scan was pointed at build output.
+
+**Where:** `internal/adapters/sveltekitutils/dynamic_import.go`, the `scanFile` closure inside
+`CheckDynamicImports`; consumed by `internal/adapters/nativeinspect/strict.go` (`Inspect`, the
+`HasUnsupportedDynamicImports` gate).
+
+**Fix:** scanning no longer uses `bufio.Scanner`. `ScanDynamicImports` reads each file whole up to a
+caller-supplied ceiling (`DefaultMaxDynamicImportScanBytes`, 16MiB — deliberately the same value as
+`secretguard`'s `defaultMaxFileSizeBytes`, since the two walk the same trees and a quieter ceiling in
+one of them is a coverage gap nobody stated), sniffs 512 bytes for NULs so a mislabeled binary stays
+cheap, and splits with `bytes.Split`. A file that cannot be inspected — over the ceiling, or failing
+after a clean open — is recorded in the new `DynamicImportCheckResult.SkippedFiles` and reported in
+`Reasons`, and `StrictNativeAdapter` now fails preflight on a non-empty skip list: "I could not look
+at this file" is a distinct outcome from "I looked and found nothing," which is the same distinction
+`core.ErrSecretScanIncomplete` draws for `secretguard`. The sibling one-match-per-line bug from that
+same post-mortem was present here too — dedupe keyed on `file:line` alone, so a minified bundle,
+whose one line is the whole file, could report at most one finding however many it had — and is fixed
+by keying on location *and* expression. Guards for the >64KiB line, the reported skip, and the
+per-line multiplicity were each shown failing against the pre-fix code before being trusted.
+
+**Sweep (done this session, so the rule below is one this entry actually followed):**
+`grep -rn 'bufio.NewScanner' --include='*.go'` returns six production call sites. Five check
+`scanner.Err()` (`scannerutils.ParseOSRelease`, `ParseDPKGStatus`, `ParseAPKInstalled`,
+`ignoreutils.Load`, `scripts/gen-docs/findings.go`), and three of those also raise the token buffer
+to 1MiB rather than relying on the 64KiB default. The one remaining unchecked scanner is
+`cmd/pokkum/init.go`'s interactive prompt reader, where the input is a human typing at a terminal and
+a truncated read has no "reported clean" semantics to corrupt — noted as a deliberate exemption, not
+an oversight. `dynamic_import.go` was the last instance of the class with the silent-false-negative
+shape.
+
+**Preventative rule:** a preventative rule that names a *class* of code is enforced only if something
+enumerates the class. When a post-mortem's rule generalises past the file the bug was found in, sweep
+the repo for the rest of the class **in the same session** — `grep -rn 'bufio.NewScanner'` costs
+seconds — and either fix each hit or record in the entry why it is exempt; a rule with one fixed
+instance and no sweep is a rule that will be rediscovered rather than applied. Corollary, and the
+reason this one survived: **do not defer a defect because its current caller discards the result.**
+Inertness is a property of the wiring, which changes independently of the defective code, and a
+silent false negative in a build gate is precisely the bug nobody notices when the wiring changes.
+
 ## 2026-09-01 — CI caught what the five-step suite structurally cannot, on the exact class a 2026-08-17 entry had already written a rule for
 
 **Category:** verification-scope — a rule that existed, was correct, and lived where nobody following the documented protocol would read it
