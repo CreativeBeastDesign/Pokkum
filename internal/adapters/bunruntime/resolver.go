@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/clearsign"
@@ -128,10 +130,84 @@ type Resolver struct {
 	ReleaseKeyArmored string
 
 	mu sync.Mutex
+
+	// verifiedMu guards verified (and only that). It is deliberately a
+	// separate mutex from mu: mu is held by checkAndPinChecksum around
+	// pin-store I/O and by Resolve around the cache-path computation, and
+	// funnelling the memo through it would reintroduce exactly the
+	// cross-platform serialization this memo exists to remove.
+	verifiedMu sync.Mutex
+
+	// verified memoises cache hits this process has already fully verified
+	// during this run (see memoizedVerifiedCacheHit). Process-scoped and
+	// in-memory only — it is never written to disk, never seeded from disk,
+	// and does not survive the process, because its whole security argument
+	// is "this same process hashed these exact bytes a moment ago". Nil
+	// until first use; always accessed under verifiedMu.
+	verified map[verifiedMemoKey]verifiedMemoEntry
 }
 
-// NewResolver constructs a BunRuntimeResolver. If cacheDir is empty, it defaults
-// to ~/.cache/pokkum/bun. If httpClient is nil, http.DefaultClient is used.
+// httpTimeouts groups the phase timeouts applied to the resolver's default
+// HTTP client. Grouped in a struct rather than hardcoded so tests can
+// construct the same client shape with short timeouts and assert the
+// behaviour, instead of asserting that a comment exists.
+type httpTimeouts struct {
+	dial           time.Duration
+	tlsHandshake   time.Duration
+	responseHeader time.Duration
+	total          time.Duration
+}
+
+// defaultHTTPTimeouts bounds every network phase this resolver can stall in.
+//
+// Why phase timeouts rather than only http.Client.Timeout: the release
+// archive is a ~90MB download that legitimately takes minutes on a slow or
+// metered link, and http.Client.Timeout covers the whole exchange including
+// the body transfer. A flat timeout tight enough to notice a stalled
+// connection promptly (say 60s) would abort real downloads on slow links,
+// and one loose enough not to (30m) is useless as a stall detector. So the
+// phases that should *never* be slow regardless of link speed — TCP connect,
+// TLS handshake, and time-to-first-response-header — get short bounds on the
+// transport, and the body transfer is left to run at whatever speed the link
+// allows.
+//
+// total is a deliberate backstop on top of that, not the primary mechanism:
+// a connection that stalls *mid-body* is caught by neither
+// ResponseHeaderTimeout (headers already arrived) nor the dial timeout, so
+// without it a half-open connection could still hang the build forever,
+// which is the bug this whole block fixes. 30 minutes is ~50KB/s for a 90MB
+// archive — far below any link a real build runs on, so it cannot abort a
+// legitimate download, while still guaranteeing termination.
+var defaultHTTPTimeouts = httpTimeouts{
+	dial:           15 * time.Second,
+	tlsHandshake:   15 * time.Second,
+	responseHeader: 30 * time.Second,
+	total:          30 * time.Minute,
+}
+
+// newHTTPClient builds the client described by defaultHTTPTimeouts. Clones
+// http.DefaultTransport so proxy-from-environment, HTTP/2 and connection
+// pooling behave exactly as the stdlib default did before this change; only
+// the timeout fields differ.
+func newHTTPClient(t httpTimeouts) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   t.dial,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.TLSHandshakeTimeout = t.tlsHandshake
+	transport.ResponseHeaderTimeout = t.responseHeader
+	return &http.Client{
+		Transport: transport,
+		Timeout:   t.total,
+	}
+}
+
+// NewResolver constructs a BunRuntimeResolver. If cacheDir is empty, it
+// defaults to ~/.cache/pokkum/bun. If httpClient is nil, a client with
+// explicit connect/TLS/response-header timeouts and a generous total
+// backstop is used (see defaultHTTPTimeouts) — never http.DefaultClient,
+// which has no timeout at all.
 func NewResolver(cacheDir string, httpClient *http.Client) *Resolver {
 	if cacheDir == "" {
 		homeDir, err := os.UserCacheDir()
@@ -141,7 +217,12 @@ func NewResolver(cacheDir string, httpClient *http.Client) *Resolver {
 		cacheDir = filepath.Join(homeDir, "pokkum", "bun")
 	}
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		// NOT http.DefaultClient: it has no Timeout and no transport phase
+		// timeouts, so a stalled connection to the release CDN hung the
+		// ~90MB archive download (and the SHASUMS fetch) forever with no
+		// diagnostic. See defaultHTTPTimeouts for why this is phase-based
+		// rather than one flat deadline.
+		httpClient = newHTTPClient(defaultHTTPTimeouts)
 	}
 	return &Resolver{
 		CacheDir:   cacheDir,
@@ -197,16 +278,19 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 		return ports.BunResolverResult{}, fmt.Errorf("bunruntime: resolve target name: %w: %w", err, core.ErrBunResolutionFailed)
 	}
 
-	// The lock only guards the cheap path computation and cache-hit check
-	// below, not the compile/download work that follows: each platform's
-	// cache path is distinct (platformSlug), so concurrent per-platform
-	// resolves from the pipeline's fan-out don't race on the same path, and
-	// holding the lock across a `bun build --compile` subprocess or a
-	// multi-second HTTP download would otherwise serialize per-platform work
-	// the fan-out is meant to run concurrently.
+	// 4. Construct cache path.
+	//
+	// The lock covers *only* the few filepath.Join calls immediately below,
+	// and is released before anything expensive. It used to be held across
+	// verifiedCacheHit as well, under a comment claiming it guarded "the
+	// cheap path computation and cache-hit check" — true by the letter,
+	// false in effect: verifiedCacheHit SHA-256s the entire ~90MB cached
+	// binary, so the pipeline's per-platform fan-out serialized on a 90MB
+	// hash. Nothing in that hash needs the lock; each platform reads its own
+	// distinct path (platformSlug) and the hash mutates no resolver state,
+	// so it now runs outside the lock, as the compile/download work below
+	// already did.
 	r.mu.Lock()
-
-	// 4. Construct cache path
 	platformSlug := strings.ReplaceAll(req.Platform.String(), "/", "_")
 	var targetDir, binaryPath string
 	if req.StubLauncher {
@@ -216,6 +300,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 		targetDir = filepath.Join(r.CacheDir, version, string(variant), platformSlug)
 		binaryPath = filepath.Join(targetDir, "bun")
 	}
+	r.mu.Unlock()
 
 	// Check if already cached & verified. A file existing at binaryPath is
 	// NOT sufficient on its own — see verifiedCacheHit's doc comment: only a
@@ -224,8 +309,19 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 	// Anything else (no sidecar, mismatched sidecar) is a cache miss, forcing
 	// a fresh download-and-verify rather than trusting arbitrary bytes some
 	// other process placed at that path.
-	if sha, size, ok := verifiedCacheHit(binaryPath); ok {
-		r.mu.Unlock()
+	//
+	// memoizedVerifiedCacheHit is a strict wrapper around that check, never
+	// a replacement for it: it only skips the re-hash when this same process
+	// already hashed a file with the identical identity (same inode, via
+	// os.SameFile), size and mtime during this run.
+	memoKey := verifiedMemoKey{
+		binaryPath:   binaryPath,
+		version:      version,
+		variant:      variant,
+		platform:     req.Platform,
+		stubLauncher: req.StubLauncher,
+	}
+	if sha, size, ok := r.memoizedVerifiedCacheHit(memoKey, binaryPath); ok {
 		return ports.BunResolverResult{
 			BinaryPath: binaryPath,
 			Version:    version,
@@ -235,7 +331,6 @@ func (r *Resolver) Resolve(ctx context.Context, req ports.BunResolverRequest) (p
 			Size:       size,
 		}, nil
 	}
-	r.mu.Unlock()
 
 	// If stub launcher is requested, compile rather than download release archive
 	if req.StubLauncher {
@@ -759,6 +854,164 @@ func verifiedCacheHit(binaryPath string) (sha string, size int64, ok bool) {
 		return "", 0, false
 	}
 	return gotSHA, gotSize, true
+}
+
+// verifiedMemoKey identifies one already-verified cache entry for the
+// lifetime of this process.
+//
+// binaryPath alone would already be a complete function of the other four
+// fields (Resolve derives the path from exactly version/variant/platform/
+// stubLauncher), but they are carried explicitly anyway so that "a memo hit
+// can never answer for a different version, variant, platform or launcher
+// kind" is enforced by the map key rather than by a reader re-deriving that
+// argument from the path-construction code above.
+type verifiedMemoKey struct {
+	binaryPath   string
+	version      string
+	variant      ports.BunVariant
+	platform     ports.Platform
+	stubLauncher bool
+}
+
+// verifiedMemoEntry is one memoised verification result plus the exact
+// filesystem state the verification was performed against. binaryInfo and
+// sidecarInfo are the os.FileInfo values observed *after* the hash
+// completed; a later Resolve must reproduce both (same file identity, size
+// and mtime) or the memo is discarded and the full hash re-run.
+type verifiedMemoEntry struct {
+	sha         string
+	size        int64
+	binaryInfo  os.FileInfo
+	sidecarInfo os.FileInfo
+}
+
+// sameFileState reports whether two stats describe the same file, unchanged.
+// os.SameFile is the portable form of an inode+device comparison (it uses
+// st_ino/st_dev on unix and the file index on Windows), so this covers file
+// identity, length and modification time together — a replaced, truncated,
+// rewritten or swapped-in file fails at least one of the three.
+func sameFileState(a, b os.FileInfo) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
+}
+
+// statCachePair stats the cached binary and its digest sidecar together.
+// Both must exist, and the binary must not be a directory, for any of this
+// to mean anything; a missing sidecar is already a cache miss as far as
+// verifiedCacheHit is concerned.
+func statCachePair(binaryPath string) (binInfo, sidecarInfo os.FileInfo, ok bool) {
+	binInfo, err := os.Stat(binaryPath)
+	if err != nil || binInfo.IsDir() {
+		return nil, nil, false
+	}
+	sidecarInfo, err = os.Stat(cacheDigestSidecarPath(binaryPath))
+	if err != nil {
+		return nil, nil, false
+	}
+	return binInfo, sidecarInfo, true
+}
+
+// memoizedVerifiedCacheHit is verifiedCacheHit with a process-scoped memo in
+// front of it, and nothing else. Resolve is called at least twice per build
+// for the same platform (once before the fan-out, to record the runtime in
+// the SBOM/provenance, and once inside it), and each call otherwise
+// SHA-256s the same ~90MB binary from scratch.
+//
+// What the memo is allowed to skip, precisely: re-hashing a file that this
+// same process already hashed and found to match its digest sidecar during
+// this run, and whose identity (os.SameFile — inode/device), size and mtime
+// are all still exactly what they were at that moment. Every property
+// verifiedCacheHit's doc comment establishes is preserved:
+//
+//   - A file with no sidecar, an unreadable sidecar or a sidecar that
+//     disagrees with the binary is never memoised, because only a
+//     verifiedCacheHit that already returned ok is ever stored. Failures are
+//     never memoised, so a rejected cache entry is re-checked in full every
+//     time and cannot be turned into a hit by repetition.
+//   - A file planted, replaced, re-downloaded or rewritten between two
+//     Resolve calls changes at least one of identity/size/mtime, misses the
+//     memo, and gets the full hash — that is the case
+//     TestResolver_Memo_* and TestResolver_CacheHit_TamperedBinaryIsRejected
+//     exercise.
+//   - The memo lives in memory for the duration of one process only. It is
+//     never persisted, so a later run cannot inherit a "trusted" claim from
+//     this one; that is what the on-disk sidecar is for, and the sidecar is
+//     still re-checked on the first Resolve of every process.
+//
+// The residual gap, stated rather than hidden: an attacker with local write
+// access to the cache directory who rewrites the binary *in place* (same
+// inode), pads it to the identical byte length, and restores the original
+// mtime with utimes would survive the memo within a single process run.
+// That attacker also defeats the un-memoised check, which is inherently
+// TOCTOU — verifiedCacheHit hashes the file and returns a path that is read
+// again later, so bytes swapped after the hash were never detected either.
+// The property the sidecar check actually buys is "bytes that were already
+// wrong when we looked", and the memo detects every such mutation, because
+// a file that was written at a different time has a different mtime.
+// Closing the forged-mtime case would need st_ctime, which os.FileInfo does
+// not expose portably; it was deliberately not worth per-OS syscall files
+// for a threat that already bypasses the check being memoised.
+func (r *Resolver) memoizedVerifiedCacheHit(key verifiedMemoKey, binaryPath string) (string, int64, bool) {
+	binBefore, sidecarBefore, ok := statCachePair(binaryPath)
+	if !ok {
+		return "", 0, false
+	}
+
+	if sha, size, hit := r.lookupVerified(key, binBefore, sidecarBefore); hit {
+		return sha, size, true
+	}
+
+	sha, size, ok := verifiedCacheHit(binaryPath)
+	if !ok {
+		// Never memoise a failure: a cache entry that failed verification
+		// must be re-verified from scratch on every subsequent call.
+		return "", 0, false
+	}
+
+	// Re-stat after hashing. If the file changed underneath the hash, the
+	// digest we just computed still matched the sidecar and is safe to
+	// return, but it is not safe to *remember* against a stat taken before
+	// the change — so in that case the result is returned unmemoised and the
+	// next call pays for a full re-hash.
+	binAfter, sidecarAfter, okAfter := statCachePair(binaryPath)
+	if okAfter && sameFileState(binBefore, binAfter) && sameFileState(sidecarBefore, sidecarAfter) {
+		r.storeVerified(key, verifiedMemoEntry{
+			sha:         sha,
+			size:        size,
+			binaryInfo:  binAfter,
+			sidecarInfo: sidecarAfter,
+		})
+	}
+	return sha, size, true
+}
+
+// lookupVerified returns a memoised result only if the current stats of the
+// binary and its sidecar are indistinguishable from those recorded when the
+// entry was verified.
+func (r *Resolver) lookupVerified(key verifiedMemoKey, binInfo, sidecarInfo os.FileInfo) (string, int64, bool) {
+	r.verifiedMu.Lock()
+	entry, ok := r.verified[key]
+	r.verifiedMu.Unlock()
+	if !ok {
+		return "", 0, false
+	}
+	if !sameFileState(entry.binaryInfo, binInfo) || !sameFileState(entry.sidecarInfo, sidecarInfo) {
+		return "", 0, false
+	}
+	return entry.sha, entry.size, true
+}
+
+func (r *Resolver) storeVerified(key verifiedMemoKey, entry verifiedMemoEntry) {
+	r.verifiedMu.Lock()
+	defer r.verifiedMu.Unlock()
+	if r.verified == nil {
+		// Lazily created so a zero-value &Resolver{} (rather than one built
+		// by NewResolver) behaves identically.
+		r.verified = make(map[verifiedMemoKey]verifiedMemoEntry)
+	}
+	r.verified[key] = entry
 }
 
 // writeCacheDigestSidecar records sha as the trusted digest for the
