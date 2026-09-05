@@ -243,6 +243,25 @@ func BenchmarkStaticServer_Request(b *testing.B) {
 		},
 		{
 			// Full resolve + negotiate + ETag, short-circuited before any body.
+			// The one request shape that did NOT get faster in the 2026-09-05
+			// os.Root rework: measured 23.8us before and ~27.4us after
+			// (consistent across repeated runs), against improvements
+			// everywhere else. Allocations still fell, 79 -> 28.
+			//
+			// This is understood and accepted rather than an open regression.
+			// A 304 must produce the same strong ETag a 200 would, and the
+			// ETag is now taken from the open file handle that is actually
+			// served — that identity between "the thing validated" and "the
+			// thing served" is precisely what closes the TOCTOU window the old
+			// resolve-then-stat-then-open path had. So a conditional request
+			// now pays one file open it could previously skip by answering
+			// from a path-keyed cache. Roughly 3.6us buys the containment
+			// property; the same change made the 404 path 14x faster.
+			//
+			// If this ever needs recovering, the direction is to satisfy
+			// If-None-Match from a cached ETag while still proving the file
+			// exists through the root handle — not to reintroduce a path-keyed
+			// answer that no longer describes what would be served.
 			name:     "conditional_304",
 			path:     fx.jsPath,
 			headers:  map[string]string{"Accept-Encoding": benchFullAccept, "If-None-Match": fx.jsETag},

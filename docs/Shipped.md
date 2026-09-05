@@ -35,6 +35,12 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | --- | --- | --- | --- | --- |
 | [Reconsider pokkum metrics' shape](items/metrics-command-shape.md) | Decided by removal: pokkum metrics claimed to run a metrics server, never listened on anything, and is deleted, since it neither runs a server nor exposes anything the way its own text claims. | dx | shipped |  |
 
+### Testing & Infrastructure
+
+| Title | Summary | Kind | Status | Commits |
+| --- | --- | --- | --- | --- |
+| [A benchmark harness, and the optimisation pass it made possible](items/performance-benchmark-harness.md) | Nothing in this repo measured speed, so every performance claim was an argument from reading the code; adding benchmarks over realistic inputs turned that into numbers, and the numbers then found two bugs that correctness tests structurally could not. | dx | shipped |  |
+
 ## v1.1
 
 ### Build & Packaging
