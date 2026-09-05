@@ -21,6 +21,10 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### self-invalidating cache key / unobservable-by-construction (1)
+
+- `2026-09-05` — The remote build cache could never hit, on any project, since it shipped: `pokkum.lock` was hashed as project source, but the build stamps `time.Now()` into that file before computing the hash. Invisible because a cache that never hits looks exactly like one that correctly misses. Read before adding any path to a content-addressed key, and before shipping any optimisation whose failure mode is "silently does nothing".
+
 ### cache-completeness (1)
 
 - `2026-09-05` — A credential cache stored only its successes, so the "no credential for this registry" answer — the most frequently requested one — re-spawned a 100-500ms helper subprocess on every call forever. Read before adding any memo: enumerate every return path, and assert the memo's benefit by counting the underlying operation, because a cache that stores nothing still returns correct values.

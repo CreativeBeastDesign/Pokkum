@@ -1495,6 +1495,33 @@ type BuildResult struct {
 	// measured by core, never by an adapter, and it is deliberately absent from
 	// anything that affects the output digest.
 	Duration time.Duration
+
+	// Stages is the per-stage wall-clock breakdown of Duration, in the order
+	// the stages ran. Same contract as Duration: measured by core, purely
+	// informational, and never an input to anything that affects the output
+	// digest. It exists so a caller can answer "which stage was slow?"
+	// without re-deriving it from log lines — a build that reports only a
+	// single total is unattributable.
+	//
+	// The entries do not necessarily sum to Duration: stages that overlap
+	// (the early gates that run alongside the remote-cache lookup, the
+	// SvelteKit build that runs alongside base-image verification) are
+	// recorded as the elapsed span of the section that dispatched them, and
+	// a build that returns early (--dry-run, a cache hit, --print-manifest)
+	// records only the stages it actually reached.
+	Stages []StageTiming
+}
+
+// StageTiming is one pipeline stage's wall-clock cost.
+type StageTiming struct {
+	// Stage is the stage name, matching the name checkCtx reports when a
+	// build is cancelled at that boundary ("preflight", "sveltekit build",
+	// "publish", ...) so a timing line and a cancellation message name the
+	// same thing.
+	Stage string
+
+	// Duration is how long that stage took.
+	Duration time.Duration
 }
 
 // ArtifactFor returns the compiled artifact for a platform, and reports whether

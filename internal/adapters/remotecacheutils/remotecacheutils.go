@@ -168,6 +168,36 @@ var IgnoredBuildDirs = map[string]bool{
 	"dist":         true,
 }
 
+// IgnoredBuildFiles lists file basenames skipped when hashing project source
+// trees, for the same reason IgnoredBuildDirs skips directories: their contents
+// are not build input.
+//
+// pokkum.lock is here because including it made the remote cache incapable of
+// ever hitting. The lockfile carries wall-clock metadata — SaveLockfile stamps
+// updatedAt, and RecordScanResult stamps a per-entry lastScannedAt — and both
+// writes happen during the build, BEFORE ComputeInputHash runs. So the tree
+// hash covered a file this build had just rewritten with the current time, and
+// two builds of byte-identical source produced different composite input
+// hashes. Every build missed, on a feature whose entire purpose is to skip
+// rebuilding unchanged source, and nothing failed: a permanent miss is
+// indistinguishable from a correct miss unless you are counting.
+//
+// Excluding it loses nothing, because the lockfile's build-relevant content is
+// already an explicit, first-class cache input: the resolved base image digest
+// travels in InputParams.BaseImageDigest. The rest of the file is either
+// metadata (timestamps, scan audit records) or pinned digests for base slots
+// this build did not resolve, none of which can change the image bytes. A
+// user hand-editing pokkum.lock to pin a different base still invalidates the
+// cache correctly, because the digest they changed is what BaseImageDigest
+// reads.
+//
+// Note this is a deliberate one-time change to the hash's meaning: every
+// pre-existing cache entry misses once. That is the safe direction, and it
+// matches the precedent set by AppRuntime's doc comment below.
+var IgnoredBuildFiles = map[string]bool{
+	"pokkum.lock": true,
+}
+
 // InputParams defines the complete set of inputs that determine a container
 // build's output. See ports.RemoteCacheInputRequest's doc comment for why
 // this must stay exhaustive, and why Sign is deliberately excluded.
@@ -248,6 +278,10 @@ func ComputeSourceTreeHash(projectDir string) (string, error) {
 			if IgnoredBuildDirs[name] {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+
+		if IgnoredBuildFiles[name] {
 			return nil
 		}
 

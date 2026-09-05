@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -271,14 +272,22 @@ func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 //     Signature verification is deliberately *not* part of this call (see
 //     stage 5) — Resolve only pins the digest that everything downstream,
 //     including the remote-cache key, needs.
+//     3.5 The base-image CVE scan and the pre-build source secret scan are
+//     dispatched concurrently and joined before the remote-cache result
+//     (stage 4.5) may be acted on. They overlap the cache lookup rather
+//     than preceding it, but they are NOT deferred past it: unlike the
+//     base-image signature check, a CVE scan queries a live vulnerability
+//     database whose answer for a fixed digest changes over time, so
+//     skipping it on a cache hit would let a build that fails today
+//     silently promote release tags tomorrow.
 //  4. --dry-run stops here and reports the plan, after synchronously
-//     verifying the base image signature so a dry run still fails fast on
-//     an invalid one.
+//     running both of those scans and verifying the base image signature,
+//     so a dry run still fails fast on an invalid one.
 //  5. Compiler.Prepare — the SvelteKit build — runs concurrently (via
-//     errgroup) with BaseImageResolver.VerifyBaseImage and
-//     NativeInspector.Inspect, since a cache miss needs all three to
-//     succeed before publishing but none of them needs to finish before
-//     Prepare can start. Prepare itself still runs exactly once: it writes
+//     errgroup) with BaseImageResolver.VerifyBaseImage,
+//     NativeInspector.Inspect and every platform's Bun runtime resolve,
+//     since a cache miss needs all of them to succeed before publishing
+//     but none of them needs to finish before Prepare can start. Prepare itself still runs exactly once: it writes
 //     into ProjectDir/.svelte-kit and the port documents it as unsafe to
 //     run concurrently with another Prepare for the same project. A
 //     failure in either concurrent check cancels the in-flight Prepare
@@ -304,6 +313,9 @@ func (d Deps) validate(req BuildRequest, opts BuildOptions) error {
 //     digest AND every per-platform manifest digest — then every attachment
 //     is fetched back from the registry and cryptographically verified
 //     (post-push self-verification) before the build may report success.
+//     Subjects are signed concurrently and then verified concurrently, in
+//     two separate phases: every attach completes before any read-back
+//     starts, which is what makes the read-back meaningful.
 //     With signing enabled but no key, the image pushes unsigned with an
 //     unmistakable warning and BuildResult.Signing records the fact;
 //     Signing.Require turns that into a validation-time failure instead.
@@ -330,6 +342,11 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 
 	log := deps.logger()
+	// Per-stage wall-clock attribution for BuildResult.Stages. Every
+	// timer.begin below sits at an existing stage boundary — the same ones
+	// checkCtx names — so a timing entry and a cancellation message always
+	// refer to the same stage.
+	timer := newStageTimer(log, started, "preflight")
 	log.Info("build starting",
 		"projectDir", req.ProjectDir,
 		"repo", req.Repo,
@@ -430,6 +447,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		toolchain.SupervisorVersion = v
 	}
 
+	timer.begin("base image resolution")
 	if err := checkCtx(ctx, "base image resolution"); err != nil {
 		return BuildResult{}, err
 	}
@@ -487,7 +505,29 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 	log.Info("base image resolved", "ref", baseInfo.Ref, "pinned", baseInfo.PinnedRef, "isIndex", base.IsIndex)
 
-	if deps.Scanner != nil {
+	// scanBaseImage is the base-image CVE gate, lifted verbatim out of the
+	// straight-line stage order into a closure so it can be dispatched
+	// concurrently below (Stage 4.45) instead of blocking the pipeline for
+	// the 2-8s it takes to pull every base layer, read the OS package DB and
+	// query OSV. Nothing about WHAT it checks changed — the branches, the
+	// error strings and their wrapping, the RecordScanResult write and the
+	// threshold enforcement are the same code in the same order.
+	//
+	// It returns the VEX exemption IDs that were actually applied rather than
+	// writing req.Runtime.VEXExemptions itself: that field is read by
+	// RemoteCache.ComputeInputHash (via Runtime) and stamped into the image
+	// by the packager (dev.pokkum.vex-exemptions), so a goroutine writing it
+	// directly would be a write to req racing every reader on Build's own
+	// goroutine. The caller applies it once, after joining.
+	// recordedScan carries the scan result back out for the caller to write
+	// to pokkum.lock; nil when no scan ran. See the comment at its
+	// assignment for why the write does not happen inside the gate.
+	var recordedScan *ports.ScanResult
+	scanBaseImage := func(ctx context.Context) ([]string, error) {
+		if deps.Scanner == nil {
+			return nil, nil
+		}
+		var appliedVEX []string
 		effectiveFailOn := req.FailOnCVE
 		failGateActive := effectiveFailOn != ""
 		if effectiveFailOn == "" {
@@ -522,17 +562,17 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 							if req.AllowIncompleteScan {
 								log.Warn("cached base image vulnerability audit contains invalid severity level; proceeding because --allow-incomplete was set", "max_severity", base.MaxSeverity, "err", err)
 							} else {
-								return BuildResult{}, fmt.Errorf("cached base image vulnerability audit from %s has invalid max severity %q: %w", base.LastScannedAt, base.MaxSeverity, ErrScanIncomplete)
+								return nil, fmt.Errorf("cached base image vulnerability audit from %s has invalid max severity %q: %w", base.LastScannedAt, base.MaxSeverity, ErrScanIncomplete)
 							}
 						} else if recordedSev.Rank() >= effectiveFailOn.Rank() {
-							return BuildResult{}, fmt.Errorf("cached base image vulnerability audit from %s exceeds threshold %s (max severity: %s, %d vulnerabilities): %w",
+							return nil, fmt.Errorf("cached base image vulnerability audit from %s exceeds threshold %s (max severity: %s, %d vulnerabilities): %w",
 								base.LastScannedAt, effectiveFailOn, base.MaxSeverity, base.VulnerabilitiesCount, ErrVulnerabilityThresholdExceeded)
 						}
 					} else if base.VulnerabilitiesCount > 0 {
 						if req.AllowIncompleteScan {
 							log.Warn("cached base image vulnerability audit recorded vulnerabilities but missing max severity; proceeding because --allow-incomplete was set", "vulns", base.VulnerabilitiesCount)
 						} else {
-							return BuildResult{}, fmt.Errorf("cached base image vulnerability audit from %s recorded %d vulnerabilities but missing max severity: %w", base.LastScannedAt, base.VulnerabilitiesCount, ErrScanIncomplete)
+							return nil, fmt.Errorf("cached base image vulnerability audit from %s recorded %d vulnerabilities but missing max severity: %w", base.LastScannedAt, base.VulnerabilitiesCount, ErrScanIncomplete)
 						}
 					}
 				}
@@ -540,7 +580,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				if req.AllowIncompleteScan {
 					log.Warn("base image vulnerability scan skipped: offline/hermetic build cannot reach the vulnerability database and no previous scan is recorded in pokkum.lock; proceeding because --allow-incomplete was set", "offline", req.BaseImage.Offline, "hermetic", req.Hermetic, "failOnCVE", effectiveFailOn)
 				} else {
-					return BuildResult{}, fmt.Errorf("base image vulnerability scan cannot run in offline/hermetic mode and no previous scan is recorded in pokkum.lock (fail-on-cve=%s): %w (pass --allow-incomplete to proceed without a scan, or drop --fail-on-cve for this build)", effectiveFailOn, ErrScanIncomplete)
+					return nil, fmt.Errorf("base image vulnerability scan cannot run in offline/hermetic mode and no previous scan is recorded in pokkum.lock (fail-on-cve=%s): %w (pass --allow-incomplete to proceed without a scan, or drop --fail-on-cve for this build)", effectiveFailOn, ErrScanIncomplete)
 				}
 			} else {
 				log.Debug("base image vulnerability scan skipped: offline/hermetic build cannot reach the vulnerability database", "offline", req.BaseImage.Offline, "hermetic", req.Hermetic)
@@ -565,26 +605,37 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				Now: time.Now(),
 			})
 
-			// Record scan result in pokkum.lock if lockfile tracking is available.
-			// Never on a dry run: this write is what created pokkum.lock in a
-			// project that had none, from a command documented to perform no
-			// writes.
-			if deps.BaseImages != nil && !opts.DryRun {
-				// req.BaseImage.Ref is passed alongside the preset because a
-				// custom base's lockfile entry is keyed per reference, not per
-				// preset — the same raw Ref handed to Resolve above.
-				_ = deps.BaseImages.RecordScanResult(ctx, lockPath, req.BaseImage.Preset, req.BaseImage.Ref, scanRes)
-			}
+			// The scan result is HANDED BACK for the caller to record rather
+			// than written here, and that is a correctness requirement, not
+			// tidiness: RecordScanResult is the only WRITE anywhere in this
+			// gate, its target (pokkum.lock) sits inside ProjectDir, and
+			// lockfileutils.SaveLockfile writes with os.WriteFile —
+			// truncate-then-write, not a temp-file rename, so a concurrent
+			// reader can observe a partial file. Both things running
+			// alongside this gate read that tree: the pre-build secret scan
+			// walks it, and RemoteCache.ComputeInputHash hashes it
+			// (ComputeSourceTreeHash walks the whole project directory and
+			// pokkum.lock is in neither IgnoredBuildDirs nor
+			// ignoreutils.DefaultPatterns). A torn read there would mean a
+			// spurious ErrSecretScanIncomplete on one side and a
+			// nondeterministic composite input hash on the other — and that
+			// hash is stamped into the image as pokkum.dev/build-input-hash,
+			// so it is content-addressed bytes, the exact class mem:core
+			// names. The caller writes it on Build's own goroutine, after
+			// joining this gate and still ahead of ComputeInputHash: the
+			// same position it has always occupied relative to both the
+			// cache key and publish.
+			recordedScan = &scanRes
 
 			if scanErr != nil {
 				if errors.Is(scanErr, ErrVulnerabilityThresholdExceeded) {
 					if failGateActive {
-						return BuildResult{}, fmt.Errorf("base image vulnerability scan failed: %w", scanErr)
+						return nil, fmt.Errorf("base image vulnerability scan failed: %w", scanErr)
 					}
 					log.Warn("base image contains vulnerabilities exceeding threshold", "pinned", base.PinnedRef, "vulns", len(scanRes.Vulnerabilities), "maxSeverity", scanRes.MaxSeverityFound)
 				} else if errors.Is(scanErr, ErrScanIncomplete) {
 					if failGateActive && !req.AllowIncompleteScan {
-						return BuildResult{}, fmt.Errorf("base image vulnerability scan incomplete: %w", scanErr)
+						return nil, fmt.Errorf("base image vulnerability scan incomplete: %w", scanErr)
 					}
 					log.Warn("base image vulnerability scan incomplete: vulnerability database lookup failed", "err", scanErr)
 				} else {
@@ -604,25 +655,51 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 					}
 				}
 				slices.Sort(ids)
-				req.Runtime.VEXExemptions = ids
+				appliedVEX = ids
 				log.Warn("VEX exemption(s) applied — these CVEs were excluded from the --fail-on-cve threshold", "cves", strings.Join(ids, ","))
 			}
 		}
+		return appliedVEX, nil
 	}
 
-	// Pre-build source scan: earliest possible, best-located feedback for a
-	// secret already sitting in the repo. This does NOT cover the shipped
-	// artifact — see the post-build scan after Stage 5 (Prepare) below,
-	// which is what actually gates what ships. Kept as an addition, not a
-	// replacement: a source-level hit points a developer straight at the
-	// offending source line, which the post-build scan (against
-	// minified/bundled output) generally cannot do as precisely.
-	if err := runSecretScan(ctx, deps, log, "pre-build source", req.ProjectDir, req.AllowSecretPatterns, false, req.ShowSecretValues); err != nil {
-		return BuildResult{}, err
+	// preBuildSecretScan is the pre-build source scan, likewise lifted into a
+	// closure so it can run concurrently with the remote-cache lookup below.
+	// Earliest possible, best-located feedback for a secret already sitting
+	// in the repo. This does NOT cover the shipped artifact — see the
+	// post-build scan after Stage 5 (Prepare) below, which is what actually
+	// gates what ships. Kept as an addition, not a replacement: a
+	// source-level hit points a developer straight at the offending source
+	// line, which the post-build scan (against minified/bundled output)
+	// generally cannot do as precisely.
+	preBuildSecretScan := func(ctx context.Context) error {
+		return runSecretScan(ctx, deps, log, "pre-build source", req.ProjectDir, req.AllowSecretPatterns, false, req.ShowSecretValues)
 	}
 
 	// Stage 4: --dry-run stops here, having touched nothing.
 	if opts.DryRun {
+		timer.begin("dry run")
+		// Both scans run SYNCHRONOUSLY here, in the order they always ran,
+		// and before anything else a dry run does. A dry run has no
+		// remote-cache lookup to overlap them with — the concurrency below
+		// exists purely to hide their latency behind that lookup — and a dry
+		// run's whole contract is "report the plan, and fail on anything
+		// that would have failed the real build", so the CVE gate and the
+		// secret gate must both still fire here.
+		dryRunVEX, err := scanBaseImage(ctx)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		if len(dryRunVEX) > 0 {
+			req.Runtime.VEXExemptions = dryRunVEX
+		}
+		// recordedScan is deliberately NOT written here: the pokkum.lock
+		// write is what created the file in a project that had none, from a
+		// command documented to perform no writes. Same guarantee the
+		// previous `!opts.DryRun` guard gave, expressed as "the dry-run path
+		// simply never calls the recorder".
+		if err := preBuildSecretScan(ctx); err != nil {
+			return BuildResult{}, err
+		}
 		// Resolve above only resolved the digest/manifest (VerifySignature is
 		// always false in baseReq now); verify the signature synchronously
 		// here so a dry run still fails fast on a bad base image signature,
@@ -651,6 +728,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			Toolchain:       toolchain,
 			SourceDateEpoch: req.SourceDateEpoch,
 			Duration:        time.Since(started),
+			Stages:          timer.finish(),
 		}
 		if err := writePlan(deps.stdout(), req, res); err != nil {
 			return res, err
@@ -658,6 +736,8 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		log.Info("dry run complete; nothing was built, written or pushed")
 		return res, nil
 	}
+
+	timer.begin("asset overlay")
 
 	// Stage 4.4: --asset-overlay resolution.
 	//
@@ -722,6 +802,112 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		}
 	}
 
+	timer.begin("cache lookup")
+
+	// Stage 4.45: the two source/base gates, run concurrently with each
+	// other — and, when this build has no pokkum.lock scan result to write,
+	// the secret scan additionally overlaps the remote-cache lookup below.
+	// (The write is what forces the earlier join; see its own comment.)
+	//
+	// Sequentially these cost a base-layer pull plus an OSV query (2-8s) and
+	// then a full source-tree walk (1-3s), one after the other, in front of
+	// a cache lookup that is supposed to answer in under 100ms.
+	//
+	// Neither is deferred into the Stage 5 errgroup, which is where the
+	// base-image SIGNATURE verification lives. That skip is sound for a
+	// signature and is documented at the cache-hit branch below: a signature
+	// is a property of the base image BYTES, and the cache key already binds
+	// base.Digest, so a hit can only match the exact base the verifier would
+	// have checked. A CVE scan is not that kind of check — it queries a live
+	// advisory database whose answer for a FIXED digest changes as new CVEs
+	// land, which is precisely why the offline branch above reads a
+	// TIMESTAMPED audit out of pokkum.lock rather than treating a digest as
+	// self-certifying. Deferring it past the cache check would mean a
+	// --fail-on-cve build that fails today silently promotes release tags
+	// tomorrow on a hit. The secret scan reads the working tree, which the
+	// cache key hashes but does not vet, so the same argument applies.
+	cveGroup, cveCtx := errgroup.WithContext(ctx)
+	var appliedVEXExemptions []string
+	cveGroup.Go(func() error {
+		ids, err := scanBaseImage(cveCtx)
+		appliedVEXExemptions = ids
+		return err
+	})
+
+	secretGroup, secretCtx := errgroup.WithContext(ctx)
+	secretGroup.Go(func() error { return preBuildSecretScan(secretCtx) })
+
+	// joinSecretScan waits for the secret gate exactly once, so it can be
+	// called wherever it is first needed and again later without a second
+	// Wait.
+	var secretOnce sync.Once
+	var secretErr error
+	joinSecretScan := func() error {
+		secretOnce.Do(func() { secretErr = secretGroup.Wait() })
+		return secretErr
+	}
+	// Registered at dispatch, not at the one call site that needs it today:
+	// every return between here and the join — including ones a future edit
+	// adds — must drain this goroutine rather than abandon it. Checklist row
+	// 2 (cleanup registered at allocation, covering every branch) rather
+	// than a guard on the paths that happen to exist right now.
+	defer func() { _ = joinSecretScan() }()
+
+	// The CVE gate is joined HERE, ahead of the cache lookup, and
+	// deliberately NOT carried past it, for two independent reasons — either
+	// one alone would be sufficient:
+	//
+	//  1. It produces the pokkum.lock write (below), and that write must not
+	//     race the source-tree read that ComputeInputHash turns into the
+	//     cache key and into the image's pokkum.dev/build-input-hash
+	//     annotation. See the comment at recordedScan's assignment.
+	//  2. An APPLIED VEX exemption lands in req.Runtime.VEXExemptions, which
+	//     ComputeInputHash hashes (via Runtime) and the packager stamps into
+	//     the image as dev.pokkum.vex-exemptions. Hashing before it is
+	//     applied would let a build that exempts a CVE reuse — and promote
+	//     its release tags onto — a cache entry produced by a build that did
+	//     not, whose image label disagrees.
+	//
+	// So the CVE scan overlaps the secret scan, and nothing else. That is
+	// the whole overlap available without weakening a gate or introducing a
+	// nondeterminism source into content-addressed bytes.
+	if err := cveGroup.Wait(); err != nil {
+		return BuildResult{}, err
+	}
+	if len(appliedVEXExemptions) > 0 {
+		req.Runtime.VEXExemptions = appliedVEXExemptions
+	}
+	// Record the scan result in pokkum.lock if lockfile tracking is
+	// available. On Build's own goroutine, and still before
+	// ComputeInputHash — unchanged in position relative to the cache key and
+	// to publish, only in which goroutine performs it. Never reached on a
+	// dry run: that path returns above without calling the recorder.
+	//
+	// req.BaseImage.Ref is passed alongside the preset because a custom
+	// base's lockfile entry is keyed per reference, not per preset — the
+	// same raw Ref handed to Resolve above.
+	if recordedScan != nil && deps.BaseImages != nil {
+		// The secret scan is joined FIRST, inside this branch, because this
+		// is a non-atomic write (os.WriteFile) to a file inside ProjectDir
+		// and the secret scan is concurrently walking that same tree. A
+		// truncated pokkum.lock read mid-write yields either a spurious
+		// ErrSecretScanIncomplete or a nondeterministic scan input — a
+		// security gate reading a file as it is being rewritten.
+		//
+		// Scoping the join to the branch that actually writes is deliberate:
+		// when no scan recorded anything (no Scanner wired, an
+		// offline/hermetic build reading a cached audit, no lockfile entry
+		// for this base) there is no writer at all, and the secret scan
+		// keeps its full overlap with the cache lookup below. The cost of
+		// the safe ordering is therefore paid only by builds that actually
+		// write, and never by the sub-100ms cache-hit path in the
+		// no-scanner case.
+		if err := joinSecretScan(); err != nil {
+			return BuildResult{}, err
+		}
+		_ = deps.BaseImages.RecordScanResult(ctx, lockPath, req.BaseImage.Preset, req.BaseImage.Ref, *recordedScan)
+	}
+
 	// Stage 4.5: Composite Remote OCI Input Caching check.
 	//
 	// Cache-poisoning mitigation and verification:
@@ -732,6 +918,10 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	// unverified digests. If verification fails or is missing, the cache hit
 	// is rejected and the build falls through cleanly to compilation from source.
 	var compositeInputHash string
+	// hit is the cache result once one is confirmed, deliberately kept as a
+	// value to act on later rather than acted on in place — see the join
+	// below the lookup.
+	var hit *ports.RemoteCacheResult
 	allowCache := deps.RemoteCache != nil && req.Output.Mode == OutputPush && !req.Compile.NoCache
 	if req.Sign && (req.CacheVerify.VerifyMode == CacheVerifyNone || !req.CacheVerify.VerifySignature) {
 		allowCache = false
@@ -825,58 +1015,82 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				Verify:             cacheVerify,
 			})
 			if err == nil && cacheRes.Hit {
-				if cacheRes.Verified {
-					log.Info("remote input cache hit; signature verified; build skipped", "repo", req.Repo, "digest", cacheRes.Digest.String(), "inputHash", inputHash, "signer", cacheRes.SignerIdentity)
-				} else {
-					log.Info("remote input cache hit; build skipped", "repo", req.Repo, "digest", cacheRes.Digest.String(), "inputHash", inputHash)
-				}
-				// Auditable disclosure of the accepted security tradeoff: a
-				// confirmed cache hit short-circuits before Stage 5, so base-image
-				// signature verification does NOT run on the hit path. Nothing is
-				// built from the base image on a hit and the cache key already
-				// binds the base image digest (base.Digest, pinned via pokkum.lock),
-				// so the hit can only match the exact base the verifier would have
-				// checked. Log it explicitly so CI/operators can see the skip and
-				// the residual trust model instead of it being silently invisible.
-				baseVerifySkipped := "cache hit; base image signature verification skipped (not built from base)"
-				if req.BaseImage.NoVerifyBase {
-					baseVerifySkipped = "base image signature verification already disabled via --no-verify-base"
-				}
-				log.Info(baseVerifySkipped, "repo", req.Repo, "baseRef", base.Ref, "baseDigest", base.Digest.String())
-				res := BuildResult{
-					Image: ImageResult{
-						Mode:      req.Output.Mode,
-						Ref:       cacheRes.Ref,
-						Digest:    cacheRes.Digest,
-						Tags:      slices.Clone(cacheRes.Tags),
-						Platforms: slices.Clone(req.Platforms),
-						IsIndex:   len(req.Platforms) > 1,
-						Cached:    true,
-					},
-					Cached:          true,
-					BaseImage:       baseInfo,
-					Toolchain:       toolchain,
-					SourceDateEpoch: req.SourceDateEpoch,
-					Duration:        time.Since(started),
-				}
-				// A signing-enabled cache hit only happens with cache-hit
-				// signature verification active (allowCache above), so the
-				// promoted digest's .sig was just cryptographically verified
-				// — record that instead of leaving Signing nil, which would
-				// read as "signing never happened" for an image that is in
-				// fact signed.
-				if req.Sign {
-					res.Signing = &SigningResult{Signed: cacheRes.Verified}
-					if !cacheRes.Verified {
-						res.Signing.Reason = "cache hit promoted without signature verification"
-					}
-				}
-				if _, err := fmt.Fprintln(deps.stdout(), cacheRes.Ref); err != nil {
-					return res, fmt.Errorf("writing output reference: %w", err)
-				}
-				return res, nil
+				// Recorded, not acted on: honouring a hit returns from
+				// Build, and that return must sit BELOW the unconditional
+				// joinSecretScan call after this block so no edit can ever
+				// reintroduce a path that promotes tags without the source
+				// gate having been joined.
+				hit = &cacheRes
 			}
 		}
+	}
+
+	// The fail-closed join, and the reason the secret scan may overlap the
+	// lookup at all. It is unconditional and it sits between the cache
+	// lookup and every use of its result, so "a cache hit returned before
+	// the secret gate error was joined" is unreachable by construction
+	// rather than by a correctly-placed guard: a hardcoded secret in the
+	// source tree still fails the build even on a hit — where "success"
+	// would promote this build's release tags onto the cached digest. (The
+	// CVE gate is joined even earlier, above the lookup, so it is covered by
+	// the same property a fortiori.)
+	if err := joinSecretScan(); err != nil {
+		return BuildResult{}, err
+	}
+
+	if hit != nil {
+		cacheRes := *hit
+		if cacheRes.Verified {
+			log.Info("remote input cache hit; signature verified; build skipped", "repo", req.Repo, "digest", cacheRes.Digest.String(), "inputHash", compositeInputHash, "signer", cacheRes.SignerIdentity)
+		} else {
+			log.Info("remote input cache hit; build skipped", "repo", req.Repo, "digest", cacheRes.Digest.String(), "inputHash", compositeInputHash)
+		}
+		// Auditable disclosure of the accepted security tradeoff: a
+		// confirmed cache hit short-circuits before Stage 5, so base-image
+		// signature verification does NOT run on the hit path. Nothing is
+		// built from the base image on a hit and the cache key already
+		// binds the base image digest (base.Digest, pinned via pokkum.lock),
+		// so the hit can only match the exact base the verifier would have
+		// checked. Log it explicitly so CI/operators can see the skip and
+		// the residual trust model instead of it being silently invisible.
+		baseVerifySkipped := "cache hit; base image signature verification skipped (not built from base)"
+		if req.BaseImage.NoVerifyBase {
+			baseVerifySkipped = "base image signature verification already disabled via --no-verify-base"
+		}
+		log.Info(baseVerifySkipped, "repo", req.Repo, "baseRef", base.Ref, "baseDigest", base.Digest.String())
+		res := BuildResult{
+			Image: ImageResult{
+				Mode:      req.Output.Mode,
+				Ref:       cacheRes.Ref,
+				Digest:    cacheRes.Digest,
+				Tags:      slices.Clone(cacheRes.Tags),
+				Platforms: slices.Clone(req.Platforms),
+				IsIndex:   len(req.Platforms) > 1,
+				Cached:    true,
+			},
+			Cached:          true,
+			BaseImage:       baseInfo,
+			Toolchain:       toolchain,
+			SourceDateEpoch: req.SourceDateEpoch,
+			Duration:        time.Since(started),
+			Stages:          timer.finish(),
+		}
+		// A signing-enabled cache hit only happens with cache-hit
+		// signature verification active (allowCache above), so the
+		// promoted digest's .sig was just cryptographically verified
+		// — record that instead of leaving Signing nil, which would
+		// read as "signing never happened" for an image that is in
+		// fact signed.
+		if req.Sign {
+			res.Signing = &SigningResult{Signed: cacheRes.Verified}
+			if !cacheRes.Verified {
+				res.Signing.Reason = "cache hit promoted without signature verification"
+			}
+		}
+		if _, err := fmt.Fprintln(deps.stdout(), cacheRes.Ref); err != nil {
+			return res, fmt.Errorf("writing output reference: %w", err)
+		}
+		return res, nil
 	}
 
 	if compositeInputHash != "" {
@@ -912,6 +1126,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 	defer cleanup()
 
+	timer.begin("sveltekit build")
 	if err := checkCtx(ctx, "sveltekit build"); err != nil {
 		return BuildResult{}, err
 	}
@@ -972,6 +1187,56 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		_, err := deps.NativeInspector.Inspect(gctx, req.ProjectDir, req.Platforms[0])
 		return err
 	})
+
+	// Every platform's embedded Bun runtime, resolved here rather than
+	// between this Wait and fanOut. On a cold cache a Bun resolve is a large
+	// download; done serially after Prepare it was pure critical path, and
+	// the OTHER platforms' downloads then happened inside fanOut, so a
+	// two-platform build paid one download before fan-out and one during it.
+	// Resolving all of them alongside Prepare overlaps every download with
+	// the SvelteKit build, and leaves fanOut with nothing to fetch.
+	//
+	// The gate is unchanged, deliberately: layered strategy AND RuntimeBun
+	// AND a non-nil resolver AND at least one platform. A --runtime=node
+	// image embeds no Bun runtime at all — nothing to resolve, and an
+	// SBOM/SLSA bun component naming an embedded runtime that isn't there
+	// would be a false claim.
+	//
+	// Results are written into a pre-sized slice indexed by platform, never
+	// appended and never into a map, so the fan-out writes cannot race and
+	// index i always means req.Platforms[i] regardless of completion order.
+	bunRuntimes := make([]ports.BunResolverResult, len(req.Platforms))
+	resolveBun := req.Compile.Strategy == StrategyLayered && req.AppRuntime == ports.RuntimeBun && deps.BunRuntime != nil && len(req.Platforms) > 0
+	if resolveBun {
+		for i, p := range req.Platforms {
+			g.Go(func() error {
+				res, err := deps.BunRuntime.Resolve(gctx, ports.BunResolverRequest{
+					Platform:         p,
+					Version:          req.BunRuntime.Version,
+					Variant:          req.BunRuntime.Variant,
+					CustomBinaryPath: req.BunRuntime.CustomBinaryPath,
+					StubLauncher:     req.BunRuntime.StubLauncher,
+					SourceDateEpoch:  req.SourceDateEpoch,
+					Offline:          req.Hermetic,
+				})
+				if err != nil {
+					// Platform 0's resolve is the one whose result feeds the
+					// SBOM and the SLSA statement, and it used to fail with
+					// this exact message from its own pre-fan-out call site;
+					// every other platform failed inside fanOut with the
+					// per-platform one. Both messages are preserved so a
+					// user's error text does not change with this
+					// reordering.
+					if i == 0 {
+						return fmt.Errorf("core: resolve bun runtime for sbom/provenance: %w", err)
+					}
+					return fmt.Errorf("core: resolve bun runtime for %s: %w", p, err)
+				}
+				bunRuntimes[i] = res
+				return nil
+			})
+		}
+	}
 
 	if err := g.Wait(); err != nil {
 		return BuildResult{}, err
@@ -1035,6 +1300,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	// own image as its own layer. It is scanned here too: re-shipping
 	// unscanned third-party registry content defeats the point of this
 	// gate exactly as much as skipping the local build output would.
+	timer.begin("post-build secret scan")
 	if err := checkCtx(ctx, "post-build secret scan"); err != nil {
 		return BuildResult{}, err
 	}
@@ -1047,45 +1313,33 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		return BuildResult{}, err
 	}
 
+	timer.begin("compile")
 	if err := checkCtx(ctx, "compile"); err != nil {
 		return BuildResult{}, err
 	}
 
-	// Resolve the embedded Bun runtime once, ahead of the per-platform fan-out
-	// below, so its version/hash are available to attach to the SBOM and SLSA
-	// provenance — both single documents describing the whole build, not
-	// per-platform. Deliberately distinct from toolchain.BunVersion (the
-	// HOST's compiler bun, from Preflight): this is the actual runtime
-	// artifact that gets embedded in the image, which is what a dependency
-	// descriptor in an SBOM/SLSA statement needs to name correctly, and the
-	// two commonly differ (a developer's local bun and the pinned runtime
-	// version are unrelated unless they happen to match).
+	// The embedded Bun runtime that the SBOM and the SLSA provenance name —
+	// both single documents describing the whole build, not per-platform, so
+	// one platform's resolved artifact is what they cite. Resolved in the
+	// Stage 5 errgroup above, alongside Prepare, rather than serially here.
 	//
-	// Resolving req.Platforms[0] here and then again inside fanOut's own
-	// per-platform loop is intentional, not wasted work: the second call is a
-	// cache hit (Resolver's own on-disk cache), and this keeps fanOut's
-	// concurrent per-platform logic completely untouched rather than special
-	// -casing one platform's goroutine to reuse a pre-fetched result.
-	// Gated on RuntimeBun as well as the strategy: a --runtime=node image
-	// embeds no Bun runtime at all — nothing to resolve, and an SBOM/SLSA
-	// bun component naming an embedded runtime that isn't there would be a
-	// false claim. The SLSA statement still records the HOST bun (the build
-	// tool, from Preflight) via slsaGeneratorRequest's firstNonEmpty
-	// fallback, which is the honest dependency for a node build.
+	// Deliberately distinct from toolchain.BunVersion (the HOST's compiler
+	// bun, from Preflight): this is the actual runtime artifact that gets
+	// EMBEDDED IN THE IMAGE, which is what a dependency descriptor in an
+	// SBOM/SLSA statement needs to name correctly, and the two commonly
+	// differ (a developer's local bun and the pinned runtime version are
+	// unrelated unless they happen to match). The distinction is
+	// load-bearing and was wrong once: for strategies with no embedded
+	// runtime at all (exe, static) and for --runtime=node, this stays the
+	// zero value and slsaGeneratorRequest's firstNonEmpty falls back to the
+	// HOST bun — the honest dependency for a build that embeds no Bun.
+	//
+	// Zero value when resolveBun was false, exactly as before: bunRuntimes
+	// is allocated but never written in that case, and Generate treats an
+	// empty BunVersion as "no Bun component" rather than an error.
 	var bunToolchain ports.BunResolverResult
-	if req.Compile.Strategy == StrategyLayered && req.AppRuntime == ports.RuntimeBun && deps.BunRuntime != nil && len(req.Platforms) > 0 {
-		bunToolchain, err = deps.BunRuntime.Resolve(ctx, ports.BunResolverRequest{
-			Platform:         req.Platforms[0],
-			Version:          req.BunRuntime.Version,
-			Variant:          req.BunRuntime.Variant,
-			CustomBinaryPath: req.BunRuntime.CustomBinaryPath,
-			StubLauncher:     req.BunRuntime.StubLauncher,
-			SourceDateEpoch:  req.SourceDateEpoch,
-			Offline:          req.Hermetic,
-		})
-		if err != nil {
-			return BuildResult{}, fmt.Errorf("core: resolve bun runtime for sbom/provenance: %w", err)
-		}
+	if resolveBun {
+		bunToolchain = bunRuntimes[0]
 	}
 
 	// Route exclusions run here: after Prepare's errgroup has been waited on
@@ -1100,7 +1354,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 
 	// Stage 6: the parallel section.
-	built, doc, err := fanOut(ctx, deps, req, base, prep, workDir, imageLabels(req, baseInfo, toolchain, bunToolchain), bunToolchain, predecessorDigest, assetOverlayDigests, assetOverlayDir)
+	built, doc, err := fanOut(ctx, deps, req, base, prep, workDir, imageLabels(req, baseInfo, toolchain, bunToolchain), bunToolchain, bunRuntimes, predecessorDigest, assetOverlayDigests, assetOverlayDir)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -1128,6 +1382,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		}
 	}
 
+	timer.begin("index assembly")
 	if err := checkCtx(ctx, "index assembly"); err != nil {
 		return BuildResult{}, err
 	}
@@ -1190,10 +1445,12 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			result.Image.Digest = d
 		}
 		result.Duration = time.Since(started)
+		result.Stages = timer.finish()
 		log.Info("manifest printed; nothing was published")
 		return result, nil
 	}
 
+	timer.begin("publish")
 	if err := checkCtx(ctx, "publish"); err != nil {
 		return BuildResult{}, err
 	}
@@ -1205,6 +1462,8 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 	result.Image = NewImageResult(req.Output.Mode, pub, publishedPlatforms(req, multi), multi && req.Output.Mode != OutputLocal)
 	log.Info("published", "mode", req.Output.Mode, "ref", pub.Ref, "digest", pub.Digest.String(), "tags", strings.Join(pub.Tags, ","))
+
+	timer.begin("sbom attachment")
 
 	// Stage 10: attach the SBOM to the digest that was just published — the
 	// index digest for a multi-platform build, because the document describes
@@ -1229,6 +1488,8 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	} else if doc != nil {
 		log.Info("sbom generated but not attached", "mode", req.Output.Mode, "noAttach", req.SBOM.NoAttach)
 	}
+
+	timer.begin("signing")
 
 	// Stage 10.5: signing. Runs only for push mode — a signature is a
 	// registry artifact keyed to the pushed digest, and the non-push case was
@@ -1267,6 +1528,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 	}
 
 	result.Duration = time.Since(started)
+	result.Stages = timer.finish()
 
 	// Stage 11: the one line of program output. Callers pipe this straight
 	// into `kubectl set image` or a manifest rewrite, so nothing else may ever
@@ -1393,28 +1655,71 @@ func slsaGeneratorRequest(deps Deps, req BuildRequest, base *ports.BaseImage, to
 // could be replaced wholesale without any verification path noticing. A signed
 // statement naming the digest cannot be swapped for another image's SBOM, and
 // cannot be edited at all without breaking the signature.
+// sbomStatementTemplate is the part of the signed SBOM statement that does
+// NOT vary by subject: the predicate bytes and their type, validated once.
+//
+// It exists because signSBOMStatement used to re-run json.Valid over the
+// whole SPDX document — megabytes for a real node_modules tree — once per
+// signing subject, and a two-platform build has three subjects. The
+// per-subject marshal genuinely cannot be hoisted: the subject digest is
+// inside the bytes that get signed, which is the entire point of binding it.
+type sbomStatementTemplate struct {
+	predicateType string
+	predicate     json.RawMessage
+	packageCount  int
+}
+
+// newSBOMStatementTemplate validates the SBOM document once for the whole
+// signing stage. Returns (nil, nil) when there is no SBOM to sign, which is
+// the caller's signal to attach provenance alone.
+//
+// subject is used only to name the offending document in the error; the
+// validity of the document is a property of the build, not of any one
+// subject, so checking it once is the correct scope as well as the cheap one.
+func newSBOMStatementTemplate(doc *ports.SBOMDocument, subject v1.Hash) (*sbomStatementTemplate, error) {
+	if doc == nil || len(doc.Content) == 0 {
+		return nil, nil
+	}
+	if !json.Valid(doc.Content) {
+		// Embedding non-JSON as a predicate would produce a statement no
+		// verifier can parse, and it would be signed — an authentic-looking
+		// artifact carrying garbage is worse than no artifact.
+		return nil, fmt.Errorf("core: SBOM document for %s is not valid JSON, refusing to sign it as an attestation: %w", subject, ErrSigningFailed)
+	}
+	return &sbomStatementTemplate{
+		predicateType: ports.SBOMPredicateType(doc.Format),
+		predicate:     json.RawMessage(doc.Content),
+		packageCount:  doc.PackageCount,
+	}, nil
+}
+
+// signSBOMStatement wraps the generated SBOM document in an in-toto Statement
+// whose subject is the image digest, and DSSE-signs it with the build's
+// signing key.
+//
+// Binding the subject is the whole point: the SBOM used to be attached as a
+// bare blob under the .sbom tag with nothing tying it to the image, so it
+// could be replaced wholesale without any verification path noticing. A signed
+// statement naming the digest cannot be swapped for another image's SBOM, and
+// cannot be edited at all without breaking the signature.
+//
+// Safe to call concurrently for different subjects: tmpl is read-only and
+// every other value is either a parameter or freshly allocated here.
 func signSBOMStatement(
 	ctx context.Context,
 	deps Deps,
 	req BuildRequest,
 	subject v1.Hash,
-	doc *ports.SBOMDocument,
+	tmpl *sbomStatementTemplate,
 ) (ports.DSSEEnvelope, error) {
-	if !json.Valid(doc.Content) {
-		// Embedding non-JSON as a predicate would produce a statement no
-		// verifier can parse, and it would be signed — an authentic-looking
-		// artifact carrying garbage is worse than no artifact.
-		return ports.DSSEEnvelope{}, fmt.Errorf("core: SBOM document for %s is not valid JSON, refusing to sign it as an attestation: %w", subject, ErrSigningFailed)
-	}
-
 	stmt := ports.SBOMStatement{
 		Type: ports.InTotoStatementTypeV1,
 		Subject: []ports.ResourceDescriptor{{
 			Name:   req.Repo,
 			Digest: map[string]string{"sha256": subject.Hex},
 		}},
-		PredicateType: ports.SBOMPredicateType(doc.Format),
-		Predicate:     json.RawMessage(doc.Content),
+		PredicateType: tmpl.predicateType,
+		Predicate:     tmpl.predicate,
 	}
 	stmtJSON, err := json.Marshal(stmt)
 	if err != nil {
@@ -1429,9 +1734,16 @@ func signSBOMStatement(
 		return ports.DSSEEnvelope{}, fmt.Errorf("core: DSSE-sign SBOM statement for %s: %w: %w", subject, err, ErrSigningFailed)
 	}
 	deps.logger().Info("sbom attestation signed",
-		"subject", subject.String(), "predicateType", stmt.PredicateType, "packages", doc.PackageCount)
+		"subject", subject.String(), "predicateType", stmt.PredicateType, "packages", tmpl.packageCount)
 	return env, nil
 }
+
+// signingConcurrency caps how many signing subjects are in flight at once in
+// signAndSelfVerify's two loops. Small on purpose: the work is registry round
+// trips against one repository, and a build has three subjects at most today
+// (an index plus two platforms), so a higher limit buys nothing and only
+// raises the chance of tripping a registry's rate limiting.
+const signingConcurrency = 4
 
 func signAndSelfVerify(
 	ctx context.Context,
@@ -1452,116 +1764,162 @@ func signAndSelfVerify(
 		return nil, err
 	}
 
-	res := &SigningResult{}
-	for _, subject := range subjects {
-		stmt, err := deps.SLSAGenerator.Generate(ctx, slsaGeneratorRequest(deps, req, base, toolchain, bunToolchain, subject))
-		if err != nil {
-			return nil, fmt.Errorf("core: generate SLSA provenance for %s: %w: %w", subject, err, ErrSigningFailed)
-		}
-		if len(stmt.Subject) == 0 {
-			// A statement with no subject names nothing — attaching it would
-			// be attaching noise that verifiers reject later.
-			return nil, fmt.Errorf("core: SLSA provenance statement for %s has no subject: %w", subject, ErrSigningFailed)
-		}
-		stmtJSON, err := json.Marshal(stmt)
-		if err != nil {
-			return nil, fmt.Errorf("core: marshal SLSA statement for %s: %w: %w", subject, err, ErrSigningFailed)
-		}
-
-		env, err := deps.DSSESigner.Sign(ctx, ports.DSSESignRequest{
-			PayloadBytes: stmtJSON,
-			PayloadType:  ports.InTotoPayloadType,
-			KeyPEM:       req.Signing.KeyPEM,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("core: DSSE-sign SLSA statement for %s: %w: %w", subject, err, ErrSigningFailed)
-		}
-		// Sign the SBOM as a second in-toto attestation bound to this same
-		// subject digest. It rides in the same .att attachment as an extra
-		// layer, which is cosign's convention for multiple attestations, so
-		// `cosign verify-attestation --type spdxjson` resolves it without
-		// Pokkum in the loop. The provenance envelope stays layer 0.
-		var extraEnvelopes []ports.DSSEEnvelope
-		if sbomDoc != nil && len(sbomDoc.Content) > 0 {
-			sbomEnv, serr := signSBOMStatement(ctx, deps, req, subject, sbomDoc)
-			if serr != nil {
-				return nil, serr
-			}
-			extraEnvelopes = append(extraEnvelopes, sbomEnv)
-		}
-
-		attRes, err := deps.Registry.AttachAttestation(ctx, ports.AttachAttestationRequest{
-			Repo:                req.Repo,
-			Subject:             subject,
-			Envelope:            env,
-			AdditionalEnvelopes: extraEnvelopes,
-			Insecure:            req.Insecure,
-			RegistryConfigPath:  req.RegistryConfigPath,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("core: attach attestation for %s (the image itself was pushed but is NOT fully signed): %w", subject, err)
-		}
-
-		bundle, err := deps.CosignSigner.Sign(ctx, ports.CosignSignRequest{
-			Repo:            req.Repo,
-			Digest:          subject,
-			KeyPEM:          req.Signing.KeyPEM,
-			Creator:         strings.TrimSpace("pokkum " + deps.Version),
-			SourceDateEpoch: req.SourceDateEpoch,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("core: sign image digest %s: %w: %w", subject, err, ErrSigningFailed)
-		}
-		sigRes, err := deps.Registry.AttachSignature(ctx, ports.AttachSignatureRequest{
-			Repo:               req.Repo,
-			Subject:            subject,
-			Bundle:             bundle,
-			Insecure:           req.Insecure,
-			RegistryConfigPath: req.RegistryConfigPath,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("core: attach signature for %s (the image itself was pushed but is NOT signed): %w", subject, err)
-		}
-
-		res.AttestationRefs = append(res.AttestationRefs, attRes.Ref)
-		res.SignatureRefs = append(res.SignatureRefs, sigRes.Ref)
-		log.Info("signed subject", "subject", subject.String(), "sig", sigRes.Ref, "att", attRes.Ref)
+	// Validated and built once for the whole stage rather than once per
+	// subject — see sbomStatementTemplate.
+	sbomTmpl, err := newSBOMStatementTemplate(sbomDoc, subjects[0])
+	if err != nil {
+		return nil, err
 	}
+
+	res := &SigningResult{}
+	// Indexed, never appended: the refs are reported to the caller and
+	// logged in subject order (published digest first, then each platform),
+	// and concurrent appends would both race and scramble that order.
+	attRefs := make([]string, len(subjects))
+	sigRefs := make([]string, len(subjects))
+
+	// Per subject this loop does an SLSA generate, two DSSE signs, a Cosign
+	// sign and two registry attach round trips; a two-platform build has
+	// three subjects, so serially that is a long tail of latency after the
+	// image is already pushed. errgroup gives first-error-wins and cancels
+	// the rest, which is exactly the previous loop's semantics — the first
+	// failing subject aborts the stage and the build.
+	signGroup, signCtx := errgroup.WithContext(ctx)
+	signGroup.SetLimit(signingConcurrency)
+	for i, subject := range subjects {
+		signGroup.Go(func() error {
+			ctx := signCtx
+			stmt, err := deps.SLSAGenerator.Generate(ctx, slsaGeneratorRequest(deps, req, base, toolchain, bunToolchain, subject))
+			if err != nil {
+				return fmt.Errorf("core: generate SLSA provenance for %s: %w: %w", subject, err, ErrSigningFailed)
+			}
+			if len(stmt.Subject) == 0 {
+				// A statement with no subject names nothing — attaching it would
+				// be attaching noise that verifiers reject later.
+				return fmt.Errorf("core: SLSA provenance statement for %s has no subject: %w", subject, ErrSigningFailed)
+			}
+			stmtJSON, err := json.Marshal(stmt)
+			if err != nil {
+				return fmt.Errorf("core: marshal SLSA statement for %s: %w: %w", subject, err, ErrSigningFailed)
+			}
+
+			env, err := deps.DSSESigner.Sign(ctx, ports.DSSESignRequest{
+				PayloadBytes: stmtJSON,
+				PayloadType:  ports.InTotoPayloadType,
+				KeyPEM:       req.Signing.KeyPEM,
+			})
+			if err != nil {
+				return fmt.Errorf("core: DSSE-sign SLSA statement for %s: %w: %w", subject, err, ErrSigningFailed)
+			}
+			// Sign the SBOM as a second in-toto attestation bound to this same
+			// subject digest. It rides in the same .att attachment as an extra
+			// layer, which is cosign's convention for multiple attestations, so
+			// `cosign verify-attestation --type spdxjson` resolves it without
+			// Pokkum in the loop. The provenance envelope stays layer 0.
+			var extraEnvelopes []ports.DSSEEnvelope
+			if sbomTmpl != nil {
+				sbomEnv, serr := signSBOMStatement(ctx, deps, req, subject, sbomTmpl)
+				if serr != nil {
+					return serr
+				}
+				extraEnvelopes = append(extraEnvelopes, sbomEnv)
+			}
+
+			attRes, err := deps.Registry.AttachAttestation(ctx, ports.AttachAttestationRequest{
+				Repo:                req.Repo,
+				Subject:             subject,
+				Envelope:            env,
+				AdditionalEnvelopes: extraEnvelopes,
+				Insecure:            req.Insecure,
+				RegistryConfigPath:  req.RegistryConfigPath,
+			})
+			if err != nil {
+				return fmt.Errorf("core: attach attestation for %s (the image itself was pushed but is NOT fully signed): %w", subject, err)
+			}
+
+			bundle, err := deps.CosignSigner.Sign(ctx, ports.CosignSignRequest{
+				Repo:            req.Repo,
+				Digest:          subject,
+				KeyPEM:          req.Signing.KeyPEM,
+				Creator:         strings.TrimSpace("pokkum " + deps.Version),
+				SourceDateEpoch: req.SourceDateEpoch,
+			})
+			if err != nil {
+				return fmt.Errorf("core: sign image digest %s: %w: %w", subject, err, ErrSigningFailed)
+			}
+			sigRes, err := deps.Registry.AttachSignature(ctx, ports.AttachSignatureRequest{
+				Repo:               req.Repo,
+				Subject:            subject,
+				Bundle:             bundle,
+				Insecure:           req.Insecure,
+				RegistryConfigPath: req.RegistryConfigPath,
+			})
+			if err != nil {
+				return fmt.Errorf("core: attach signature for %s (the image itself was pushed but is NOT signed): %w", subject, err)
+			}
+
+			attRefs[i] = attRes.Ref
+			sigRefs[i] = sigRes.Ref
+			log.Info("signed subject", "subject", subject.String(), "sig", sigRes.Ref, "att", attRes.Ref)
+			return nil
+		})
+	}
+	if err := signGroup.Wait(); err != nil {
+		return nil, err
+	}
+	res.AttestationRefs = attRefs
+	res.SignatureRefs = sigRefs
 
 	// Post-push self-verification: prove the registry serves back what a
 	// verifier will actually fetch, and that it verifies against this
 	// build's own public key. This is a real pipeline stage, not a test.
+	//
+	// A SECOND group, started only after the first has fully drained, not
+	// more goroutines in the first one: every attach must complete before
+	// any read-back, or a subject could be fetched back before it was
+	// attached and the read-back would prove nothing. The two-phase order is
+	// what makes this stage meaningful, so it survives the parallelisation
+	// intact.
+	verifyGroup, verifyCtx := errgroup.WithContext(ctx)
+	verifyGroup.SetLimit(signingConcurrency)
 	for _, subject := range subjects {
-		fetchReq := ports.FetchAttachmentRequest{
-			Repo:               req.Repo,
-			Subject:            subject,
-			Insecure:           req.Insecure,
-			RegistryConfigPath: req.RegistryConfigPath,
-		}
+		verifyGroup.Go(func() error {
+			ctx := verifyCtx
+			fetchReq := ports.FetchAttachmentRequest{
+				Repo:               req.Repo,
+				Subject:            subject,
+				Insecure:           req.Insecure,
+				RegistryConfigPath: req.RegistryConfigPath,
+			}
 
-		fetched, err := deps.Registry.FetchSignature(ctx, fetchReq)
-		if err != nil {
-			return nil, fmt.Errorf("core: self-verify: fetch signature for %s back from registry: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
-		}
-		if err := deps.CosignSigner.Verify(ctx, fetched, req.Signing.PublicKeyPEM, req.Repo, subject); err != nil {
-			return nil, fmt.Errorf("core: self-verify: fetched signature for %s does not verify: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
-		}
+			fetched, err := deps.Registry.FetchSignature(ctx, fetchReq)
+			if err != nil {
+				return fmt.Errorf("core: self-verify: fetch signature for %s back from registry: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
+			}
+			if err := deps.CosignSigner.Verify(ctx, fetched, req.Signing.PublicKeyPEM, req.Repo, subject); err != nil {
+				return fmt.Errorf("core: self-verify: fetched signature for %s does not verify: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
+			}
 
-		envFetched, err := deps.Registry.FetchAttestation(ctx, fetchReq)
-		if err != nil {
-			return nil, fmt.Errorf("core: self-verify: fetch attestation for %s back from registry: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
-		}
-		payload, err := deps.DSSESigner.Verify(ctx, envFetched, req.Signing.PublicKeyPEM)
-		if err != nil {
-			return nil, fmt.Errorf("core: self-verify: fetched attestation for %s does not verify: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
-		}
-		var fetchedStmt ports.SLSAStatement
-		if err := json.Unmarshal(payload, &fetchedStmt); err != nil {
-			return nil, fmt.Errorf("core: self-verify: fetched attestation payload for %s is not a SLSA statement: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
-		}
-		if !statementNamesDigest(fetchedStmt, subject) {
-			return nil, fmt.Errorf("core: self-verify: fetched attestation for %s names a different subject digest: %w", subject, ErrSignatureSelfVerifyFailed)
-		}
+			envFetched, err := deps.Registry.FetchAttestation(ctx, fetchReq)
+			if err != nil {
+				return fmt.Errorf("core: self-verify: fetch attestation for %s back from registry: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
+			}
+			payload, err := deps.DSSESigner.Verify(ctx, envFetched, req.Signing.PublicKeyPEM)
+			if err != nil {
+				return fmt.Errorf("core: self-verify: fetched attestation for %s does not verify: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
+			}
+			var fetchedStmt ports.SLSAStatement
+			if err := json.Unmarshal(payload, &fetchedStmt); err != nil {
+				return fmt.Errorf("core: self-verify: fetched attestation payload for %s is not a SLSA statement: %w: %w", subject, err, ErrSignatureSelfVerifyFailed)
+			}
+			if !statementNamesDigest(fetchedStmt, subject) {
+				return fmt.Errorf("core: self-verify: fetched attestation for %s names a different subject digest: %w", subject, ErrSignatureSelfVerifyFailed)
+			}
+			return nil
+		})
+	}
+	if err := verifyGroup.Wait(); err != nil {
+		return nil, err
 	}
 
 	res.Signed = true
@@ -1626,14 +1984,18 @@ type platformBuild struct {
 //     error cancels gctx, every other in-flight port call sees a done context
 //     and returns, and Wait reports the first error.
 //
-// bunToolchain is pre-resolved by the caller (Build), not by this function:
-// the SBOM scan needs it immediately, with no dependency on any platform's
-// own per-platform resolve completing, and threading a live resolve through
-// this goroutine's own concurrency would couple two things (SBOM generation
-// and Bun resolution) that this function's own doc comment above says are
-// deliberately independent. Zero value (StrategyExe/static, or
-// deps.BunRuntime == nil) is fine — Generate treats an empty BunVersion as
-// "no Bun component" rather than an error.
+// bunToolchain and bunRuntimes are both pre-resolved by the caller (Build)
+// inside its Stage 5 errgroup, not by this function. bunToolchain is the
+// single embedded-runtime artifact the SBOM and SLSA statement name (the
+// first platform's); bunRuntimes holds one entry per req.Platforms position,
+// consumed by the layered branch below. The SBOM scan needs bunToolchain
+// immediately, with no dependency on any platform's packaging completing,
+// and resolving live in here would couple two things (SBOM generation and
+// Bun resolution) that this function's own doc comment above says are
+// deliberately independent — and would put a cold-cache download on the
+// fan-out's critical path. Zero values (StrategyExe/static, --runtime=node,
+// or deps.BunRuntime == nil) are fine — Generate treats an empty BunVersion
+// as "no Bun component" rather than an error.
 func fanOut(
 	ctx context.Context,
 	deps Deps,
@@ -1643,6 +2005,7 @@ func fanOut(
 	workDir string,
 	labels map[string]string,
 	bunToolchain ports.BunResolverResult,
+	bunRuntimes []ports.BunResolverResult,
 	predecessorDigest string,
 	assetOverlayDigests []string,
 	assetOverlayDir string,
@@ -1684,22 +2047,22 @@ func fanOut(
 				// and resolving anyway would gate a node build on Bun
 				// release infrastructure it doesn't depend on.
 				if req.AppRuntime == ports.RuntimeBun {
+					// Kept as a hard failure rather than folded into the
+					// caller's pre-resolve gate: a nil resolver reaching a
+					// layered+bun fan-out is a miswired composition root,
+					// and it must fail loudly here even if the caller's
+					// gate is ever changed.
 					if deps.BunRuntime == nil {
 						return fmt.Errorf("core: bun runtime resolver unavailable for layered strategy: %w", ErrPackageFailed)
 					}
-					res, err := deps.BunRuntime.Resolve(gctx, ports.BunResolverRequest{
-						Platform:         p,
-						Version:          req.BunRuntime.Version,
-						Variant:          req.BunRuntime.Variant,
-						CustomBinaryPath: req.BunRuntime.CustomBinaryPath,
-						StubLauncher:     req.BunRuntime.StubLauncher,
-						Offline:          req.Hermetic,
-						SourceDateEpoch:  req.SourceDateEpoch,
-					})
-					if err != nil {
-						return fmt.Errorf("core: resolve bun runtime for %s: %w", p, err)
+					// Pre-resolved by Build inside the Stage 5 errgroup, so
+					// no download happens on the fan-out's critical path.
+					// The slice is indexed by platform position, which is
+					// the same i this goroutine was dispatched with.
+					if i >= len(bunRuntimes) {
+						return fmt.Errorf("core: no pre-resolved bun runtime for %s: %w", p, ErrPackageFailed)
 					}
-					bunResult = res
+					bunResult = bunRuntimes[i]
 					log.Info("resolved bun runtime", "platform", p.String(), "version", bunResult.Version, "sha256", bunResult.SHA256)
 				}
 			case StrategyStatic:
@@ -2097,6 +2460,68 @@ func checkCtx(ctx context.Context, stage string) error {
 		return fmt.Errorf("core: build cancelled before %s: %w", stage, err)
 	}
 	return nil
+}
+
+// stageTimer accumulates the per-stage wall-clock breakdown that
+// BuildResult.Stages reports, so "the build took 94s" becomes "Prepare took
+// 71s of it". Before this existed the only measurement anywhere in the
+// pipeline was the single whole-build Duration, which is unattributable:
+// nothing could say which stage a regression landed in.
+//
+// The clock reads here are the same sanctioned exception BuildResult.Duration
+// already is (see its doc comment) — measurement of the build, never an input
+// to any image byte. Nothing derived from this type reaches a tar header, a
+// layer, a manifest or the cache key; SourceDateEpoch remains the only clock
+// the artifact ever sees.
+//
+// Not safe for concurrent use: every call site is on Build's own goroutine,
+// at a stage boundary, with no fan-out in flight across a mark.
+type stageTimer struct {
+	log     *slog.Logger
+	current string
+	since   time.Time
+	stages  []StageTiming
+}
+
+// newStageTimer starts the breakdown at started (Build's own clock read for
+// Duration, so the two agree) with first already open — the request/deps
+// validation that precedes the first explicit boundary is folded into it
+// rather than reported as its own microsecond-sized entry.
+func newStageTimer(log *slog.Logger, started time.Time, first string) *stageTimer {
+	return &stageTimer{log: log, since: started, current: first}
+}
+
+// begin closes out whichever stage is currently open — recording and logging
+// its duration — and starts timing name. An empty name just closes the open
+// stage without opening another, which is what finish uses.
+func (s *stageTimer) begin(name string) {
+	now := time.Now()
+	if s.current != "" {
+		d := now.Sub(s.since)
+		s.stages = append(s.stages, StageTiming{Stage: s.current, Duration: d})
+		// Debug, not Info: one line per stage at Info would triple the
+		// normal build's output for a number most builds never need. The
+		// Info-level summary in finish carries the whole breakdown in a
+		// single line instead.
+		s.log.Debug("stage complete", "stage", s.current, "duration", d.Round(time.Millisecond).String())
+	}
+	s.current = name
+	s.since = now
+}
+
+// finish closes the open stage and returns the whole breakdown, logging it as
+// one line. Safe to call on a build that returned early: it reports only the
+// stages that actually ran.
+func (s *stageTimer) finish() []StageTiming {
+	s.begin("")
+	if len(s.stages) > 0 {
+		parts := make([]string, 0, len(s.stages))
+		for _, st := range s.stages {
+			parts = append(parts, st.Stage+"="+st.Duration.Round(time.Millisecond).String())
+		}
+		s.log.Info("stage timings", "stages", strings.Join(parts, " "))
+	}
+	return slices.Clone(s.stages)
 }
 
 // runSecretScan invokes deps.SecretGuard.ScanDirectory against dir and turns

@@ -5,6 +5,67 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-05 — The remote build cache could never hit, because the build stamped the wall clock into a file it then hashed as source
+
+**Category:** self-invalidating cache key / unobservable-by-construction — a feature that was inert
+since it shipped, where the broken behaviour and the correct behaviour produce identical output
+
+**Root cause:** `ComputeSourceTreeHash` walked the project directory and hashed every file not under
+an ignored *directory*. `IgnoredBuildDirs` lists only directory basenames, so `pokkum.lock` — a file
+in the project root — was hashed as though it were source.
+
+But `pokkum.lock` is not source; it is something the build itself writes, twice, before the hash is
+taken. `lockfileutils.SaveLockfile` stamps `updatedAt = time.Now()`, and `RecordScanResult` stamps a
+per-entry `lastScannedAt = time.Now()`. Both run during base-image resolution and CVE scanning, which
+sit *ahead of* `ComputeInputHash` in `core.Build`. So the composite input hash covered a file the
+current build had just rewritten with the current time, and two builds of byte-identical source
+produced different hashes.
+
+The result: `--cache` never hit. Not "hit less often" — never, on any project, since the feature
+shipped. The documented promise of a sub-100ms verified cache hit was unreachable in principle.
+
+**Why it went unnoticed for so long is the actual lesson.** A cache that never hits is behaviourally
+indistinguishable from a cache that correctly misses. Every build still produced a correct image;
+every test still passed; no error was logged; the only symptom was that builds took as long as they
+had before the feature existed, which is exactly what you would expect from a cold cache. There was
+no assertion anywhere that a *hit* is reachable, and there was no benchmark that would have shown the
+promised fast path never engaging. The defect was invisible by construction, and it was found only
+because a concurrency change forced someone to enumerate every reader and writer of `ProjectDir`
+during the build window — the timestamp write showed up as a torn-read hazard first, and the
+cache-invalidation consequence second.
+
+Note the near-miss: the same enumeration also found that `SaveLockfile` uses `os.WriteFile`
+(truncate-then-write, no temp+rename), so once the secret scan and the tree hash were made
+concurrent with it, a torn read would have produced a *nondeterministic*
+`pokkum.dev/build-input-hash` annotation — a wall-clock artifact baked into content-addressed image
+bytes. That was fixed in the same change by moving the write onto the build's own goroutine.
+
+**Where:** `internal/adapters/remotecacheutils/remotecacheutils.go`, `ComputeSourceTreeHash`'s walk
+callback; the writes are in `internal/adapters/lockfileutils/lockfile.go` (`SaveLockfile`) and
+`core.Build`'s `RecordScanResult` call.
+
+**Fix:** a new `IgnoredBuildFiles` set excludes `pokkum.lock` from the tree hash. Nothing is lost by
+excluding it, because the lockfile's only build-relevant content is already a first-class, explicit
+cache input — the resolved base digest travels in `InputParams.BaseImageDigest`. Everything else in
+the file is metadata or pinned digests for base slots this build did not resolve, none of which can
+change the image bytes. A user hand-editing the lockfile to pin a different base still invalidates
+correctly, through that explicit field. Two regression tests guard it, and both were shown red
+against the pre-fix walk; the first carries an explicit floor asserting that editing a real source
+file *does* still change the hash, so it cannot pass by the hash ignoring everything.
+
+**Preventative rule:** never hash a file the build itself writes. Before adding any path to a
+content-addressed key, ask who writes it and when — if the answer is "this build, earlier", the key
+is self-invalidating. More generally, and this is the half that would have caught it years earlier:
+**a cache needs a test that a hit is reachable, not only that a miss is correct.** Assert that two
+runs over unchanged input produce the same key, and count hits rather than trusting that correct
+output implies a working cache. Any optimisation whose failure mode is "silently does nothing" —
+caches, memos, fast paths, skip conditions — must ship with an assertion that observes the
+optimisation engaging, because correctness tests cannot distinguish a disabled optimisation from a
+working one. This is checklist row 62's counting rule, arrived at independently on the same day from
+the opposite direction.
+
+---
+
 ## 2026-09-05 — A credential cache that stored only its successes re-spawned the helper subprocess forever for the one answer that repeats most
 
 **Category:** cache-completeness — a memo that caches the positive result and silently drops the

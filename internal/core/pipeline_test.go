@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,12 +195,16 @@ func (m *mockPackager) Index(ctx context.Context, req ports.IndexRequest) (v1.Im
 // subject digest — so the pipeline's post-push self-verification stage
 // exercises its real fetch-back flow against the mock without a registry.
 type mockRegistry struct {
-	pushFn               func(ctx context.Context, req ports.PushRequest) (ports.PublishResult, error)
-	attachSBOMFn         func(ctx context.Context, req ports.AttachSBOMRequest) (ports.PublishResult, error)
-	attachSignatureFn    func(ctx context.Context, req ports.AttachSignatureRequest) (ports.PublishResult, error)
-	attachAttestationFn  func(ctx context.Context, req ports.AttachAttestationRequest) (ports.PublishResult, error)
-	fetchSignatureFn     func(ctx context.Context, req ports.FetchAttachmentRequest) (ports.CosignSignatureBundle, error)
-	fetchAttestationFn   func(ctx context.Context, req ports.FetchAttachmentRequest) (ports.DSSEEnvelope, error)
+	pushFn              func(ctx context.Context, req ports.PushRequest) (ports.PublishResult, error)
+	attachSBOMFn        func(ctx context.Context, req ports.AttachSBOMRequest) (ports.PublishResult, error)
+	attachSignatureFn   func(ctx context.Context, req ports.AttachSignatureRequest) (ports.PublishResult, error)
+	attachAttestationFn func(ctx context.Context, req ports.AttachAttestationRequest) (ports.PublishResult, error)
+	fetchSignatureFn    func(ctx context.Context, req ports.FetchAttachmentRequest) (ports.CosignSignatureBundle, error)
+	fetchAttestationFn  func(ctx context.Context, req ports.FetchAttachmentRequest) (ports.DSSEEnvelope, error)
+	// mu guards every recording field below. The pipeline's signing stage
+	// attaches and reads back its subjects concurrently, so a mock that
+	// records without a lock is itself the data race -race would report.
+	mu                   sync.Mutex
 	attachedSignatures   map[string]ports.CosignSignatureBundle
 	attachedAttestations map[string]ports.DSSEEnvelope
 	fetchSignatureCalls  int
@@ -233,6 +238,8 @@ func (m *mockRegistry) AttachSignature(ctx context.Context, req ports.AttachSign
 	if m.attachSignatureFn != nil {
 		return m.attachSignatureFn(ctx, req)
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.attachedSignatures == nil {
 		m.attachedSignatures = make(map[string]ports.CosignSignatureBundle)
 	}
@@ -244,6 +251,8 @@ func (m *mockRegistry) AttachAttestation(ctx context.Context, req ports.AttachAt
 	if m.attachAttestationFn != nil {
 		return m.attachAttestationFn(ctx, req)
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.attachedAttestations == nil {
 		m.attachedAttestations = make(map[string]ports.DSSEEnvelope)
 	}
@@ -252,10 +261,15 @@ func (m *mockRegistry) AttachAttestation(ctx context.Context, req ports.AttachAt
 }
 
 func (m *mockRegistry) FetchSignature(ctx context.Context, req ports.FetchAttachmentRequest) (ports.CosignSignatureBundle, error) {
+	m.mu.Lock()
 	m.fetchSignatureCalls++
-	if m.fetchSignatureFn != nil {
-		return m.fetchSignatureFn(ctx, req)
+	fn := m.fetchSignatureFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, req)
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	bundle, ok := m.attachedSignatures[req.Subject.String()]
 	if !ok {
 		return ports.CosignSignatureBundle{}, fmt.Errorf("mock registry: no signature attached for %s: %w", req.Subject, core.ErrSignatureMissing)
@@ -264,10 +278,15 @@ func (m *mockRegistry) FetchSignature(ctx context.Context, req ports.FetchAttach
 }
 
 func (m *mockRegistry) FetchAttestation(ctx context.Context, req ports.FetchAttachmentRequest) (ports.DSSEEnvelope, error) {
+	m.mu.Lock()
 	m.fetchAttestCalls++
-	if m.fetchAttestationFn != nil {
-		return m.fetchAttestationFn(ctx, req)
+	fn := m.fetchAttestationFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, req)
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	env, ok := m.attachedAttestations[req.Subject.String()]
 	if !ok {
 		return ports.DSSEEnvelope{}, fmt.Errorf("mock registry: no attestation attached for %s: %w", req.Subject, core.ErrSignatureMissing)
@@ -378,8 +397,12 @@ func (m *mockSLSAGenerator) Generate(ctx context.Context, req ports.SLSAGenerato
 }
 
 type mockCosignSigner struct {
-	signFn    func(ctx context.Context, req ports.CosignSignRequest) (ports.CosignSignatureBundle, error)
-	verifyFn  func(ctx context.Context, bundle ports.CosignSignatureBundle, pubKeyPEM []byte, expectedRepo string, expectedDigest v1.Hash) error
+	signFn   func(ctx context.Context, req ports.CosignSignRequest) (ports.CosignSignatureBundle, error)
+	verifyFn func(ctx context.Context, bundle ports.CosignSignatureBundle, pubKeyPEM []byte, expectedRepo string, expectedDigest v1.Hash) error
+	// mu guards signCalls: the signing stage signs its subjects
+	// concurrently. Order of signCalls is therefore NOT meaningful — assert
+	// membership, not position.
+	mu        sync.Mutex
 	signCalls []ports.CosignSignRequest
 }
 
@@ -388,7 +411,9 @@ func (m *mockCosignSigner) CreatePayload(req ports.CosignSignRequest) ([]byte, e
 }
 
 func (m *mockCosignSigner) Sign(ctx context.Context, req ports.CosignSignRequest) (ports.CosignSignatureBundle, error) {
+	m.mu.Lock()
 	m.signCalls = append(m.signCalls, req)
+	m.mu.Unlock()
 	if m.signFn != nil {
 		return m.signFn(ctx, req)
 	}
@@ -409,8 +434,10 @@ func (m *mockCosignSigner) Verify(ctx context.Context, bundle ports.CosignSignat
 }
 
 type mockDSSESigner struct {
-	signFn    func(ctx context.Context, req ports.DSSESignRequest) (ports.DSSEEnvelope, error)
-	verifyFn  func(ctx context.Context, envelope ports.DSSEEnvelope, pubKeyPEM []byte) ([]byte, error)
+	signFn   func(ctx context.Context, req ports.DSSESignRequest) (ports.DSSEEnvelope, error)
+	verifyFn func(ctx context.Context, envelope ports.DSSEEnvelope, pubKeyPEM []byte) ([]byte, error)
+	// mu guards signCalls; see mockCosignSigner.mu.
+	mu        sync.Mutex
 	signCalls []ports.DSSESignRequest
 }
 
@@ -419,7 +446,9 @@ func (m *mockDSSESigner) CreatePAE(payloadType string, payload []byte) []byte {
 }
 
 func (m *mockDSSESigner) Sign(ctx context.Context, req ports.DSSESignRequest) (ports.DSSEEnvelope, error) {
+	m.mu.Lock()
 	m.signCalls = append(m.signCalls, req)
+	m.mu.Unlock()
 	if m.signFn != nil {
 		return m.signFn(ctx, req)
 	}
@@ -2693,15 +2722,21 @@ func TestBuild_MultiPlatformSignsIndexAndPerPlatformManifests(t *testing.T) {
 	if len(cosignMock.signCalls) != 3 {
 		t.Fatalf("CosignSigner.Sign calls = %d, want 3 (index + 2 per-platform manifests)", len(cosignMock.signCalls))
 	}
-	if cosignMock.signCalls[0].Digest != res.Image.Digest {
-		t.Errorf("first signing subject = %s, want the published index digest %s", cosignMock.signCalls[0].Digest, res.Image.Digest)
-	}
 	seen := make(map[string]bool)
 	for _, c := range cosignMock.signCalls {
 		if seen[c.Digest.String()] {
 			t.Errorf("digest %s signed twice — per-platform subjects must be distinct", c.Digest)
 		}
 		seen[c.Digest.String()] = true
+	}
+	// Membership, not position: the subjects are signed concurrently, so
+	// which one reaches CosignSigner.Sign first is not a property this test
+	// may assert. The property that matters — and that this used to check by
+	// proxy — is that the PUBLISHED index digest is among the signed
+	// subjects, which is asserted directly here and again by
+	// SigningResult.SignatureRefs' order below.
+	if !seen[res.Image.Digest.String()] {
+		t.Errorf("published index digest %s was not among the signing subjects %v", res.Image.Digest, seen)
 	}
 	if len(regMock.attachedSignatures) != 3 || len(regMock.attachedAttestations) != 3 {
 		t.Errorf("attached %d signatures / %d attestations, want 3/3", len(regMock.attachedSignatures), len(regMock.attachedAttestations))
