@@ -7,7 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Pokkum is in active development. Features in `docs/Roadmap.md` marked as shipped are included below.
+Nothing yet.
+
+## [v1.1.0] — 2026-09-06
+
+A performance release, and two bugs that only became visible once something
+finally measured. Nothing in the CLI surface changed: no flag was added,
+removed or renamed, and no configuration file needs editing.
+
+### Fixed
+
+- **The remote build cache could never hit.** Not rarely — never, on any
+  project, since the feature shipped. `pokkum.lock` was hashed as project
+  source, but the build writes that file twice (a lockfile save and a scan
+  record, both stamping the wall clock) *before* the composite input hash is
+  computed, so every build hashed a file it had just rewritten. It went
+  unnoticed because a cache that never hits is indistinguishable from one that
+  correctly misses: right image, passing tests, no error, just slow. The
+  lockfile is now excluded from the source-tree hash; its only build-relevant
+  content, the resolved base digest, was already a first-class cache input.
+  **Your first build after upgrading will miss once, by design**, since the
+  hash's meaning changed.
+- **`--strategy=layered` builds under a strict native-inspection wiring
+  reported every minified bundle as free of dynamic imports.** The scan used a
+  `bufio.Scanner` whose default 64 KiB token limit a minified bundle exceeds on
+  line one; the resulting error was discarded, so the file was reported clean.
+  The check now reads whole files under an explicit ceiling and reports what it
+  could not read, rather than treating unread as clean.
+- **The Bun runtime download had no timeout**, so a stalled connection could
+  hang a build indefinitely. Dial, TLS and response-header timeouts now bound
+  it, with a generous total backstop that cannot abort a legitimate download.
+- **A shared build directory could be rewritten while another platform read
+  it.** ELF stripping mutated the vendor and native trees in place, once per
+  platform, with no synchronisation, while a concurrent platform was already
+  archiving them — a latent reproducibility hazard. That work now happens once
+  per build.
+- **Credential helpers were re-executed on every registry operation** — the
+  keychain cached only its successes, so any registry without a stored
+  credential re-spawned the helper subprocess for the life of the process.
+
+### Changed
+
+- **Readiness probes in generated Kubernetes manifests** no longer carry a
+  5-second `initialDelaySeconds`, and poll every 3 seconds instead of 10. The
+  startup probe already gates readiness, so the delay postponed `Ready` without
+  protecting anything — worth roughly 5–13 seconds per pod per rollout. The
+  startup probe's 60-second grace is unchanged.
+- **`pokkum-static` now always sends `Accept-Ranges: bytes`** (range support
+  was fully implemented but never advertised) and sets `Vary: Accept-Encoding`
+  on every response for a compressible file type, not only when a compressed
+  sidecar was chosen. Without that, a shared cache could serve the identity
+  copy to a client that would have taken Brotli, turning a 304 into a full 200.
+- **`pokkum-static` serves through kernel-enforced root containment.** Two
+  behaviours are stricter as a result, and neither is reachable in an image
+  Pokkum builds, which archives regular files only: an absolute symlink inside
+  a served root is no longer followed, and a hand-placed sidecar for a
+  non-compressible extension is no longer served.
+- **A file whose name contains a percent-escape is served instead of rejected.**
+  The request path was being percent-decoded a second time, so a file literally
+  named `a%2e.js` decoded to `a..js` and returned 400. All traversal checks are
+  unchanged.
+- **Go toolchain raised to 1.27.1.** Images rebuilt after this release get new
+  digests even where their contents are identical, because the base image
+  descriptor moves; Pokkum's own layer bytes are unaffected.
+
+### Performance
+
+Measured against a benchmark harness added in this release; there was none
+before, and its absence is why the two cache bugs above survived.
+
+- Layer cache hit **24.3 ms → 33 µs**; the Bun runtime layer's cache hit
+  **157 ms → 37 µs**. Both were fully decompressing and re-hashing a blob on
+  every hit.
+- Secret scanning **4.5 → 92.6 MB/s** over a directory and **4.2 → 180.7 MB/s**
+  over a large bundle, with no change to what it detects.
+- Multi-platform builds no longer rebuild byte-identical layers once per
+  platform; that work is now flat in platform count rather than linear.
+- A signed two-platform push opens roughly **8 registry auth sessions instead
+  of 26**, and no longer scales with tag or attachment count.
+- Container startup attestation **648 ms → 387 ms** on a 10,000-file tree,
+  using 89% less memory. Static serving improved on five of six request shapes,
+  with 404s **14× faster**; a conditional 304 is marginally slower, a
+  deliberate trade for closing a TOCTOU window.
+- Precompression peak allocation **16.3 GB → 1.8 GB**.
 
 ### Added
 
