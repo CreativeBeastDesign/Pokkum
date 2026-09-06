@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [v1.1.2] — 2026-09-06
+
+**The first release published to npm since 1.0.6.** The compiler itself is
+unchanged from v1.1.1 — same behaviour, same fixes, only the version string
+differs. This tag exists because the npm publishing method changed, and a
+tag-triggered workflow runs the workflow file as it existed at that tag, so
+v1.1.1 could not be re-run with it.
+
+### Changed
+
+- **npm publishing now uses OIDC trusted publishing instead of a token.** v1.1.1
+  failed with `EOTP: This operation requires a one-time password` — the token
+  authenticated fine, but the account requires 2FA for writes and a token cannot
+  answer an OTP challenge from CI. There is now no npm token in the release
+  pipeline at all, and packages are published with `--provenance`.
+
+  The non-obvious part, recorded because it is the usual way this setup fails:
+  removing the token environment variable is not sufficient. `actions/setup-node`
+  writes an `_authToken=` line into `.npmrc` regardless; with no token it expands
+  to empty, npm concludes credentials are configured, and never performs the OIDC
+  exchange — surfacing as a misleading `ENEEDAUTH` or `404`. The line itself has
+  to be removed, and the workflow now fails loudly if it survives.
+
 ## [v1.1.1] — 2026-09-06
 
 Everything v1.1.0 contains, plus the release pipeline fix that v1.1.0 needed
