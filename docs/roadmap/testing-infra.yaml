@@ -273,7 +273,7 @@ items:
       mount privileges generally, not AppArmor's unprivileged-userns restriction specifically.
 
       Resolution: The `e2e-real-build` CI job now includes a step named "Hermetic Sandbox Tests
-      (privileged container)" that runs `docker run --rm --privileged ... golang:1.26 go test
+      (privileged container)" that runs `docker run --rm --privileged ... golang:<go.mod version> go test
       -count=1 -run 'Hermetic' ./internal/adapters/bunexec/`. This brings the control from "skipped
       everywhere" to "tested 14/14 with 0 skips". The tests pass on the ephemeral GitHub-hosted VM
       inside a privileged container, and they also pass locally on developer machines (verified in

@@ -75,7 +75,7 @@ jobs:
       # fails if they drift.
       - name: Run golangci-lint
         if: ${{ !cancelled() }}
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run ./...
 
       - name: Run govulncheck
         if: ${{ !cancelled() }}
@@ -214,13 +214,29 @@ jobs:
       # "error obtaining VCS status: exit status 128". That failure surfaces as a
       # t.Skipf, so without this flag the step passes green while testing nothing
       # — the same shape of silent hole this whole CI repair is about.
+      # The image tag is DERIVED from go.mod rather than written here. It used
+      # to be a hardcoded `golang:1.26`, and the 1.26.6 -> 1.27.1 bump stranded
+      # it: the container sets GOTOOLCHAIN=local, so it refused with "go.mod
+      # requires go >= 1.27.1 (running go 1.26.8)" while every other job — all
+      # of which read go-version-file: 'go.mod' — moved automatically. Every
+      # other Go version in this repository already derives from that one line;
+      # this was the only place that did not, which is precisely why it was the
+      # only place that broke.
+      #
+      # Deriving the full x.y.z rather than the floating `golang:1.27` is
+      # deliberate: a floating minor tag resolves to whatever the registry
+      # currently serves, and this repo has already been bitten once by a
+      # floating pin resolving below what go.mod required.
       - name: Hermetic Sandbox Tests (privileged container)
         if: ${{ !cancelled() }}
         run: |
+          set -eu
+          go_version="$(awk '/^go [0-9]/{print $2; exit}' go.mod)"
+          echo "go.mod declares Go ${go_version}; running the privileged container on golang:${go_version}"
           docker run --rm --privileged \
             -v "$PWD":/src -w /src \
             -e GOFLAGS="-mod=mod -buildvcs=false" \
-            golang:1.26 \
+            "golang:${go_version}" \
             go test -count=1 -run 'Hermetic' -v ./internal/adapters/bunexec/
 
       # The runtime smoke tests get their own step, ahead of the rest of the

@@ -75,6 +75,25 @@ linters:
         text: QF1001
       - linters: [staticcheck]
         text: (QF1011|ST1023)
+      # SA4023 ("this comparison is always true") on the two
+      # applyHermeticMountIsolation call sites, and ONLY when the analysis runs
+      # for a non-Linux GOOS. It is not a false positive there: hermetic_other.go's
+      # stub (//go:build !linux) always returns an error, because mount namespaces
+      # are a Linux-only concept with no fallback, so `err != nil` genuinely is
+      # always true in that build. The call is unreachable on those platforms
+      # anyway — callers gate on hermeticSandboxSupported, a false constant there.
+      #
+      # Verified, not assumed: with this exclusion removed,
+      # `GOOS=linux golangci-lint run ./internal/adapters/bunexec/` reports
+      # "0 issues." while the same run on darwin reports the two SA4023 findings.
+      # So on the platform that actually executes the sandbox, staticcheck's
+      # analysis of this code is unrestricted; the exclusion only stops a
+      # Mac developer's `make verify` going red for a finding CI can never see.
+      # Re-check that asymmetry if this is ever touched — an exclusion that has
+      # stopped matching is a pre-authorised blind spot (row 46).
+      - linters: [staticcheck]
+        path: internal/adapters/bunexec/compiler\.go
+        text: SA4023
       - linters: [gosec]
         path: internal/adapters/bunexec/.*
         text: G204

@@ -221,7 +221,7 @@ fuzz-smoke:  ##  Run every FuzzXxx target briefly (30s each); see scripts/run-fu
 # 1.26.6 for weeks. Building with the local toolchain makes the two equal by
 # construction. Keep this version identical to the one in .github/workflows/
 # ci.yml and release.yml; cmd/pokkum/lintversion_test.go fails if they drift.
-GOLANGCI_LINT := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+GOLANGCI_LINT := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 
 lint:  ##  Run golangci-lint
 	@echo "Running linters..."
