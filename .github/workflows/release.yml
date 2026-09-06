@@ -79,10 +79,40 @@ jobs:
         uses: actions/setup-node@v7
         with:
           # Node 24 ships npm 11.x. npm >= 11.5.1 is what trusted publishing
-          # (OIDC) requires, so this is also the prerequisite for retiring
-          # NPM_TOKEN later — see the note on the publish step.
+          # (OIDC) requires, and OIDC is how this workflow publishes — there is
+          # no npm token anywhere in it. Do not lower this below Node 22.14.
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      # setup-node's `registry-url` unconditionally writes
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into ~/.npmrc.
+      # That is correct for token auth and FATAL for trusted publishing: with no
+      # NODE_AUTH_TOKEN set the placeholder expands to empty, npm reads the line,
+      # concludes credentials are already configured, and never performs the OIDC
+      # exchange at all — surfacing as ENEEDAUTH or a misleading 404 rather than
+      # as "OIDC did not run".
+      #
+      # So removing the token env is NOT sufficient; the line itself has to go.
+      # This is the single most common way an otherwise-correct trusted-publishing
+      # setup fails, and this repo's own earlier note ("delete the NODE_AUTH_TOKEN
+      # env") described exactly that insufficient fix. registry-url is kept
+      # because it is what points npm at the public registry in the first place.
+      - name: Clear the token line setup-node wrote, so OIDC can engage
+        run: |
+          set -eu
+          npmrc="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          if [ -f "$npmrc" ]; then
+            echo "before:"; sed 's/=.*/=<redacted>/' "$npmrc"
+            sed -i '/_authToken=/d' "$npmrc"
+            echo "after:"; cat "$npmrc"
+          else
+            echo "no .npmrc at $npmrc — nothing to strip"
+          fi
+          # A leftover token line here means the publish would silently skip OIDC.
+          if [ -f "$npmrc" ] && grep -q "_authToken=" "$npmrc"; then
+            echo "::error::_authToken line survived in $npmrc; npm would skip the OIDC exchange"
+            exit 1
+          fi
 
       # Pin the cosign version: the action's default is a value it chooses, not
       # one this repo controls. cosign-installer defaults to v3.0.6, which has no
@@ -198,13 +228,35 @@ jobs:
       # publish defaults to restricted, and a free org cannot host restricted
       # packages, so omitting it fails.
       #
-      # To retire NPM_TOKEN later: configure a trusted publisher for each package
-      # (npmjs.com -> package -> Settings -> Trusted publishing), then add
-      # `--provenance` below and delete the NODE_AUTH_TOKEN env. Everything else
-      # it needs — npm 11.x, id-token: write, the repository field — is already
-      # in place above.
+      # Publishing is via TRUSTED PUBLISHING (OIDC). There is no NPM_TOKEN here
+      # and there must not be one — see the .npmrc step above for why an unused
+      # token line is not merely redundant but actively breaks OIDC.
+      #
+      # PRECONDITION, and it is not optional: every package published below must
+      # have a trusted publisher configured at
+      # npmjs.com -> <package> -> Settings -> Trusted publishing, naming this
+      # repository and this workflow file (release.yml). npm cannot configure a
+      # trusted publisher for a package that does not exist yet, so a brand-new
+      # package name still needs one traditional publish to create it before it
+      # can be moved onto OIDC. All five of this project's packages already
+      # exist, so that bootstrap does not apply here.
+      #
+      # Why this replaced NPM_TOKEN: the v1.1.1 release failed with
+      # `EOTP: This operation requires a one-time password`. The token was valid
+      # — it authenticated — but the account requires 2FA for writes, and a
+      # token cannot answer an OTP challenge from CI. A granular token with
+      # "Bypass 2FA" would also work, but npm is progressively narrowing what
+      # bypass-2FA tokens may do, so OIDC is the direction that stays fixed.
       - name: Publish NPM Packages
         run: |
+          # Fail loudly and early if the OIDC credentials the exchange needs are
+          # absent, rather than letting npm fall through to an anonymous publish
+          # and report a misleading 404. These are injected by `id-token: write`.
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::OIDC token request URL is missing — the job lacks 'id-token: write', so npm cannot use trusted publishing"
+            exit 1
+          fi
+
           # npm refuses to publish a prerelease version without an explicit
           # --tag, so a tag like v1.1.0-rc1 would fail here — after the binaries
           # were already released. Found by dry-running a publish with a
@@ -217,11 +269,9 @@ jobs:
 
           for d in dist/npm/pokkum-*/; do
             echo "publishing $d"
-            npm publish "$d" --access public --tag "$npm_tag"
+            npm publish "$d" --access public --tag "$npm_tag" --provenance
           done
-          npm publish dist/npm/pokkum --access public --tag "$npm_tag"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          npm publish dist/npm/pokkum --access public --tag "$npm_tag" --provenance
 
   # Attaches SLSA L3 provenance to the release GoReleaser just published.
   #
