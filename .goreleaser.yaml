@@ -26,12 +26,38 @@ builds:
       - -s -w
       - -X main.version={{.Version}}
       - -X main.commit={{.ShortCommit}}
-      - -X main.buildDate={{.Date}}
+      # .CommitDate, not .Date. .Date is the wall clock at build time, so it
+      # made Pokkum's own release binaries unreproducible: two builds of the
+      # same tag, seconds apart, produce different bytes. Verified rather than
+      # inferred — two local builds 18 seconds apart differed.
+      #
+      # For a tool whose entire premise is bit-for-bit reproducible images,
+      # that was the wrong default to inherit, and it had a concrete cost. When
+      # the v1.1.0 npm publish failed and the release job was re-run, GoReleaser
+      # rebuilt the binaries, could not re-upload them (422 already_exists), and
+      # could not safely be allowed to either: the new bytes would not have
+      # matched the sha256 values already baked into the Homebrew formula, nor
+      # the digests the SLSA provenance attests. An unreproducible release is a
+      # release whose pipeline cannot be resumed after a partial failure.
+      #
+      # .CommitDate is fixed by the tag being built, so a rerun now produces
+      # byte-identical artifacts and the upload becomes idempotent in effect.
+      - -X main.buildDate={{.CommitDate}}
+    # Pin the binary's mtime to the commit as well, so the archives wrapping
+    # them are reproducible too — otherwise the tarball bytes still move even
+    # when the binary inside them does not.
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
   - formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # Without this the tarball is still unreproducible even though the binary
+    # inside it is: git does not preserve mtimes, so LICENSE and README.md
+    # carry the CI runner's checkout time and land in the tar headers. Pinned
+    # to the commit for the same reason builds[].mod_timestamp is.
+    builds_info:
+      mtime: "{{ .CommitDate }}"
     files:
       - LICENSE
       - README.md

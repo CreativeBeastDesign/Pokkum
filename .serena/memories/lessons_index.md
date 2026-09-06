@@ -21,6 +21,10 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### release-pipeline / unresumable-by-construction (1)
+
+- `2026-09-06` — Pokkum's own release binaries embedded a wall-clock build date, so they were not reproducible, so a v1.1.0 release that published GitHub + Homebrew and then failed at npm could not be re-run: rebuilt bytes hit `422 already_exists`, and deleting the assets would have broken the formula's pinned sha256 and the SLSA attestation. Read before touching `.goreleaser.yaml` or any multi-destination publish.
+
 ### fixture-availability / verified-locally-only (1)
 
 - `2026-09-06` — A new test asserted that gitignored build output under `testdata/fixtures/*/build` was "committed" and hard-failed when absent, breaking two CI jobs on the first clean checkout. The convention for exactly this (skip by default, hard-fail behind `POKKUM_REQUIRE_MINIFIED_CORPUS`) already existed in one test and was not reused. Read before writing any test that reads a path a build produces; the catching move is to hide the directory and re-run.

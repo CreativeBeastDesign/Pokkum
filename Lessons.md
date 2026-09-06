@@ -5,6 +5,56 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-06 — Pokkum's own release binaries were not reproducible, so a half-finished release could not be resumed
+
+**Category:** release-pipeline / unresumable-by-construction — and a premise failure: the one property
+this project sells was the one property its own release pipeline did not have
+
+**Root cause:** `.goreleaser.yaml` built release binaries with
+`-X main.buildDate={{.Date}}`. GoReleaser's `.Date` is the wall clock at build time, not anything
+derived from the commit, so two builds of the *same tag* produce different bytes. Verified rather
+than inferred: two local builds eighteen seconds apart differed
+(`2cc808b26c66c850…` vs `65305cd0533a5f8c…`). The archives had the same problem one level up — git
+does not preserve mtimes, so `LICENSE` and `README.md` carried the runner's checkout time into the
+tar headers.
+
+On its own that is embarrassing for a tool whose entire premise is bit-for-bit reproducible images.
+What made it *expensive* is that it removed the pipeline's ability to recover from a partial failure.
+
+The v1.1.0 release published the GitHub release and updated the Homebrew tap, then failed at the npm
+publish step on an expired token. The obvious repair — fix the token, re-run the failed job — could
+not work, and could not be *made* to work by deleting the uploaded assets either:
+
+- GoReleaser rebuilt the binaries and GitHub refused the uploads with
+  `422 Validation Failed [Code:already_exists]`, so the re-run died before ever reaching npm. The new
+  token was never exercised.
+- Deleting the assets first would have been worse. The rebuilt bytes differ, so they would no longer
+  match the `sha256` values already written into the Homebrew formula (`brew install` would fail on a
+  checksum mismatch) nor the digests the already-generated SLSA provenance attests.
+
+So the release was stuck in a state with no safe forward path for that tag: npm could not receive the
+same artifacts everything else had already committed to.
+
+**Where:** `.goreleaser.yaml`, `builds[].ldflags` and `archives[]`.
+
+**Fix:** `{{.CommitDate}}` replaces `{{.Date}}`, plus `builds[].mod_timestamp` and
+`archives[].builds_info.mtime` pinned to the commit. Every input to the artifact is now fixed by the
+tag being built, so a re-run produces byte-identical bytes and re-uploading is idempotent in effect.
+The config change was validated with `goreleaser check` against the same `~> v2` the release action
+resolves — the first attempt used a plausible-looking `archives[].mtime` field that does not exist,
+and `check` caught it.
+
+**Preventative rule:** **a release pipeline that cannot be re-run is a release pipeline that will
+strand you**, because the steps most likely to fail are the last ones (registry auth, npm tokens,
+signing) and by then the earlier steps have already published. Make every artifact a pure function of
+the tag — no wall clocks, no checkout mtimes — so a re-run is a no-op rather than a conflict, and
+verify that by building the same tag twice and diffing. The general form: **if a pipeline publishes
+to more than one destination, the artifacts must be reproducible, or the first destination's success
+becomes a lock on every later destination's failure.** And note where the check actually happened —
+the wrong field name was caught by running the tool's own validator, not by reading the docs.
+
+---
+
 ## 2026-09-06 — A new test asserted that gitignored build output was "committed", and broke CI on the first clean checkout
 
 **Category:** fixture-availability / verified-locally-only — a test that passes on every machine that
