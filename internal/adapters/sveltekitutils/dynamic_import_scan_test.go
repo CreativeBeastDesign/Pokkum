@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -295,7 +296,35 @@ func realMinifiedChunk(t *testing.T) (line, source string) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk real build corpus %s: %v (this fixture is committed; a missing corpus is a defect, not an environment difference)", corpus, err)
+		// The fixture's SOURCE is committed; its build/ output is not — it is
+		// gitignored, and the real-build E2E tests never populate it, because
+		// copyFixtureProject copies each fixture into t.TempDir() and builds
+		// there so a shared fixture directory is never written to by a test.
+		//
+		// So this corpus does not exist on a clean checkout, and cannot be made
+		// to without breaking that rule. The first version of this test called a
+		// missing corpus "a defect, not an environment difference" and failed CI
+		// on both the main and E2E jobs. That claim was simply wrong, and it is
+		// the same wrong premise recorded in ci.yml's comment above the
+		// deliberately-absent POKKUM_REQUIRE_MINIFIED_CORPUS step.
+		//
+		// Absent is therefore legitimate on a fresh clone, and must NOT be
+		// legitimate where the fixtures have been built — otherwise the
+		// measurement quietly stops happening. Same gate, same env var, same
+		// shape as secretguard's minified-corpus test and the runtime smoke
+		// tests: skip by default, hard-fail where the corpus is promised.
+		if requireMinifiedCorpus() {
+			t.Fatalf("real build-output corpus %s is missing and %s is set — the fixtures are supposed to be built in this environment: %v",
+				corpus, requireMinifiedCorpusEnv, err)
+		}
+		t.Skipf("real build-output corpus %s not present (it is gitignored build output; build the fixtures to exercise this test, or set %s to require it): %v",
+			corpus, requireMinifiedCorpusEnv, err)
+	}
+	if line == "" {
+		if requireMinifiedCorpus() {
+			t.Fatalf("real build-output corpus %s exists but contains no .js files, and %s is set", corpus, requireMinifiedCorpusEnv)
+		}
+		t.Skipf("real build-output corpus %s contains no .js files (build the fixtures, or set %s to require it)", corpus, requireMinifiedCorpusEnv)
 	}
 
 	// Corpus floor: a corpus whose longest line is a few dozen characters is
@@ -379,4 +408,20 @@ func TestScanDynamicImports_SkipOnLaterFileDoesNotHideEarlierFindings(t *testing
 	if len(res.DetectedLocations) != 2 {
 		t.Errorf("DetectedLocations = %v, want both a.js and c.js: a skip in the middle of the walk must not stop or discard the rest", res.DetectedLocations)
 	}
+}
+
+// requireMinifiedCorpusEnv turns an absent build-output corpus from a skip into
+// a failure, for environments where the fixtures are known to have been built.
+// Deliberately the same variable secretguard's minified-corpus test reads: the
+// two measure different things over the same gitignored trees, and a developer
+// who opts one in has opted both in.
+const requireMinifiedCorpusEnv = "POKKUM_REQUIRE_MINIFIED_CORPUS"
+
+func requireMinifiedCorpus() bool {
+	v := strings.TrimSpace(os.Getenv(requireMinifiedCorpusEnv))
+	if v == "" {
+		return false
+	}
+	b, err := strconv.ParseBool(v)
+	return err == nil && b
 }

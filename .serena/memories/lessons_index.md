@@ -21,6 +21,10 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### fixture-availability / verified-locally-only (1)
+
+- `2026-09-06` — A new test asserted that gitignored build output under `testdata/fixtures/*/build` was "committed" and hard-failed when absent, breaking two CI jobs on the first clean checkout. The convention for exactly this (skip by default, hard-fail behind `POKKUM_REQUIRE_MINIFIED_CORPUS`) already existed in one test and was not reused. Read before writing any test that reads a path a build produces; the catching move is to hide the directory and re-run.
+
 ### shared-mutable-input in a fan-out (1)
 
 - `2026-09-05` — Two platforms stripped and tarred the same directory concurrently. `striputils` had no lock at all while `precompressutils` had one, and even the lock would not have been enough: it orders writers against writers, never writers against readers. The fix is a build-scoped memo so the work happens once. Read before adding any step that mutates a shared directory in place inside the per-platform fan-out.

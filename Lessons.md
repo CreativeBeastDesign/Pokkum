@@ -5,6 +5,56 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-06 — A new test asserted that gitignored build output was "committed", and broke CI on the first clean checkout
+
+**Category:** fixture-availability / verified-locally-only — a test that passes on every machine that
+has built the fixtures and fails on every machine that has not, which is exactly the set difference
+between a developer's laptop and a CI runner
+
+**Root cause:** `TestScanDynamicImports_RealMinifiedBundleShape` walks
+`testdata/fixtures/sveltekit-adapter-node/build` to find a genuinely minified line to scan. Using
+real bundler output rather than a hand-written fixture is the right instinct — a hand-written file
+cannot produce the one-line-is-the-whole-file shape the bug was about. But the test treated an
+absent corpus as a defect:
+
+    walk real build corpus …/build: no such file or directory
+    (this fixture is committed; a missing corpus is a defect, not an environment difference)
+
+That parenthesis is simply false. The fixture's *source* is committed; its `build/` output is
+gitignored (`testdata/fixtures/sveltekit-adapter-node/.gitignore:9`). And the real-build E2E tests
+never populate it, deliberately: `copyFixtureProject` copies each fixture into `t.TempDir()` and
+builds there, precisely so a shared fixture directory is never written to by a test. So the corpus
+cannot exist on a CI runner at any point, and the test failed both the main and E2E jobs on the first
+push.
+
+**This premise had already been wrong once, in writing, in the same repository.** `ci.yml` carries a
+comment explaining that a `POKKUM_REQUIRE_MINIFIED_CORPUS=1` step was once added "on the assumption
+the e2e tests populated those directories. They do not, and the gate correctly failed rather than
+passing on a corpus of nothing." The convention that came out of that — skip by default, hard-fail
+only where the fixtures are known to be built — was implemented in
+`secretguard/minified_corpus_test.go` and nowhere else. A second test over the same trees was written
+without it. That is the same shape as this file's 2026-09-05 `bufio.Scanner` entry: a rule stated
+over a class, applied to one instance.
+
+**Where:** `internal/adapters/sveltekitutils/dynamic_import_scan_test.go`, `realMinifiedChunk`.
+
+**Fix:** the corpus lookup now follows the established convention exactly, reading the same
+`POKKUM_REQUIRE_MINIFIED_CORPUS` variable: absent corpus skips with an explanatory message, and fails
+hard only when that variable says the environment promised one. An empty-corpus case was added too,
+since a present-but-empty directory would otherwise have produced a confusing floor failure. All
+three states were verified rather than assumed — skip when absent, fail when absent-and-required,
+and genuinely run (29,215-byte real minified line) when present.
+
+**Preventative rule:** before a test reads anything under `testdata/`, run `git check-ignore` on the
+exact path. If it is ignored, it is not a fixture, it is a local artifact — gate it behind the
+project's existing require-env convention rather than inventing a new one or asserting it must exist.
+More generally: **a test whose availability depends on prior local work must be run once in a state
+that has not done that work.** Hiding the directory and re-running takes seconds and is the only way
+to see what a clean checkout sees; "it passes locally" is a statement about a machine that has
+already done the work, and CI is by definition the machine that has not.
+
+---
+
 ## 2026-09-05 — Two platforms stripped and tarred the same directory at once; a per-directory lock deduplicates work but does not order it against a reader
 
 **Category:** concurrency / determinism — a latent bit-for-bit reproducibility hazard in the
