@@ -123,7 +123,15 @@ snapshot:
   version_template: "{{ .Tag }}-next"
 
 changelog:
-  sort: asc
+  # No `sort:`. It reads like "chronological order", and it is not — GoReleaser
+  # sorts the rendered lines ALPHABETICALLY BY MESSAGE, so v1.1.0's release page
+  # opened with "Add a benchmark harness…" and buried the two bug fixes in the
+  # middle of 43 lines starting with whatever verb sorted first. Leaving it unset
+  # keeps git's own order, which is the order the work actually happened in.
+  #
+  # abbrev: 7 because the default prints the full 40-character SHA on every line,
+  # which crowds out the message it is supposed to be annotating.
+  abbrev: 7
   filters:
     exclude:
       - "^docs:"

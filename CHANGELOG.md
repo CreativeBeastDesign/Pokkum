@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [v1.1.1] — 2026-09-06
+
+Everything v1.1.0 contains, plus the release pipeline fix that v1.1.0 needed
+and did not have. **This is the release to install** — v1.1.0 reached Homebrew
+and GitHub Releases but never reached npm, and could not be repaired in place.
+
+### Fixed
+
+- **Pokkum's own release binaries are now reproducible.** They embedded
+  `{{.Date}}`, the wall clock at build time, so two builds of the same tag
+  produced different bytes — an awkward property for a tool whose premise is
+  bit-for-bit reproducible images. The embedded date now comes from the commit,
+  and the binary's mtime and the files archived beside it are pinned the same
+  way.
+
+  This was not cosmetic. It is why v1.1.0 could not be completed: when the npm
+  publish failed on an expired token, re-running the job rebuilt the binaries,
+  GitHub refused to re-upload them (`422 already_exists`), and deleting the
+  originals first would have broken both the Homebrew formula's pinned `sha256`
+  values and the SLSA provenance attesting the originals. A release whose
+  artifacts are not reproducible cannot be resumed after a partial failure, and
+  the steps most likely to fail are the last ones.
+- **The `v1` tag now exists**, so the `uses: CreativeBeastDesign/pokkum@v1`
+  form that the README and `docs/GITHUB_ACTION.md` have always documented
+  resolves. It was created by a release-pipeline job that had been skipped
+  whenever the release job failed.
+
+### Changed
+
+- **Generated release notes are readable.** They were sorted alphabetically by
+  commit message — `sort: asc` sorts the rendered lines, not the history — and
+  printed full 40-character SHAs. They now follow git's own order with short
+  SHAs.
+
 ## [v1.1.0] — 2026-09-06
 
 A performance release, and two bugs that only became visible once something
