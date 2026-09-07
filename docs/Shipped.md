@@ -55,6 +55,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | Title | Summary | Kind | Status | Commits |
 | --- | --- | --- | --- | --- |
 | [adopt reordered untouched package.json keys and could duplicate a third-party adapter import](items/adopt-reorders-package-json-and-duplicates-adapter-import.md) | A real, non-dry-run `pokkum adopt` alphabetized every nested `package.json` object on write, and `--write-config` could emit two colliding `adapter` bindings for a third-party adapter package, breaking every build strategy. | fix | shipped |  |
+| [pokkum dev --cluster](items/cluster-dev-loop.md) | Watch, rebuild, and sync app server and client output directly into a running pod via the Kubernetes API, without an image build or registry round-trip. | dx | shipped |  |
 | [Human-readable console output for build logs](items/console-log-rendering.md) | Build progress rendered with level glyphs and aligned attribute blocks on a terminal, while piped and CI output stays byte-identical logfmt. | dx | shipped |  |
 | [pokkum init wrote a config pokkum build refused](items/init-generates-invalid-config.md) | Every generated .pokkum.yaml carried an invalid sbom.attach value, so the first two commands a new user runs did not work together. | fix | shipped |  |
 | [pokkum init recommended a command it had guaranteed could not work](items/init-recommends-a-failing-command.md) | init always ended with "you can now run pokkum build", which fails immediately for the local-only setup its own first prompt invites. | fix | shipped |  |

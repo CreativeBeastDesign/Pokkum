@@ -12,12 +12,6 @@ _None._
 
 ## v1.1
 
-### Developer Experience
-
-| Title | Summary | Kind | Status |
-| --- | --- | --- | --- |
-| [pokkum dev --cluster](items/cluster-dev-loop.md) | Watch, rebuild, and sync app server and client output directly into a running pod via the Kubernetes API, without an image build or registry round-trip. | dx | open |
-
 ### Supply Chain & Attestation
 
 | Title | Summary | Kind | Status |

@@ -5,6 +5,71 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-07 — A permission fix that handled every directory except the one that mattered
+
+**Category:** guard-scope (off-by-one-level) / fixture-fidelity
+
+**Root cause:** `pokkum dev --cluster`'s in-pod extractor has to write into `/app/server`, which the
+packager ships mode `0555` — no write bit for anyone, owner included. `mkdirAllIn` correctly restored
+the owner write bit on every path segment it descended through, so `chunks/a.js` worked. But
+`index.js` — the single most important file the whole loop exists to replace — sits *directly* in the
+root, where `path.Dir(rel)` is `"."` and `mkdirAllIn` returns immediately having chmod'd nothing. The
+root itself was never made writable, so the very first entry of every real sync would have failed on
+the unlink with `permission denied`.
+
+The reason this is worth an entry rather than a shrug is *why it would not have been caught*: the
+obvious test fixture is a `t.TempDir()`, which is `0755`. Against that fixture the buggy code passes
+every assertion. The bug only exists against the mode the packager actually writes, and the test only
+found it because the fixture deliberately reproduced `0555` — including on a pre-seeded stale file —
+rather than reproducing "a directory".
+
+**Where:** `supervisor/cmd/pokkum-init/devsync.go`, `extractTar`/`mkdirAllIn`
+
+**Fix:** `ensureWritablePath(root)` runs for each `--root` before its `os.Root` handle is opened,
+alongside the existing per-segment `ensureWritable` below it.
+
+**Preventative rule:** When a fix restores or relaxes a permission, a mode, an owner or a quota along
+a path, enumerate the endpoints explicitly — the root, the leaf, and the segments between — and say
+which one each line of the fix covers. A loop over "the parents of X" silently excludes X's own
+container when X has no parent inside the scope. And when the production artifact has a non-default
+mode/owner, the test fixture must reproduce *that*, not merely the shape: a `t.TempDir()` is `0755`
+and will pass for code that cannot write a byte into a real image.
+
+---
+
+## 2026-09-07 — `exec.ExitError.Stderr` is empty whenever you set `cmd.Stderr`, so a reused error helper discarded every failure reason
+
+**Category:** library-semantics-assumption / silent-degradation
+
+**Root cause:** `cmd/pokkum/k8s.go`'s `describeKubectlErr` enriches an error with
+`exec.ExitError.Stderr`, and it works there because its caller uses `cmd.Output()`. The `clusterdev`
+adapter copied that shape for its `kubectl exec` call — but that call needs *both* streams (stdout
+carries the extractor's summary), so it assigns `cmd.Stderr` to a buffer. os/exec populates
+`ExitError.Stderr` **only** from `Output()`, and only when `cmd.Stderr` is nil; once you assign it,
+the field is always empty.
+
+The result: an RBAC denial — by far the most likely real-world failure of this command — surfaced as
+`exit status 1`, with `Error from server (Forbidden): pods "web-aaa" is forbidden` read into a buffer
+and then thrown away. The helper looked like it was enriching the error. It was returning it
+unchanged.
+
+The test that caught it asserted on the *content* of the error (`want it to mention "Forbidden"`),
+not merely that an error occurred. An assertion of the latter kind would have passed throughout.
+
+**Where:** `internal/adapters/clusterdev/syncer.go`, `Sync`
+
+**Fix:** `describeCapturedErr(err, stderr string)` for the `cmd.Stderr`-assigned path, kept separate
+from `describeExecErr` for the `Output()` path, with a doc comment on each saying which is which —
+they cannot be merged, and merging them is precisely how this recurs.
+
+**Preventative rule:** Before reusing an error-enrichment (or output-capture) helper against a
+different subprocess call site, check that the call site still satisfies the helper's *implicit*
+precondition about which streams os/exec owns. More generally: when a test asserts on a failure path,
+assert on what the error *says*, not only that it is non-nil — a helper that silently stops enriching
+is invisible to `if err == nil { t.Fatal }`.
+
+---
+
 ## 2026-09-06 — Pokkum's own release binaries were not reproducible, so a half-finished release could not be resumed
 
 **Category:** release-pipeline / unresumable-by-construction — and a premise failure: the one property
