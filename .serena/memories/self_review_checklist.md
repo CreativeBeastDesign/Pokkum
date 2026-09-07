@@ -68,6 +68,7 @@ diff") rather than skipping it silently — the explicit N/A is what proves the 
 | adds a predicate named `isValid` / `verify*` / `*Clean` | 52, 53 |
 | writes bytes into a format defined by someone else | 56 |
 | duplicates a constant across a process or language boundary | 51, 54 |
+| adds an env-var name, subcommand name or argv token the CLI writes and an embedded binary reads | 51 |
 | restores/relaxes a permission, mode, owner or quota along a path | 66 |
 | reuses an error-enrichment or output-capture helper at a new subprocess call site | 67 |
 | adds a long-running watch/poll loop, or a test that drives one | 68 |

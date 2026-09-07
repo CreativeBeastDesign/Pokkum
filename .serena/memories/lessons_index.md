@@ -21,6 +21,14 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### guard-scope (off-by-one-level) / permission-and-mode fixes (1)
+
+- `2026-09-07` — A chmod-the-parents loop restored the write bit on every path segment BELOW the sync root and never on the root itself, so the one file the feature exists to replace (`/app/server/index.js`, which has no parent inside the scope) could never be written. Invisible against a `t.TempDir()` fixture, which is 0755; found only because the fixture reproduced the packager's 0555 including a pre-seeded stale file. Read before any fix that restores or relaxes a permission, mode, owner or quota along a path, and before writing a fixture for code that touches a production artifact with a non-default mode.
+
+### library-semantics-assumption / silent-degradation (1)
+
+- `2026-09-07` — `exec.ExitError.Stderr` is populated ONLY by `cmd.Output()`, and only while `cmd.Stderr` is nil. An error-enrichment helper copied from an `Output()` call site to one that assigns `cmd.Stderr` returned the error completely unenriched — an RBAC denial surfaced as `exit status 1` with `Error from server (Forbidden)` read into a buffer and discarded. Caught only because the test asserted on the error's *content*, not on `err != nil`. Read before reusing any error-enrichment or output-capture helper at a new subprocess call site.
+
 ### release-pipeline / unresumable-by-construction (1)
 
 - `2026-09-06` — Pokkum's own release binaries embedded a wall-clock build date, so they were not reproducible, so a v1.1.0 release that published GitHub + Homebrew and then failed at npm could not be re-run: rebuilt bytes hit `422 already_exists`, and deleting the assets would have broken the formula's pinned sha256 and the SLSA attestation. Read before touching `.goreleaser.yaml` or any multi-destination publish.

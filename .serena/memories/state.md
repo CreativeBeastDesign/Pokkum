@@ -337,6 +337,38 @@ before trusting a claim that predates the commit it cites.
   outright (they describe an image never built); `--port`/`--watch` warn only if
   explicitly set; `--bun-binary`/`--env-file` still apply, the latter parsed
   locally instead of handed to a daemon.
+- `--cluster` (new, 2026-09-07, Roadmap item `cluster-dev-loop`, tier moat): builds
+  the SvelteKit project and streams `/app/client` then `/app/server` straight
+  into a running pod over `kubectl exec`, then restarts the in-pod application
+  process. No image, no registry, no pod recreation. Three parts:
+  `ports.ClusterDevSyncer` (`internal/ports/clusterdev.go`),
+  `internal/adapters/clusterdev` (kubectl shell-out + tar builder), and
+  `cmd/pokkum/dev_cluster.go`. **The fact that shapes everything: a Pokkum image
+  is distroless.** No shell, no `tar`, so `kubectl cp` cannot work against it,
+  and nothing in the image can kill and re-exec the server. Both halves are
+  therefore in `pokkum-init` — a hidden `pokkum-init __dev-sync --root DIR...
+  [--restart]` tar extractor, and SIGHUP reinterpreted as "stop the child and
+  start a replacement" — both gated on `POKKUM_DEV_MODE`, off by default and
+  never set by the packager. `pokkum dev --cluster` reads the target
+  container's env and refuses up front when it is unset.
+  - Integrity: the extractor prints a JSON summary and the sender refuses any
+    result whose counts differ from what it sent, or where a requested restart
+    did not happen. Containment is enforced twice — lexically on whole path
+    segments against the `--root` allowlist, then again through `os.Root`.
+  - Supervisor state machine: `Supervisor.restarting` + `State.Restarting`.
+    `beginShutdown` clears `restarting` BEFORE its idempotence check and
+    disarms the restart's deadline — without that, a SIGTERM mid-restart is
+    swallowed and the supervisor spawns a fresh server while the runtime waits
+    for it to die. Liveness holds through the restart window
+    (`!st.Started || (!st.Running && !st.Restarting)`); readiness still drops.
+  - Honest scope: layered images only, `/app/server` + `/app/client` only,
+    additive only (deletions are not propagated). Extraction restores the owner
+    write bit on the packager's `0555` `/app` dirs and leaves entries at
+    `0755`/`0644`, so a synced pod is no longer byte-identical to its image. A
+    target with `POKKUM_ATTESTATION_DIGEST` set crash-loops on exit 125 at its
+    NEXT start (attestation runs once, at supervisor startup); a Warn says so.
+    A multi-container pod requires `--container` — no heuristic, since
+    `--with-otel-sidecar` makes "first container" a coin flip.
 - Container-mode watch/rebuild loop (the default) uses a fresh result channel
   per container generation (fixed `1f8e5bf`) — previously reused one buffered
   channel across generations, so a stale write from a just-killed container
