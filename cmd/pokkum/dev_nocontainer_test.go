@@ -249,7 +249,7 @@ func TestRunDevWithDeps_NoContainer_NeverInvokesContainerSeams(t *testing.T) {
 	localRunner := &fakeLocalRunner{}
 
 	flags := &devFlags{noContainer: true}
-	if err := runDevWithDeps(context.Background(), discardLogger(), flags, []string{tempDir}, containerRunner, containerBuilder, localRunner); err != nil {
+	if err := runDevWithDeps(context.Background(), discardLogger(), flags, []string{tempDir}, containerRunner, containerBuilder, localRunner, failingClusterStarter{t}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -283,7 +283,7 @@ func TestRunDevWithDeps_NoContainer_CleanShutdownOnContextCancel(t *testing.T) {
 
 	doneCh := make(chan error, 1)
 	go func() {
-		doneCh <- runDevWithDeps(ctx, discardLogger(), flags, []string{tempDir}, containerRunner, containerBuilder, localRunner)
+		doneCh <- runDevWithDeps(ctx, discardLogger(), flags, []string{tempDir}, containerRunner, containerBuilder, localRunner, failingClusterStarter{t})
 	}()
 
 	waitForCondition(t, 15*time.Second, func() bool {
@@ -319,7 +319,7 @@ func TestRunDevWithDeps_DefaultPath_SingleShotUnchanged(t *testing.T) {
 	localRunner := &fakeLocalRunner{}
 
 	flags := &devFlags{watch: false}
-	err := runDevWithDeps(context.Background(), discardLogger(), flags, []string{tempDir}, containerRunner, containerBuilder, localRunner)
+	err := runDevWithDeps(context.Background(), discardLogger(), flags, []string{tempDir}, containerRunner, containerBuilder, localRunner, failingClusterStarter{t})
 
 	if !errors.Is(err, crashErr) {
 		t.Fatalf("expected crashErr, got: %v", err)
@@ -353,7 +353,7 @@ func TestRunDevWithDeps_DefaultPath_WatchLoopUnchanged(t *testing.T) {
 	localRunner := &fakeLocalRunner{}
 
 	flags := &devFlags{watch: true}
-	err := runDevWithDeps(context.Background(), discardLogger(), flags, []string{tempDir}, containerRunner, containerBuilder, localRunner)
+	err := runDevWithDeps(context.Background(), discardLogger(), flags, []string{tempDir}, containerRunner, containerBuilder, localRunner, failingClusterStarter{t})
 
 	if !errors.Is(err, crashErr) {
 		t.Fatalf("expected crashErr, got: %v", err)
@@ -534,4 +534,16 @@ func must(t *testing.T, err error) {
 	if err != nil {
 		t.Fatalf("unexpected setup error: %v", err)
 	}
+}
+
+// failingClusterStarter fails the test if the --cluster seam is ever entered.
+// Every runDevWithDeps case in this file exercises a non-cluster mode, so any
+// call here means the dispatch in runDevWithDeps has started routing a mode
+// to the wrong branch.
+type failingClusterStarter struct{ t *testing.T }
+
+func (f failingClusterStarter) Start(context.Context, *slog.Logger, *devFlags, string) error {
+	f.t.Helper()
+	f.t.Fatal("cluster starter invoked for a non-cluster dev mode")
+	return nil
 }

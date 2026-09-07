@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekitutils"
@@ -28,6 +29,10 @@ type devFlags struct {
 	bunVariant  string
 	bunVersion  string
 	noContainer bool
+	cluster     bool
+	namespace   string
+	selector    string
+	container   string
 }
 
 func newDevCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -49,13 +54,22 @@ enabled, the command drops into an interactive shell inside the container enviro
 rather than Pokkum's rebuild loop. This is the fast path for everyday iteration, but it does NOT
 reproduce the runtime guarantees a real Pokkum image provides -- no supervisor, no startup
 attestation, no health/readiness probes, no base image, no non-root user. Use the default
-container-parity mode whenever a real environment check matters.`,
+container-parity mode whenever a real environment check matters.
+
+--cluster is the third mode: it builds the SvelteKit project and streams /app/server and
+/app/client straight into an already-running pod over the Kubernetes API, then asks the in-pod
+pokkum-init to restart the application process. No image is built, nothing is pushed to a
+registry, and the pod is never recreated. It requires kubectl on PATH, --namespace and
+--selector, and a workload that opts in by setting POKKUM_DEV_MODE=1 on the container. The
+patched pod no longer matches the image it was started from, and every change is lost the moment
+the pod is replaced -- this is a development loop, not a deployment.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateDevFlags(cmd); err != nil {
 				return err
 			}
 			warnIneffectiveNoContainerFlags(cmd, logger)
+			warnIneffectiveClusterFlags(cmd, logger)
 			return runDev(ctx, logger, flags, args)
 		},
 	}
@@ -78,6 +92,14 @@ container-parity mode whenever a real environment check matters.`,
 		"Bun release version to embed (default: the pinned "+core.DefaultBunVersion+"); not supported with --no-container")
 	cmd.Flags().BoolVar(&flags.noContainer, "no-container", false,
 		"Skip image construction entirely and run the project's own dev server directly on the host -- no daemon, no supervisor/probes/non-root guarantees; use for fast local iteration, not production parity")
+	cmd.Flags().BoolVar(&flags.cluster, "cluster", false,
+		"Build and sync /app/server and /app/client straight into a running pod via kubectl, restarting the in-pod application process -- no image build, no registry round-trip; requires --namespace, --selector and POKKUM_DEV_MODE=1 on the target container")
+	cmd.Flags().StringVar(&flags.namespace, "namespace", "",
+		"Kubernetes namespace holding the pod to sync into (required with --cluster)")
+	cmd.Flags().StringVar(&flags.selector, "selector", "",
+		"Label selector identifying the pod to sync into, in kubectl -l syntax, e.g. app=storefront (required with --cluster)")
+	cmd.Flags().StringVar(&flags.container, "container", "",
+		"Container within the matched pod to sync into; required only when the pod runs more than one container")
 
 	return cmd
 }
@@ -99,6 +121,11 @@ container-parity mode whenever a real environment check matters.`,
 func validateDevFlags(cmd *cobra.Command) error {
 	fs := cmd.Flags()
 	noContainer, _ := fs.GetBool("no-container")
+	cluster, _ := fs.GetBool("cluster")
+
+	if err := validateDevClusterFlags(fs, cluster, noContainer); err != nil {
+		return err
+	}
 	if !noContainer {
 		return nil
 	}
@@ -121,6 +148,107 @@ func validateDevFlags(cmd *cobra.Command) error {
 		return nil
 	}
 	return fmt.Errorf("dev: --no-container is incompatible with: %s: %w", strings.Join(rejected, "; "), core.ErrInvalidRequest)
+}
+
+// validateDevClusterFlags enforces --cluster's own flag contract, in both
+// directions.
+//
+// The forward direction is ordinary: --cluster needs a namespace and a
+// selector, and it cannot be combined with --no-container (two different
+// places to run the application) or with the image-build flags, since it
+// builds no image at all.
+//
+// The reverse direction is the one this repo has been bitten by before: a
+// --namespace, --selector or --container given WITHOUT --cluster parses
+// perfectly and does nothing whatsoever. That is the exact "flag parsed fine,
+// silently did nothing" shape Lessons.md's --bun-version entry records, so it
+// is a usage error rather than a warning.
+func validateDevClusterFlags(fs *pflag.FlagSet, cluster, noContainer bool) error {
+	if !cluster {
+		var orphaned []string
+		for _, name := range []string{"namespace", "selector", "container"} {
+			if fs.Changed(name) {
+				orphaned = append(orphaned, "--"+name)
+			}
+		}
+		if len(orphaned) > 0 {
+			return fmt.Errorf("dev: %s only apply to --cluster, and --cluster was not given: %w",
+				strings.Join(orphaned, ", "), core.ErrInvalidRequest)
+		}
+		return nil
+	}
+
+	if noContainer {
+		return fmt.Errorf("dev: --cluster and --no-container are mutually exclusive: one syncs into a running pod, the other runs a dev server on this machine: %w", core.ErrInvalidRequest)
+	}
+
+	var missing []string
+	if strings.TrimSpace(mustGetString(fs, "namespace")) == "" {
+		missing = append(missing, "--namespace")
+	}
+	if strings.TrimSpace(mustGetString(fs, "selector")) == "" {
+		missing = append(missing, "--selector")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("dev: --cluster requires %s: a loop that hot-patches a running pod must never guess which one: %w",
+			strings.Join(missing, " and "), core.ErrInvalidRequest)
+	}
+
+	debug, _ := fs.GetBool("debug")
+	var rejected []string
+	if debug {
+		rejected = append(rejected, "--debug (there is no local container to open a shell in; use kubectl exec)")
+	}
+	if fs.Changed("platform") {
+		rejected = append(rejected, "--platform (no image is built; the pod's own image decides its platform)")
+	}
+	if fs.Changed("bun-version") {
+		rejected = append(rejected, "--bun-version (no Bun runtime is embedded; the pod runs the one already in its image)")
+	}
+	if fs.Changed("bun-variant") {
+		rejected = append(rejected, "--bun-variant (no Bun runtime is embedded; the pod runs the one already in its image)")
+	}
+	if len(rejected) > 0 {
+		return fmt.Errorf("dev: --cluster is incompatible with: %s: %w", strings.Join(rejected, "; "), core.ErrInvalidRequest)
+	}
+	return nil
+}
+
+// mustGetString reads a string flag that this file registered itself. The
+// error can only be a programming mistake (wrong name, wrong type), never
+// user input, so it is folded into the empty string rather than plumbed
+// through every caller.
+func mustGetString(fs *pflag.FlagSet, name string) string {
+	v, err := fs.GetString(name)
+	if err != nil {
+		return ""
+	}
+	return v
+}
+
+// warnIneffectiveClusterFlags is --cluster's counterpart to
+// warnIneffectiveNoContainerFlags: the flags that have a plausible but
+// different meaning here rather than none at all, and so warn instead of
+// failing.
+func warnIneffectiveClusterFlags(cmd *cobra.Command, logger *slog.Logger) {
+	fs := cmd.Flags()
+	cluster, _ := fs.GetBool("cluster")
+	if !cluster {
+		return
+	}
+	if fs.Changed("port") {
+		logger.Warn("--port has no effect with --cluster; the pod keeps the ports its own manifest declares. Use kubectl port-forward to reach it.", "port", mustGetString(fs, "port"))
+	}
+	if fs.Changed("watch") {
+		watch, _ := fs.GetBool("watch")
+		logger.Warn("--watch has no effect with --cluster; the sync loop always watches for source changes, and there is no single-shot mode to fall back to", "watch", watch)
+	}
+	if fs.Changed("env-file") {
+		logger.Warn("--env-file has no effect with --cluster; the running pod's environment comes from its own manifest and cannot be changed by syncing files into it. Use kubectl set env instead.", "env_file", mustGetString(fs, "env-file"))
+	}
+	if fs.Changed("bun-binary") {
+		logger.Warn("--bun-binary points at the bun used for the local SvelteKit build only; the pod runs the Bun already embedded in its own image", "bun_binary", mustGetString(fs, "bun-binary"))
+	}
 }
 
 // warnIneffectiveNoContainerFlags logs an explicit warning for flags that
@@ -149,7 +277,7 @@ func warnIneffectiveNoContainerFlags(cmd *cobra.Command, logger *slog.Logger) {
 }
 
 func runDev(ctx context.Context, logger *slog.Logger, flags *devFlags, args []string) error {
-	return runDevWithDeps(ctx, logger, flags, args, dockerContainerRunner{}, dockerDevBuilder{}, hostDevProcessRunner{})
+	return runDevWithDeps(ctx, logger, flags, args, dockerContainerRunner{}, dockerDevBuilder{}, hostDevProcessRunner{}, kubectlClusterStarter{})
 }
 
 // runDevWithDeps is runDev's real implementation, parameterized over the
@@ -161,7 +289,7 @@ func runDev(ctx context.Context, logger *slog.Logger, flags *devFlags, args []st
 // assertable: a test can inject a devContainerRunner/devBuilder that fails
 // the test if Run/Build is ever called, then run the --no-container path
 // and confirm it wasn't.
-func runDevWithDeps(ctx context.Context, logger *slog.Logger, flags *devFlags, args []string, containerRunner devContainerRunner, containerBuilder devBuilder, localRunner devLocalRunner) error {
+func runDevWithDeps(ctx context.Context, logger *slog.Logger, flags *devFlags, args []string, containerRunner devContainerRunner, containerBuilder devBuilder, localRunner devLocalRunner, clusterStarter devClusterStarter) error {
 	projectDir := "."
 	if len(args) > 0 {
 		projectDir = args[0]
@@ -174,6 +302,14 @@ func runDevWithDeps(ctx context.Context, logger *slog.Logger, flags *devFlags, a
 
 	if flags.noContainer {
 		return runNoContainerDev(ctx, logger, flags, absDir, localRunner)
+	}
+
+	if flags.cluster {
+		// Like --no-container above, this branch deliberately never
+		// references containerRunner or containerBuilder: nothing is built
+		// into an image and no daemon is contacted. The tests' "never
+		// invoked" assertion on those fakes is what proves it.
+		return clusterStarter.Start(ctx, logger, flags, absDir)
 	}
 
 	logger.Info("starting hot-reload dev environment", "project_dir", absDir, "debug", flags.debug, "port", flags.port)

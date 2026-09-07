@@ -74,6 +74,15 @@ var foreignFlags = map[string]string{
 	"--entrypoint":     "docker run (dev.go container invocation)",
 	"--strip-unneeded": "strip (striputils)",
 	"--config":         "vite build --config, and otel-collector's args in the sidecar spec",
+
+	// pokkum-init __dev-sync — the in-pod extractor half of `pokkum dev
+	// --cluster`. These are flags of the supervisor binary embedded in the
+	// image, not of the pokkum CLI: internal/adapters/clusterdev builds the
+	// `kubectl exec ... -- /pokkum/init __dev-sync --root ... --restart`
+	// argv, so they appear in this tree without ever being registered on a
+	// cobra command. See supervisor/cmd/pokkum-init/devsync.go.
+	"--root":    "pokkum-init __dev-sync (in-pod dev sync extractor)",
+	"--restart": "pokkum-init __dev-sync (in-pod dev sync extractor)",
 }
 
 // mentionFlagRe is deliberately narrower than flags_docs_test.go's flagTokenRe.
