@@ -48,6 +48,16 @@ type State struct {
 	// the graceful deadline is counting down.
 	ShuttingDown bool
 
+	// Restarting reports whether a dev-mode restart is in flight: the old
+	// child has been asked to stop and a fresh one will be started as soon
+	// as it is reaped. It exists so the two probes can disagree about that
+	// window, which they must — readiness has to drop (there is nothing
+	// serving) while liveness has to hold (the container is fine and is
+	// actively replacing the process), or a dev loop would get its own pod
+	// killed by the kubelet on every rebuild. Never true outside
+	// Config.DevMode.
+	Restarting bool
+
 	// PID is the child's process id, which is also its process group id. Zero
 	// before the child starts.
 	PID int
@@ -115,6 +125,7 @@ type Supervisor struct {
 	startedAt    time.Time
 	exitedAt     time.Time
 	shuttingDown bool
+	restarting   bool
 	killIssued   bool
 	childExited  bool
 	status       syscall.WaitStatus
@@ -264,6 +275,16 @@ func (s *Supervisor) supervise(ctx context.Context, sigCh, chldCh <-chan os.Sign
 				continue
 			}
 			s.log.Info("signal received", "signal", ss.String())
+			// In dev mode SIGHUP is claimed by the restart path and is
+			// NOT relayed: relaying it as well would hand the outgoing
+			// child a signal the SvelteKit server has no handler for,
+			// whose default disposition is termination — so the child
+			// would die by SIGHUP rather than by the graceful SIGTERM
+			// beginRestart is about to send, skipping its drain.
+			if s.cfg.DevMode && ss == syscall.SIGHUP {
+				s.beginRestart(ctx)
+				continue
+			}
 			s.forward(ss)
 			if isTerminating(ss) {
 				s.beginShutdown(ctx)
@@ -272,6 +293,13 @@ func (s *Supervisor) supervise(ctx context.Context, sigCh, chldCh <-chan os.Sign
 		case <-chldCh:
 			s.reap()
 			if s.childExited {
+				if s.restarting {
+					if err := s.restartChild(); err != nil {
+						s.log.Error("failed to start replacement child", "error", err, "command", s.cfg.Command)
+						return startExitCode(err), err
+					}
+					continue
+				}
 				return s.finish()
 			}
 
@@ -398,6 +426,26 @@ func (s *Supervisor) forward(sig syscall.Signal) {
 // the clock, so an impatient operator sending SIGTERM three times cannot make
 // the window drift.
 func (s *Supervisor) beginShutdown(ctx context.Context) {
+	// A dev-mode restart in flight is abandoned here, before the
+	// idempotence check below: the container is going away, so the
+	// replacement child would only have to be killed the moment it started.
+	// Clearing it here rather than at each call site is what guarantees a
+	// SIGTERM arriving mid-restart still exits, instead of the reap that
+	// follows it being read as "the restart's old child is gone, start a new
+	// one" — which would leave the supervisor spawning a fresh server while
+	// the runtime waits for it to die.
+	if s.restarting {
+		s.log.Info("abandoning in-flight restart; shutting down instead", "pid", s.pid)
+		s.restarting = false
+		// The restart armed its own deadline. Release it before this
+		// function arms the shutdown's, or the restart's cancel func is
+		// dropped on the floor and its timer runs to completion with
+		// nothing listening. Disarming is confined to this branch: reaching
+		// here with s.shuttingDown already true is impossible, because
+		// beginRestart refuses to start a restart during a shutdown, so
+		// this can never cancel a live shutdown deadline.
+		s.disarmDeadline()
+	}
 	if s.shuttingDown {
 		s.log.Debug("shutdown already in progress", "pid", s.pid)
 		return
@@ -442,6 +490,81 @@ func (s *Supervisor) escalate(ctx context.Context) {
 	// deadline firing and this call, because that path returns above and the
 	// window is disarmed when supervise returns.
 	s.deadline, s.deadlineStop = context.WithTimeout(context.WithoutCancel(ctx), hardKillGrace)
+}
+
+// beginRestart stops the current child so that restartChild can put a fresh
+// one in its place. It is the first half of the dev-mode hot swap; the second
+// half runs from the reap that follows.
+//
+// The child is asked to stop with SIGTERM and gets the ordinary
+// ShutdownTimeout window before the same SIGKILL escalation a real shutdown
+// would use — a restart is a shutdown that happens to be followed by a start,
+// and giving it a second, gentler set of rules would mean a dev restart could
+// hang where a production shutdown could not.
+func (s *Supervisor) beginRestart(ctx context.Context) {
+	switch {
+	case s.shuttingDown:
+		s.log.Info("ignoring restart request; a shutdown is already in progress", "pid", s.pid)
+		return
+	case s.restarting:
+		s.log.Debug("restart already in progress", "pid", s.pid)
+		return
+	case s.childExited:
+		s.log.Info("ignoring restart request; the child has already exited", "pid", s.pid)
+		return
+	}
+
+	s.restarting = true
+	s.publish()
+	s.forward(syscall.SIGTERM)
+
+	s.disarmDeadline()
+	s.deadline, s.deadlineStop = context.WithTimeout(context.WithoutCancel(ctx), s.cfg.ShutdownTimeout)
+
+	s.log.Info("dev mode: restarting application on SIGHUP",
+		"pid", s.pid, "pgid", s.pgid, "timeout", s.cfg.ShutdownTimeout)
+}
+
+// restartChild replaces the reaped child with a freshly started one.
+//
+// It runs only from the supervise loop, only once the old child has actually
+// been reaped, so there is never a window with two children tracked at once.
+func (s *Supervisor) restartChild() error {
+	s.disarmDeadline()
+
+	// Sweep whatever the old child left in its process group before its pid
+	// - and therefore its pgid - is forgotten. This is the same courtesy
+	// finish() performs, and it matters more here: the supervisor is not
+	// about to exit and collapse the PID namespace, so a detached worker
+	// from the previous generation would otherwise survive alongside the new
+	// one and keep holding the application port.
+	if err := signalGroup(s.pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		s.log.Debug("process group cleanup failed before restart", "pgid", s.pgid, "error", err)
+	}
+	// Drain anything that just died. childExited is still true here, so this
+	// sweep cannot be mistaken for the tracked child exiting a second time.
+	s.reap()
+
+	if s.proc != nil {
+		// Release the old handle before the new one overwrites the field,
+		// so the process handle is not leaked once per rebuild for the
+		// whole lifetime of a dev session.
+		_ = s.proc.Release()
+		s.proc = nil
+	}
+
+	s.childExited = false
+	s.shuttingDown = false
+	s.restarting = false
+	s.killIssued = false
+	s.status = 0
+	s.exitedAt = time.Time{}
+
+	if err := s.start(); err != nil {
+		return err
+	}
+	s.log.Info("dev mode: application restarted", "pid", s.pid)
+	return nil
 }
 
 func (s *Supervisor) disarmDeadline() {
@@ -538,6 +661,7 @@ func (s *Supervisor) publish() {
 		Started:      s.pid != 0,
 		Running:      s.pid != 0 && !s.childExited,
 		ShuttingDown: s.shuttingDown,
+		Restarting:   s.restarting,
 		PID:          s.pid,
 		StartedAt:    s.startedAt,
 	}

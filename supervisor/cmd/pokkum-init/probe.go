@@ -196,7 +196,14 @@ func (p *ProbeServer) Shutdown() {
 // liveness handler answers from Started && Running.
 func (p *ProbeServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	st := p.state.State()
-	if !st.Started || !st.Running {
+	// Restarting is the one case where "no child is running" is not a
+	// liveness failure: a dev-mode restart has deliberately stopped the old
+	// process and is about to start its replacement. Answering 503 through
+	// that window would let the kubelet kill the container on the very
+	// rebuild the developer is waiting on. Readiness still drops (see
+	// handleReadyz, which requires Running), so nothing is routed to a pod
+	// that is not serving.
+	if !st.Started || (!st.Running && !st.Restarting) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}

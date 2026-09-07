@@ -29,6 +29,15 @@ const (
 	envRequiredEnv       = "POKKUM_REQUIRED_ENV"
 	envAttestationDigest = "POKKUM_ATTESTATION_DIGEST"
 
+	// envDevMode mirrors ports.EnvDevMode. It is the single opt-in for the
+	// in-pod development loop and is never set by the packager: an image
+	// carries it only because an operator put it on the workload. Two
+	// behaviours are gated on it, and both hand real power to anyone who
+	// can already exec into the pod, which is why the default is off:
+	// the __dev-sync subcommand (overwrite the live /app tree), and SIGHUP
+	// meaning "restart the application" instead of being relayed to it.
+	envDevMode = "POKKUM_DEV_MODE"
+
 	defaultPort      = 3000
 	defaultProbePort = 8081
 
@@ -75,6 +84,12 @@ type Config struct {
 
 	// RequireEnv lists environment variable keys required to be present at runtime.
 	RequireEnv []string
+
+	// DevMode enables the in-pod development loop: the __dev-sync
+	// subcommand becomes callable, and SIGHUP stops the application and
+	// starts a fresh one in its place instead of being forwarded to it. Off
+	// unless envDevMode is set to a true value.
+	DevMode bool
 
 	// AttestationDigest is the expected SHA-256 root digest of the /app runtime
 	// tree, stamped by the packager for layered builds (startup attestation,
@@ -144,6 +159,15 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 	// security control unless something says so; that case gets the same
 	// warnf treatment as envShutdownTimeout above so it surfaces at Warn
 	// level once main.go relays the returned warnings.
+	// Dev mode is env-only, exactly like attestation and for the mirror-image
+	// reason: it is a property of how the workload was deployed, not
+	// something a human debugging a container by hand should be able to
+	// switch on from the command line of an already-running image.
+	cfg.DevMode = parseBoolEnv(getenv(envDevMode))
+	if cfg.DevMode {
+		warnf("%s is set: SIGHUP now restarts the application instead of being forwarded to it, and `%s %s` may overwrite the live /app tree. Never set this on a production workload.",
+			envDevMode, "pokkum-init", devSyncSubcommand)
+	}
 	if raw := strings.TrimSpace(getenv(envAttestationDigest)); raw != "" {
 		if isHexDigest(raw) {
 			cfg.AttestationDigest = raw
@@ -280,4 +304,16 @@ func parseLevel(s string) (slog.Level, error) {
 		return slog.LevelInfo, err
 	}
 	return lvl, nil
+}
+
+// parseBoolEnv reports whether raw spells a true boolean. It accepts exactly
+// what strconv.ParseBool does ("1", "t", "T", "true", "TRUE", "True", and
+// their false counterparts); anything else, including an empty value, is
+// false. internal/adapters/clusterdev's truthy is the sending side of this
+// same contract and must stay in lockstep, so that an operator who sets
+// POKKUM_DEV_MODE=true does not get "on" from one half of the system and
+// "off" from the other.
+func parseBoolEnv(raw string) bool {
+	b, err := strconv.ParseBool(strings.TrimSpace(raw))
+	return err == nil && b
 }
