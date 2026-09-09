@@ -439,6 +439,10 @@ These are SvelteKit's own prerendering rules, read from its source rather than
 inferred. Matching ignores comments and string literals, so a commented-out
 directive does not count.
 
+The list above is a summary. pokkum init's own output is authoritative for the
+version you are running, and it names the specific file and finding — run it
+rather than reasoning from this table if the two ever disagree.
+
 The scan is a SOUND NEGATIVE ONLY. "Nothing found" means nothing in the source
 requires a server; it does not mean a static build will succeed. A load
 function calling a runtime-only API, or a dynamic route the crawler never

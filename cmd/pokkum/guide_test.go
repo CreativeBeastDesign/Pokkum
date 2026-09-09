@@ -217,3 +217,29 @@ func newRootCommandForTest(t *testing.T) *cobra.Command {
 	}
 	return root
 }
+
+// TestGuideNamesEveryStaticVerdict couples the guide's strategy section to the
+// classifier's actual verdict vocabulary.
+//
+// It is narrow on purpose. The blocker RULES are matchers inside
+// sveltekitutils, not an enumerable set, so nothing here can mechanically
+// prove the guide's rule table still matches them — which is why the section
+// tells the reader pokkum init is authoritative. The verdicts ARE enumerable,
+// so at minimum a renamed or added verdict cannot ship with the guide still
+// describing the old three. See the roadmap item static-rules-guide-coupling.
+func TestGuideNamesEveryStaticVerdict(t *testing.T) {
+	var section string
+	for _, s := range guideSections {
+		if s.Topic == "strategy" {
+			section = s.Body
+		}
+	}
+	if section == "" {
+		t.Fatal("[TEST SETUP] no section with topic \"strategy\"")
+	}
+	for _, v := range []ports.StaticVerdict{ports.StaticViable, ports.StaticBlocked, ports.StaticUnknown} {
+		if !strings.Contains(section, string(v)) {
+			t.Errorf("pokkum guide's strategy section never uses the verdict %q that pokkum init reports", v)
+		}
+	}
+}

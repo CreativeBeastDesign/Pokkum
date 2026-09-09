@@ -73,6 +73,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | [pokkum mcp — Model Context Protocol server as a second driving adapter](items/mcp-server.md) | Expose analysis, planning and build as MCP tools plus the guide as an MCP resource, for agents without a shell — deliberately not a one-tool-per-command wrapper. | feature | awaiting-decision |
 | [JSON Schema for .pokkum.yaml](items/pokkum-yaml-json-schema.md) | Publish a JSON Schema for `.pokkum.yaml` so editors can offer inline validation and completion instead of only failing at `pokkum config validate` time. | dx | open |
 | [Stable Go library API](items/stable-go-library-api.md) | Expose Pokkum's build pipeline as a stable, embeddable Go library API, for a future Skaffold/Tilt-style integration. | dx | open |
+| [Nothing couples the guide's prerender-rule table to the classifier](items/static-rules-guide-coupling.md) | `pokkum guide strategy` restates which constructs rule out a static build; the classifier's rules are matchers rather than an enumerable set, so no test can prove the two still agree. | dx | open |
 
 ### Kubernetes & Operations
 
