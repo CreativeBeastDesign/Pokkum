@@ -8,7 +8,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
+| Status | shipped |
 | Stage | v1.2 |
 | Kind | fix |
 | Tier | polish |

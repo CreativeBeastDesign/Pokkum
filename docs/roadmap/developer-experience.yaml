@@ -612,7 +612,7 @@ items:
   - id: json-output-envelope
     title: "Standardized machine-readable output (--output=json)"
     stage: v1.2
-    status: in-progress
+    status: shipped
     kind: feature
     tier: foundation
     summary: "`--output=json` emits a machine-readable envelope on most commands — but not on `build` or `dev`, where it is accepted and silently ignored."
@@ -643,8 +643,22 @@ items:
       - cmd/pokkum/main.go
       - cmd/pokkum/build.go
       - cmd/pokkum/dev.go
+    decision: |
+      `build` now emits a versioned envelope carrying the ref, digest, tags, output mode,
+      platforms and deploy result, and routes every error return through a shared helper so a
+      failure is an envelope too. In JSON mode `core.Build` is handed a nil stdout — the
+      mechanism `k8s.go` already used — so the pipeline's own raw ref write does not precede the
+      envelope. Text output is unchanged.
+
+      `dev` rejects `--output json` rather than emitting one. It streams container logs, an
+      interactive `--debug` shell, or an unbounded `--cluster` watch loop, so there is no point
+      at which a single envelope could be emitted, and a startup envelope would be interleaved
+      with and indistinguishable from what follows. Rejecting is the honest option; silently
+      ignoring was the bug.
     limitations:
-      - "Shipped and working on `init`, `doctor`, `config`, `scan`, `verify`, `explain`, `adopt`, `history`, `rollback` and `repro doctor`; only `build` and `dev` are outstanding."
+      - "`dev` rejects `--output json` rather than supporting it — deliberate, since it has no single completion point to emit an envelope from."
+      - "`build`'s envelope carries the published ref's own digest, not per-platform manifest digests, and no warnings array: neither exists on `core.BuildResult`, and inventing them would have meant a pipeline change. Documented as absent rather than faked."
+      - "`doctor`'s failure path still drops its per-check array — see item doctor-json-drops-per-check-detail."
     related: ["mcp-server", "exit-code-reference", "agent-guide-command"]
 
   - id: pokkum-yaml-json-schema
@@ -956,7 +970,7 @@ items:
   - id: agent-guide-command
     title: "pokkum guide — the operating manual, shipped inside the binary"
     stage: v1.2
-    status: open
+    status: shipped
     kind: dx
     tier: foundation
     summary: "A task-shaped guide the binary prints itself, so an agent driving Pokkum in someone else's SvelteKit project reads instructions that cannot be a different version from the binary it is driving."
@@ -1045,10 +1059,35 @@ items:
 
       Serving the same text as an MCP resource is what makes [pokkum mcp](item:mcp-server) a
       thin layer rather than a second body of knowledge to keep in sync.
+    decision: |
+      Shipped as `pokkum guide` with 14 addressable topics: all sections by default,
+      `pokkum guide <topic>` for one, `pokkum guide topics` for the index, and an unknown topic
+      as a usage error naming the valid set. Registered first in the command tree so it heads
+      `pokkum --help`, whose long description now opens with `START WITH: pokkum guide`.
+
+      Authored and parity-guarded rather than generated. That reverses this item's original
+      recommendation, and the reason is that the repo's own convention for CLI documentation is
+      already authored-plus-guarded (`flags_docs_test.go`, `envvar_docs_test.go`); generation is
+      used for `docs/roadmap` output only. Three guards apply: every `yaml:` field of
+      `ports.ProjectConfig`/`ports.BuildProfile` must appear in the config section (70 today),
+      every command in the cobra tree must be named in the guide, and the pre-existing
+      `flagmentions_test.go` AST scan rejects any flag mention that is not a registered flag.
+
+      Both new guards were red on their first run rather than needing to be broken to prove
+      they work: the field guard caught the `deploy:` block documented as recipes but absent
+      from the field reference, and the command guard caught the guide omitting itself.
+
+      The config reference is reflected out of the real structs, not copied from
+      `testdata/config/pokkum.yaml.golden` — whose header claims it carries every field of
+      schema version 1 while omitting `runtime`, `stub_launcher`, the whole `deploy:` block, six
+      `image` header fields, `build.allow_server_code_in_static`, `security.vex_exemptions` and
+      three `cache` keys. Its guards prove it parses and validates, not that it is exhaustive.
     impl:
+      - cmd/pokkum/guide.go
+      - cmd/pokkum/guide_test.go
       - cmd/pokkum/main.go
-      - scripts/gen-docs
       - README.md
+      - Vocabulary.md
     related: ["mcp-server", "pokkum-yaml-json-schema", "exit-code-reference", "readonly-app-invariant-undocumented", "paas-deploy-targets"]
 
   - id: mcp-server
@@ -1110,7 +1149,7 @@ items:
   - id: readonly-app-invariant-undocumented
     title: "The read-only /app invariant is stated only in a code comment"
     stage: v1.2
-    status: open
+    status: shipped
     kind: dx
     tier: polish
     summary: "Every Pokkum image ships `/app` at mode 0555 with no opt-out, and the only place that says so is a comment in the packager."
@@ -1143,7 +1182,7 @@ items:
   - id: doctor-effective-adapter-check
     title: "pokkum doctor does not check the effective SvelteKit adapter"
     stage: v1.2
-    status: open
+    status: shipped
     kind: fix
     tier: polish
     summary: "`checkSvelteKitWorkspace` confirms `@sveltejs/kit` is a dependency and stops there — an `adapter-auto` project passes doctor cleanly and fails at build."

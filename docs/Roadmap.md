@@ -38,11 +38,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
-| [pokkum guide — the operating manual, shipped inside the binary](items/agent-guide-command.md) | A task-shaped guide the binary prints itself, so an agent driving Pokkum in someone else's SvelteKit project reads instructions that cannot be a different version from the binary it is driving. | dx | open |
-| [pokkum doctor does not check the effective SvelteKit adapter](items/doctor-effective-adapter-check.md) | `checkSvelteKitWorkspace` confirms `@sveltejs/kit` is a dependency and stops there — an `adapter-auto` project passes doctor cleanly and fails at build. | fix | open |
 | [A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md) | Whether init should configure `deploy:` at all. Step 1 of the recommendation (`deploy --check`) has shipped; the remaining question is `pokkum deploy init`. | feature | awaiting-decision |
-| [Standardized machine-readable output (--output=json)](items/json-output-envelope.md) | `--output=json` emits a machine-readable envelope on most commands — but not on `build` or `dev`, where it is accepted and silently ignored. | feature | in-progress |
-| [The read-only /app invariant is stated only in a code comment](items/readonly-app-invariant-undocumented.md) | Every Pokkum image ships `/app` at mode 0555 with no opt-out, and the only place that says so is a comment in the packager. | dx | open |
 
 ### Supply Chain & Attestation
 

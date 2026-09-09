@@ -8,7 +8,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
+| Status | shipped |
 | Stage | v1.2 |
 | Kind | dx |
 | Tier | foundation |
@@ -107,11 +107,38 @@ user actually needs is the snippet, not prose describing what to write.
 Serving the same text as an MCP resource is what makes [pokkum mcp](mcp-server.md) a
 thin layer rather than a second body of knowledge to keep in sync.
 
+## Decision
+
+Shipped as `pokkum guide` with 14 addressable topics: all sections by default,
+`pokkum guide <topic>` for one, `pokkum guide topics` for the index, and an unknown topic
+as a usage error naming the valid set. Registered first in the command tree so it heads
+`pokkum --help`, whose long description now opens with `START WITH: pokkum guide`.
+
+Authored and parity-guarded rather than generated. That reverses this item's original
+recommendation, and the reason is that the repo's own convention for CLI documentation is
+already authored-plus-guarded (`flags_docs_test.go`, `envvar_docs_test.go`); generation is
+used for `docs/roadmap` output only. Three guards apply: every `yaml:` field of
+`ports.ProjectConfig`/`ports.BuildProfile` must appear in the config section (70 today),
+every command in the cobra tree must be named in the guide, and the pre-existing
+`flagmentions_test.go` AST scan rejects any flag mention that is not a registered flag.
+
+Both new guards were red on their first run rather than needing to be broken to prove
+they work: the field guard caught the `deploy:` block documented as recipes but absent
+from the field reference, and the command guard caught the guide omitting itself.
+
+The config reference is reflected out of the real structs, not copied from
+`testdata/config/pokkum.yaml.golden` — whose header claims it carries every field of
+schema version 1 while omitting `runtime`, `stub_launcher`, the whole `deploy:` block, six
+`image` header fields, `build.allow_server_code_in_static`, `security.vex_exemptions` and
+three `cache` keys. Its guards prove it parses and validates, not that it is exhaustive.
+
 ## Implementation
 
+- [cmd/pokkum/guide.go](../../cmd/pokkum/guide.go)
+- [cmd/pokkum/guide_test.go](../../cmd/pokkum/guide_test.go)
 - [cmd/pokkum/main.go](../../cmd/pokkum/main.go)
-- [scripts/gen-docs](../../scripts/gen-docs)
 - [README.md](../../README.md)
+- [Vocabulary.md](../../Vocabulary.md)
 
 ## Related
 
