@@ -103,6 +103,14 @@ and an agent-facing surface built around a manual that ships inside the binary.
 
 ### Fixed
 
+- **A Dokploy deploy that succeeded could be reported as failed.** Dokploy answers
+  `application.deploy` with HTTP 200 and an empty body, which Pokkum could not positively
+  identify as a started rollout and so treated as a failure — on an image already pushed, so
+  the exit status said nothing about the actual state. An unrecognised 2xx is now resolved by
+  reading the application back and finding the deployment carrying that exact image reference:
+  started or finished is reported as success, a rollout the platform recorded as failed is
+  reported with the platform's own error message, and anything not positively observed still
+  fails.
 - Two false positives in the static-viability classifier, and a third site fooled by a
   commented-out directive. Comment and string-literal stripping now goes through one shared
   scanner rather than three independent implementations.

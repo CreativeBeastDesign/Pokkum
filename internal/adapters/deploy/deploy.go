@@ -94,6 +94,38 @@ func postJSON(ctx context.Context, client *http.Client, url string, headers map[
 	return post(ctx, client, url, headers, "application/json", bytes.NewReader(encoded))
 }
 
+// getJSON performs a GET and reads the (capped) response body.
+//
+// Dokploy exposes its tRPC queries as GETs with plain query parameters
+// (`GET /api/application.one?applicationId=...`), unlike the mutations, which
+// are POSTs with a JSON body. Errors go through the same redaction as post's,
+// because the caller's endpoint is operator-supplied and may carry a secret.
+func getJSON(ctx context.Context, client *http.Client, url string, headers map[string]string) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("request failed: %w", redactURLError(err))
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBody))
+		_ = resp.Body.Close()
+	}()
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("read response: %w", redactURLError(err))
+	}
+	return resp.StatusCode, data, nil
+}
+
 // post performs the request and reads the (capped) response body.
 func post(ctx context.Context, client *http.Client, url string, headers map[string]string, contentType string, body io.Reader) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)

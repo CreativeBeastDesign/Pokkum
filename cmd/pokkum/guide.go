@@ -630,9 +630,15 @@ RESPONSE CLASSIFICATION
 
   Both PaaS targets answer HTTP 200 for outcomes that are not deployments, so
   Pokkum classifies the body rather than the status code and fails closed on
-  anything it cannot positively identify as a started rollout. A reported
-  failure whose image was already pushed is worth confirming against the
-  platform's own API before assuming nothing happened.
+  anything it cannot positively identify as a started rollout.
+
+  For Dokploy, an unrecognised 200 is then resolved rather than assumed: Pokkum
+  reads back the application and looks for the deployment carrying this exact
+  image reference. A rollout that started or finished is reported as the success
+  it is; one the platform recorded as failed is reported with the platform's own
+  error message; and anything it cannot positively observe still fails. So a
+  Dokploy deploy reported as failed now means the rollout was not seen to start,
+  not merely that the response body was unfamiliar.
 `,
 	},
 	{

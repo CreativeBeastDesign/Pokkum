@@ -12,7 +12,7 @@ Sending an HTTP request is trivial. What earns a dedicated adapter is that **bot
 |---|---|---|
 | SwiftWave webhook | `200` + body `OK - No rebuild` | Classified on the body text; returns `core.ErrDeployNotTriggered` |
 | SwiftWave GraphQL | `200` + `{"errors":[…]}`, or `rebuildApplication: false` | Body decoded; both are failures |
-| Dokploy | `200` + an HTML login page from a reverse proxy | Body must be Dokploy's own `true`; anything else is unconfirmed |
+| Dokploy | `200` + an HTML login page from a reverse proxy | Body must be Dokploy's own `true`; anything else is *unconfirmed*, and unconfirmed is then resolved by reading `application.one` — see below |
 
 `core.Deploy` adds a backstop: a result with `Triggered == false` can never be returned alongside a `nil` error.
 
@@ -21,6 +21,42 @@ Sending an HTTP request is trivial. What earns a dedicated adapter is that **bot
 Both platform contracts were read from the projects' **own source**, not from their prose documentation (self-review checklist row 36).
 
 ### SwiftWave — `swiftwave_service/rest/webhook.go`
+
+### Unconfirmed is a question, not a verdict (Dokploy)
+
+Dokploy answers `application.deploy` with HTTP 200 and an **empty body** in practice, and the
+rollout it queued then completes normally. The strict classifier is right to refuse to read an
+unrecognised body as a confirmed mutation — but treating that as a failed deploy is a false
+negative with real cost: the image is already pushed, so the operator gets a non-zero exit that
+says nothing about the actual state. Reported from a live deployment whose rollout finished in
+about four seconds while Pokkum called it failed.
+
+So an unrecognised 2xx is now resolved rather than assumed. `confirmRollout` reads
+`application.one` and looks for **our** deployment row — Pokkum stamps every deploy it triggers
+with title `pokkum` and a description naming the exact image reference, so a row carrying this
+build's reference is evidence about *this* request. `applicationStatus` alone is not: it is a
+property of the application and can reflect somebody else's deploy.
+
+| Observed | Result |
+| --- | --- |
+| our row is `done` or `running` | success; logged as confirmed by polling |
+| our row is `error` | failure, carrying the platform's **own** `errorMessage` — actionable, unlike "unconfirmed" |
+| no matching row before the deadline | failure (fail-closed) |
+| `application.one` unreachable, rejected, or unparseable | failure (fail-closed) |
+
+Two properties this must keep. **The strict classifier stays the fast path** — a body Dokploy
+positively confirms costs no extra request. And **only a positively observed rollout passes**;
+every other branch still fails, so "could not check" never becomes "checked and fine".
+
+`application.one` is the one read-only Dokploy endpoint this adapter calls, and it was verified
+against Dokploy's own router source to be a tRPC `.query()` rather than a `.mutation()` — it
+cannot deploy, restart or mutate anything. That verification is why it is safe here and why
+`pokkum deploy --check` still declines to confirm an application id: `--check` must not deploy,
+and at the time it was written no read-only endpoint's contract had been established.
+
+Note the rows in `application.one`'s `deployments` array are **not** in chronological order, so
+matching is by image reference, and the no-reference fallback compares `createdAt` rather than
+taking the first or last entry.
 
 `ANY /webhook/redeploy-app/:app-id/:webhook-token`. For an image-sourced deployment, the handler reduces its configured image to `owner/name` (tag stripped, then the last two path segments) and rebuilds **only if the request body contains that substring**. Otherwise: `200 OK - No rebuild`.
 

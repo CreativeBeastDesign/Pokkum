@@ -65,7 +65,6 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
 | [pokkum config view value provenance](items/config-view-provenance.md) | Show where each resolved `.pokkum.yaml` setting actually came from — flag, profile, env, or default — not just its final value. | dx | open |
-| [Dokploy: disambiguate an unrecognised 2xx by polling, instead of failing outright](items/dokploy-ambiguous-response-poll.md) | An HTTP 200 with an empty body is reported as a failed deploy even when the rollout in fact started; a follow-up `application.one` read could tell the two apart without weakening fail-closed. | dx | open |
 | [Pre/post-build shell hooks](items/hooks-system.md) | Deferred: pre/post-build shell hooks would defuse plugin-system demand cheaply, but add new maintenance surface for something CI pipelines already provide natively. | dx | open |
 | [pokkum init names the presets but not what they resolve to](items/init-prints-resolved-base-refs.md) | The base-image prompt explains each preset in prose; discovering that `distroless` means `gcr.io/distroless/cc-debian12:nonroot` still requires a separate `pokkum base update`. | dx | open |
 | [pokkum mcp — Model Context Protocol server as a second driving adapter](items/mcp-server.md) | Expose analysis, planning and build as MCP tools plus the guide as an MCP resource, for agents without a shell — deliberately not a one-tool-per-command wrapper. | feature | awaiting-decision |
