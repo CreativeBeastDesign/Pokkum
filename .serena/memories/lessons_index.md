@@ -23,7 +23,7 @@ carries the *why* that the checklist row compresses away.
 
 ### silent no-op from picking the wrong near-identical function, or from a load-bearing fallback (1)
 
-- `2026-09-09` — **boundary (serialization flag changed a verdict)** — `--output json` made a red `pokkum doctor` exit 0 while text mode exited 1: the JSON branch returned before the shared `if !allPassed` failure signal, so a CI gate on it passed on a failing doctor. Checklist row 73.
+- `2026-09-09` — **boundary (serialization flag changed a verdict)** — `--output json` made failing commands exit 0 while text mode exited 1, so a CI gate passed on a red run. 13 sites across 6 commands, all `return jsonutils.WriteError(...)` (which returns the WRITE result, hence nil on success); one test actively defended the behaviour with a written rationale. Checklist rows 73 and 57.
 - `2026-09-09` — A regex matching a string VALUE was run through `blankJSStringsAndComments`, which blanks string contents, making it unmatchable on every input forever and reporting the same "found nothing" a healthy project produces. In the same function, `filepath.Rel(absolute, relative)` errored on every call while its fallback silently did all the work. Read before choosing between two same-signature functions whose names differ by a qualifier, and before adding any fallback on an error path.
 
 ### encoding another tool's rules from a mental model instead of its source (1)
