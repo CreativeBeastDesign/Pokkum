@@ -314,13 +314,15 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 | `pokkum build [dir]`       | `pokkum build ./my-app`          | Compiles SvelteKit app into a multi-layer OCI container image.                                                                |
 | `pokkum resolve -f <file>` | `pokkum resolve -f deploy.yaml`  | Resolves `pokkum://` URIs in K8s manifests to immutable image digests.                                                        |
 | `pokkum apply -f <file>`   | `pokkum apply -f deploy.yaml`    | Resolves manifests and pipes directly to `kubectl apply`.                                                                     |
-| `pokkum dev [dir]`         | `pokkum dev ./my-app`            | Local development mode with hot-reloading file watcher and Docker daemon loading.                                             |
+| `pokkum dev [dir]`         | `pokkum dev --cluster`           | Local development mode. Three loops: a container with a hot-reloading file watcher, `--no-container` against the project's own dev server, and `--cluster` syncing into a running pod. |
 | `pokkum scan [target]`     | `pokkum scan ./my-app`           | Security vulnerability scanner for directories, images, or tarballs.                                                          |
 | `pokkum doctor [dir]`      | `pokkum doctor ./my-app`         | Diagnostic wizard for preflight checks and mechanical repairs.                                                                |
 | `pokkum init [dir]`        | `pokkum init ./my-app`           | Bootstraps project config and `.pokkumignore`.                                                                                |
 | `pokkum explain [image]`   | `pokkum explain <ref>`           | Inspects layer hierarchy, file origin tracing (`why`), and image diffing (`diff`).                                            |
 | `pokkum rollback`          | `pokkum rollback -f deploy.yaml` | Rolls back to the previous image ref (`pokkum.dev/previous-image` annotation), or pass `--to=<ref>` explicitly. One hop deep. |
 | `pokkum upgrade`           | `pokkum upgrade --check`         | Checks for signed CLI release updates.                                                                                        |
+| `pokkum deploy [dir]`      | `pokkum deploy --check`          | Hands a pushed image to a self-hosted PaaS control plane (Dokploy, SwiftWave). `--check` validates the `deploy:` block and deploys nothing. |
+| `pokkum config`            | `pokkum config validate`         | Inspects and validates `.pokkum.yaml`, per profile as well as at the top level. A JSON Schema for editors lives at [schema/pokkum.schema.json](schema/pokkum.schema.json). |
 
 ---
 

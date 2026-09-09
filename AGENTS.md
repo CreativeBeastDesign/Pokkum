@@ -89,24 +89,38 @@ The verification protocol applies **ONLY when Go source code (`.go` files, build
 > - Do **NOT** run the verification test suite for simple user questions, code exploration, planning, or documentation updates (e.g. `docs/roadmap/*.yaml`, `AGENTS.md`, `Lessons.md`, `.md` files, docstrings, or memory graph edits).
 > - Tests should be executed **only before declaring completion of actual code modifications**.
 
-When code changes have occurred, agents **MUST** execute the following 4-step verification suite before declaring completion:
+When code changes have occurred, agents **MUST** execute the following 5-step verification suite before declaring completion (`make verify` runs all five in order):
 
 1. **Formatting & Static Analysis**:
    ```bash
    gofmt -s -w . && go vet ./...
    ```
-2. **Adapter Unit Tests**:
+2. **golangci-lint**:
+   ```bash
+   make lint
+   ```
+   `gofmt`/`go vet`/`go test` alone miss findings this catches (`errcheck`, `staticcheck`, ...); see `Lessons.md`'s "4-step verification suite does not run golangci-lint" entry — which is the entry this very list was missing until it was corrected.
+
+   **Do not run a bare `golangci-lint` from PATH.** `.golangci.yml` is v2 schema, which a v1 binary cannot load, and any binary built with an older Go than `go.mod` targets refuses the config and exits non-zero *without linting anything* — the failure mode that left CI running zero tests for six consecutive runs. `make lint` invokes the pinned version through `go run`. Confirm the output reports an issue count; a non-zero exit listing no findings means it never linted.
+3. **Adapter Unit Tests**:
    ```bash
    go test ./internal/adapters/...
    ```
-3. **CLI Compilation Check**:
+4. **CLI Compilation Check**:
    ```bash
    go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test
    ```
-4. **Full Internal Test Suite (includes Architecture Purity Verification `internal/architecture_test.go`)**:
+5. **Full Internal Test Suite (includes Architecture Purity Verification `internal/architecture_test.go`)**:
    ```bash
    go test ./internal/...
    ```
+
+`make verify` also runs two guards beyond those five, both asserting a generated artifact still matches its source: `check-docs-freshness` and `check-schema-freshness`. Neither is a test and neither is optional — they fail on a hand-edit or a missed regeneration.
+
+`supervisor/` (the `pokkum-init`/`pokkum-static` PID-1 binaries) shares the root `go.mod` but is covered by none of the five steps above. If a diff touches anything under `supervisor/`, also run `go build ./supervisor/... && go test ./supervisor/...`.
+
+> [!WARNING]
+> **The five steps do not cover `tests/integration/`, and CI does.** Steps 3 and 5 scope to `./internal/...`; CI runs `go test ./...` plus a real-build E2E job. Run `GOTOOLCHAIN=go$(awk '/^go [0-9]/{print $2}' go.mod) go test -short ./...` before declaring any change complete that touches image labels/annotations, layer compression, tar construction, OCI manifest/config assembly, or any widely-depended-on primitive.
 
 ---
 
@@ -154,6 +168,7 @@ Agents **MUST** keep the project documentation and persistent knowledge graph sy
 
 - **`Lessons.md`**: Record bug post-mortems, root causes, and preventative rules flagged during sub-agent verification or debugging sessions.
 - **Roadmap / shipped log / feature list — `docs/roadmap/*.yaml` ONLY.** These four documents are **generated**: `docs/Roadmap.md`, `docs/Shipped.md`, `docs/Features.md`, and `docs/items/*.md`. **Never hand-edit them** — `make docs` overwrites them and deletes orphaned item pages, so an edit made there is silently discarded. Edit the item in `docs/roadmap/<area>.yaml`, then run `make docs`. `make check-docs-freshness` fails the build if generated output does not match its source, and the generator rejects an unknown field, a bad enum value, an `impl` path that does not exist on disk, or an `[title](item:<id>)` reference to an unknown id.
+- **`schema/pokkum.schema.json` is generated too — never hand-edit it.** It is produced by `scripts/gen-schema` from `ports.ProjectConfig`/`ports.BuildProfile`, so a new config field belongs in the Go struct and nowhere else; run `make schema` after changing one. `make check-schema-freshness` fails the build on drift, and `make verify` runs it alongside the docs guard.
 - **`docs/archive/`**: retired historical documents (the old hand-maintained `Roadmap.md`, `Feature-list.md`, `AdditionalFeatures.md`, `overnight-findings.md` and the v1-era logs). **Read-only** — cite them for provenance, never update them.
 - **`ARCHITECTURE.md`**: Update architectural diagrams, adapter contracts, layer layouts, and boundary descriptions.
 - **`Vocabulary.md`**: Maintain the complete, human-readable reference of all CLI commands, subcommands, flags, defaults, and runtime environment variables.

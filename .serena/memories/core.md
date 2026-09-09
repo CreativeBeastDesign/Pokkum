@@ -75,6 +75,25 @@ next feature ships, it belongs in `mem:state`, not here.
   fallback for a verification key. A trust anchor nobody owns is worse than
   refusing to verify.
 
+## An output format is a serialization, never a verdict (a structural rule)
+- `--output`/`--format` selects how a result is rendered. It must never change
+  whether the command succeeded, what it exits with, or which side effects ran.
+  A caller must be able to switch format and get the same answer.
+- This has been violated at scale once: fourteen sites across seven commands
+  wrote a JSON envelope saying `status:"error"` and then exited **0**, while
+  the text branch on the identical input exited 1 — so a `set -e` step or a
+  `&&` chain read a failure as a success. Two contributing shapes, both worth
+  recognising generally: a format branch that `return`s early and skips a
+  shared failure signal at the end of the function, and a helper whose name
+  says "error" while its return value is a *write* result
+  (`jsonutils.WriteError`), so `return helper(...)` reads as propagating an
+  error and propagates nil.
+- Therefore: when a format branch returns early, the question is not "did I
+  handle this error" but "what shared postlude does this skip". And assert the
+  invariant by running ONE failing fixture through EVERY format and comparing
+  exit status — testing each format's output in isolation passes, because each
+  branch is individually correct. See `mem:self_review_checklist` row 73.
+
 ## Naming conventions
 - Any shared/internal helper package that does not implement a concrete
   Hexagonal port adapter gets a `utils` suffix (`sveltekitutils`,
