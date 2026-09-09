@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [v1.2.1] — 2026-09-09
+
+A patch release for one user-facing defect: a Dokploy deploy that worked could be reported as
+having failed.
+
+### Fixed
+
+- **A Dokploy deploy that succeeded could be reported as failed.** Dokploy answers
+  `application.deploy` with HTTP 200 and an empty body. Pokkum could not positively identify
+  that as a started rollout and so treated it as a failure — on an image that had already been
+  pushed, so the non-zero exit said nothing about the actual state. Observed against a live
+  instance whose rollout completed in about four seconds while the command reported failure.
+
+  An unrecognised 2xx is now resolved rather than assumed: Pokkum reads the application back
+  and looks for the deployment carrying that exact image reference. Started or finished is
+  reported as the success it is; a rollout the platform recorded as failed is reported with the
+  platform's **own** error message, which an operator can act on; and anything not positively
+  observed still fails. The strict body classifier remains the fast path, so a response Dokploy
+  positively confirms costs no extra request.
+
+  Only `application.one` is read, and only for this case. It was verified against Dokploy's own
+  router source to be a read-only tRPC query before being called, so confirming a rollout
+  cannot itself deploy, restart or change anything.
+
+### Internal
+
+- A vendor-cancellation test raced a fixed-duration fake install against cancellation
+  propagation, so it could fail on a loaded runner with the code working correctly. It now
+  asserts the teardown signal directly. No behaviour change.
+
 ## [v1.2.0] — 2026-09-09
 
 Four areas: a third `pokkum dev` mode that syncs into a running cluster, static-build
@@ -103,14 +133,6 @@ and an agent-facing surface built around a manual that ships inside the binary.
 
 ### Fixed
 
-- **A Dokploy deploy that succeeded could be reported as failed.** Dokploy answers
-  `application.deploy` with HTTP 200 and an empty body, which Pokkum could not positively
-  identify as a started rollout and so treated as a failure — on an image already pushed, so
-  the exit status said nothing about the actual state. An unrecognised 2xx is now resolved by
-  reading the application back and finding the deployment carrying that exact image reference:
-  started or finished is reported as success, a rollout the platform recorded as failed is
-  reported with the platform's own error message, and anything not positively observed still
-  fails.
 - Two false positives in the static-viability classifier, and a third site fooled by a
   commented-out directive. Comment and string-literal stripping now goes through one shared
   scanner rather than three independent implementations.
@@ -118,9 +140,6 @@ and an agent-facing surface built around a manual that ships inside the binary.
 - Dynamic routes with no `entries()` export are reported as a static-build caveat rather than
   passed over in silence.
 - Three constants mirrored across the CLI/supervisor boundary are now guarded against drift.
-- A vendor-cancellation test raced a fixed-duration fake install against cancellation
-  propagation, so it could fail on a loaded runner with the code working correctly. It now
-  asserts the teardown signal directly.
 
 ## [v1.1.2] — 2026-09-06
 
