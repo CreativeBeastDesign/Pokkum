@@ -305,12 +305,41 @@ Both are gated on `POKKUM_DEV_MODE`, are off by default, and are never set by th
 
 ## 7. `pokkum init [dir]`
 
-Initializes a SvelteKit workspace for Pokkum by creating `.pokkum.yaml` (with default configuration and build profiles) and `.pokkumignore`. In interactive terminal sessions (TTY), runs a guided questionnaire for target container registry, base image preset, build strategy, local profile, and CVE gating policy.
+Initializes a SvelteKit workspace for Pokkum by creating `.pokkum.yaml` (with default configuration and build profiles) and `.pokkumignore`.
+
+**Init reads your project before it asks you anything.** Two analyses run first, and their results become the prompt defaults — so the questions that the source code can answer arrive pre-answered, with the evidence shown:
+
+| Analysis | What it reads | What it decides |
+|---|---|---|
+| Static viability | Every route source under `kit.files.routes` (default `src/routes`), plus `*.remote.ts\|js` anywhere and `src/hooks.server.*` | Whether `strategy: static` is possible at all |
+| Runtime | `packageManager` in `package.json`, then lockfiles, then `engines` | `runtime: bun` vs `runtime: node`, and the base preset that carries it |
+
+The static-viability scan is a **disqualifier** scan. It reports what rules a static build out, and it is sound in that direction only: "nothing found" means nothing in your source needs a server, not that a static build is guaranteed to succeed (a load function calling a runtime-only API, or a dynamic route with no links for the crawler to follow, still fails later). It reports three outcomes, and they are deliberately distinct — a project it could not scan is reported as *unknown*, never as viable.
+
+What counts as needing a server:
+
+| Found | Blocks static? |
+|---|---|
+| `+server.*` — an API endpoint | Yes, unless the file sets `export const prerender = true` |
+| `+page.server.*` / `+layout.server.*` — a server load function | Yes, unless the file sets `export const prerender = true` |
+| `export const actions` — form actions | **Always.** A POST handler cannot be prerendered, so a `prerender = true` in the same file does not change this |
+| `*.remote.ts\|js` using `query()`, `form()` or `command()` | Yes |
+| `*.remote.ts\|js` using only `prerender()` | No — that resolves at build time and ships as data |
+| `export const prerender = false` anywhere | Yes |
+| `hooks.server.*` | No, reported as a caveat — server hooks run during prerendering, so the build works; what you lose is per-request behaviour for real visitors |
+
+Matching ignores comments and string literals, so a commented-out `export const prerender = false` does not count.
+
+When nothing rules static out but the project is not set up to build that way, init says which of the two prerequisites is missing — `@sveltejs/adapter-static` in `package.json`, and `export const prerender = true` in the routes root's `+layout.ts`.
+
+Interactive sessions (TTY) then ask six questions: target registry, build strategy, **application runtime** (skipped for `strategy: static`, which ships no JavaScript runtime), base image preset (each shown with a one-line rationale, detected default marked), local profile, and CVE gating policy. `--defaults` takes every detected default without prompting — so `pokkum init --defaults` still gets the analysed strategy and runtime, it just does not ask.
+
+`runtime`, `strategy` and `base` are written as a composition, not three independent choices: `runtime: node` requires `strategy: layered` and a base that ships a Node binary, so init upgrades the base to `distroless-node` alongside it and never writes it next to `strategy: static`.
 
 | Flag | Shorthand | Default | Description |
 |---|---|---|---|
 | `--dir` | `-d` | `.` | Path to SvelteKit project directory. |
-| `--defaults` | — | `false` | Accept default initialization settings without interactive prompts. |
+| `--defaults` | — | `false` | Accept default initialization settings without interactive prompts. Detection still runs; only the questions are skipped. |
 | `--output` | — | `text` | Output serialization format (`text` or `json`). |
 
 ---

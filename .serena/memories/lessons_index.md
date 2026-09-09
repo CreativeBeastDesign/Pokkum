@@ -21,6 +21,16 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### parsing user-authored source (comments/strings are not code) (3)
+
+- `2026-09-09` — A commented-out `kit.files.routes` beat the real one in `bunexec.resolveRoutesDir`, the THIRD site in this repo fooled by a bare regex over JS/TS source — after the class had already been fixed twice and two working comment/string scanners already existed in `sveltekitutils`. Read before writing any `regexp`/`strings.Index` against a file a user wrote; the answer is `stripJSComments` (matcher needs string contents) or `blankJSStringsAndComments` (matching an identifier), never a new scanner. See also the two originals below (2026-08-16 `fallback:`, 2026-08-17 `sveltekit(`).
+- `2026-08-17` — `TransformViteConfig` rewrote `sveltekit(` inside comments and string literals; fixed with real lexical scanners.
+- `2026-08-16` — `StaticFallbackFilename`'s whole-file regex was flipped by `fallback: false` in a comment and by an unrelated `fallback: true`.
+
+### negative assertion over a tri-state (1)
+
+- `2026-09-09` — A symlink-containment guard asserted `Verdict != StaticViable` and passed with the `os.Root` fix reverted: `os.ReadFile` follows the escaping symlink, reads the outside file and returns `StaticBlocked`, which is also not `StaticViable`. Read before writing any assertion shaped `!= X` / `no error` / `not empty` against a value with a third state — enumerate the other states and ask which one the BUG produces.
+
 ### guard-scope (off-by-one-level) / permission-and-mode fixes (1)
 
 - `2026-09-07` — A chmod-the-parents loop restored the write bit on every path segment BELOW the sync root and never on the root itself, so the one file the feature exists to replace (`/app/server/index.js`, which has no parent inside the scope) could never be written. Invisible against a `t.TempDir()` fixture, which is 0755; found only because the fixture reproduced the packager's 0555 including a pre-seeded stale file. Read before any fix that restores or relaxes a permission, mode, owner or quota along a path, and before writing a fixture for code that touches a production artifact with a non-default mode.

@@ -299,6 +299,64 @@ before trusting a claim that predates the commit it cites.
   `mem:self_review_checklist` row 41. `verifyKey` now keys on a fingerprint of
   the trusted-root bytes, not the path.
 
+## Project detection in `pokkum init` — shipped 2026-09-09
+
+`pokkum init` analyses the project BEFORE prompting; the prompt defaults are
+derived, not constant, and `--defaults` still gets the derived values (only the
+questions are skipped). Two analyses, both in `internal/adapters/sveltekitutils`,
+both called from `cmd/pokkum/init_analysis.go` (init calls the adapter directly —
+it is the composition root and does not go through `internal/core`).
+
+**`AnalyzeStaticViability(projectDir) StaticReport`** (`staticviability.go`) — a
+DISQUALIFIER scan. Sound for "static is ruled out", NOT a proof that static
+works; the doc comment on `StaticViable` and init's own output both say so.
+
+- Three verdicts: `StaticUnknown` / `StaticBlocked` / `StaticViable`. `unknown`
+  is NOT derivable from `len(Blockers)==0` — an unreadable or non-SvelteKit
+  directory must never produce the reassuring answer. `FilesScanned` is the
+  floor assertion at the other end.
+- Blockers: `+server.*`, `+page.server.*`, `+layout.server.*` (each retired by
+  `export const prerender = true` in the same file), `export const actions`
+  (UNCONDITIONAL — checked before the prerender override, so a `prerender = true`
+  alongside actions does not silence it), `*.remote.ts|js` using
+  `query()`/`form()`/`command()`, and `export const prerender = false` anywhere.
+  An unrecognised `.remote.*` fails CLOSED.
+- Not blockers: a remote module using only `prerender()`; `hooks.server.*`
+  (reported as a caveat — server hooks run during prerendering).
+- Walks the whole project (remote modules live anywhere), skipping
+  `node_modules`, `build`, `dist`, `.svelte-kit`, `.pokkum`, `.git`,
+  `.vercel`, `.netlify`, `.output`.
+- Reads through an `os.OpenRoot(projectDir)`, not `os.ReadFile(path)` — gosec
+  G122, and the tree is dependency-writable. Whole-file reads, never a
+  `bufio.Scanner` (the 64KiB-token class, shipped twice).
+- Matches on `blankJSStringsAndComments` output, never raw source.
+
+**`DetectAppRuntime(projectDir) RuntimeSignal`** (`runtimedetect.go`) — a
+PREFERENCE signal, not a compatibility verdict; nothing refuses a build over it.
+Precedence: `packageManager` → lockfiles (`bun.lock`/`bun.lockb` vs
+`package-lock.json`/`pnpm-lock.yaml`/`yarn.lock`) → `engines`. A contradiction
+inside a tier returns NO opinion with `Conflict` set. `RecommendedBaseForRuntime`
+pairs node with `distroless-node`.
+
+**Cross-field composition lives in `config.GenerateDefault`**, not in the
+prompts: `runtime: node` requires `strategy: layered` and a Node-carrying base,
+so it upgrades the base and drops the runtime rather than emitting an
+uncomposable trio. `pokkum config validate` checks fields, NOT their
+composition, so this is the only place that can prevent it. Guarded by
+`TestInit_EveryEmittableCombinationBuilds`, which walks every emittable
+combination through both `validateGeneratedConfig` and core's `Validate()`.
+
+Prompt order is now: registry, strategy, runtime (SKIPPED for static), base
+preset (with per-preset rationale), local profile, CVE threshold — six prompts,
+was five. Tests feed positional lines, so changing the order means updating
+`cmd/pokkum/init_test.go`'s input strings.
+
+`sveltekitutils.ResolveRoutesDir` is the single answer to "where are the routes"
+(honours `kit.files.routes`, strips comments first); `bunexec.resolveRoutesDir`
+delegates to it. Advisory only — `pokkum build` does NOT yet refuse
+`strategy: static` on a blocked project; that is roadmap item
+`static-strategy-preflight`.
+
 ## Static strategy (`--strategy=static`)
 - Genuinely functional end-to-end as of the 2026-08-19 fixture-driven batch —
   see `mem:staticserver` for the full deep dive (bind-address bug, `Preflight`

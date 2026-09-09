@@ -8,7 +8,9 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 ## Needs decision
 
-_None._
+| Title | Summary | Kind | Status |
+| --- | --- | --- | --- |
+| [A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md) | Whether init should configure `deploy:` at all, and which of three shapes the expansion of `pokkum deploy` takes. | feature | awaiting-decision |
 
 ## v1.1
 
@@ -29,6 +31,13 @@ _None._
 | [Shared vendor cache across a monorepo invocation](items/monorepo-vendor-cache.md) | --since skips builds between unaffected projects but does nothing within a build when many packages in one invocation share dependencies; extending the layer cache into a content-addressable vendor-layer cache would close that. | feature | open |
 | [Resumable chunked layer upload](items/resumable-chunked-upload.md) | Back off and retry on 429/5xx during a large layer push instead of failing the whole push on one transient registry hiccup. | hardening | open |
 | [Supervisor cgroup awareness](items/supervisor-cgroup-awareness.md) | JSC (Bun's engine) doesn't read cgroup limits, so a Bun app in a 512Mi container OOMKills in ways that look random; read /sys/fs/cgroup/memory.max, export it, and warn below a sane floor. | feature | open |
+
+### Developer Experience
+
+| Title | Summary | Kind | Status |
+| --- | --- | --- | --- |
+| [A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md) | Whether init should configure `deploy:` at all, and which of three shapes the expansion of `pokkum deploy` takes. | feature | awaiting-decision |
+| [pokkum build preflight for strategy: static](items/static-strategy-preflight.md) | Reject `strategy: static` before the build starts when the project has server-side code, instead of failing deep inside SvelteKit's build. | hardening | open |
 
 ### Supply Chain & Attestation
 

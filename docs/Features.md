@@ -154,6 +154,16 @@ Audits local Bun runtime, SvelteKit version compatibility, `.pokkumignore`, and 
 - Implementation:
   - [cmd/pokkum/doctor.go](../cmd/pokkum/doctor.go)
 
+### [pokkum init detects bun vs node, and the base image that carries it](items/init-runtime-detection.md)
+
+`runtime: bun|node` is inferred from the project's own toolchain, and drags the paired base preset along so the two cannot disagree.
+
+- Implementation:
+  - [internal/adapters/sveltekitutils/runtimedetect.go](../internal/adapters/sveltekitutils/runtimedetect.go)
+  - [internal/adapters/config/config.go](../internal/adapters/config/config.go)
+  - [internal/ports/config.go](../internal/ports/config.go)
+  - [cmd/pokkum/init.go](../cmd/pokkum/init.go)
+
 ### [Standardized machine-readable output (--output=json)](items/json-output-envelope.md)
 
 A global `--output=json` flag emits a versioned JSON envelope across every command, instead of callers parsing human-readable stdout.
@@ -196,6 +206,15 @@ Checks for new releases and verifies the release binary's checksum signature via
 
 - Implementation:
   - [cmd/pokkum/upgrade.go](../cmd/pokkum/upgrade.go)
+
+### [Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md)
+
+Scans a project's routes for server-side code and reports what rules a static build out, feeding `pokkum init`'s strategy default.
+
+- Implementation:
+  - [internal/adapters/sveltekitutils/staticviability.go](../internal/adapters/sveltekitutils/staticviability.go)
+  - [internal/adapters/sveltekitutils/staticviability_test.go](../internal/adapters/sveltekitutils/staticviability_test.go)
+  - [cmd/pokkum/init_analysis.go](../cmd/pokkum/init_analysis.go)
 
 ### [pokkum init](items/workspace-init-wizard.md)
 
@@ -517,6 +536,8 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - If the target container sets `POKKUM_ATTESTATION_DIGEST`, the pod will fail its *next* start with exit 125, because startup attestation re-derives the digest of the very `/app` tree this loop rewrote. The running pod is unaffected — attestation runs once, at supervisor startup — but an eviction or reschedule turns into a crash loop. A `Warn` says so when the target has it set. ([pokkum dev --cluster](items/cluster-dev-loop.md))
 - Layered images only. An `exe` or `static` image has no `/app/server`, and the extractor refuses to create a `--root` that does not exist rather than materialising a tree that would look synced and serve nothing. ([pokkum dev --cluster](items/cluster-dev-loop.md))
 - Requires `POKKUM_DEV_MODE=1` on the target container. It is off by default, never set by the packager, and must never be set on a production workload: it makes the in-pod `__dev-sync` subcommand callable and turns SIGHUP into a process restart, both of which hand real power to anyone who can already exec into the pod. ([pokkum dev --cluster](items/cluster-dev-loop.md))
+- SwiftWave's webhook method has no application-listing equivalent, so option B's picker would be Dokploy-only; SwiftWave would fall back to pasting the webhook URL into an env var. ([A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md))
+- `pokkum deploy --check` needs an authenticated no-op endpoint per target. If a target has none, the check degrades to config-shape validation only, and must SAY so rather than reporting a pass it did not earn. ([A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md))
 - A project defining both `kit.experimental` and a top-level `experimental` for vite-plugin-svelte would see the kit one win after flattening. Unusual, and preferable to dropping the config entirely. ([Adapter injection silently discarded the project's whole SvelteKit config](items/injection-discarded-svelte-config.md))
 - No supervisor, no startup attestation, no health/readiness probes, no base image, and no non-root user — a single startup warning states this explicitly and the default remains full container-parity mode so nobody debugs a production discrepancy against a mode never meant to model it. ([pokkum dev --no-container](items/no-container-dev-mode.md))
 - `--debug`, `--platform`, `--bun-version`, and `--bun-variant` are rejected outright rather than silently ignored, since each describes a property of an image that is never built. ([pokkum dev --no-container](items/no-container-dev-mode.md))
@@ -528,6 +549,9 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - SwiftWave cannot be repointed at a new image reference: both its webhook and its `rebuildApplication` mutation rebuild the application's current deployment, so the application must be pinned to a mutable tag that Pokkum republishes. `update_image` is rejected for that target rather than silently ignored. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
 - The two platform contracts were verified against Dokploy's and SwiftWave's own source rather than their prose docs, but they are third-party APIs and can drift; the adapters fail closed on any response they cannot positively identify as a started rollout. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
 - Vercel and other edge/serverless platforms remain out of scope — they do not run OCI images, which is the existing non-goal stated in README.md. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
+- A sound negative only. `viable` means nothing found rules static out, never that a static build will succeed. ([Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md))
+- Advisory only. `pokkum build` does not yet refuse `strategy: static` on a project this scan calls blocked — see item static-strategy-preflight. ([Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md))
+- Dynamic route segments are not reported at all yet; adapter-static cannot crawl an unlinked `[slug]` route, and detecting that needs link analysis rather than a per-file scan. ([Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md))
 
 ### Kubernetes & Operations
 

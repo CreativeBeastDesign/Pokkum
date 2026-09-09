@@ -5,6 +5,84 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-09 — A commented-out `kit.files.routes` won over the real one, in the third instance of a class fixed twice already
+
+**Category:** parsing (whole-file regex vs scoped match) / repeated-failure-class
+
+**Root cause:** `bunexec`'s private `resolveRoutesDir` matched
+`routes\s*:\s*["'`]([^"'`]+)["'`]` against the raw text of `svelte.config.js` and `vite.config.ts`.
+A project with a commented-out `// files: { routes: 'src/old-routes' }` above its real
+configuration got the commented path, because the regex has no idea what a comment is. The
+consequence is not cosmetic: that path is what `stageRoutesMirror` builds the filtered routes
+mirror from, so `--exclude-route` would have mirrored a directory that may not exist, silently
+excluding nothing (`os.Stat` fails, "no routes directory found", skip) — the exclusion reported as
+applied and the route's code still in the image.
+
+The mechanism was already written down twice. `StaticFallbackFilename` was found fooled by
+`fallback: false` in a comment (2026-08-16), and `TransformViteConfig` by `sveltekit(` in a comment
+or string literal (2026-08-17). The second of those shipped a real fix — `findLiveSvelteKitCall`
+and `findLiveAdapterProp`, proper comment/string state scanners in `injector.go` — and
+`stripJSComments` landed in `project.go` for the first. So this repo already contained TWO working
+implementations of "skip comments and string literals before matching JS", and a third site that
+needed one used a bare regex anyway.
+
+That is the same shape as the 2026-09-05 `bufio.Scanner` entry, and the reason is the same: a
+preventative rule stated over a class was acted on for the instances that existed at the time, and
+nothing enumerates new instances on the way in. Neither `gofmt`, `go vet`, `make lint` nor any test
+distinguishes a regex over user source from a regex over a config value.
+
+**Where:** `internal/adapters/bunexec/route_mirror.go`'s `resolveRoutesDir` and its `routesFilesRe`
+(both now deleted); consumed by `stageRoutesMirror`.
+
+**Fix:** the resolution moved to `sveltekitutils.ResolveRoutesDir`, which strips comments before
+matching, and `bunexec` delegates to it. Found while building the static-viability analyser, which
+needed the identical answer — the duplicate was going to become a third copy, and consolidating it
+surfaced the defect in the copy being retired. `stripJSComments` was generalised into
+`stripJS(source, blankStringContents bool)` at the same time, adding
+`blankJSStringsAndComments` for identifier-level matching, so the package now has one scanner
+serving both needs rather than a fourth hand-rolled one.
+
+**Preventative rule:** before writing any regex or `strings.Index` against the text of a
+user-authored source file, grep the repo for an existing comment/string-aware scanner and use it.
+This codebase has had one since 2026-08-16 and has now been bitten three times by code that did not
+look. More generally: when consolidating two implementations of the same question, diff their
+BEHAVIOUR before picking a winner — the duplicate being deleted is where the bug was, and deleting
+it without reading it ships the bug forward under a new name.
+
+---
+
+## 2026-09-09 — A new symlink-containment guard passed with the fix reverted, because "not viable" and "could not check" both satisfied it
+
+**Category:** test-substance / wrong-observable (row 45 family)
+
+**Root cause:** the static-viability scan reads files through an `os.Root` scoped to the project, so
+a route source that is really a symlink out of the project is refused rather than followed. The
+guard written for that asserted `Verdict != StaticViable`. Reverting the `os.Root` conversion back
+to `os.ReadFile(path)` left it GREEN.
+
+`os.ReadFile` follows the symlink, reads the file outside the project, finds the `query()` inside
+it and returns `StaticBlocked` — which is also not `StaticViable`. Two entirely different
+behaviours, one of them the vulnerability the guard exists to prevent, both satisfying the
+assertion. The verdict enum has three values and the assertion only partitioned it into two, so it
+could not distinguish the outcomes that mattered.
+
+Caught only by the mandatory revert-and-watch-it-fail step, which is the whole argument for that
+step: the test was written after the fix, passed immediately, and read as coverage.
+
+**Where:** `internal/adapters/sveltekitutils/staticviability_test.go`,
+`TestAnalyzeStaticViability_SymlinkEscapingTheProjectIsNotSilentlyRead`.
+
+**Fix:** assert `Verdict == StaticUnknown` — the state only the contained read produces. Reverting
+the fix now fails with `Verdict = "blocked", want "unknown"`.
+
+**Preventative rule:** for any assertion written as a negative (`!= X`, `not empty`, `no error`)
+against a value with more than two states, enumerate the OTHER states and ask which of them the bug
+would produce. If the bug produces a state the negative also accepts, the assertion is measuring
+the wrong thing — assert the specific state the fix produces, positively. A negative assertion over
+a tri-state is a two-thirds-empty test that looks full.
+
+---
+
 ## 2026-09-07 — A permission fix that handled every directory except the one that mattered
 
 **Category:** guard-scope (off-by-one-level) / fixture-fidelity

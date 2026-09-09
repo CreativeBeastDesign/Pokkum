@@ -220,6 +220,254 @@ items:
     impl:
       - cmd/pokkum/init.go
 
+  - id: static-viability-analyzer
+    title: "Static-viability analysis (does this project need a server?)"
+    stage: v1.1
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Scans a project's routes for server-side code and reports what rules a static build out, feeding `pokkum init`'s strategy default."
+    problem: |
+      `pokkum init` offered `layered` / `static` as a free choice and validated nothing. Nothing
+      anywhere in the codebase looked at `src/routes` at all: choosing `static` on a project with
+      a `+server.ts` failed deep inside the SvelteKit build, with SvelteKit's message rather than
+      Pokkum's, long after the choice was made. Picking correctly required the user to already
+      know the answer, which is the opposite of what a setup step is for.
+    decision: |
+      Shipped as `sveltekitutils.AnalyzeStaticViability`, a DISQUALIFIER scan. It answers "does
+      anything here rule static out?" soundly and does not attempt the converse, which is not
+      decidable from source: a load function hitting a runtime-only API, or a dynamic route with
+      no inbound links for the crawler, passes the scan and fails the build. The verdict wording
+      and `pokkum init`'s output both say so explicitly.
+
+      Blockers: `+server.*`, `+page.server.*` and `+layout.server.*` (each retired by an
+      `export const prerender = true` in the same file), form actions (`export const actions`,
+      unconditional — a POST handler cannot be prerendered, so a `prerender = true` alongside it
+      does not silence the finding), `*.remote.ts|js` using `query()`/`form()`/`command()`, and
+      an explicit `export const prerender = false` anywhere. A remote module using only
+      `prerender()` is build-time data and is not a blocker. `hooks.server.*` is reported as a
+      caveat, not a blocker: server hooks do run during prerendering, so calling them
+      disqualifying would wrongly reject projects that build today.
+
+      Three verdicts, not two. `unknown` (could not scan) is distinct from `viable` (scanned,
+      found nothing) and carries the reason, so an unreadable or non-SvelteKit directory can
+      never produce the reassuring answer — the fail-open shape logged three times on
+      2026-08-21. `FilesScanned` is reported for the same reason at the other end: a walk that
+      matched nothing must not read as a clean project.
+
+      Matching is done on comment-stripped, string-blanked source via the scanner already in
+      `project.go`, never a whole-file regex. Both halves of that have burned this repo before
+      (2026-08-16 `fallback:` in a comment, 2026-08-17 `sveltekit(` in a string literal), and a
+      commented-out `export const prerender = false` silently forcing `layered` would be the same
+      bug a third time.
+    impl:
+      - internal/adapters/sveltekitutils/staticviability.go
+      - internal/adapters/sveltekitutils/staticviability_test.go
+      - cmd/pokkum/init_analysis.go
+    limitations:
+      - "A sound negative only. `viable` means nothing found rules static out, never that a static build will succeed."
+      - "Dynamic route segments are not reported at all yet; adapter-static cannot crawl an unlinked `[slug]` route, and detecting that needs link analysis rather than a per-file scan."
+      - "Advisory only. `pokkum build` does not yet refuse `strategy: static` on a project this scan calls blocked — see item static-strategy-preflight."
+    related: ["workspace-init-wizard", "init-runtime-detection", "static-strategy-preflight"]
+
+  - id: init-runtime-detection
+    title: "pokkum init detects bun vs node, and the base image that carries it"
+    stage: v1.1
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "`runtime: bun|node` is inferred from the project's own toolchain, and drags the paired base preset along so the two cannot disagree."
+    problem: |
+      `runtime` is a real config field and a real `--runtime` flag, but `ports.InitConfigOptions`
+      had no `Runtime` member at all, so `pokkum init` could not write it under any circumstances.
+      A Node project got a Bun image by silence, and the operator had to discover the flag and
+      hand-edit `.pokkum.yaml` afterwards.
+
+      Worse, the field does not stand alone. core rejects `runtime: node` outside
+      `strategy: layered`, and on any base preset that ships no Node binary — the runtime IS base
+      image content for node. Those are three fields that must compose, and
+      `pokkum config validate` checks fields, not their composition. A generator emitting them
+      independently would produce a config that validates and then refuses to build: the exact
+      2026-08-19 `init-generates-invalid-config` shape, one field wider.
+    decision: |
+      Shipped as `sveltekitutils.DetectAppRuntime`, reading three tiers of evidence in a fixed
+      precedence: `packageManager` in package.json (explicit and singular), then lockfiles
+      (`bun.lock`/`bun.lockb` vs `package-lock.json`/`pnpm-lock.yaml`/`yarn.lock`), then
+      `engines`. Contradictory evidence inside a tier returns NO opinion with a `Conflict`
+      reason rather than picking a side; the caller keeps its own default and says why.
+
+      Explicitly a preference signal, not a compatibility verdict — nothing here proves a project
+      cannot run under the other runtime, and nothing refuses a build over it.
+
+      The composition is enforced in `config.GenerateDefault`, the one place that picks all three
+      values: `runtime: node` upgrades the base to `distroless-node`, and is dropped rather than
+      emitted next to a non-layered strategy. `pokkum init`'s prompt does not offer the runtime
+      question at all when the strategy is `static`, since a static image ships no JavaScript
+      runtime and every answer would be meaningless or invalid.
+
+      Guarded by a test that walks EVERY combination of strategy, runtime, base preset and local
+      profile the generator can emit and asserts each is accepted by both `config validate`'s
+      per-field checks and core's cross-field `Validate()`. Reverting the composition clamp turns
+      six of those combinations red.
+    impl:
+      - internal/adapters/sveltekitutils/runtimedetect.go
+      - internal/adapters/config/config.go
+      - internal/ports/config.go
+      - cmd/pokkum/init.go
+    related: ["static-viability-analyzer", "init-generates-invalid-config", "workspace-init-wizard"]
+
+  - id: init-base-image-recommendations
+    title: "pokkum init explains the base image presets instead of listing them"
+    stage: v1.1
+    status: shipped
+    kind: dx
+    tier: polish
+    summary: "Each preset is shown with a one-line reason and the detected default marked, rather than as a bare three-way choice."
+    decision: |
+      The base-image prompt printed three preset names and nothing else, which asks the operator
+      to already know the difference between `distroless` and `chainguard` — and gives no hint
+      that `distroless-node` is required for `runtime: node` and pointless otherwise. Each preset
+      now carries a one-line rationale, and the default derived from the runtime detection is
+      marked so the recommended answer is visible without reading it off a separate line.
+
+      The offered list is built from the `ports` preset constants rather than written out in the
+      prompt, which is what stops the 2026-08-19 defect recurring: that prompt offered
+      `chainguard-static`, an unimplemented roadmap item, because the list was hand-maintained.
+    impl:
+      - cmd/pokkum/init_analysis.go
+      - cmd/pokkum/init.go
+    related: ["init-runtime-detection", "init-generates-invalid-config"]
+
+  - id: init-deployment-section
+    title: "A deployment section in pokkum init, and what pokkum deploy would need to earn it"
+    stage: v1.2
+    status: awaiting-decision
+    kind: feature
+    tier: polish
+    summary: "Whether init should configure `deploy:` at all, and which of three shapes the expansion of `pokkum deploy` takes."
+    problem: |
+      `pokkum init` writes `docker`, `strategy`, `runtime`, `base`, `platforms`, `security`, `sbom`
+      and `profiles`, and never touches `deploy:` — so the one step that gets an image in front of
+      users is the one step init leaves entirely to hand-editing `.pokkum.yaml` against
+      Vocabulary.md. The gap is real.
+
+      But `deploy:` is not shaped like the fields init already writes, and that is the whole
+      difficulty rather than an implementation detail:
+
+      - **It needs secrets.** `token_env` names an environment variable holding an API credential,
+        and a webhook `endpoint` contains its secret inside the URL. Init writes a file intended to
+        be committed. Anything it asks for here it must be careful NOT to write.
+      - **It needs facts only the platform has.** `application` is a platform-side id. The user
+        cannot type it from memory; it has to be looked up in a panel, or fetched over the API with
+        a credential init has not been given yet.
+      - **Answers cannot be validated offline.** Every other init answer is checked against a fixed
+        set. An endpoint, an application id and a token can only be validated by calling the
+        platform — and `pokkum config validate` reporting a `deploy:` block valid that
+        `pokkum deploy` then refuses is a defect this repo has already shipped once (2026-09-01,
+        validator-consumer disagreement).
+      - **Only two targets exist.** `dokploy` and `swiftwave`. A prompt is a poor fit for a
+        two-value choice most users answer with "neither".
+
+      So the honest question is not "should init ask about deployment" but "what could init ask
+      that is worth more than the risk of writing a half-configured deploy block", and that depends
+      on what `pokkum deploy` grows.
+    options:
+      - title: "A. Offer deployment in init, ask only for the non-secret half"
+        description: |
+          Add a prompt: target (`none` / `dokploy` / `swiftwave`, default `none`), and for a
+          non-none answer, `method` and `endpoint`. Write `token_env: POKKUM_DEPLOY_TOKEN` as a
+          comment-documented default and NEVER prompt for the token itself. Leave `application`
+          empty with a generated comment saying where to find it. `auto` stays false.
+        tradeoffs: |
+          Smallest diff and no new commands. But it writes a `deploy:` block that is
+          structurally incomplete by construction — the user's next `pokkum deploy` fails on the
+          missing `application`, which is the "init recommended a command it had guaranteed could
+          not work" shape (2026-08-19) in a new place. Mitigable by having init's closing
+          `next_command` advice account for it, which is machinery that already exists.
+      - title: "B. Keep init out of it; add `pokkum deploy init`"
+        description: |
+          A dedicated interactive subcommand that runs AFTER the platform credential is available:
+          reads `$POKKUM_DEPLOY_TOKEN`, calls the platform's list-applications API, and lets the
+          user pick their application from a real list rather than typing an id. Writes the
+          complete, validated `deploy:` block. `pokkum init` prints one line pointing at it.
+        tradeoffs: |
+          Produces a block that is correct and verified against the live platform, which is the
+          only way `application` can be right, and puts the secret-handling in a command whose
+          entire premise is that a credential is present. Costs a new subcommand, a
+          list-applications call per target (Dokploy has one; SwiftWave's webhook method has no
+          equivalent and would stay manual), and network access in a setup path.
+      - title: "C. Neither — document it and expand `pokkum deploy` diagnostics instead"
+        description: |
+          Leave configuration to the file and Vocabulary.md. Spend the effort on
+          `pokkum deploy --check`: validate the block, resolve `token_env`, call the platform's
+          authenticated no-op endpoint and report exactly which of endpoint/token/application is
+          wrong.
+        tradeoffs: |
+          Zero risk of writing a bad block, and `--check` is useful for CI regardless of how the
+          config was authored. But it leaves the actual gap — first-time setup — unaddressed, and
+          a diagnostic is a worse experience than not needing one.
+    recommendation: |
+      **B, with C's `--check` as its foundation and built first.**
+
+      The reasoning is that `application` decides this. It is the one field that cannot be
+      typed correctly from memory and cannot be validated offline, and every option that writes a
+      `deploy:` block without it writes a block that does not work. A prompt in `pokkum init`
+      structurally cannot obtain it, because init runs before the user has a reason to have set
+      `POKKUM_DEPLOY_TOKEN`. Option A therefore buys a partially-filled block and a deferred
+      failure, and this codebase's own history says deferred failures from generated config are
+      expensive.
+
+      Sequencing, because the second half is worth shipping alone if the first is enough:
+
+      1. `pokkum deploy --check` (option C). Resolves the config exactly as `pokkum deploy` does,
+         then reports per-field status. This must reuse the deploy path's own resolution rather
+         than reimplementing it — the 2026-09-01 entry is precisely a validator that disagreed
+         with its consumer. Ship, and see whether the setup gap persists.
+      2. `pokkum deploy init` (option B) on top: the same resolution, plus a list-applications
+         call, plus an interactive picker, writing the block only once `--check` passes against it.
+         `pokkum init` gains one closing line pointing at it and writes no `deploy:` key itself.
+
+      What init should do in the meantime is nothing beyond that one line. It is the correct
+      amount for a command that cannot verify what it would be writing.
+    limitations:
+      - "SwiftWave's webhook method has no application-listing equivalent, so option B's picker would be Dokploy-only; SwiftWave would fall back to pasting the webhook URL into an env var."
+      - "`pokkum deploy --check` needs an authenticated no-op endpoint per target. If a target has none, the check degrades to config-shape validation only, and must SAY so rather than reporting a pass it did not earn."
+    related: ["workspace-init-wizard", "paas-deploy-targets", "static-viability-analyzer"]
+
+  - id: static-strategy-preflight
+    title: "pokkum build preflight for strategy: static"
+    stage: v1.2
+    status: open
+    kind: hardening
+    tier: foundation
+    summary: "Reject `strategy: static` before the build starts when the project has server-side code, instead of failing deep inside SvelteKit's build."
+    problem: |
+      `static-viability-analyzer` shipped as advice only, reached from `pokkum init`. A project
+      that adds a `+server.ts` a month after init still discovers the incompatibility from
+      SvelteKit's own error, minutes into a build, with no mention of Pokkum's strategy setting —
+      which is the failure this analysis exists to prevent, merely moved later in the project's
+      life rather than removed.
+    options:
+      - title: "Hard failure in core validation"
+        description: "core.Build refuses the request when the analysis returns blocked."
+        tradeoffs: "Strongest signal and earliest possible. But the scan is a sound negative with no proof of completeness, so a false positive would block a build that works today — and it needs a new ports interface, since internal/core cannot import sveltekitutils directly."
+      - title: "Warning at preflight, build continues"
+        description: "Log the blockers and proceed."
+        tradeoffs: "No false-positive risk, but a warning in a long build log is close to no warning at all."
+      - title: "Hard failure with an explicit opt-out flag"
+        description: "Refuse by default; `--allow-server-code-in-static` (or a config key) overrides."
+        tradeoffs: "Keeps the strong signal while leaving an escape hatch for a false positive. Costs one more flag on an already-large surface."
+    recommendation: |
+      Option 3. The analysis is a sound negative — every blocker it reports is genuinely
+      incompatible with adapter-static — so the false-positive risk is low enough to justify
+      failing closed, and an opt-out costs one flag against a class of failure that currently
+      surfaces as somebody else's error message.
+
+      Needs a `ports.StaticViabilityAnalyzer` interface wrapping `sveltekitutils`, injected at the
+      composition root, because `internal/core` must not import an adapter — the same shape
+      `ports.EnvBakeDetector` and `ports.RouteFilter` already use.
+    related: ["static-viability-analyzer"]
+
   - id: config-management
     title: "pokkum config view / validate, build profiles"
     status: shipped
