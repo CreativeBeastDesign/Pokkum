@@ -164,14 +164,6 @@ Audits local Bun runtime, SvelteKit version compatibility, `.pokkumignore`, and 
   - [internal/ports/config.go](../internal/ports/config.go)
   - [cmd/pokkum/init.go](../cmd/pokkum/init.go)
 
-### [Standardized machine-readable output (--output=json)](items/json-output-envelope.md)
-
-A global `--output=json` flag emits a versioned JSON envelope across every command, instead of callers parsing human-readable stdout.
-
-- Flags: `--output`
-- Implementation:
-  - [cmd/pokkum/build.go](../cmd/pokkum/build.go)
-
 ### [pokkum explain / explain why / explain diff](items/layer-origin-tracing.md)
 
 Reads a real OCI image and reports its actual per-layer digests, sizes, and file origins, and diffs two images layer-by-layer.
@@ -553,6 +545,7 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - The endpoint probe proves the host accepts a connection, not that the panel is running at that path. ([pokkum deploy --check](items/deploy-check.md))
 - A `pokkum deploy init` picker would be Dokploy-only; SwiftWave's webhook method has no application-listing equivalent. ([A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md))
 - A project defining both `kit.experimental` and a top-level `experimental` for vite-plugin-svelte would see the kit one win after flattening. Unusual, and preferable to dropping the config entirely. ([Adapter injection silently discarded the project's whole SvelteKit config](items/injection-discarded-svelte-config.md))
+- Shipped and working on `init`, `doctor`, `config`, `scan`, `verify`, `explain`, `adopt`, `history`, `rollback` and `repro doctor`; only `build` and `dev` are outstanding. ([Standardized machine-readable output (--output=json)](items/json-output-envelope.md))
 - No supervisor, no startup attestation, no health/readiness probes, no base image, and no non-root user — a single startup warning states this explicitly and the default remains full container-parity mode so nobody debugs a production discrepancy against a mode never meant to model it. ([pokkum dev --no-container](items/no-container-dev-mode.md))
 - `--debug`, `--platform`, `--bun-version`, and `--bun-variant` are rejected outright rather than silently ignored, since each describes a property of an image that is never built. ([pokkum dev --no-container](items/no-container-dev-mode.md))
 - `--port` and `--watch` warn (rather than reject) when explicitly set, since the dev server picks its own port and hot reload is inherent rather than opt-in. ([pokkum dev --no-container](items/no-container-dev-mode.md))

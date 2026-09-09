@@ -873,3 +873,89 @@ items:
       - internal/core/pipeline.go
     related: ["strategy-static", "cache-control-contract"]
 
+
+  - id: extra-project-paths
+    title: "build.extra_paths — ship project directories beyond the adapter's output"
+    stage: backlog
+    status: open
+    kind: feature
+    tier: polish
+    summary: "Only the adapter's `build/` output enters the image, so a project reading templates, fonts or seed data off disk has to smuggle them in via a postbuild copy."
+    problem: |
+      Pokkum packages the adapter's output and nothing else from the project root. That is the
+      right default — it is most of why the images are small — but it has no escape hatch, and
+      the class of application that needs one is not exotic: anything reading a template
+      directory, a font set, or seed data directly off disk.
+
+      The workaround that does work today is a postbuild script copying those directories into
+      `build/` so they ride along in the existing server layer, plus setting `image.working_dir`
+      to the path that layer mounts at so the app's own `process.cwd()`-relative resolution keeps
+      working unchanged. It is two moving parts held together by a convention nothing enforces,
+      and neither part is discoverable — it was reconstructed from first principles in a real
+      session (2026-09).
+    recommendation: |
+      A `build.extra_paths` list, copied to a documented stable path under the app tree and
+      surfaced to the application through an environment variable so it does not have to infer
+      the location from `working_dir`. Determinism is unaffected: the same sorted-walk and
+      `SOURCE_DATE_EPOCH` header rules the existing layers use apply unchanged.
+
+      Deliberately narrower than [extra OS binaries](item:extra-os-binaries): the content is the
+      operator's own source tree, already inside the build context and already covered by
+      `secretguard` and the SBOM, so it opens no new supply-chain surface. That is what makes it
+      the one of the two pair worth doing first.
+    related: ["extra-os-binaries", "readonly-app-invariant-undocumented", "vendor-production-dependencies"]
+
+  - id: extra-os-binaries
+    title: "Vendoring a third-party OS binary into the image (Typst, pandoc, ffmpeg)"
+    stage: backlog
+    status: awaiting-decision
+    kind: feature
+    tier: polish
+    summary: "A SvelteKit app shelling out to a real CLI tool currently needs a hand-built custom base and a separate buildx pipeline, which undercuts the zero-Dockerfile pitch for that whole class of app."
+    problem: |
+      "SvelteKit app that invokes a native tool" is a common shape — Typst, pandoc, ImageMagick,
+      ffmpeg. Today it requires building a custom base image by hand (`FROM <tool image>` /
+      `FROM <resolved preset digest>` / `COPY --from`), which means running `pokkum base update`
+      to discover the preset's real reference, keeping a Dockerfile and a buildx builder
+      configured for multi-platform, and re-verifying the tool's tag still resolves on both
+      architectures. Done end to end in a real session (2026-09); it worked, and it was most of
+      the work.
+
+      The machinery is largely present. `bunruntime` already downloads a GitHub-release binary,
+      verifies its checksum, caches it and embeds it as its own deterministic layer — a Typst
+      resolver is close to that adapter with different URLs. The supervisor is runtime-agnostic.
+      The packager, multi-arch index and the whole attestation chain sit above the application
+      type, not inside it.
+    options:
+      - title: "Do not build it"
+        description: "Keep Pokkum a SvelteKit compiler. Document the custom-base recipe properly in the guide and leave the tool image to a Dockerfile, apko or ko."
+        tradeoffs: "Preserves the product boundary and the supply-chain story exactly. Leaves a common application shape needing a second toolchain, which is the thing Pokkum exists to remove."
+      - title: "build.extra_binaries sourced from an upstream image"
+        description: "A config list of {from, path, to}, compiled as an extra COPY --from layer, as suggested from the field."
+        tradeoffs: "Narrower than a general image builder — no second Compiler, no reshaped PackageRequest. But it lets arbitrary bytes from an arbitrary image into the image while bypassing base-image verification, and the scanner and SBOM would need to cover a layer whose provenance nothing established."
+      - title: "A first-class tool resolver, modelled on bunruntime"
+        description: "Named, version-pinned, checksum-verified resolvers for a small set of tools, resolved from upstream releases rather than from another container image."
+        tradeoffs: "Keeps verification and reproducibility intact and fits the existing adapter shape. Costs a maintained resolver per tool, and does not generalise — every new tool is a code change."
+    recommendation: |
+      Hold at awaiting-decision, and ship [extra_paths](item:extra-project-paths) first: it
+      covers the adjacent half of the same field report at a fraction of the risk, and it will
+      show whether the binary case is really the common one or was incidental to a single
+      project.
+
+      If it is built, the constraint that decides the design is supply chain, not plumbing. An
+      arbitrary `COPY --from` is a hole straight through the base-image verification, CVE gate
+      and SBOM coverage that are the reason to use this tool at all — so any source image must
+      pass the same verification path a `--base` custom reference already does
+      ([custom-base-lock-slot](item:custom-base-lock-slot),
+      [base-image-signature-verification](item:base-image-signature-verification)), get its own
+      lock slot, and be scanned. Under that constraint the third option is closer to Pokkum's
+      grain than the second, and the second is only acceptable if it fails closed by default the
+      way a custom base does.
+
+      Explicitly out of scope either way: building images for non-SvelteKit inputs. That changes
+      what Pokkum is, and the field report's own conclusion — build the tool image separately,
+      keep Pokkum for the app — remains the right answer until a second real use case exists.
+      `pokkum resolve`/`apply` already patch image references by container name, so a sidecar in
+      a hand-written manifest survives a deploy untouched; what Pokkum cannot do is generate that
+      sidecar, since only the OTel one is injectable.
+    related: ["extra-project-paths", "custom-base-lock-slot", "base-image-signature-verification", "chainguard-static-preset", "agent-guide-command"]
