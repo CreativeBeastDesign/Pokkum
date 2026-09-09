@@ -15,6 +15,7 @@ import (
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekitutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
 )
@@ -95,10 +96,24 @@ build
 		return fmt.Errorf("%s", msg)
 	}
 
+	// Look at the project before asking about it. Every default below that can
+	// be derived from the source is derived, and the prompts show the evidence
+	// rather than a bare list of options.
+	analysis := analyzeProject(opts.dir)
+
 	initOpts := ports.InitConfigOptions{
-		BasePreset:         "distroless",
-		Strategy:           "layered",
+		BasePreset:         string(ports.BaseImageDistroless),
+		Strategy:           string(ports.StrategyLayered),
 		EnableLocalProfile: true,
+	}
+	if strategy, _ := analysis.suggestedStrategy(); strategy != "" {
+		initOpts.Strategy = strategy
+	}
+	if analysis.runtime.Runtime != "" {
+		initOpts.Runtime = string(analysis.runtime.Runtime)
+		if base, _ := sveltekitutils.RecommendedBaseForRuntime(analysis.runtime.Runtime); base != "" {
+			initOpts.BasePreset = string(base)
+		}
 	}
 
 	isInteractive := false
@@ -113,7 +128,7 @@ build
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		if isInteractive && opts.inReader != nil {
-			initOpts = promptInitOptions(opts.inReader)
+			initOpts = promptInitOptions(opts.inReader, initOpts, analysis)
 		}
 
 		newCfg := cfgMgr.GenerateDefault(initOpts)
@@ -255,15 +270,21 @@ func promptChoice(scanner *bufio.Scanner, number int, label string, allowed []st
 	return ""
 }
 
-func promptInitOptions(r io.Reader) ports.InitConfigOptions {
+// promptInitOptions asks the questions the project cannot answer for itself.
+//
+// defaults arrives pre-filled from analyzeProject, so each prompt offers what
+// the project implies rather than a constant, and the findings above it explain
+// why. Answers still override everything.
+func promptInitOptions(r io.Reader, defaults ports.InitConfigOptions, analysis projectAnalysis) ports.InitConfigOptions {
 	scanner := bufio.NewScanner(r)
-	opts := ports.InitConfigOptions{
-		BasePreset:         "distroless",
-		Strategy:           "layered",
-		EnableLocalProfile: true,
-	}
+	opts := defaults
 
 	fmt.Println("=== Interactive Pokkum Project Setup ===")
+	fmt.Println()
+	fmt.Println("Looked at your project first:")
+	writeStaticFindings(os.Stdout, analysis)
+	writeRuntimeFinding(os.Stdout, analysis.runtime)
+	fmt.Println()
 
 	// 1. Docker Repo
 	fmt.Print("1. Target Container Registry (e.g. ghcr.io/example/my-app, or empty for local only) []: ")
@@ -274,30 +295,66 @@ func promptInitOptions(r io.Reader) ports.InitConfigOptions {
 		}
 	}
 
-	// 2. Base image preset. The offered set is exactly the presets that exist:
+	// 2. Strategy, asked before runtime and base because it constrains both.
+	//
+	// exe is deliberately not offered here — it is an advanced, single-binary
+	// mode rather than a sensible default for a new project — but it stays
+	// accepted in a hand-written config.
+	if v := promptChoice(scanner, 2, "Build Strategy",
+		[]string{string(ports.StrategyLayered), string(ports.StrategyStatic)}, opts.Strategy); v != "" {
+		opts.Strategy = v
+	}
+
+	// 3. Runtime — asked ONLY for layered.
+	//
+	// A static image ships no JavaScript runtime at all (pokkum-static serves
+	// the prerendered tree), and core rejects runtime=node outside
+	// strategy=layered. Asking a question whose every answer is either
+	// meaningless or invalid is how a prompt talks a user into a config that
+	// does not build; the two previous init bugs were both this shape.
+	if opts.Strategy == string(ports.StrategyLayered) {
+		if v := promptChoice(scanner, 3, "Application Runtime",
+			[]string{string(ports.RuntimeBun), string(ports.RuntimeNode)},
+			runtimePromptDefault(opts.Runtime)); v != "" {
+			opts.Runtime = v
+			if base, _ := sveltekitutils.RecommendedBaseForRuntime(ports.AppRuntime(v)); base != "" {
+				// Keep the paired base in step with an explicit runtime answer:
+				// runtime=node on a base with no Node binary is rejected by
+				// core, so the answer to prompt 3 changes the default for
+				// prompt 4, which prompt 4 then still lets the user override.
+				opts.BasePreset = string(base)
+			}
+		}
+	} else {
+		// Not asked, so not written. Leaving a stale detected runtime in place
+		// would emit `runtime: node` next to `strategy: static`.
+		opts.Runtime = ""
+	}
+
+	// 4. Base image preset. The offered set is exactly the presets that exist:
 	// this prompt used to offer "chainguard-static", which is an unimplemented
 	// roadmap item rather than a preset, so anyone picking option 3 got a
 	// .pokkum.yaml that pokkum build refused — and it omitted distroless-node,
 	// which is real.
-	if v := promptChoice(scanner, 2, "Base Image Preset",
-		[]string{
-			string(ports.BaseImageDistroless),
-			string(ports.BaseImageChainguard),
-			string(ports.BaseImageDistrolessNode),
-		}, string(ports.BaseImageDistroless)); v != "" {
+	presets := initBasePresets()
+	allowed := make([]string, 0, len(presets))
+	for _, p := range presets {
+		allowed = append(allowed, string(p))
+	}
+	fmt.Println("4. Base Image Preset:")
+	for _, p := range presets {
+		marker := " "
+		if string(p) == opts.BasePreset {
+			marker = "*"
+		}
+		fmt.Printf("   %s %-18s %s\n", marker, p, basePresetAdvice(p))
+	}
+	if v := promptChoice(scanner, 4, "   Base Image Preset", allowed, opts.BasePreset); v != "" {
 		opts.BasePreset = v
 	}
 
-	// 3. Strategy. exe is deliberately not offered here — it is an advanced,
-	// single-binary mode rather than a sensible default for a new project — but
-	// it stays accepted in a hand-written config.
-	if v := promptChoice(scanner, 3, "Build Strategy",
-		[]string{"layered", "static"}, "layered"); v != "" {
-		opts.Strategy = v
-	}
-
-	// 4. Local profile
-	fmt.Print("4. Configure local development profile (--local)? [Y/n] (default: Y): ")
+	// 5. Local profile
+	fmt.Print("5. Configure local development profile (--local)? [Y/n] (default: Y): ")
 	if scanner.Scan() {
 		input := strings.TrimSpace(strings.ToLower(scanner.Text()))
 		if input == "n" || input == "no" {
@@ -305,12 +362,22 @@ func promptInitOptions(r io.Reader) ports.InitConfigOptions {
 		}
 	}
 
-	// 5. CVE policy
-	if v := promptChoice(scanner, 5, "Fail build on vulnerability threshold",
+	// 6. CVE policy
+	if v := promptChoice(scanner, 6, "Fail build on vulnerability threshold",
 		[]string{"none", "low", "medium", "high", "critical"}, "none"); v != "" {
 		opts.FailOnCVE = v
 	}
 
 	fmt.Println()
 	return opts
+}
+
+// runtimePromptDefault renders the runtime default for the prompt line. An
+// empty Runtime means "the port default", and showing the real name is more
+// useful to a reader than showing a blank.
+func runtimePromptDefault(runtime string) string {
+	if runtime == "" {
+		return string(ports.DefaultAppRuntime)
+	}
+	return runtime
 }
