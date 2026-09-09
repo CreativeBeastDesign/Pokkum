@@ -4,12 +4,12 @@ Source: docs/roadmap/*.yaml (item id: doctor-json-drops-per-check-detail)
 Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 -->
 
-# doctor --output json loses which check failed
+# doctor --output json loses which check failed, and exited 0 when red
 
 | Field | Value |
 | --- | --- |
-| Status | open |
-| Stage | backlog |
+| Status | shipped |
+| Stage | v1.2 |
 | Kind | fix |
 | Tier | polish |
 | Area | Developer Experience |
@@ -35,15 +35,27 @@ Found while adding the effective-adapter check
 whole value is the remediation string it carries, which is the field the JSON failure path
 drops.
 
-## Recommendation
+## Decision
 
-Emit the same envelope shape on both paths, with the checks array populated either way and
-a top-level status distinguishing them. The exit code stays as it is; this is about what
-accompanies it.
+Both paths now build one `ports.JSONEnvelope` carrying the full checks array, following
+`scan.go`'s existing pattern for partial-failure commands rather than adding a third shape.
 
-Related to [json-output-envelope](json-output-envelope.md): the point of a machine
-format is that a failure is as parseable as a success, and both halves of that are needed
-before [pokkum mcp](mcp-server.md)'s diagnose tool would have anything to return.
+A second, worse bug surfaced while fixing it, and the framing of this item was part of why
+it had gone unnoticed: the item said "the exit code stays as it is". It should not have.
+`pokkum doctor --output json` on a red project printed `status:"error"`, `passed:false`
+and every failing check — and exited **0**, while text mode exited 1 on the identical
+project. `runDoctor` has one failure signal at the end of the function and the JSON branch
+returned before reaching it. A `set -e` CI step reads only the exit status, so a gate on
+`pokkum doctor --output json` passed while doctor was failing. It also contradicted
+[the exit-code table](exit-code-reference.md) published the same day, which says exit 1
+covers a red doctor with no format caveat.
+
+Fixed by returning a `silentExitError` from the JSON branch, so the process exits 1
+without a second log line that would add nothing and corrupt the JSON stream.
+`TestDoctorExitStatusIsIndependentOfOutputFormat` runs one failing fixture through both
+formats and requires their error-ness to match. Logged in `Lessons.md` with
+`mem:self_review_checklist` row 73: an output-format flag selects a serialization and must
+never change the exit status, the verdict, or which side effects ran.
 
 ## Implementation
 
