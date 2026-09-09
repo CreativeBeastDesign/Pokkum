@@ -253,6 +253,10 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 		val := *profile.Security.VerifyBase
 		merged.Security.VerifyBase = &val
 	}
+	if profile.Build.AllowServerCodeInStatic != nil {
+		val := *profile.Build.AllowServerCodeInStatic
+		merged.Build.AllowServerCodeInStatic = &val
+	}
 	if profile.Security.AllowIncompleteScans != nil {
 		val := *profile.Security.AllowIncompleteScans
 		merged.Security.AllowIncompleteScans = &val
@@ -509,6 +513,10 @@ func deepCopyProjectConfig(src *ports.ProjectConfig) *ports.ProjectConfig {
 	if src.Security.VerifyBase != nil {
 		v := *src.Security.VerifyBase
 		dst.Security.VerifyBase = &v
+	}
+	if src.Build.AllowServerCodeInStatic != nil {
+		v := *src.Build.AllowServerCodeInStatic
+		dst.Build.AllowServerCodeInStatic = &v
 	}
 	if src.Security.AllowIncompleteScans != nil {
 		v := *src.Security.AllowIncompleteScans

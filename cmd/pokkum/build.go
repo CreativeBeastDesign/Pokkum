@@ -39,6 +39,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sigstore"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/slsa"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/staticserver"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/staticviability"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/vexutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
@@ -149,17 +150,18 @@ type buildFlags struct {
 	xffDepth       int
 	bodySizeLimit  string
 
-	failOnCVE        string
-	allowIncomplete  bool
-	vexOutput        string
-	noPrune          bool
-	keepVendor       []string
-	noPrecompress    bool
-	noStrip          bool
-	noCache          bool
-	stubLauncher     bool
-	assetOverlay     int
-	assetOverlayFrom []string
+	failOnCVE               string
+	allowIncomplete         bool
+	allowServerCodeInStatic bool
+	vexOutput               string
+	noPrune                 bool
+	keepVendor              []string
+	noPrecompress           bool
+	noStrip                 bool
+	noCache                 bool
+	stubLauncher            bool
+	assetOverlay            int
+	assetOverlayFrom        []string
 
 	// Cache verification flags
 	noCacheVerify        bool
@@ -333,6 +335,9 @@ The project directory defaults to the current working directory.`,
 		"Request body size cap in adapter-node's size-string format (e.g. 512K, 10M, Infinity; empty = adapter-node's own default of 512K), written to BODY_SIZE_LIMIT")
 	cmd.Flags().StringVar(&flags.failOnCVE, "fail-on-cve", "",
 		"Fail build if base image vulnerabilities exceed threshold (low, medium, high, critical; default warn-only)")
+	cmd.Flags().BoolVar(&flags.allowServerCodeInStatic, "allow-server-code-in-static", false,
+		"Proceed with --strategy=static even when the project contains code SvelteKit cannot prerender "+
+			"(an escape hatch for a false positive in that check; the build will still fail inside SvelteKit if the check was right)")
 	cmd.Flags().BoolVar(&flags.allowIncomplete, "allow-incomplete", false,
 		"Allow build to succeed even if base image vulnerability database lookups fail (default: fail closed when --fail-on-cve is active)")
 	cmd.Flags().StringVar(&flags.vexOutput, "vex-output", "",
@@ -571,15 +576,16 @@ func buildDeps(logger *slog.Logger, stdout io.Writer) core.Deps {
 		Tarballs:   reg,
 		OCILayouts: reg,
 
-		SBOM:            sbom.NewGenerator(logger),
-		NativeInspector: nativeinspect.NewClosuredAdapter(),
-		SLSAGenerator:   slsa.NewGenerator(logger),
-		CosignSigner:    cosign.NewSigner(logger),
-		DSSESigner:      dsse.NewSigner(logger),
-		Scanner:         scanner.NewAdapter(logger),
-		SecretGuard:     secretguard.NewAdapter(),
-		EnvBakeDetector: envbake.NewAdapter(),
-		RouteFilter:     routefilter.NewAdapter(),
+		SBOM:                    sbom.NewGenerator(logger),
+		NativeInspector:         nativeinspect.NewClosuredAdapter(),
+		SLSAGenerator:           slsa.NewGenerator(logger),
+		CosignSigner:            cosign.NewSigner(logger),
+		DSSESigner:              dsse.NewSigner(logger),
+		Scanner:                 scanner.NewAdapter(logger),
+		SecretGuard:             secretguard.NewAdapter(),
+		EnvBakeDetector:         envbake.NewAdapter(),
+		StaticViabilityAnalyzer: staticviability.NewAdapter(),
+		RouteFilter:             routefilter.NewAdapter(),
 		RemoteCache: remotecacheutils.New(
 			remotecacheutils.WithLogger(logger),
 			remotecacheutils.WithCosignSigner(cosign.NewSigner(logger)),
@@ -1172,6 +1178,14 @@ func buildRequestFromResolvedConfig(ctx context.Context, logger *slog.Logger, fl
 		}
 	}
 
+	// Flag OR config, matching --allow-incomplete: the flag turns it on, and
+	// the config key turns it on for a project that sets `strategy: static`
+	// there and would otherwise have to pass the flag on every build.
+	if !flags.allowServerCodeInStatic && projCfg != nil && projCfg.Build.AllowServerCodeInStatic != nil && *projCfg.Build.AllowServerCodeInStatic {
+		req.AllowServerCodeInStatic = true
+	} else {
+		req.AllowServerCodeInStatic = flags.allowServerCodeInStatic
+	}
 	if !flags.allowIncomplete && projCfg != nil && projCfg.Security.AllowIncompleteScans != nil && *projCfg.Security.AllowIncompleteScans {
 		req.AllowIncompleteScan = true
 	} else {

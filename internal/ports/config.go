@@ -56,6 +56,15 @@ type BuildConfig struct {
 	// never enters the bundle). Otherwise only the route's prerendered output
 	// is removed and the build warns that its code still ships.
 	ExcludeRoutes []string `yaml:"exclude_routes,omitempty" json:"exclude_routes,omitempty"`
+
+	// AllowServerCodeInStatic proceeds with a `strategy: static` build even
+	// when the static-viability scan found code SvelteKit cannot prerender,
+	// mirroring --allow-server-code-in-static.
+	//
+	// A pointer so "not set" is distinguishable from "set to false", which is
+	// what lets a profile turn it off again after the base config turned it
+	// on — the same shape as Security.AllowIncompleteScans.
+	AllowServerCodeInStatic *bool `yaml:"allow_server_code_in_static,omitempty" json:"allow_server_code_in_static,omitempty"`
 }
 
 // SecurityConfig holds security scanning and validation policies.

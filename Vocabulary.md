@@ -70,6 +70,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--body-size-limit` | — | — | (none, adapter-node's own default of `512K` applies) | Request body size cap in adapter-node's size-string format, written to `BODY_SIZE_LIMIT` — see §18b. |
 | `--fail-on-cve` | — | `POKKUM_FAIL_ON_CVE` | (none) | Fail build if base image vulnerabilities exceed threshold (`low`, `medium`, `high`, `critical`; default warn-only). |
 | `--allow-incomplete` | — | — | `false` | Allow build to succeed even if base image vulnerability database lookups fail (default: fail closed when `--fail-on-cve` is active). |
+| `--allow-server-code-in-static` | — | `build.allow_server_code_in_static` | `false` | Proceed with `--strategy=static` even when the project contains code SvelteKit cannot prerender. See **Static-build preflight** below — this is an escape hatch for a false positive in that check, not a normal setting. |
 | `--vex-output` | — | — | (none) | Write a real OpenVEX v0.2.0 JSON document (one `not_affected` statement per active `.pokkum.yaml` `security.vex_exemptions` entry) to the given path after a successful build. No file is written if there are no exemptions. |
 | `--hermetic` | — | — | `false` | Enforce strict hermetic build mode: on Linux, real kernel-enforced network isolation (an unprivileged network namespace) around both build subprocess stages, no IP network egress possible regardless of what a build script does. Also strips `SSH_AUTH_SOCK`/`SSH_AGENT_PID`/`GPG_AGENT_INFO`/`DBUS_SESSION_BUS_ADDRESS`/`DOCKER_HOST` from the subprocess's environment — closes SSH-agent-forwarding fully. A *pathname* Unix domain socket reachable by hardcoded/conventional path (e.g. a bind-mounted `/var/run/docker.sock`) needs the separate opt-in `--hermetic-mount-isolation` flag below to close, since network isolation alone does nothing for it. On non-Linux, advisory-only (`BUN_OFFLINE=1` and friends, clearly logged as such). Also requires cached base images and pre-populated `node_modules`, and fails closed (rather than downloading) on a cold Bun-runtime cache. |
 | `--hermetic-mount-isolation` | — | — | `false` | With `--hermetic` on Linux, additionally block path-based Unix domain socket access (starting with `/var/run/docker.sock`/`/run/docker.sock`, if either exists) for the build subprocess, via a `/proc/self/exe` reexec into a fresh `CLONE_NEWNS` mount namespace with those specific paths bind-masked. **Opt-in, default off** — new, previously-unexercised raw-syscall code, deliberately not folded into `--hermetic`'s own default behavior. Ignored (with a warning) without `--hermetic` or on non-Linux hosts. Known, documented residual limitation: the sandboxed build process retains the same namespace-level capability used to create the mask, so a sufficiently sophisticated dependency that specifically knows this mechanism exists could in principle undo it — see `docs/Roadmap.md`. |
@@ -345,6 +346,34 @@ Interactive sessions (TTY) then ask six questions: target registry, build strate
 | `--dir` | `-d` | `.` | Path to SvelteKit project directory. |
 | `--defaults` | — | `false` | Accept default initialization settings without interactive prompts. Detection still runs; only the questions are skipped. |
 | `--output` | — | `text` | Output serialization format (`text` or `json`). |
+
+---
+
+### Static-build preflight
+
+Before `pokkum build --strategy=static` spawns anything, Pokkum scans the project for source SvelteKit refuses to prerender and **refuses the build** if it finds any, listing every offending file:
+
+```
+--strategy=static ships no server, but 2 files in this project cannot be prerendered
+  - src/routes/api/+server.ts exports a POST handler, and SvelteKit cannot prerender a
+    +server file with a handler whose response depends on the request body
+  - src/routes/signup/+page.server.ts declares form actions, which handle POST requests
+    at runtime and cannot be prerendered
+
+Build with --strategy=layered to ship a server, or remove the code above.
+```
+
+Without this the same project fails minutes later, inside SvelteKit's build, with a message that names neither Pokkum nor the strategy setting that caused it.
+
+Three deliberate limits, because a preflight that over-rejects is worse than none:
+
+| Limit | Why |
+|---|---|
+| `--strategy=static` only | Every other strategy ships a server, so none of these findings apply |
+| Only refuses on a **blocked** verdict, never on **unknown** | An unreadable project, or one with no routes directory, is the *absence* of evidence. Pokkum has blocked every real project this way once before and will not do it again |
+| `--allow-server-code-in-static` overrides it | The scan is a heuristic over source text. If it is ever wrong, nobody should have to wait for a Pokkum release to ship |
+
+The rules it applies are SvelteKit's own — see the table under `pokkum init` for the full list. Setting `build.allow_server_code_in_static: true` in `.pokkum.yaml` is equivalent to passing the flag on every build, and can be turned back off in a named profile.
 
 ---
 
