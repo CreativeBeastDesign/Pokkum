@@ -80,6 +80,17 @@ func helperMain(mode string) int {
 			time.Sleep(time.Hour)
 		}
 
+	case "record-hup":
+		// Catches SIGHUP and exits with a distinctive code. It is what
+		// proves SIGHUP is still RELAYED when dev mode is off: a child that
+		// merely died would be indistinguishable from the supervisor
+		// claiming the signal and restarting it.
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGHUP)
+		ready()
+		<-ch
+		return 22
+
 	case "record-usr1":
 		// Catches SIGUSR1 and exits with a distinctive code, so a test can
 		// prove that non-terminating signals are forwarded too and do not

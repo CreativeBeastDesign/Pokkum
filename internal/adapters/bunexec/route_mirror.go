@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/routefilterutils"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekitutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 )
 
@@ -110,20 +111,16 @@ func stageRoutesMirror(projectDir string, patterns []string, kitVersion string, 
 
 // resolveRoutesDir returns the project's routes directory, honouring a
 // kit.files.routes the project set for itself.
+//
+// Delegates to sveltekitutils rather than keeping bunexec's own copy: the
+// static-viability analysis needs the identical answer, and "where are this
+// project's routes" resolved independently in two packages is the
+// mirrored-constant drift shape logged 2026-08-21. The shared implementation
+// also strips comments before matching, which this copy did not — a commented-out
+// `routes: 'src/old-routes'` used to win here.
 func resolveRoutesDir(projectDir string) string {
-	sources := []string{readConfigSource(projectDir)}
-	if viteSrc, _ := readViteConfigSource(projectDir); viteSrc != "" {
-		sources = append(sources, viteSrc)
-	}
-	for _, src := range sources {
-		if m := routesFilesRe.FindStringSubmatch(src); len(m) == 2 {
-			return filepath.Join(projectDir, filepath.FromSlash(m[1]))
-		}
-	}
-	return filepath.Join(projectDir, "src", "routes")
+	return sveltekitutils.ResolveRoutesDir(projectDir)
 }
-
-var routesFilesRe = regexp.MustCompile(`routes\s*:\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]`)
 
 // kitSupportsInlineConfig reports whether kitVersion is at least
 // minKitVersionForInlineConfig. An unparseable or empty version is treated as

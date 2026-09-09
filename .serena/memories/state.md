@@ -299,6 +299,156 @@ before trusting a claim that predates the commit it cites.
   `mem:self_review_checklist` row 41. `verifyKey` now keys on a fingerprint of
   the trusted-root bytes, not the path.
 
+## `pokkum deploy --check` — shipped 2026-09-09
+
+Validates the deploy configuration and deploys NOTHING. `cmd/pokkum/deploy_check.go`.
+
+- **Resolves through `core.ResolveDeployRequest`**, the exact call `executeDeploy`
+  makes. Not a reimplementation — this repo already shipped a validator that
+  disagreed with its consumer (2026-09-01). `TestDeployCheck_AgreesWithTheResolutionItClaimsToPredict`
+  asserts the biconditional (check fails ⟺ resolution fails) over configs on
+  both sides of every rule the resolver applies. That test is the point of the
+  command; if it is ever weakened, `--check` becomes worse than useless.
+- **Tri-state per item**: `ok` / `failed` / `unverified`. Only `failed` exits
+  non-zero. `unverified` NEVER fails — treating "Pokkum could not determine
+  this" as the user's error would make the command unusable for the configs it
+  exists to help with — and never renders as `ok`.
+- **The application id is deliberately unverified.** Confirming it needs a
+  read-only endpoint; every Dokploy endpoint whose contract this repo verified
+  against Dokploy's source MUTATES (`application.deploy` queues a rollout,
+  `application.saveDockerProvider` overwrites credentials). Do not "improve"
+  this by calling an unverified endpoint.
+- **The endpoint probe is a bare TCP dial to host:port, never an HTTP request.**
+  That is what makes it safe for a SwiftWave webhook endpoint whose URL PATH is
+  the secret. It therefore proves reachability only. `--offline` skips it.
+- No credential, token or URL is ever printed; the endpoint appears as
+  `host:port` and the token as a character count.
+- `TestDeployCheck_DeploysNothing` drives it at a recording listener and
+  asserts zero bytes were sent.
+
+## Dynamic-route caveat — shipped 2026-09-09
+
+`addDynamicRouteCaveats` reports a dynamic route (`[slug]`, `[...rest]`,
+`[[optional]]`, `[id=matcher]`) with no `entries()` export as a CAVEAT.
+
+Never a blocker, and the distinction is load-bearing: SvelteKit prerenders such
+a route when the crawler reaches it (prerender.js:687/:705), which depends on
+the rendered HTML of every other page. A linked blog post builds fine, so
+blocking would refuse the most ordinary static site there is. The default
+`handleUnseenRoutes` DOES throw (prerender.js:103), so an unreached one really
+does fail the build — hence a caveat rather than silence.
+
+`entries()` is read from the universal OR server page module, or the endpoint
+module (analyse.js:202, :222), so any scanned route file in the directory
+retires it. Suppressed entirely when the project sets
+`prerender.handleUnseenRoutes` to `warn`/`ignore` — matched with
+`stripJSComments`, NOT `blankJSStringsAndComments`, because it matches a string
+VALUE (getting that backwards made the regex unmatchable; see Lessons.md).
+
+## Static-build preflight gate — shipped 2026-09-09
+
+`pokkum build --strategy=static` REFUSES before Stage 2 (before `Compiler.Preflight`,
+before any subprocess) when the static-viability scan returns `StaticBlocked`.
+
+- Port: `ports.StaticViabilityAnalyzer` (`internal/ports/staticviability.go`),
+  which also owns the `StaticVerdict`/`StaticFinding`/`StaticReport` vocabulary.
+  `sveltekitutils` re-exports those as type ALIASES, not parallel types.
+- Adapter: `internal/adapters/staticviability`, wrapping `sveltekitutils`.
+  `internal/core` must not import the utils package directly.
+- Wiring: `cmd/pokkum/build.go`'s `buildDeps`.
+- Override: `--allow-server-code-in-static` / `build.allow_server_code_in_static`
+  (`*bool`, so a profile can turn it back off). Flag OR config, like
+  `--allow-incomplete`.
+
+**Three limits, and they are the whole design.** Changing any of them needs the
+2026-08-17 Lessons.md entry read first:
+
+1. `StrategyStatic` only, and the analyzer is not even consulted otherwise.
+2. Refuses on `StaticBlocked` ONLY. `StaticUnknown` NEVER fails a build — it is
+   the absence of evidence, and refusing on it is exactly how `Preflight` once
+   blocked every project `sv create` produces.
+3. Always overridable. The scan is a source-text heuristic.
+
+**`Deps.StaticViabilityAnalyzer == nil` skips the gate** — a fail-open for the
+~16 test callers that construct `core.Deps` directly.
+`cmd/pokkum`'s `TestCompositionRootWiresTheStaticViabilityGate` is what keeps
+that away from users; nothing in `internal/core` can assert its own composition
+root. The same test also pins `EnvBakeDetector`, `SecretGuard` and `RouteFilter`,
+which are skipped on nil for the same reason.
+
+**The classifier's rules are @sveltejs/kit's, cited in `classifyFile`'s doc
+comment.** The complete "cannot prerender" set is four throws:
+`analyse.js:102` (route with both +page and +server), `analyse.js:185`
+(+server with BODY_DEPENDENT_METHODS = POST/PUT/PATCH/DELETE/QUERY per
+`constants.js:23`), `prerender.js:539` (root +server returning non-HTML — NOT
+implemented, it depends on the response value), `page/index.js:89` (pages with
+actions). A GET-only `+server.ts` and a `+page.server.ts` `load` are BOTH fine —
+the first cut of this classifier got both wrong in the over-rejecting direction.
+
+`TestAnalyzeStaticViability_AgainstRealFixtures` pins all four committed
+fixtures. The `sveltekit-basic` row is load-bearing beyond that package:
+`tests/integration/static_e2e_test.go` builds that fixture with
+`StrategyStatic`, so a "blocked" verdict there breaks the E2E suite AND every
+real project with a read-only endpoint.
+
+## Project detection in `pokkum init` — shipped 2026-09-09
+
+`pokkum init` analyses the project BEFORE prompting; the prompt defaults are
+derived, not constant, and `--defaults` still gets the derived values (only the
+questions are skipped). Two analyses, both in `internal/adapters/sveltekitutils`,
+both called from `cmd/pokkum/init_analysis.go` (init calls the adapter directly —
+it is the composition root and does not go through `internal/core`).
+
+**`AnalyzeStaticViability(projectDir) StaticReport`** (`staticviability.go`) — a
+DISQUALIFIER scan. Sound for "static is ruled out", NOT a proof that static
+works; the doc comment on `StaticViable` and init's own output both say so.
+
+- Three verdicts: `StaticUnknown` / `StaticBlocked` / `StaticViable`. `unknown`
+  is NOT derivable from `len(Blockers)==0` — an unreadable or non-SvelteKit
+  directory must never produce the reassuring answer. `FilesScanned` is the
+  floor assertion at the other end.
+- Blockers: `+server.*`, `+page.server.*`, `+layout.server.*` (each retired by
+  `export const prerender = true` in the same file), `export const actions`
+  (UNCONDITIONAL — checked before the prerender override, so a `prerender = true`
+  alongside actions does not silence it), `*.remote.ts|js` using
+  `query()`/`form()`/`command()`, and `export const prerender = false` anywhere.
+  An unrecognised `.remote.*` fails CLOSED.
+- Not blockers: a remote module using only `prerender()`; `hooks.server.*`
+  (reported as a caveat — server hooks run during prerendering).
+- Walks the whole project (remote modules live anywhere), skipping
+  `node_modules`, `build`, `dist`, `.svelte-kit`, `.pokkum`, `.git`,
+  `.vercel`, `.netlify`, `.output`.
+- Reads through an `os.OpenRoot(projectDir)`, not `os.ReadFile(path)` — gosec
+  G122, and the tree is dependency-writable. Whole-file reads, never a
+  `bufio.Scanner` (the 64KiB-token class, shipped twice).
+- Matches on `blankJSStringsAndComments` output, never raw source.
+
+**`DetectAppRuntime(projectDir) RuntimeSignal`** (`runtimedetect.go`) — a
+PREFERENCE signal, not a compatibility verdict; nothing refuses a build over it.
+Precedence: `packageManager` → lockfiles (`bun.lock`/`bun.lockb` vs
+`package-lock.json`/`pnpm-lock.yaml`/`yarn.lock`) → `engines`. A contradiction
+inside a tier returns NO opinion with `Conflict` set. `RecommendedBaseForRuntime`
+pairs node with `distroless-node`.
+
+**Cross-field composition lives in `config.GenerateDefault`**, not in the
+prompts: `runtime: node` requires `strategy: layered` and a Node-carrying base,
+so it upgrades the base and drops the runtime rather than emitting an
+uncomposable trio. `pokkum config validate` checks fields, NOT their
+composition, so this is the only place that can prevent it. Guarded by
+`TestInit_EveryEmittableCombinationBuilds`, which walks every emittable
+combination through both `validateGeneratedConfig` and core's `Validate()`.
+
+Prompt order is now: registry, strategy, runtime (SKIPPED for static), base
+preset (with per-preset rationale), local profile, CVE threshold — six prompts,
+was five. Tests feed positional lines, so changing the order means updating
+`cmd/pokkum/init_test.go`'s input strings.
+
+`sveltekitutils.ResolveRoutesDir` is the single answer to "where are the routes"
+(honours `kit.files.routes`, strips comments first); `bunexec.resolveRoutesDir`
+delegates to it. Advisory only — `pokkum build` does NOT yet refuse
+`strategy: static` on a blocked project; that is roadmap item
+`static-strategy-preflight`.
+
 ## Static strategy (`--strategy=static`)
 - Genuinely functional end-to-end as of the 2026-08-19 fixture-driven batch —
   see `mem:staticserver` for the full deep dive (bind-address bug, `Preflight`
@@ -337,6 +487,38 @@ before trusting a claim that predates the commit it cites.
   outright (they describe an image never built); `--port`/`--watch` warn only if
   explicitly set; `--bun-binary`/`--env-file` still apply, the latter parsed
   locally instead of handed to a daemon.
+- `--cluster` (new, 2026-09-07, Roadmap item `cluster-dev-loop`, tier moat): builds
+  the SvelteKit project and streams `/app/client` then `/app/server` straight
+  into a running pod over `kubectl exec`, then restarts the in-pod application
+  process. No image, no registry, no pod recreation. Three parts:
+  `ports.ClusterDevSyncer` (`internal/ports/clusterdev.go`),
+  `internal/adapters/clusterdev` (kubectl shell-out + tar builder), and
+  `cmd/pokkum/dev_cluster.go`. **The fact that shapes everything: a Pokkum image
+  is distroless.** No shell, no `tar`, so `kubectl cp` cannot work against it,
+  and nothing in the image can kill and re-exec the server. Both halves are
+  therefore in `pokkum-init` — a hidden `pokkum-init __dev-sync --root DIR...
+  [--restart]` tar extractor, and SIGHUP reinterpreted as "stop the child and
+  start a replacement" — both gated on `POKKUM_DEV_MODE`, off by default and
+  never set by the packager. `pokkum dev --cluster` reads the target
+  container's env and refuses up front when it is unset.
+  - Integrity: the extractor prints a JSON summary and the sender refuses any
+    result whose counts differ from what it sent, or where a requested restart
+    did not happen. Containment is enforced twice — lexically on whole path
+    segments against the `--root` allowlist, then again through `os.Root`.
+  - Supervisor state machine: `Supervisor.restarting` + `State.Restarting`.
+    `beginShutdown` clears `restarting` BEFORE its idempotence check and
+    disarms the restart's deadline — without that, a SIGTERM mid-restart is
+    swallowed and the supervisor spawns a fresh server while the runtime waits
+    for it to die. Liveness holds through the restart window
+    (`!st.Started || (!st.Running && !st.Restarting)`); readiness still drops.
+  - Honest scope: layered images only, `/app/server` + `/app/client` only,
+    additive only (deletions are not propagated). Extraction restores the owner
+    write bit on the packager's `0555` `/app` dirs and leaves entries at
+    `0755`/`0644`, so a synced pod is no longer byte-identical to its image. A
+    target with `POKKUM_ATTESTATION_DIGEST` set crash-loops on exit 125 at its
+    NEXT start (attestation runs once, at supervisor startup); a Warn says so.
+    A multi-container pod requires `--container` — no heuristic, since
+    `--with-otel-sidecar` makes "first container" a coin flip.
 - Container-mode watch/rebuild loop (the default) uses a fresh result channel
   per container generation (fixed `1f8e5bf`) — previously reused one buffered
   channel across generations, so a stale write from a just-killed container
@@ -416,11 +598,71 @@ before trusting a claim that predates the commit it cites.
   with layered/static. Closes what had been `mem:open_decisions` row 5,
   deleted as resolved.
 
+## Agent-facing surface (`pokkum guide`, exit codes, JSON envelopes) — shipped 2026-09-09
+- **`pokkum guide` is the operating manual for using Pokkum in someone else's
+  SvelteKit project, compiled into the binary** (`cmd/pokkum/guide.go`, 14
+  topics). It exists because the audience it serves has the binary and not this
+  repository: `AGENTS.md`/`CLAUDE.md`/`DSH.md` instruct agents working ON
+  Pokkum, and `Vocabulary.md` is organised by flag rather than by decision and
+  lives here. Text in the binary cannot describe a different version than the
+  one printing it — the concrete failure was a Homebrew 1.0.6 whose README does
+  not mention `pokkum deploy` at all.
+- **It is AUTHORED and parity-guarded, not generated** — the same discipline
+  `Vocabulary.md` already uses (`flags_docs_test.go`), not the generation used
+  for `docs/roadmap`. Three guards in `cmd/pokkum/guide_test.go` and
+  `flagmentions_test.go`: every `yaml:` field of
+  `ports.ProjectConfig`/`ports.BuildProfile` must appear in the config section
+  (70 today, by reflection); every command in the cobra tree must be named;
+  every `ports.StaticVerdict` and `ports.StaticBlockerKind` must appear in the
+  strategy section (parsed out of `internal/ports/staticviability.go` by AST,
+  NOT a hand-written list — the first version listed them by hand and so could
+  not catch a newly added kind, which is the only case it exists for); and the
+  pre-existing AST scan rejects any flag mention that is not a real flag.
+- **`schema/pokkum.schema.json`** (draft 2020-12) is generated by
+  `scripts/gen-schema` from the same two structs. `make schema` regenerates,
+  `make check-schema-freshness` guards it, and `make verify` runs that guard
+  beside the docs one. `base` is deliberately NOT an enum —
+  `core.ParseBaseImageSpec` accepts the presets or an arbitrary reference, so
+  enumerating it would reject every valid custom base. Cross-field rules (the
+  deploy target/method matrix, the runtime/strategy/base composition) are NOT
+  encoded; the descriptions say so.
+- **CLI exit codes are now a published contract** (`Vocabulary.md` §18d,
+  `pokkum guide exit-codes`), guarded by `cmd/pokkum/exitcodes_test.go`, which
+  AST-scans for literal `os.Exit`/`exitFunc` arguments and fails on an
+  undocumented one. The CLI's set is `0`, `1`, `2` (`verify` only) and
+  `apply`'s kubectl passthrough. **`verify`'s 1/2 split is load-bearing**: `2`
+  means verification could not be performed, `1` means it ran and failed. These
+  are NOT the supervisor's codes (`Vocabulary.md` §19, 125/126/127/128+N),
+  which are returned by `pokkum-init` inside the container.
+- **An output format must never change the exit status.** Thirteen call sites
+  across `adopt`/`explain`/`history`/`config`/`init`/`deploy`, plus `doctor`
+  separately, wrote `status:"error"` and exited **0** while text mode exited 1
+  on the same input. The API was the trap: `jsonutils.WriteError` returns the
+  *write* result, so `return jsonutils.WriteError(...)` reads as "return this
+  error" and returns nil on success. All now go through `failJSON()`
+  (`cmd/pokkum/jsonfail.go`), which writes the envelope and returns a
+  `silentExitError`. Two guards: an AST one forbidding the raw shape, and an
+  empirical one driving the real command tree in both formats. See
+  `mem:self_review_checklist` row 73.
+- `build` honours `--output json`; `dev` **rejects** it (a streaming command has
+  no single point to emit an envelope from). `build`'s envelope carries the
+  published ref's digest only — no per-platform manifest digests and no
+  warnings array, because neither exists on `core.BuildResult`.
+- `pokkum doctor` resolves the effective SvelteKit adapter via the same
+  function `bunexec`'s preflight uses (`sveltekitutils.EffectiveAdapterConfigured`),
+  never a second comparison; the strategy→adapter mapping is
+  `ports.BuildStrategy.RequiredAdapterPackage()`. An agreement test drives the
+  real compiler and asserts doctor and build cannot disagree.
+
 ## Documentation system (generated — read this before editing any status doc)
 - **`docs/roadmap/*.yaml` is the single source; the markdown is generated output.
   Never hand-edit `docs/Roadmap.md`, `docs/Shipped.md`, `docs/Features.md`, or
   `docs/items/*.md` — `make docs` overwrites them and prunes orphaned item
   pages.** 6 area files, 87 items.
+- **`schema/pokkum.schema.json` is generated too** by `scripts/gen-schema` from
+  `ports.ProjectConfig`/`ports.BuildProfile`. Never hand-edit it; a new config
+  field goes in the Go struct, then `make schema`. `make check-schema-freshness`
+  guards it the same way, and `make verify` runs both guards.
 - `scripts/gen-docs` validates strictly: `KnownFields(true)`, every `impl` path
   must exist on disk, enum fields checked against fixed sets, and every
   `[title](item:<id>)` reference must resolve to a real item id. A bad edit

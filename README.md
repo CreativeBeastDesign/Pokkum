@@ -310,16 +310,54 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 
 | Command                    | Usage                            | Description                                                                                                                   |
 | -------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `pokkum guide [topic]`     | `pokkum guide deploy`            | **Start here.** Prints the full operating manual for using Pokkum in a project, from this binary — so it always matches this version. |
 | `pokkum build [dir]`       | `pokkum build ./my-app`          | Compiles SvelteKit app into a multi-layer OCI container image.                                                                |
 | `pokkum resolve -f <file>` | `pokkum resolve -f deploy.yaml`  | Resolves `pokkum://` URIs in K8s manifests to immutable image digests.                                                        |
 | `pokkum apply -f <file>`   | `pokkum apply -f deploy.yaml`    | Resolves manifests and pipes directly to `kubectl apply`.                                                                     |
-| `pokkum dev [dir]`         | `pokkum dev ./my-app`            | Local development mode with hot-reloading file watcher and Docker daemon loading.                                             |
+| `pokkum dev [dir]`         | `pokkum dev --cluster`           | Local development mode. Three loops: a container with a hot-reloading file watcher, `--no-container` against the project's own dev server, and `--cluster` syncing into a running pod. |
 | `pokkum scan [target]`     | `pokkum scan ./my-app`           | Security vulnerability scanner for directories, images, or tarballs.                                                          |
 | `pokkum doctor [dir]`      | `pokkum doctor ./my-app`         | Diagnostic wizard for preflight checks and mechanical repairs.                                                                |
 | `pokkum init [dir]`        | `pokkum init ./my-app`           | Bootstraps project config and `.pokkumignore`.                                                                                |
 | `pokkum explain [image]`   | `pokkum explain <ref>`           | Inspects layer hierarchy, file origin tracing (`why`), and image diffing (`diff`).                                            |
 | `pokkum rollback`          | `pokkum rollback -f deploy.yaml` | Rolls back to the previous image ref (`pokkum.dev/previous-image` annotation), or pass `--to=<ref>` explicitly. One hop deep. |
 | `pokkum upgrade`           | `pokkum upgrade --check`         | Checks for signed CLI release updates.                                                                                        |
+| `pokkum deploy [dir]`      | `pokkum deploy --check`          | Hands a pushed image to a self-hosted PaaS control plane (Dokploy, SwiftWave). `--check` validates the `deploy:` block and deploys nothing. |
+| `pokkum config`            | `pokkum config validate`         | Inspects and validates `.pokkum.yaml`, per profile as well as at the top level. A JSON Schema for editors lives at [schema/pokkum.schema.json](schema/pokkum.schema.json). |
+
+---
+
+## Using Pokkum with an AI coding agent
+
+Everything under "Documentation & Deep Dive" below lives in *this* repository. An
+agent working in *your* SvelteKit project cannot read any of it, and a copy pasted
+into your project goes stale the moment either side moves — the exact skew that
+makes a 1.0.x README describe a binary that has since grown new commands.
+
+`pokkum guide` solves that by shipping the manual inside the binary. It covers the
+invariants that constrain application code (the image tree is read-only; only the
+adapter's build output ships), the complete `.pokkum.yaml` field reference,
+deployment recipes for Kubernetes, Dokploy, SwiftWave and plain registry pulls, and
+what each escape-hatch flag actually turns off.
+
+To anchor it, paste this into your project's `CLAUDE.md`, `AGENTS.md`, or the
+equivalent for your agent:
+
+```markdown
+## Containerizing this app
+
+This project is built into a container image with Pokkum.
+
+Before running any `pokkum` command, changing `.pokkum.yaml`, or writing code that
+reads or writes files at runtime, run `pokkum guide` and follow it. It is the
+manual for the exact installed version. `pokkum guide topics` lists the sections;
+`pokkum guide <topic>` prints one (start with `invariants` and `config`).
+
+Two constraints it will explain, worth knowing before you write anything:
+- Only the SvelteKit adapter's build output ships in the image. There is no
+  implicit `COPY .` — files outside it are simply absent at runtime.
+- The application tree in the image is read-only, with no opt-out. Runtime writes
+  must target the OS temp directory, never a project-relative path.
+```
 
 ---
 

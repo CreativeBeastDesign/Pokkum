@@ -56,6 +56,15 @@ type BuildConfig struct {
 	// never enters the bundle). Otherwise only the route's prerendered output
 	// is removed and the build warns that its code still ships.
 	ExcludeRoutes []string `yaml:"exclude_routes,omitempty" json:"exclude_routes,omitempty"`
+
+	// AllowServerCodeInStatic proceeds with a `strategy: static` build even
+	// when the static-viability scan found code SvelteKit cannot prerender,
+	// mirroring --allow-server-code-in-static.
+	//
+	// A pointer so "not set" is distinguishable from "set to false", which is
+	// what lets a profile turn it off again after the base config turned it
+	// on — the same shape as Security.AllowIncompleteScans.
+	AllowServerCodeInStatic *bool `yaml:"allow_server_code_in_static,omitempty" json:"allow_server_code_in_static,omitempty"`
 }
 
 // SecurityConfig holds security scanning and validation policies.
@@ -234,9 +243,21 @@ type ProjectConfig struct {
 
 // InitConfigOptions provides parameters for bootstrapping a new .pokkum.yaml.
 type InitConfigOptions struct {
-	Repo               string
-	BasePreset         string
-	Strategy           string
+	Repo       string
+	BasePreset string
+	Strategy   string
+
+	// Runtime is the image's application runtime ("bun" or "node"). Empty
+	// means the default (bun) and writes no `runtime:` key at all, so a
+	// generated config stays as small as the choices actually made.
+	//
+	// Not independent of BasePreset and Strategy: core rejects
+	// runtime=node outside strategy=layered, and rejects it on any base that
+	// ships no Node binary. GenerateDefault is responsible for never emitting
+	// a combination of the three that core would refuse — see the
+	// cross-field note there.
+	Runtime string
+
 	EnableLocalProfile bool
 	FailOnCVE          string
 }

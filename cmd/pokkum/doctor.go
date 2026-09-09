@@ -11,9 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/bunexec"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/lockfileutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/scanner"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekitutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 	"github.com/spf13/cobra"
@@ -66,21 +69,29 @@ func runDoctor(logger *slog.Logger, opts *doctorOptions) error {
 		allPassed = false
 	}
 
-	// Check 3: Registry Auth Credentials
+	// Check 3: SvelteKit adapter (must agree with bunexec's build preflight —
+	// see checkSvelteKitAdapter's doc comment)
+	adapterCheck := checkSvelteKitAdapter(opts.dir, logger)
+	checks = append(checks, adapterCheck)
+	if !adapterCheck.Passed {
+		allPassed = false
+	}
+
+	// Check 4: Registry Auth Credentials
 	authCheck := checkRegistryAuth()
 	checks = append(checks, authCheck)
 	if !authCheck.Passed {
 		allPassed = false
 	}
 
-	// Check 4: .pokkumignore file
+	// Check 5: .pokkumignore file
 	ignoreCheck := checkPokkumIgnore(opts.dir, opts.fix)
 	checks = append(checks, ignoreCheck)
 	if !ignoreCheck.Passed {
 		allPassed = false
 	}
 
-	// Check 5: Base image security & CVEs
+	// Check 6: Base image security & CVEs
 	baseCheck := checkBaseImageSecurity(opts.dir, logger)
 	checks = append(checks, baseCheck)
 	if !baseCheck.Passed {
@@ -99,10 +110,58 @@ func runDoctor(logger *slog.Logger, opts *doctorOptions) error {
 	}
 
 	if outputFormat == ports.FormatJSON {
-		if allPassed {
-			return jsonutils.WriteSuccess(os.Stdout, "doctor", doctorPayload)
+		// Both the pass and fail cases carry the full doctorPayload (its
+		// per-check Checks array, each with Name/Passed/Message/Remediation)
+		// in Data — matching how `scan` reports its findings on both paths.
+		// Before this, a failing doctor run went through jsonutils.WriteError,
+		// which only carries a summary string and a code: a machine consumer
+		// got per-check structure exactly when everything passed and nothing
+		// needed reading, and lost it — including the SvelteKit Adapter
+		// check's Remediation, the exact `bun add -D` command to run — in the
+		// one case where it needed to know which check failed and how to fix
+		// it. Status/Error mirror WriteError's shape so existing "status" ==
+		// "error" consumers keep working; doctorPayload.Passed remains the
+		// authoritative top-level pass/fail field either way.
+		envelope := ports.JSONEnvelope{
+			SchemaVersion: jsonutils.CurrentSchemaVersion,
+			Command:       "doctor",
+			Status:        "success",
+			Data:          doctorPayload,
 		}
-		return jsonutils.WriteError(os.Stdout, "doctor", "ERR_DOCTOR_FAILED", summary, "")
+		if !allPassed {
+			envelope.Status = "error"
+			envelope.Error = &ports.ErrorData{
+				Code:    "ERR_DOCTOR_FAILED",
+				Message: summary,
+			}
+		}
+		// Marshal + Fprintln, mirroring jsonutils.FormatSuccess/WriteSuccess
+		// exactly (same indent, same trailing newline via Fprintln) so this
+		// is byte-for-byte what WriteSuccess already produced on the pass
+		// path. Returning the write error (not a "doctor failed" error)
+		// preserves today's JSON-mode exit code on both paths: a failing
+		// `doctor --output json` run exits the same way it does right now.
+		bytes, err := json.MarshalIndent(envelope, "", "  ")
+		if err != nil {
+			return fmt.Errorf("jsonutils adapter: failed to marshal doctor payload: %w", err)
+		}
+		if _, err = fmt.Fprintln(os.Stdout, string(bytes)); err != nil {
+			return err
+		}
+		// A red doctor must exit non-zero in BOTH output modes. Until this
+		// return existed, `--output json` wrote status:"error", passed:false
+		// and a list of failing checks -- and then exited 0, so a CI step
+		// gating on `pokkum doctor --output json` passed while doctor was red.
+		// Text mode had always exited 1; only the JSON branch returned early,
+		// before the shared failure signal at the end of this function.
+		//
+		// The error is silent because the envelope above is already the
+		// complete report; a second, less informative line on stderr would add
+		// nothing and would contradict the structured output above it.
+		if !allPassed {
+			return errDoctorChecksFailed
+		}
+		return nil
 	}
 
 	// Text output mode
@@ -126,6 +185,12 @@ func runDoctor(logger *slog.Logger, opts *doctorOptions) error {
 	}
 	return nil
 }
+
+// errDoctorChecksFailed signals a red doctor in JSON mode without printing a
+// second message: the envelope on stdout is already the complete report.
+// Reuses silentExitError (deploy_check.go), which main.go's isSilentExit
+// recognises, so the process exits 1 with no redundant log line.
+var errDoctorChecksFailed = &silentExitError{}
 
 func checkBunRuntime() ports.DoctorCheck {
 	bunPath, err := exec.LookPath("bun")
@@ -203,6 +268,211 @@ func checkSvelteKitWorkspace(dir string) ports.DoctorCheck {
 		Passed:  true,
 		Message: fmt.Sprintf("valid SvelteKit project detected (@sveltejs/kit %s)", skVersion),
 	}
+}
+
+// checkSvelteKitAdapter resolves the SvelteKit adapter that will actually
+// govern a real `pokkum build` and reports it as a doctor check, with the
+// same remediation build's own preflight gives.
+//
+// This check exists because, before it did, `pokkum doctor` only verified
+// @sveltejs/kit was a dependency (checkSvelteKitWorkspace) and said nothing
+// about which adapter was actually configured. A fresh `sv create` scaffold —
+// @sveltejs/adapter-auto only, which produces no build output pokkum can
+// package — passed doctor cleanly and was refused by `pokkum build`
+// immediately after. Doctor's entire purpose is to catch exactly this before
+// anything expensive runs, and it did not.
+//
+// The verdict is derived from the exact same decision function bunexec's own
+// build preflight uses — sveltekitutils.EffectiveAdapterConfigured, called
+// with the exact same three inputs bunexec.Compiler.Prepare's
+// checkEffectiveAdapter would use for this project (the strategy's required
+// adapter package from ports.BuildStrategy.RequiredAdapterPackage,
+// svelte.config.js's raw source, and whichever bunexec.ViteConfigCandidates
+// file governs) — never a second, independently-written comparison. That
+// sharing is the actual fix: before it, the only way to make doctor agree
+// with build would have been to keep two hand-written copies of "is the
+// adapter configured" in sync by hand, which is exactly the kind of drift
+// this check exists to prevent (see Lessons.md, 2026-08-19, "Preflight again
+// made an independent, untested assumption about the target adapter").
+//
+// It deliberately reports neither a clean pass nor a confident failure when
+// it cannot actually read what it needs to decide. An absent
+// svelte.config.js is not evidence of anything by itself — current
+// `sv create` scaffolds ship none at all, configuring the adapter entirely
+// through vite.config.ts instead (see EffectiveAdapterConfigured's own doc
+// comment) — so that case still yields a normal, confident PASS or FAIL.
+// What it will not do is turn a *present-but-unreadable* config file, or a
+// .pokkum.yaml whose strategy: value it cannot recognize, into either
+// verdict: doctor genuinely does not know which adapter is required or what
+// the governing file says in that case, and guessing would be exactly the
+// false confidence this whole check exists to remove — the same shape
+// checkBaseImageSecurity above already handles the same way for an
+// unreachable vulnerability database (Passed: false, worded as "could not
+// complete the check", not as a confirmed problem).
+func checkSvelteKitAdapter(dir string, logger *slog.Logger) ports.DoctorCheck {
+	const name = "SvelteKit Adapter"
+
+	strategy, strategyErr := resolveDoctorBuildStrategy(dir, logger)
+	if strategyErr != nil {
+		return ports.DoctorCheck{
+			Name:    name,
+			Passed:  false,
+			Message: fmt.Sprintf("cannot determine the effective SvelteKit adapter: %v", strategyErr),
+			Remediation: fmt.Sprintf(
+				"fix `strategy:` in %s (supported: layered, exe, static), or run `pokkum build` directly for a definitive check",
+				ports.ConfigFilename,
+			),
+		}
+	}
+	targetAdapter := strategy.RequiredAdapterPackage()
+
+	svelteSource, svelteErr := readIfExists(filepath.Join(dir, "svelte.config.js"))
+	if svelteErr != nil {
+		return ports.DoctorCheck{
+			Name:        name,
+			Passed:      false,
+			Message:     fmt.Sprintf("cannot determine the effective SvelteKit adapter: svelte.config.js exists but could not be read: %v", svelteErr),
+			Remediation: "check svelte.config.js's file permissions, or run `pokkum build` directly for a definitive check",
+		}
+	}
+
+	viteName, viteSource, viteErr := readEffectiveViteConfig(dir)
+	if viteErr != nil {
+		return ports.DoctorCheck{
+			Name:        name,
+			Passed:      false,
+			Message:     fmt.Sprintf("cannot determine the effective SvelteKit adapter: %s exists but could not be read: %v", viteName, viteErr),
+			Remediation: fmt.Sprintf("check %s's file permissions, or run `pokkum build` directly for a definitive check", viteName),
+		}
+	}
+
+	configured, readFrom, overridden := sveltekitutils.EffectiveAdapterConfigured(svelteSource, viteSource, viteName, targetAdapter)
+	if configured {
+		return ports.DoctorCheck{
+			Name:    name,
+			Passed:  true,
+			Message: fmt.Sprintf("%s is configured as the effective adapter for --strategy=%s (read from %s)", targetAdapter, strategy, readFrom),
+		}
+	}
+
+	if overridden {
+		alsoInSvelteConfig := ""
+		if sveltekitutils.AdapterConfigured(svelteSource, targetAdapter) {
+			alsoInSvelteConfig = " (svelte.config.js does reference it, but SvelteKit never reads that file here)"
+		}
+		return ports.DoctorCheck{
+			Name:   name,
+			Passed: false,
+			Message: fmt.Sprintf(
+				"--strategy=%s requires %s, but %s passes options to its sveltekit() plugin call, so SvelteKit ignores svelte.config.js entirely (\"svelte.config.js is ignored when options are passed via your Vite config\") and takes the adapter from %s — which does not reference %s%s",
+				strategy, targetAdapter, readFrom, readFrom, targetAdapter, alsoInSvelteConfig,
+			),
+			Remediation: fmt.Sprintf(
+				"fix it in %s: run `bun add -D %s`, then `import adapter from '%s'` and pass `adapter: adapter()` inside sveltekit({ ... }). If the adapter is re-exported from a local module, import it directly so pokkum can see it.",
+				readFrom, targetAdapter, targetAdapter,
+			),
+		}
+	}
+
+	return ports.DoctorCheck{
+		Name:   name,
+		Passed: false,
+		Message: fmt.Sprintf(
+			"--strategy=%s requires %s, but svelte.config.js does not reference it (a fresh `sv create` project ships @sveltejs/adapter-auto, which does not produce the build output pokkum packages)",
+			strategy, targetAdapter,
+		),
+		Remediation: fmt.Sprintf(
+			"fix it in svelte.config.js: run `bun add -D %s`, then `import adapter from '%s'` and set `kit.adapter: adapter()`. If the adapter is re-exported from a local module, import it directly so pokkum can see it.",
+			targetAdapter, targetAdapter,
+		),
+	}
+}
+
+// resolveDoctorBuildStrategy determines the strategy a real `pokkum build`
+// would use for dir: .pokkum.yaml's top-level `strategy:` when the file is
+// present, parseable, and sets a recognized value; ports.DefaultBuildStrategy
+// otherwise (matching core.BuildRequest.Normalize()'s own default). It does
+// not apply --profile overrides — doctor takes no --profile flag, so this
+// deliberately checks the base config, the same one every profile inherits
+// from and the one a bare `pokkum build` (no --profile) actually uses.
+//
+// An existing-but-unparseable .pokkum.yaml, or a strategy: value that is not
+// one of layered/exe/static, is reported as an error rather than silently
+// falling back to the default: silently defaulting could report an adapter
+// requirement the project's own config explicitly says is wrong.
+func resolveDoctorBuildStrategy(dir string, logger *slog.Logger) (ports.BuildStrategy, error) {
+	mgr, err := config.New(dir, logger)
+	if err != nil {
+		return "", fmt.Errorf("load %s: %w", ports.ConfigFilename, err)
+	}
+
+	projCfg, err := mgr.Load(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ports.DefaultBuildStrategy, nil
+		}
+		return "", fmt.Errorf("%s: %w", ports.ConfigFilename, err)
+	}
+
+	raw := strings.TrimSpace(projCfg.Strategy)
+	if raw == "" {
+		return ports.DefaultBuildStrategy, nil
+	}
+
+	strategy := ports.BuildStrategy(raw)
+	if !strategy.Valid() {
+		return "", fmt.Errorf("%s sets strategy: %q, which is not a recognized build strategy (supported: layered, exe, static)", ports.ConfigFilename, projCfg.Strategy)
+	}
+	return strategy, nil
+}
+
+// readIfExists reads path, returning ("", nil) when it does not exist —
+// absence is a normal, common project shape here, never an error — and
+// ("", err) for any other read failure (permission denied, path is a
+// directory, ...), which callers must treat as "cannot determine" rather
+// than silently agreeing with content they never actually saw.
+func readIfExists(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err == nil {
+		return string(data), nil
+	}
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return "", err
+}
+
+// readEffectiveViteConfig finds the Vite config file that would actually
+// govern dir, in bunexec.ViteConfigCandidates' resolution order (Vite's own
+// precedence — the first candidate that exists on disk is the one Vite
+// loads), and reads it.
+//
+// Existence is checked with os.Stat rather than folding it into the read
+// itself, so that a candidate which exists but cannot be read (permission
+// denied) is reported as "the file that governs could not be read" rather
+// than silently skipped in favor of a lower-priority candidate — unlike
+// bunexec's own internal readViteConfigSource, which only needs "some
+// readable Vite config, or none" for a real build and treats any read error
+// the same as absence. Doctor additionally needs to tell "no Vite config"
+// apart from "the governing one could not be read", since only the latter is
+// the honest-uncertainty case this check must not paper over.
+func readEffectiveViteConfig(dir string) (name, source string, err error) {
+	for _, candidate := range bunexec.ViteConfigCandidates {
+		path := filepath.Join(dir, candidate)
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return candidate, "", readErr
+		}
+		return candidate, string(data), nil
+	}
+	return "", "", nil
 }
 
 func checkRegistryAuth() ports.DoctorCheck {

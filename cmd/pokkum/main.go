@@ -38,7 +38,13 @@ func main() {
 	// Create and run root command
 	rootCmd := newRootCommand(ctx, logger)
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		logger.Error("command failed", "error", err)
+		// A command that has already rendered its own complete, formatted
+		// report signals failure with an empty-message error. Logging
+		// `command failed error=""` underneath it would add a line that
+		// carries no information and contradicts the report above it.
+		if !isSilentExit(err) {
+			logger.Error("command failed", "error", err)
+		}
 		os.Exit(1)
 	}
 }
@@ -146,7 +152,15 @@ func newRootCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
 		Long: `Pokkum compiles SvelteKit applications into minimal, reproducible container images.
 
 It handles the full lifecycle: building the application with Bun, assembling an OCI image
-with a hardened base, and publishing to a registry or local Docker daemon.`,
+with a hardened base, and publishing to a registry or local Docker daemon.
+
+New here, or driving Pokkum from a script or an AI agent? START WITH: pokkum guide
+
+That prints the operating manual for using Pokkum inside a SvelteKit project -- the
+invariants that constrain application code (the image tree is read-only, and only the
+adapter's build output ships), the full .pokkum.yaml reference, deployment recipes, and
+the failure taxonomy. It is compiled into this binary, so it always describes this exact
+version. The flag tables below assume you have read it.`,
 		Version: fmt.Sprintf("%s (commit %s, built %s)", version, commit, buildDate),
 
 		// A runtime failure (bad config, failed push) is not a usage error, so
@@ -185,6 +199,11 @@ with a hardened base, and publishing to a registry or local Docker daemon.`,
 	rootCmd.PersistentFlags().String("output", "text", "Output serialization format (text or json)")
 
 	// Add subcommands
+	// Registered first so it is the first subcommand listed in `pokkum --help`:
+	// the guide is the intended entry point for anyone, human or agent, who has
+	// not used Pokkum before, and burying it alphabetically defeats the pointer
+	// in the long description above.
+	rootCmd.AddCommand(newGuideCommand(logger))
 	rootCmd.AddCommand(newBuildCommand(ctx, logger))
 	rootCmd.AddCommand(newDevCommand(ctx, logger))
 	rootCmd.AddCommand(newBaseCommand(ctx, logger))

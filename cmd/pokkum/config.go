@@ -93,12 +93,12 @@ func runConfigView(logger *slog.Logger, opts *configViewOptions) error {
 		if os.IsNotExist(err) {
 			msg := fmt.Sprintf("no %s found in %s (run `pokkum init` to create one)", ports.ConfigFilename, opts.dir)
 			if outputFormat == ports.FormatJSON {
-				return jsonutils.WriteError(os.Stdout, "config view", "ERR_CONFIG_NOT_FOUND", msg, "")
+				return failJSON("config view", "ERR_CONFIG_NOT_FOUND", msg, "")
 			}
 			return fmt.Errorf("%s", msg)
 		}
 		if outputFormat == ports.FormatJSON {
-			return jsonutils.WriteError(os.Stdout, "config view", "ERR_CONFIG_PARSE", err.Error(), "")
+			return failJSON("config view", "ERR_CONFIG_PARSE", err.Error(), "")
 		}
 		return err
 	}
@@ -107,7 +107,7 @@ func runConfigView(logger *slog.Logger, opts *configViewOptions) error {
 		merged, err := mgr.ApplyProfile(cfg, opts.profile)
 		if err != nil {
 			if outputFormat == ports.FormatJSON {
-				return jsonutils.WriteError(os.Stdout, "config view", "ERR_INVALID_PROFILE", err.Error(), "")
+				return failJSON("config view", "ERR_INVALID_PROFILE", err.Error(), "")
 			}
 			return err
 		}
@@ -144,7 +144,7 @@ func runConfigValidate(logger *slog.Logger, opts *configValidateOptions) error {
 	if err != nil {
 		msg := fmt.Sprintf("validation failed: %v", err)
 		if outputFormat == ports.FormatJSON {
-			return jsonutils.WriteError(os.Stdout, "config validate", "ERR_CONFIG_INVALID", msg, "")
+			return failJSON("config validate", "ERR_CONFIG_INVALID", msg, "")
 		}
 		return fmt.Errorf("%s", msg)
 	}

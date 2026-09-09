@@ -154,13 +154,25 @@ Audits local Bun runtime, SvelteKit version compatibility, `.pokkumignore`, and 
 - Implementation:
   - [cmd/pokkum/doctor.go](../cmd/pokkum/doctor.go)
 
+### [pokkum init detects bun vs node, and the base image that carries it](items/init-runtime-detection.md)
+
+`runtime: bun|node` is inferred from the project's own toolchain, and drags the paired base preset along so the two cannot disagree.
+
+- Implementation:
+  - [internal/adapters/sveltekitutils/runtimedetect.go](../internal/adapters/sveltekitutils/runtimedetect.go)
+  - [internal/adapters/config/config.go](../internal/adapters/config/config.go)
+  - [internal/ports/config.go](../internal/ports/config.go)
+  - [cmd/pokkum/init.go](../cmd/pokkum/init.go)
+
 ### [Standardized machine-readable output (--output=json)](items/json-output-envelope.md)
 
-A global `--output=json` flag emits a versioned JSON envelope across every command, instead of callers parsing human-readable stdout.
+`--output=json` emits a machine-readable envelope on most commands — but not on `build` or `dev`, where it is accepted and silently ignored.
 
 - Flags: `--output`
 - Implementation:
+  - [cmd/pokkum/main.go](../cmd/pokkum/main.go)
   - [cmd/pokkum/build.go](../cmd/pokkum/build.go)
+  - [cmd/pokkum/dev.go](../cmd/pokkum/dev.go)
 
 ### [pokkum explain / explain why / explain diff](items/layer-origin-tracing.md)
 
@@ -196,6 +208,28 @@ Checks for new releases and verifies the release binary's checksum signature via
 
 - Implementation:
   - [cmd/pokkum/upgrade.go](../cmd/pokkum/upgrade.go)
+
+### [pokkum build preflight for strategy: static](items/static-strategy-preflight.md)
+
+`pokkum build --strategy=static` refuses before it starts when the project has code SvelteKit cannot prerender, listing every offending file.
+
+- Flags: `--allow-server-code-in-static`
+- Implementation:
+  - [internal/ports/staticviability.go](../internal/ports/staticviability.go)
+  - [internal/adapters/staticviability/staticviability.go](../internal/adapters/staticviability/staticviability.go)
+  - [internal/core/pipeline.go](../internal/core/pipeline.go)
+  - [internal/core/staticgate_test.go](../internal/core/staticgate_test.go)
+  - [cmd/pokkum/build.go](../cmd/pokkum/build.go)
+  - [cmd/pokkum/staticgate_wiring_test.go](../cmd/pokkum/staticgate_wiring_test.go)
+
+### [Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md)
+
+Scans a project's routes for server-side code and reports what rules a static build out, feeding `pokkum init`'s strategy default.
+
+- Implementation:
+  - [internal/adapters/sveltekitutils/staticviability.go](../internal/adapters/sveltekitutils/staticviability.go)
+  - [internal/adapters/sveltekitutils/staticviability_test.go](../internal/adapters/sveltekitutils/staticviability_test.go)
+  - [cmd/pokkum/init_analysis.go](../cmd/pokkum/init_analysis.go)
 
 ### [pokkum init](items/workspace-init-wizard.md)
 
@@ -511,7 +545,20 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 ### Developer Experience
 
 - Presets are tried first, and only a value containing `/`, `.`, `:`, or `@` is parsed as a reference — this ordering is load-bearing, since `name.ParseReference` would otherwise accept a typo'd preset (e.g. `distrolss`) as valid Docker Hub shorthand instead of surfacing a clear "unknown preset" error. ([--base accepts a custom image reference](items/base-flag-custom-reference.md))
+- A multi-container pod (e.g. with `--with-otel-sidecar`) requires `--container`. There is deliberately no first-container heuristic: it would be a coin flip between the application and the collector. ([pokkum dev --cluster](items/cluster-dev-loop.md))
+- Deletions are not propagated: a file removed from the local build stays in the pod until the pod is replaced. Only `/app/server` and `/app/client` are synced — a change to production dependencies, prerendered pages, vendor or native trees still needs a real image build. ([pokkum dev --cluster](items/cluster-dev-loop.md))
+- Extraction restores the owner write bit on the `/app` directories it writes into (the packager ships them `0555`) and leaves synced entries at `0755`/`0644`, so a dev-synced pod is no longer byte-identical to its image. The container user must own the `/app` tree; if it does not, the sync fails rather than half-completing. ([pokkum dev --cluster](items/cluster-dev-loop.md))
+- If the target container sets `POKKUM_ATTESTATION_DIGEST`, the pod will fail its *next* start with exit 125, because startup attestation re-derives the digest of the very `/app` tree this loop rewrote. The running pod is unaffected — attestation runs once, at supervisor startup — but an eviction or reschedule turns into a crash loop. A `Warn` says so when the target has it set. ([pokkum dev --cluster](items/cluster-dev-loop.md))
+- Layered images only. An `exe` or `static` image has no `/app/server`, and the extractor refuses to create a `--root` that does not exist rather than materialising a tree that would look synced and serve nothing. ([pokkum dev --cluster](items/cluster-dev-loop.md))
+- Requires `POKKUM_DEV_MODE=1` on the target container. It is off by default, never set by the packager, and must never be set on a production workload: it makes the in-pod `__dev-sync` subcommand callable and turns SIGHUP into a process restart, both of which hand real power to anyone who can already exec into the pod. ([pokkum dev --cluster](items/cluster-dev-loop.md))
+- Cannot confirm the credential is accepted or the application exists; both need a read-only endpoint with a verified contract, and neither platform offers one Pokkum has verified. ([pokkum deploy --check](items/deploy-check.md))
+- The endpoint probe proves the host accepts a connection, not that the panel is running at that path. ([pokkum deploy --check](items/deploy-check.md))
+- The CLI still has only three codes. Giving categories of failure distinct codes (config vs network vs policy) would be a behaviour change, not a documentation one, and is not attempted here. ([Documented CLI exit-code table](items/exit-code-reference.md))
+- A `pokkum deploy init` picker would be Dokploy-only; SwiftWave's webhook method has no application-listing equivalent. ([A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md))
 - A project defining both `kit.experimental` and a top-level `experimental` for vite-plugin-svelte would see the kit one win after flattening. Unusual, and preferable to dropping the config entirely. ([Adapter injection silently discarded the project's whole SvelteKit config](items/injection-discarded-svelte-config.md))
+- `build`'s envelope carries the published ref's own digest, not per-platform manifest digests, and no warnings array: neither exists on `core.BuildResult`, and inventing them would have meant a pipeline change. Documented as absent rather than faked. ([Standardized machine-readable output (--output=json)](items/json-output-envelope.md))
+- `dev` rejects `--output json` rather than supporting it — deliberate, since it has no single completion point to emit an envelope from. ([Standardized machine-readable output (--output=json)](items/json-output-envelope.md))
+- `doctor`'s failure path still drops its per-check array — see item doctor-json-drops-per-check-detail. ([Standardized machine-readable output (--output=json)](items/json-output-envelope.md))
 - No supervisor, no startup attestation, no health/readiness probes, no base image, and no non-root user — a single startup warning states this explicitly and the default remains full container-parity mode so nobody debugs a production discrepancy against a mode never meant to model it. ([pokkum dev --no-container](items/no-container-dev-mode.md))
 - `--debug`, `--platform`, `--bun-version`, and `--bun-variant` are rejected outright rather than silently ignored, since each describes a property of an image that is never built. ([pokkum dev --no-container](items/no-container-dev-mode.md))
 - `--port` and `--watch` warn (rather than reject) when explicitly set, since the dev server picks its own port and hot reload is inherent rather than opt-in. ([pokkum dev --no-container](items/no-container-dev-mode.md))
@@ -522,6 +569,14 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - SwiftWave cannot be repointed at a new image reference: both its webhook and its `rebuildApplication` mutation rebuild the application's current deployment, so the application must be pinned to a mutable tag that Pokkum republishes. `update_image` is rejected for that target rather than silently ignored. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
 - The two platform contracts were verified against Dokploy's and SwiftWave's own source rather than their prose docs, but they are third-party APIs and can drift; the adapters fail closed on any response they cannot positively identify as a started rollout. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
 - Vercel and other edge/serverless platforms remain out of scope — they do not run OCI images, which is the existing non-goal stated in README.md. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
+- Cross-field rules are not encoded: the deploy target/method matrix and the runtime/strategy/base composition. Both need JSON Schema conditionals for constraints `pokkum config validate` already enforces; the field descriptions say the schema does not check them rather than implying it does. ([JSON Schema for .pokkum.yaml](items/pokkum-yaml-json-schema.md))
+- The schema is not reachable from the CLI — see item config-schema-subcommand. ([JSON Schema for .pokkum.yaml](items/pokkum-yaml-json-schema.md))
+- Does not implement SvelteKit's root `+server.js` non-HTML-response rule (prerender.js:539), which depends on the response value rather than on the file's shape. ([pokkum build preflight for strategy: static](items/static-strategy-preflight.md))
+- Dynamic route segments are still not reported; adapter-static cannot crawl an unlinked `[slug]`, and detecting that needs link analysis rather than a per-file scan. ([pokkum build preflight for strategy: static](items/static-strategy-preflight.md))
+- Source-text heuristic, not a SvelteKit build. It cannot see a handler assembled dynamically, re-exported from another module, or generated at build time. ([pokkum build preflight for strategy: static](items/static-strategy-preflight.md))
+- A sound negative only. `viable` means nothing found rules static out, never that a static build will succeed. ([Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md))
+- Advisory only. `pokkum build` does not yet refuse `strategy: static` on a project this scan calls blocked — see item static-strategy-preflight. ([Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md))
+- Dynamic routes are reported as caveats, not blockers: a route without an `entries()` export is prerendered only if the crawler reaches it, and whether it is linked cannot be determined from source. The caveat is suppressed when the project sets `prerender.handleUnseenRoutes` to `warn` or `ignore`. ([Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md))
 
 ### Kubernetes & Operations
 

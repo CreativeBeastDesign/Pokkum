@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"syscall"
 )
 
 const (
@@ -49,6 +50,26 @@ const (
 )
 
 func main() {
+	// The __dev-sync subcommand is dispatched before any configuration is
+	// read, because it is not a supervisor invocation at all: it neither
+	// forks a child nor supervises anything, it extracts a tar into the live
+	// /app tree on behalf of `pokkum dev --cluster` and exits. Keeping it in
+	// this binary rather than shipping a second one is the whole reason it
+	// can work: a distroless image has no shell and no tar, so `kubectl cp`
+	// and every other "just exec tar" approach is unavailable, and the only
+	// executable already inside the image that could extract an archive is
+	// this one.
+	if len(os.Args) > 1 && os.Args[1] == devSyncSubcommand {
+		if err := runDevSync(os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr, syscall.Kill); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "pokkum-init %s: %v\n", devSyncSubcommand, err)
+			os.Exit(exitUsage)
+		}
+		return
+	}
+
 	cfg, warnings, err := parseConfig(os.Args[1:], os.Getenv, os.Stderr)
 	switch {
 	case errors.Is(err, errVersionRequested):

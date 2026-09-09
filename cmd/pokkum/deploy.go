@@ -22,6 +22,11 @@ type deployFlags struct {
 	profile string
 	image   string
 	output  string
+
+	// check runs the configuration validation instead of deploying.
+	check bool
+	// checkOffline suppresses --check's endpoint reachability probe.
+	checkOffline bool
 }
 
 func newDeployCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -40,7 +45,13 @@ false — see "pokkum build --no-deploy".
 
 The API credential is never read from .pokkum.yaml. It is read from the
 environment variable named by deploy.token_env, defaulting to
-POKKUM_DEPLOY_TOKEN.`,
+POKKUM_DEPLOY_TOKEN.
+
+--check validates the configuration and deploys nothing. It resolves the
+deploy request through the same code path a real deploy uses, so agreeing with
+--check means the same resolution will succeed. It reports three outcomes per
+item, and "unverified" is distinct from "ok": Pokkum will not claim to have
+confirmed something it did not test.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
@@ -49,6 +60,9 @@ POKKUM_DEPLOY_TOKEN.`,
 			if outFlag, _ := cmd.Flags().GetString("output"); outFlag != "" {
 				flags.output = outFlag
 			}
+			if flags.check {
+				return runDeployCheck(ctx, logger, flags)
+			}
 			return runDeploy(ctx, logger, flags)
 		},
 	}
@@ -56,7 +70,13 @@ POKKUM_DEPLOY_TOKEN.`,
 	cmd.Flags().StringVarP(&flags.dir, "dir", "d", ".", "Path to project directory")
 	cmd.Flags().StringVarP(&flags.profile, "profile", "P", "", "Configuration profile whose deploy settings to use")
 	cmd.Flags().StringVar(&flags.image, "image", "",
-		"Image reference to deploy, overriding the one recorded in configuration; required when the target repoints the application at a specific image")
+		"Image reference to deploy. There is no image reference in .pokkum.yaml to override -- "+
+			"omitting this makes the call a plain redeploy of whatever the platform is already "+
+			"pointed at. Required when update_image is enabled, which fails without it")
+	cmd.Flags().BoolVar(&flags.check, "check", false,
+		"Validate the deploy configuration and report what would happen, without deploying anything")
+	cmd.Flags().BoolVar(&flags.checkOffline, "offline", false,
+		"With --check, skip the endpoint reachability probe and validate configuration only")
 
 	return cmd
 }
@@ -79,7 +99,7 @@ func runDeploy(ctx context.Context, logger *slog.Logger, flags *deployFlags) err
 		msg := fmt.Sprintf("no deploy target configured in %s (add a `deploy:` block with a target of %q or %q)",
 			ports.ConfigFilename, ports.DeployDokploy, ports.DeploySwiftwave)
 		if outputFormat == ports.FormatJSON {
-			return jsonutils.WriteError(os.Stdout, "deploy", "ERR_DEPLOY_NOT_CONFIGURED", msg, "")
+			return failJSON("deploy", "ERR_DEPLOY_NOT_CONFIGURED", msg, "")
 		}
 		return fmt.Errorf("%s: %w", msg, core.ErrDeployNotConfigured)
 	}
@@ -90,7 +110,7 @@ func runDeploy(ctx context.Context, logger *slog.Logger, flags *deployFlags) err
 	res, err := executeDeploy(ctx, logger, projCfg.Deploy, strings.TrimSpace(flags.image), "")
 	if err != nil {
 		if outputFormat == ports.FormatJSON {
-			return jsonutils.WriteError(os.Stdout, "deploy", deployErrorCode(err), err.Error(), "")
+			return failJSON("deploy", deployErrorCode(err), err.Error(), "")
 		}
 		return err
 	}

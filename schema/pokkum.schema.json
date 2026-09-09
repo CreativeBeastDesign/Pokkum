@@ -1,0 +1,658 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/CreativeBeastDesign/Pokkum/main/schema/pokkum.schema.json",
+  "title": "Pokkum project configuration",
+  "description": "JSON Schema for .pokkum.yaml (schema version 1), generated from internal/ports/config.go by scripts/gen-schema. Do not hand-edit schema/pokkum.schema.json; run `make schema`.",
+  "type": "object",
+  "properties": {
+    "base": {
+      "description": "Base image tier: one of the built-in presets (\"distroless\", \"chainguard\", \"distroless-node\") or an explicit image reference (e.g. \"registry/repo:tag\" or \"repo@sha256:...\"), which core.ParseBaseImageSpec treats as a custom base. Not restricted to an enum here for that reason.",
+      "type": "string"
+    },
+    "build": {
+      "type": "object",
+      "properties": {
+        "allow_server_code_in_static": {
+          "type": "boolean"
+        },
+        "exclude_routes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "cache": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "keyless_identity": {
+          "type": "string"
+        },
+        "keyless_issuer": {
+          "type": "string"
+        },
+        "pubkey": {
+          "type": "string"
+        },
+        "verify_mode": {
+          "description": "Signature verification mode for remote build-cache hits.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "static-key",
+            "keyless",
+            "none"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "deploy": {
+      "type": "object",
+      "properties": {
+        "application": {
+          "type": "string"
+        },
+        "auto": {
+          "type": "boolean"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "endpoint_env": {
+          "type": "string"
+        },
+        "method": {
+          "description": "Transport used to drive the deploy target. Not every method is valid for every target (core.ValidateDeployMethod owns that matrix); this schema does not encode the cross-field rule.",
+          "type": "string",
+          "enum": [
+            "api",
+            "webhook"
+          ]
+        },
+        "registry_password_env": {
+          "type": "string"
+        },
+        "registry_url": {
+          "type": "string"
+        },
+        "registry_username_env": {
+          "type": "string"
+        },
+        "target": {
+          "description": "PaaS control plane to hand a successful push to. Empty disables deployment.",
+          "type": "string",
+          "enum": [
+            "dokploy",
+            "swiftwave"
+          ]
+        },
+        "timeout": {
+          "type": "string"
+        },
+        "token_env": {
+          "type": "string"
+        },
+        "update_image": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "docker": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "address_header": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "body_size_limit": {
+          "type": "string"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "host_header": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "origin": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "probe_port": {
+          "type": "integer"
+        },
+        "protocol_header": {
+          "type": "string"
+        },
+        "require_env": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "shutdown_timeout": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "xff_depth": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "otel": {
+      "type": "object",
+      "properties": {
+        "metrics": {
+          "type": "boolean"
+        },
+        "sidecar": {
+          "type": "boolean"
+        },
+        "tracing": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "platforms": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "base": {
+            "description": "Base image tier: one of the built-in presets (\"distroless\", \"chainguard\", \"distroless-node\") or an explicit image reference (e.g. \"registry/repo:tag\" or \"repo@sha256:...\"), which core.ParseBaseImageSpec treats as a custom base. Not restricted to an enum here for that reason.",
+            "type": "string"
+          },
+          "build": {
+            "type": "object",
+            "properties": {
+              "allow_server_code_in_static": {
+                "type": "boolean"
+              },
+              "exclude_routes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "cache": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "keyless_identity": {
+                "type": "string"
+              },
+              "keyless_issuer": {
+                "type": "string"
+              },
+              "pubkey": {
+                "type": "string"
+              },
+              "verify_mode": {
+                "description": "Signature verification mode for remote build-cache hits.",
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "static-key",
+                  "keyless",
+                  "none"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "deploy": {
+            "type": "object",
+            "properties": {
+              "application": {
+                "type": "string"
+              },
+              "auto": {
+                "type": "boolean"
+              },
+              "endpoint": {
+                "type": "string"
+              },
+              "endpoint_env": {
+                "type": "string"
+              },
+              "method": {
+                "description": "Transport used to drive the deploy target. Not every method is valid for every target (core.ValidateDeployMethod owns that matrix); this schema does not encode the cross-field rule.",
+                "type": "string",
+                "enum": [
+                  "api",
+                  "webhook"
+                ]
+              },
+              "registry_password_env": {
+                "type": "string"
+              },
+              "registry_url": {
+                "type": "string"
+              },
+              "registry_username_env": {
+                "type": "string"
+              },
+              "target": {
+                "description": "PaaS control plane to hand a successful push to. Empty disables deployment.",
+                "type": "string",
+                "enum": [
+                  "dokploy",
+                  "swiftwave"
+                ]
+              },
+              "timeout": {
+                "type": "string"
+              },
+              "token_env": {
+                "type": "string"
+              },
+              "update_image": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "docker": {
+            "type": "object",
+            "properties": {
+              "repo": {
+                "type": "string"
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "image": {
+            "type": "object",
+            "properties": {
+              "address_header": {
+                "type": "string"
+              },
+              "annotations": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "body_size_limit": {
+                "type": "string"
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "host_header": {
+                "type": "string"
+              },
+              "labels": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "origin": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer"
+              },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                }
+              },
+              "probe_port": {
+                "type": "integer"
+              },
+              "protocol_header": {
+                "type": "string"
+              },
+              "require_env": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "shutdown_timeout": {
+                "type": "string"
+              },
+              "user": {
+                "type": "string"
+              },
+              "working_dir": {
+                "type": "string"
+              },
+              "xff_depth": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          },
+          "otel": {
+            "type": "object",
+            "properties": {
+              "metrics": {
+                "type": "boolean"
+              },
+              "sidecar": {
+                "type": "boolean"
+              },
+              "tracing": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "output": {
+            "description": "Build output destination for this profile.",
+            "type": "string",
+            "enum": [
+              "push",
+              "local",
+              "tarball",
+              "oci-layout"
+            ]
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "runtime": {
+            "description": "Application JS runtime override for this profile. Empty means inherit.",
+            "type": "string",
+            "enum": [
+              "bun",
+              "node"
+            ]
+          },
+          "sbom": {
+            "type": "object",
+            "properties": {
+              "attach": {
+                "description": "How the SBOM artifact is attached to the OCI image.",
+                "type": "string",
+                "enum": [
+                  "referrer",
+                  "tag",
+                  "auto"
+                ]
+              },
+              "format": {
+                "description": "SBOM serialisation format. \"none\" disables SBOM generation.",
+                "type": "string",
+                "enum": [
+                  "spdx-json",
+                  "cyclonedx-json",
+                  "none"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "security": {
+            "type": "object",
+            "properties": {
+              "allow_incomplete_scans": {
+                "type": "boolean"
+              },
+              "allow_secret_patterns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "fail_on_cve": {
+                "description": "Fail the build if the resolved base image has a vulnerability at or above this severity. Unset means warn-only.",
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "critical"
+                ]
+              },
+              "verify_base": {
+                "type": "boolean"
+              },
+              "vex_exemptions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "cve": {
+                      "type": "string"
+                    },
+                    "expires": {
+                      "type": "string"
+                    },
+                    "justification": {
+                      "type": "string"
+                    },
+                    "owner": {
+                      "type": "string"
+                    },
+                    "package": {
+                      "type": "string"
+                    },
+                    "status_notes": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "cve",
+                    "expires",
+                    "justification",
+                    "owner"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "sourcemap": {
+            "type": "boolean"
+          },
+          "strategy": {
+            "description": "Packaging strategy override for this profile.",
+            "type": "string",
+            "enum": [
+              "layered",
+              "exe",
+              "static"
+            ]
+          },
+          "stub_launcher": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "runtime": {
+      "description": "Application JS runtime. Empty means bun.",
+      "type": "string",
+      "enum": [
+        "bun",
+        "node"
+      ]
+    },
+    "sbom": {
+      "type": "object",
+      "properties": {
+        "attach": {
+          "description": "How the SBOM artifact is attached to the OCI image.",
+          "type": "string",
+          "enum": [
+            "referrer",
+            "tag",
+            "auto"
+          ]
+        },
+        "format": {
+          "description": "SBOM serialisation format. \"none\" disables SBOM generation.",
+          "type": "string",
+          "enum": [
+            "spdx-json",
+            "cyclonedx-json",
+            "none"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "security": {
+      "type": "object",
+      "properties": {
+        "allow_incomplete_scans": {
+          "type": "boolean"
+        },
+        "allow_secret_patterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fail_on_cve": {
+          "description": "Fail the build if the resolved base image has a vulnerability at or above this severity. Unset means warn-only.",
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "verify_base": {
+          "type": "boolean"
+        },
+        "vex_exemptions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cve": {
+                "type": "string"
+              },
+              "expires": {
+                "type": "string"
+              },
+              "justification": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string"
+              },
+              "package": {
+                "type": "string"
+              },
+              "status_notes": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "cve",
+              "expires",
+              "justification",
+              "owner"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "strategy": {
+      "description": "Packaging strategy.",
+      "type": "string",
+      "enum": [
+        "layered",
+        "exe",
+        "static"
+      ]
+    },
+    "stub_launcher": {
+      "type": "boolean"
+    },
+    "version": {
+      "description": "Configuration schema version.",
+      "type": "integer",
+      "const": 1
+    }
+  },
+  "required": [
+    "version"
+  ],
+  "additionalProperties": false
+}

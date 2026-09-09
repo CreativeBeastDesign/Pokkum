@@ -70,6 +70,7 @@ These are the load-bearing patterns established across `cmd/pokkum/`:
 | `--body-size-limit` | — | — | (none, adapter-node's own default of `512K` applies) | Request body size cap in adapter-node's size-string format, written to `BODY_SIZE_LIMIT` — see §18b. |
 | `--fail-on-cve` | — | `POKKUM_FAIL_ON_CVE` | (none) | Fail build if base image vulnerabilities exceed threshold (`low`, `medium`, `high`, `critical`; default warn-only). |
 | `--allow-incomplete` | — | — | `false` | Allow build to succeed even if base image vulnerability database lookups fail (default: fail closed when `--fail-on-cve` is active). |
+| `--allow-server-code-in-static` | — | `build.allow_server_code_in_static` | `false` | Proceed with `--strategy=static` even when the project contains code SvelteKit cannot prerender. See **Static-build preflight** below — this is an escape hatch for a false positive in that check, not a normal setting. |
 | `--vex-output` | — | — | (none) | Write a real OpenVEX v0.2.0 JSON document (one `not_affected` statement per active `.pokkum.yaml` `security.vex_exemptions` entry) to the given path after a successful build. No file is written if there are no exemptions. |
 | `--hermetic` | — | — | `false` | Enforce strict hermetic build mode: on Linux, real kernel-enforced network isolation (an unprivileged network namespace) around both build subprocess stages, no IP network egress possible regardless of what a build script does. Also strips `SSH_AUTH_SOCK`/`SSH_AGENT_PID`/`GPG_AGENT_INFO`/`DBUS_SESSION_BUS_ADDRESS`/`DOCKER_HOST` from the subprocess's environment — closes SSH-agent-forwarding fully. A *pathname* Unix domain socket reachable by hardcoded/conventional path (e.g. a bind-mounted `/var/run/docker.sock`) needs the separate opt-in `--hermetic-mount-isolation` flag below to close, since network isolation alone does nothing for it. On non-Linux, advisory-only (`BUN_OFFLINE=1` and friends, clearly logged as such). Also requires cached base images and pre-populated `node_modules`, and fails closed (rather than downloading) on a cold Bun-runtime cache. |
 | `--hermetic-mount-isolation` | — | — | `false` | With `--hermetic` on Linux, additionally block path-based Unix domain socket access (starting with `/var/run/docker.sock`/`/run/docker.sock`, if either exists) for the build subprocess, via a `/proc/self/exe` reexec into a fresh `CLONE_NEWNS` mount namespace with those specific paths bind-masked. **Opt-in, default off** — new, previously-unexercised raw-syscall code, deliberately not folded into `--hermetic`'s own default behavior. Ignored (with a warning) without `--hermetic` or on non-Linux hosts. Known, documented residual limitation: the sandboxed build process retains the same namespace-level capability used to create the mask, so a sufficiently sophisticated dependency that specifically knows this mechanism exists could in principle undo it — see `docs/Roadmap.md`. |
@@ -268,6 +269,29 @@ A deploy that the platform accepts without starting a rollout fails the command.
 | `--port` | `-p` | `3000:3000` | Port mapping for local container execution. |
 | `--watch` | — | `true` | Watch source directory and auto-rebuild container on file changes. |
 | `--env-file` | — | (none) | Path to an environment file for container execution. |
+| `--cluster` | — | `false` | **In-pod dev loop.** Build the project and stream `/app/server` and `/app/client` straight into an already-running pod via `kubectl exec`, then restart the in-pod application process. No image is built, nothing is pushed to a registry, and the pod is never recreated. Requires `kubectl` on `PATH`, `--namespace`, `--selector`, a `--strategy=layered` image, and `POKKUM_DEV_MODE=1` on the target container (see §"Environment Variables (Runtime, Read by Supervisor)"). Mutually exclusive with `--no-container`; rejects `--debug`, `--platform`, `--bun-version` and `--bun-variant` (no image is built); warns on `--port`, `--watch`, `--env-file` and `--bun-binary`. |
+| `--namespace` | — | (none) | Kubernetes namespace holding the pod to sync into. Required with `--cluster`, and a usage error without it — a loop that hot-patches a running pod never guesses which one. |
+| `--selector` | — | (none) | Label selector identifying the pod to sync into, in `kubectl -l` syntax (e.g. `app=storefront`). Required with `--cluster`. Matching pods are filtered to `Running`, non-terminating ones and sorted by name; the first is used, so repeated runs against a multi-replica Deployment keep hitting the same replica instead of leaving the rest stale. |
+| `--container` | — | (none) | Container within the matched pod to sync into. Required only when the pod runs more than one container (e.g. with `--with-otel-sidecar`), where there is deliberately no "first container" heuristic. |
+
+### 5a. `pokkum dev --cluster` in practice
+
+`--cluster` is the SvelteKit analogue of hot-swapping a binary in a running pod. One cycle is: build the project once (SvelteKit build only — no `bun build --compile`, no layer construction, no packaging), stream the resulting `/app/client` and then `/app/server` trees into the pod as a tar over `kubectl exec`, and signal the in-pod `pokkum-init` to stop the application process and start a fresh one. Then it watches `src/` and repeats.
+
+**Why the image needs to cooperate.** A Pokkum image is distroless: it has no shell and no `tar`, so `kubectl cp` — which shells out to `tar` *inside* the container — cannot work against it, and there is nothing in the image able to kill and re-exec the server. Both halves are therefore provided by `pokkum-init` itself, the one executable already in every layered image:
+
+- `pokkum-init __dev-sync --root DIR [--root DIR...] [--restart]` reads a tar from stdin and extracts it into the named directories, which must already exist. Entries outside every `--root` are refused, and writes go through `os.Root`, so neither a `../` name nor a symlink planted by an earlier sync can escape.
+- `SIGHUP` stops the application process (`SIGTERM`, then the ordinary `POKKUM_SHUTDOWN_TIMEOUT` grace period, then `SIGKILL`) and starts a replacement in its place, rather than being relayed to the child.
+
+Both are gated on `POKKUM_DEV_MODE`, are off by default, and are never set by the packager.
+
+**What it costs.** Three consequences are deliberate and are logged at `Warn` when they apply:
+
+1. The patched pod no longer matches the image it was started from, and every change is lost the moment the pod is replaced. This is a development loop, not a deployment.
+2. Extraction restores the owner write bit on the `/app` directories it writes into (the packager ships them `0555`) and leaves synced entries at `0755`/`0644`. The container user must own the `/app` tree; if it does not, the sync fails rather than half-completing.
+3. If the target container sets `POKKUM_ATTESTATION_DIGEST`, the pod will fail its **next** start with exit **125**, because startup attestation re-derives the digest of the very `/app` tree this loop rewrote. The running pod is unaffected — attestation runs once, at supervisor startup — but an eviction, node drain or OOM kill turns into a crash loop. Delete and redeploy the pod to recover.
+
+**What it does not do.** Deletions are not propagated: a file removed from the local build stays in the pod until the pod is replaced. `/app/prerendered`, `/app/vendor`, `/app/native` and `/app/node_modules` are not synced — a change to production dependencies needs a real image build. `--cluster` requires a layered image; against an `exe` or `static` image the extractor refuses, because the `--root` directories it is asked to write into do not exist.
 
 ---
 
@@ -282,13 +306,75 @@ A deploy that the platform accepts without starting a rollout fails the command.
 
 ## 7. `pokkum init [dir]`
 
-Initializes a SvelteKit workspace for Pokkum by creating `.pokkum.yaml` (with default configuration and build profiles) and `.pokkumignore`. In interactive terminal sessions (TTY), runs a guided questionnaire for target container registry, base image preset, build strategy, local profile, and CVE gating policy.
+Initializes a SvelteKit workspace for Pokkum by creating `.pokkum.yaml` (with default configuration and build profiles) and `.pokkumignore`.
+
+**Init reads your project before it asks you anything.** Two analyses run first, and their results become the prompt defaults — so the questions that the source code can answer arrive pre-answered, with the evidence shown:
+
+| Analysis | What it reads | What it decides |
+|---|---|---|
+| Static viability | Every route source under `kit.files.routes` (default `src/routes`), plus `*.remote.ts\|js` anywhere and `src/hooks.server.*` | Whether `strategy: static` is possible at all |
+| Runtime | `packageManager` in `package.json`, then lockfiles, then `engines` | `runtime: bun` vs `runtime: node`, and the base preset that carries it |
+
+The static-viability scan is a **disqualifier** scan. It reports what rules a static build out, and it is sound in that direction only: "nothing found" means nothing in your source needs a server, not that a static build is guaranteed to succeed (a load function calling a runtime-only API, or a dynamic route with no links for the crawler to follow, still fails later). It reports three outcomes, and they are deliberately distinct — a project it could not scan is reported as *unknown*, never as viable.
+
+What counts as needing a server:
+
+| Found | Blocks static? |
+|---|---|
+| `+server.*` exporting POST, PUT, PATCH, DELETE or QUERY | Yes — SvelteKit: *"Cannot prerender a +server file with … handlers"* |
+| `+server.*` exporting only GET / HEAD / OPTIONS | **No** — SvelteKit prerenders read-only endpoints to static responses |
+| A route directory holding **both** a `+page.*` and a `+server.*` | Yes — SvelteKit: *"Cannot prerender a route with both +page and +server files"* |
+| `export const actions` — form actions | Yes, unconditionally — SvelteKit: *"Cannot prerender pages with actions"*. No flag retires it |
+| A `load` in `+page.server.*` / `+layout.server.*` | **No** — server loads run at build time, which is how a static site reads a CMS or the filesystem |
+| `*.remote.ts\|js` using `query()`, `form()` or `command()` | Yes |
+| `*.remote.ts\|js` using only `prerender()` | No — that resolves at build time and ships as data |
+| `export const prerender = false` anywhere | Yes — the one finding a source edit retires |
+| `hooks.server.*` | No, reported as a caveat — server hooks run during prerendering, so the build works; what you lose is per-request behaviour for real visitors |
+| A dynamic route (`[slug]`, `[...rest]`, `[[optional]]`) with no `entries()` export | No, reported as a caveat — SvelteKit prerenders it if the crawler reaches it, so a linked route builds fine. But an unreachable one **fails the build** (the default `handleUnseenRoutes` throws), and whether a route is linked cannot be determined from source. Export `entries()`, or list the paths in `config.prerender.entries`. Suppressed if the project sets `prerender.handleUnseenRoutes` to `warn` or `ignore` |
+
+These rules are SvelteKit's own, read from `@sveltejs/kit`'s source (`src/core/postbuild/analyse.js`, `src/runtime/server/page/index.js`, `src/constants.js`) rather than inferred — they are the complete set of conditions under which it refuses to prerender.
+
+Matching ignores comments and string literals, so a commented-out `export const prerender = false` does not count.
+
+When nothing rules static out but the project is not set up to build that way, init says which of the two prerequisites is missing — `@sveltejs/adapter-static` in `package.json`, and `export const prerender = true` in the routes root's `+layout.ts`.
+
+Interactive sessions (TTY) then ask six questions: target registry, build strategy, **application runtime** (skipped for `strategy: static`, which ships no JavaScript runtime), base image preset (each shown with a one-line rationale, detected default marked), local profile, and CVE gating policy. `--defaults` takes every detected default without prompting — so `pokkum init --defaults` still gets the analysed strategy and runtime, it just does not ask.
+
+`runtime`, `strategy` and `base` are written as a composition, not three independent choices: `runtime: node` requires `strategy: layered` and a base that ships a Node binary, so init upgrades the base to `distroless-node` alongside it and never writes it next to `strategy: static`.
 
 | Flag | Shorthand | Default | Description |
 |---|---|---|---|
 | `--dir` | `-d` | `.` | Path to SvelteKit project directory. |
-| `--defaults` | — | `false` | Accept default initialization settings without interactive prompts. |
+| `--defaults` | — | `false` | Accept default initialization settings without interactive prompts. Detection still runs; only the questions are skipped. |
 | `--output` | — | `text` | Output serialization format (`text` or `json`). |
+
+---
+
+### Static-build preflight
+
+Before `pokkum build --strategy=static` spawns anything, Pokkum scans the project for source SvelteKit refuses to prerender and **refuses the build** if it finds any, listing every offending file:
+
+```
+--strategy=static ships no server, but 2 files in this project cannot be prerendered
+  - src/routes/api/+server.ts exports a POST handler, and SvelteKit cannot prerender a
+    +server file with a handler whose response depends on the request body
+  - src/routes/signup/+page.server.ts declares form actions, which handle POST requests
+    at runtime and cannot be prerendered
+
+Build with --strategy=layered to ship a server, or remove the code above.
+```
+
+Without this the same project fails minutes later, inside SvelteKit's build, with a message that names neither Pokkum nor the strategy setting that caused it.
+
+Three deliberate limits, because a preflight that over-rejects is worse than none:
+
+| Limit | Why |
+|---|---|
+| `--strategy=static` only | Every other strategy ships a server, so none of these findings apply |
+| Only refuses on a **blocked** verdict, never on **unknown** | An unreadable project, or one with no routes directory, is the *absence* of evidence. Pokkum has blocked every real project this way once before and will not do it again |
+| `--allow-server-code-in-static` overrides it | The scan is a heuristic over source text. If it is ever wrong, nobody should have to wait for a Pokkum release to ship |
+
+The rules it applies are SvelteKit's own — see the table under `pokkum init` for the full list. Setting `build.allow_server_code_in_static: true` in `.pokkum.yaml` is equivalent to passing the flag on every build, and can be turned back off in a named profile.
 
 ---
 
@@ -304,6 +390,42 @@ Subcommand group to inspect and validate project configuration files (`.pokkum.y
 | `--profile`, `-P` | (none) | (`view` only) Profile to resolve and display. |
 | `--dir`, `-d` | `.` | Path to SvelteKit project directory. |
 | `--output` | `text` | Output serialization format (`text` or `json`). |
+
+---
+
+### `pokkum deploy --check`
+
+Validates the deploy configuration and **deploys nothing**. It resolves the request through `core.ResolveDeployRequest` — the same call a real deploy makes — so agreeing with `--check` means the same resolution will succeed.
+
+```
+=== pokkum deploy --check ===
+Target: dokploy (method api)
+
+  ✓ configuration  target dokploy, method api, resolved by the same code `pokkum deploy` runs
+  ✓ credential     POKKUM_DEPLOY_TOKEN is set (18 characters) — presence only; Pokkum does not ask dokploy whether it is accepted
+  ? application    "abc123" is set and syntactically usable, but Pokkum cannot confirm it exists
+  ? endpoint       panel.example.com:443 accepted a TCP connection — reachability only
+
+✓ Nothing is wrong with what Pokkum can check, but 2 item(s) could not be verified.
+```
+
+**Three outcomes per item, and `?` is not `✓`.** `unverified` means Pokkum could not test that item; it is reported distinctly and never fails the command, because treating "could not determine" as an error would make `--check` unusable for the configurations it exists to help with. Only a `✗` exits non-zero.
+
+What each item does and does not prove:
+
+| Item | Verifies | Does **not** verify |
+|---|---|---|
+| configuration | The full resolution a deploy performs: target, method, endpoint, `endpoint_env`, token presence, `application`, `update_image` support, registry credential pairing | — |
+| credential | The named environment variable is set, and its length | That the platform accepts it |
+| application | It is set and syntactically usable | That it exists. Confirming that needs a read-only endpoint, and every Dokploy endpoint whose contract Pokkum has verified against Dokploy's source **mutates** (`application.deploy` queues a rollout, `application.saveDockerProvider` overwrites credentials). A check must not deploy |
+| endpoint | The host resolves and accepts a TCP connection | That anything is listening on the right path, or that the credential works. No request is sent — which is also what makes it safe for a webhook endpoint whose URL path *is* the secret |
+
+No credential, token or webhook URL ever appears in the output; the endpoint is reported as `host:port` only.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--check` | `false` | Validate the deploy configuration and report what would happen, without deploying. |
+| `--offline` | `false` | With `--check`, skip the endpoint reachability probe and validate configuration only. |
 
 ---
 
@@ -396,6 +518,33 @@ Without `--check`, `pokkum upgrade` refuses to install anything if it cannot ver
 
 ---
 
+## 14b. `pokkum guide [topic]`
+
+Prints the operating manual for driving Pokkum from inside a SvelteKit project. Unlike this document, it is compiled into the binary, so it always describes the version that printed it — the skew this closes is a Homebrew-installed release whose bundled README predates a whole command group.
+
+Its audience is explicitly someone (or some agent) working in a *project* rather than in this repository, who cannot read `Vocabulary.md` at all. It therefore restates configuration and flag material found here on purpose. `cmd/pokkum/guide_test.go` keeps that duplication honest: every `yaml:` field of `ports.ProjectConfig`/`ports.BuildProfile` must appear in the guide's `config` section (70 fields at time of writing), and every command in the cobra tree must be named in it. `cmd/pokkum/flagmentions_test.go` additionally rejects any flag mention in the guide that does not correspond to a real, registered flag.
+
+No flags. `pokkum guide` prints every section; `pokkum guide <topic>` prints one; `pokkum guide topics` lists them. An unknown topic is a usage error naming the valid set.
+
+| Topic | Contents |
+|---|---|
+| `overview` | What Pokkum is operationally, what enters the image, the command list |
+| `quickstart` | The path from nothing to a running image, each step ending at a check |
+| `invariants` | The five properties that constrain application code before Pokkum runs |
+| `config` | The complete `.pokkum.yaml` field reference, precedence, and the runtime/strategy/base composition rule |
+| `strategy` | `static` vs `layered`, and exactly what the viability scan does and does not prove |
+| `base` | Base image presets and custom references |
+| `output` | Output modes, and what each one loses |
+| `deploy` | Kubernetes, Dokploy, SwiftWave and vanilla registry-pull recipes |
+| `env` | Environment variables, CLI-side and runtime |
+| `verify` | Proving what you built, including `explain why` and running as the real UID |
+| `extras` | Extra project files, and the third-party-binary case Pokkum does not cover |
+| `escape-hatches` | What each bypass flag actually turns off |
+| `failures` | Error text → meaning → next command |
+| `non-goals` | What Pokkum will not do, so nobody hunts for the flag |
+
+---
+
 ## 15. `pokkum version`
 
 No flags.
@@ -454,6 +603,7 @@ These configure the image's *runtime* behavior inside the container (read by `/p
 | `POKKUM_REQUIRED_ENV` | (none) | Comma-separated list of required environment variable names that must be present and non-empty at container boot; supervisor fails fast if any are missing. |
 | `POKKUM_PRERENDERED_DIR` | (none) | Path (in the image) of the mounted prerendered pages tree. Set by the packager to `/app/prerendered` for `--strategy=layered`; the patched adapter-node handler serves prerendered pages from here. |
 | `POKKUM_CLIENT_DIR` | (none) | Path (in the image) of the mounted client asset tree. Set by the packager to `/app/client` for **every** `--strategy=layered` build; the patched adapter-node handler serves stylesheets, scripts and other immutable assets from here. Without it the stock handler resolves assets relative to its own directory (`/app/server/client`), which does not exist in a Pokkum image — and because adapter-node's `serve()` returns `false` for a missing directory and the middleware chain is built with `.filter(Boolean)`, the asset handler is dropped silently: the container boots, both probes pass, `/` returns `200`, and every asset `404`s. |
+| `POKKUM_DEV_MODE` | (none, i.e. off) | **Opt-in for the in-pod development loop (`pokkum dev --cluster`); never set on a production workload.** Accepts anything `strconv.ParseBool` does (`1`, `true`, `TRUE`, ...); anything else, including empty, is off. Never set by the packager — an image carries it only because an operator put it on the workload, e.g. `kubectl set env deployment/<name> POKKUM_DEV_MODE=1`. When on, two behaviours change in `pokkum-init`, and both hand real power to anyone who can already `kubectl exec` into the pod: the `pokkum-init __dev-sync` subcommand becomes callable, letting a caller overwrite the live `/app` tree from a tar on stdin; and `SIGHUP` stops the application process and starts a fresh one in its place instead of being forwarded to it. `pokkum-init` logs a `Warn`-level message naming the variable at every startup where it is set. Startup attestation is **not** disabled by it — see the interaction described in §5a. |
 | `POKKUM_ATTESTATION_DIGEST` | (none) | Expected SHA-256 root digest of the layered `/app` runtime tree (startup attestation, hardening Option C). Set by the packager at build time for `--strategy=layered`. When present, `pokkum-init` re-derives the digest from the live `/app` tree before exec and refuses to start (exit **125** — see "Supervisor Exit Codes" below) on mismatch — tamper-evidence without cluster-level readonly-rootfs. Absent ⇒ verification silently disabled (deliberate escape hatch, no log). Malformed (non-empty but not 64 lowercase hex chars) ⇒ verification also disabled, but `pokkum-init` logs a `Warn`-level message naming the variable, since this means the build pipeline failed to stamp the env correctly and the security control is silently not running. Only applies to the layered strategy. |
 | `POKKUM_STATIC_ROOTS` | `/app/client:/app/prerendered` | Colon-separated list of static roots that `pokkum-static` serves (via Content-Encoding/Range/ETag) for `--strategy=static` images. Set by the packager at build time. Response headers worth knowing: `Accept-Ranges: bytes` is always advertised (Range handling was already implemented but never announced, so clients that check first fell back to whole-file requests), and `Vary: Accept-Encoding` is set on **every** response for a precompressible file type, not only when a compressed sidecar was actually chosen — otherwise a shared cache could hand the identity copy to a client that would have taken the Brotli one, and the ETag differs between them, so the client gets a full 200 instead of a 304. |
 | `POKKUM_STATIC_FALLBACK` | (none) | **Opt-in SPA fallback** for `--strategy=static`: an in-image file path (e.g. `/app/client/200.html`) that `pokkum-static` serves with `200` for any unmatched `GET`/`HEAD` route (same ETag/Range/Content-Encoding negotiation as any served file). Set by the packager only when the source project configures an `@sveltejs/adapter-static` `fallback` page that was actually emitted into the client staging. Absent/empty (the default) means unmatched routes keep returning a plain `404`; the server logs a one-per-process `Warn` on the first such `404` pointing at this doc. Mirrors the `-fallback` flag on the `pokkum-static` binary. |
@@ -470,6 +620,37 @@ Unlike the table above, these are read directly by the bundled `@sveltejs/adapte
 | `ADDRESS_HEADER` | (none) | Proxy header adapter-node trusts for the real client IP (e.g. `x-forwarded-for`). Without it, `event.getClientAddress()` reports the proxy's own address for every request. |
 | `XFF_DEPTH` | `1` | Number of trusted proxy hops adapter-node counts back from when parsing `ADDRESS_HEADER`. |
 | `BODY_SIZE_LIMIT` | `512K` | Request body size cap, in adapter-node's own size-string format (e.g. `512K`, `10M`, `Infinity` to disable). |
+
+---
+
+## 18c. Filesystem Contract (Runtime)
+
+Two properties of every image Pokkum produces. Neither is configurable, and both shape how an application must be written — they are stated here because previously they existed only as comments in `internal/adapters/packager/layer.go`, and were discovered as production failures rather than read.
+
+| Property | Detail |
+|---|---|
+| The application tree is read-only | Files ship at mode `0555` and directories at `0555`, unconditionally, in every image and every strategy. There is no flag or config key to change it. Any runtime write to a project-relative path fails. Writes must target the OS temporary directory. |
+| Only adapter output ships | Nothing else from the project directory enters the image. There is no implicit `COPY .`. A project reading templates, fonts or seed data off disk must place them inside the adapter's output directory during its own build — see `pokkum guide extras`. |
+
+**Verify as the real runtime user.** `docker exec` defaults to root, and root bypasses the `0555` bits via `DAC_OVERRIDE` — so a command that succeeds under `docker exec` proves nothing about the non-root process actually serving traffic. Use `docker run -u 65532 …` instead. Use `pokkum explain why <image> <path>` to answer "did this file make it into the image" without starting a container at all.
+
+---
+
+## 18d. CLI Exit Codes (`pokkum`)
+
+These are the codes the **CLI** returns on the machine you run it on. They are a different set from §19's, which are returned by `pokkum-init` as PID 1 *inside* a running container — the two never overlap and are never interchangeable. If you are reading an exit status off a crash-looping pod, you want §19; if you are gating a CI step on a `pokkum` command, you want this table.
+
+| Exit code | Meaning | Source |
+|---|---|---|
+| `0` | The command succeeded. | normal return |
+| `1` | The command failed. This is the general failure path every command shares — a build error, a refused deploy, a red `doctor`, an invalid config. | `os.Exit(1)` in `main.go` |
+| `1` | For `pokkum verify` specifically: verification **ran and produced a negative verdict** — a rebuild comparison mismatch, or a comparison that could not be completed. The image was reachable and checkable; it did not pass. | `exitFunc(1)` in `verify.go` |
+| `2` | For `pokkum verify` specifically: verification **could not be performed at all** — an unreadable `--sigstore-trusted-root`, an unresolvable Sigstore trust root, unresolvable provenance, or signature material that could not be characterized. This is deliberately not `1`: "checked and failed" and "could not check" must never share a code, or a CI gate cannot tell a bad image from a broken verifier. | `exitFunc(2)` in `verify.go` |
+| `<N>` | For `pokkum apply` only: when the underlying `kubectl apply` fails, its exit code is propagated verbatim rather than collapsed to `1`, so an operator sees kubectl's own status. | `os.Exit(exitErr.ExitCode())` in `apply.go` |
+
+**Cobra usage errors also exit `1`, not `2`.** An unknown command or an invalid flag value goes through the same `main.go` path as a runtime failure, so the exit status alone does not distinguish "you typed it wrong" from "it ran and failed". Gate on the error output or `--output json`'s error code, not on the status, when that distinction matters.
+
+`cmd/pokkum/exitcodes_test.go` asserts every literal exit code reachable in `cmd/pokkum` appears in this table, so a newly introduced code cannot ship undocumented.
 
 ---
 

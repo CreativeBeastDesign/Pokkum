@@ -47,7 +47,7 @@ items:
   - id: cluster-dev-loop
     title: "pokkum dev --cluster"
     stage: v1.1
-    status: open
+    status: shipped
     kind: dx
     tier: moat
     summary: "Watch, rebuild, and sync app server and client output directly into a running pod via the Kubernetes API, without an image build or registry round-trip."
@@ -63,7 +63,51 @@ items:
       Both external reviews independently flagged the dev loop as the weakest part of the day-to-day
       experience, and this is the option that actually answers that, as opposed to `--no-container`
       which only removes the container-build tax.
-    flags: ["--cluster", "--namespace", "--selector"]
+    decision: |
+      Built on `kubectl` rather than on a linked Kubernetes client, matching the existing
+      cluster-facing code in `cmd/pokkum` (`newKubectlClusterInspector`) and keeping the
+      zero-dependency posture: shelling out inherits the developer's kubeconfig, current context,
+      exec credential plugins and RBAC for free, which is exactly what a dev loop pointed at
+      someone's own cluster should do.
+
+      The hard constraint that shaped everything else is that a Pokkum image is distroless. It has
+      no shell and no `tar`, so `kubectl cp` — which shells out to `tar` *inside* the container* —
+      cannot work against it, and there is nothing in the image able to kill and re-exec the server
+      process. Both halves are therefore provided by `pokkum-init`, the one executable already in
+      every layered image: a hidden `pokkum-init __dev-sync` subcommand extracts a tar from stdin
+      into an allowlist of `--root` directories, and SIGHUP is reinterpreted as "stop the
+      application and start a fresh one" instead of being relayed to the child. This is the same
+      shape Tilt's `live_update` needs a restart wrapper for; Pokkum already ships one.
+
+      Both behaviours are gated on `POKKUM_DEV_MODE`, off by default and never set by the packager,
+      because between them they let anyone who can already `kubectl exec` into the pod overwrite
+      `/app` and restart the server. `pokkum dev --cluster` reads the target container's env and
+      refuses up front when it is unset, rather than building and streaming a whole project to earn
+      a rejection at the far end.
+
+      Two integrity properties are deliberate rather than incidental. The extractor prints a JSON
+      summary and the sending side refuses any result where the counts do not match what it sent,
+      or where a requested restart did not happen — a tar that streamed perfectly into a container
+      that wrote none of it is otherwise indistinguishable from a working sync. And containment is
+      enforced twice: lexically, on whole path segments against the `--root` allowlist, and again
+      through `os.Root`, which refuses to traverse a symlink out of the root — the case a lexical
+      check cannot see, and the one that matters because the tree being written into is one a
+      previous sync may already have modified.
+    flags: ["--cluster", "--namespace", "--selector", "--container"]
+    impl:
+      - cmd/pokkum/dev_cluster.go
+      - internal/ports/clusterdev.go
+      - internal/adapters/clusterdev/syncer.go
+      - internal/adapters/clusterdev/tar.go
+      - supervisor/cmd/pokkum-init/devsync.go
+      - supervisor/cmd/pokkum-init/supervisor.go
+    limitations:
+      - "Requires `POKKUM_DEV_MODE=1` on the target container. It is off by default, never set by the packager, and must never be set on a production workload: it makes the in-pod `__dev-sync` subcommand callable and turns SIGHUP into a process restart, both of which hand real power to anyone who can already exec into the pod."
+      - "Layered images only. An `exe` or `static` image has no `/app/server`, and the extractor refuses to create a `--root` that does not exist rather than materialising a tree that would look synced and serve nothing."
+      - "Deletions are not propagated: a file removed from the local build stays in the pod until the pod is replaced. Only `/app/server` and `/app/client` are synced — a change to production dependencies, prerendered pages, vendor or native trees still needs a real image build."
+      - "Extraction restores the owner write bit on the `/app` directories it writes into (the packager ships them `0555`) and leaves synced entries at `0755`/`0644`, so a dev-synced pod is no longer byte-identical to its image. The container user must own the `/app` tree; if it does not, the sync fails rather than half-completing."
+      - "If the target container sets `POKKUM_ATTESTATION_DIGEST`, the pod will fail its *next* start with exit 125, because startup attestation re-derives the digest of the very `/app` tree this loop rewrote. The running pod is unaffected — attestation runs once, at supervisor startup — but an eviction or reschedule turns into a crash loop. A `Warn` says so when the target has it set."
+      - "A multi-container pod (e.g. with `--with-otel-sidecar`) requires `--container`. There is deliberately no first-container heuristic: it would be a coin flip between the application and the collector."
     related: ["no-container-dev-mode", "oci-layout-dev-output"]
 
   - id: oci-layout-dev-output
@@ -175,6 +219,272 @@ items:
     flags: ["--defaults"]
     impl:
       - cmd/pokkum/init.go
+
+  - id: static-viability-analyzer
+    title: "Static-viability analysis (does this project need a server?)"
+    stage: v1.1
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "Scans a project's routes for server-side code and reports what rules a static build out, feeding `pokkum init`'s strategy default."
+    problem: |
+      `pokkum init` offered `layered` / `static` as a free choice and validated nothing. Nothing
+      anywhere in the codebase looked at `src/routes` at all: choosing `static` on a project with
+      a `+server.ts` failed deep inside the SvelteKit build, with SvelteKit's message rather than
+      Pokkum's, long after the choice was made. Picking correctly required the user to already
+      know the answer, which is the opposite of what a setup step is for.
+    decision: |
+      Shipped as `sveltekitutils.AnalyzeStaticViability`, a DISQUALIFIER scan. It answers "does
+      anything here rule static out?" soundly and does not attempt the converse, which is not
+      decidable from source: a load function hitting a runtime-only API, or a dynamic route with
+      no inbound links for the crawler, passes the scan and fails the build. The verdict wording
+      and `pokkum init`'s output both say so explicitly.
+
+      Blockers: `+server.*`, `+page.server.*` and `+layout.server.*` (each retired by an
+      `export const prerender = true` in the same file), form actions (`export const actions`,
+      unconditional — a POST handler cannot be prerendered, so a `prerender = true` alongside it
+      does not silence the finding), `*.remote.ts|js` using `query()`/`form()`/`command()`, and
+      an explicit `export const prerender = false` anywhere. A remote module using only
+      `prerender()` is build-time data and is not a blocker. `hooks.server.*` is reported as a
+      caveat, not a blocker: server hooks do run during prerendering, so calling them
+      disqualifying would wrongly reject projects that build today.
+
+      Three verdicts, not two. `unknown` (could not scan) is distinct from `viable` (scanned,
+      found nothing) and carries the reason, so an unreadable or non-SvelteKit directory can
+      never produce the reassuring answer — the fail-open shape logged three times on
+      2026-08-21. `FilesScanned` is reported for the same reason at the other end: a walk that
+      matched nothing must not read as a clean project.
+
+      Matching is done on comment-stripped, string-blanked source via the scanner already in
+      `project.go`, never a whole-file regex. Both halves of that have burned this repo before
+      (2026-08-16 `fallback:` in a comment, 2026-08-17 `sveltekit(` in a string literal), and a
+      commented-out `export const prerender = false` silently forcing `layered` would be the same
+      bug a third time.
+    impl:
+      - internal/adapters/sveltekitutils/staticviability.go
+      - internal/adapters/sveltekitutils/staticviability_test.go
+      - cmd/pokkum/init_analysis.go
+    limitations:
+      - "A sound negative only. `viable` means nothing found rules static out, never that a static build will succeed."
+      - "Dynamic routes are reported as caveats, not blockers: a route without an `entries()` export is prerendered only if the crawler reaches it, and whether it is linked cannot be determined from source. The caveat is suppressed when the project sets `prerender.handleUnseenRoutes` to `warn` or `ignore`."
+      - "Advisory only. `pokkum build` does not yet refuse `strategy: static` on a project this scan calls blocked — see item static-strategy-preflight."
+    related: ["workspace-init-wizard", "init-runtime-detection", "static-strategy-preflight"]
+
+  - id: init-runtime-detection
+    title: "pokkum init detects bun vs node, and the base image that carries it"
+    stage: v1.1
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "`runtime: bun|node` is inferred from the project's own toolchain, and drags the paired base preset along so the two cannot disagree."
+    problem: |
+      `runtime` is a real config field and a real `--runtime` flag, but `ports.InitConfigOptions`
+      had no `Runtime` member at all, so `pokkum init` could not write it under any circumstances.
+      A Node project got a Bun image by silence, and the operator had to discover the flag and
+      hand-edit `.pokkum.yaml` afterwards.
+
+      Worse, the field does not stand alone. core rejects `runtime: node` outside
+      `strategy: layered`, and on any base preset that ships no Node binary — the runtime IS base
+      image content for node. Those are three fields that must compose, and
+      `pokkum config validate` checks fields, not their composition. A generator emitting them
+      independently would produce a config that validates and then refuses to build: the exact
+      2026-08-19 `init-generates-invalid-config` shape, one field wider.
+    decision: |
+      Shipped as `sveltekitutils.DetectAppRuntime`, reading three tiers of evidence in a fixed
+      precedence: `packageManager` in package.json (explicit and singular), then lockfiles
+      (`bun.lock`/`bun.lockb` vs `package-lock.json`/`pnpm-lock.yaml`/`yarn.lock`), then
+      `engines`. Contradictory evidence inside a tier returns NO opinion with a `Conflict`
+      reason rather than picking a side; the caller keeps its own default and says why.
+
+      Explicitly a preference signal, not a compatibility verdict — nothing here proves a project
+      cannot run under the other runtime, and nothing refuses a build over it.
+
+      The composition is enforced in `config.GenerateDefault`, the one place that picks all three
+      values: `runtime: node` upgrades the base to `distroless-node`, and is dropped rather than
+      emitted next to a non-layered strategy. `pokkum init`'s prompt does not offer the runtime
+      question at all when the strategy is `static`, since a static image ships no JavaScript
+      runtime and every answer would be meaningless or invalid.
+
+      Guarded by a test that walks EVERY combination of strategy, runtime, base preset and local
+      profile the generator can emit and asserts each is accepted by both `config validate`'s
+      per-field checks and core's cross-field `Validate()`. Reverting the composition clamp turns
+      six of those combinations red.
+    impl:
+      - internal/adapters/sveltekitutils/runtimedetect.go
+      - internal/adapters/config/config.go
+      - internal/ports/config.go
+      - cmd/pokkum/init.go
+    related: ["static-viability-analyzer", "init-generates-invalid-config", "workspace-init-wizard"]
+
+  - id: init-base-image-recommendations
+    title: "pokkum init explains the base image presets instead of listing them"
+    stage: v1.1
+    status: shipped
+    kind: dx
+    tier: polish
+    summary: "Each preset is shown with a one-line reason and the detected default marked, rather than as a bare three-way choice."
+    decision: |
+      The base-image prompt printed three preset names and nothing else, which asks the operator
+      to already know the difference between `distroless` and `chainguard` — and gives no hint
+      that `distroless-node` is required for `runtime: node` and pointless otherwise. Each preset
+      now carries a one-line rationale, and the default derived from the runtime detection is
+      marked so the recommended answer is visible without reading it off a separate line.
+
+      The offered list is built from the `ports` preset constants rather than written out in the
+      prompt, which is what stops the 2026-08-19 defect recurring: that prompt offered
+      `chainguard-static`, an unimplemented roadmap item, because the list was hand-maintained.
+    impl:
+      - cmd/pokkum/init_analysis.go
+      - cmd/pokkum/init.go
+    related: ["init-runtime-detection", "init-generates-invalid-config"]
+
+  - id: deploy-check
+    title: "pokkum deploy --check"
+    stage: v1.1
+    status: shipped
+    kind: dx
+    tier: foundation
+    summary: "Validates the deploy configuration through the same resolution a real deploy uses, and deploys nothing."
+    problem: |
+      Every `deploy:` answer was unverifiable until the moment it mattered. A wrong endpoint, an
+      unset `POKKUM_DEPLOY_TOKEN` or a missing `application` surfaced as a failed deploy at the end
+      of a build, and `pokkum config validate` could not help: it checks field shapes, not the
+      cross-field resolution the deploy performs.
+    decision: |
+      Shipped as step 1 of [the deployment plan](item:init-deployment-section). It calls
+      `core.ResolveDeployRequest` — the exact call `executeDeploy` makes — rather than
+      re-implementing the rules. That is the whole design constraint: this repo has already shipped
+      a validator that disagreed with its consumer (2026-09-01, `config validate` reporting a
+      config valid that `pokkum deploy` refused), and a `--check` that could do the same would be
+      worse than none, since its entire promise is that agreeing with it means the deploy resolves.
+      `TestDeployCheck_AgreesWithTheResolutionItClaimsToPredict` asserts that biconditional
+      directly over configs on both sides of every rule the resolver applies.
+
+      Three outcomes per item, not two. `unverified` is distinct from `ok` and never fails the
+      command: Pokkum will not claim to have confirmed something it did not test, and will not
+      treat its own inability to check as the user's error.
+
+      What is NOT verified, and why, is stated in the output rather than papered over. The
+      application id is unconfirmed because every Dokploy endpoint whose contract this repo has
+      verified against Dokploy's own source mutates — `application.deploy` queues a rollout,
+      `application.saveDockerProvider` overwrites credentials — and a check must not deploy.
+      Guessing at an unverified read-only endpoint to make the line say "ok" would be a fabricated
+      confirmation, which is the shape of the 2026-08-21 `pokkum scan` incident.
+
+      The endpoint probe is a bare TCP dial to host:port, never an HTTP request. That is what makes
+      it safe for a SwiftWave webhook endpoint whose URL PATH is the secret, and it is why the
+      output reports reachability only. No credential, token or URL is ever printed.
+    flags: ["--check", "--offline"]
+    impl:
+      - cmd/pokkum/deploy_check.go
+      - cmd/pokkum/deploy_check_test.go
+      - cmd/pokkum/deploy.go
+    limitations:
+      - "Cannot confirm the credential is accepted or the application exists; both need a read-only endpoint with a verified contract, and neither platform offers one Pokkum has verified."
+      - "The endpoint probe proves the host accepts a connection, not that the panel is running at that path."
+    related: ["init-deployment-section", "paas-deploy-targets"]
+
+  - id: init-deployment-section
+    title: "A deployment section in pokkum init, and what pokkum deploy would need to earn it"
+    stage: v1.2
+    status: awaiting-decision
+    kind: feature
+    tier: polish
+    summary: "Whether init should configure `deploy:` at all. Step 1 of the recommendation (`deploy --check`) has shipped; the remaining question is `pokkum deploy init`."
+    problem: |
+      `pokkum init` writes every other section of `.pokkum.yaml` and never touches `deploy:`, so the
+      one step that gets an image in front of users is the one left to hand-editing against
+      Vocabulary.md.
+
+      `deploy:` is not shaped like the fields init already writes. It needs secrets (`token_env`
+      names a credential; a webhook `endpoint` contains its secret in the URL), it needs facts only
+      the platform has (`application` is a platform-side id), and its answers cannot be validated
+      offline.
+
+      **`application` is what decides this.** It cannot be typed from memory and cannot be checked
+      without calling the platform, so any prompt in `pokkum init` — which runs before the user has
+      a reason to have set `POKKUM_DEPLOY_TOKEN` — structurally cannot obtain it. Every option that
+      writes a `deploy:` block without it writes a block that does not work.
+    options:
+      - title: "A. Prompt in init for the non-secret half"
+        description: "Ask target/method/endpoint; never prompt for the token; leave `application` empty with a comment."
+        tradeoffs: "Smallest diff, but writes a block that is incomplete by construction — the user's next `pokkum deploy` fails on the missing `application`, which is the 2026-08-19 'init recommended a command it had guaranteed could not work' shape in a new place."
+      - title: "B. A dedicated `pokkum deploy init`"
+        description: "Runs after the credential exists: reads the token, lists the platform's applications, lets the user pick one, writes a complete block verified by --check."
+        tradeoffs: "The only option that can get `application` right. Costs a new subcommand and a list-applications call per target; SwiftWave's webhook method has no equivalent and would stay manual."
+      - title: "C. Diagnostics only"
+        description: "Leave configuration to the file; spend the effort on `pokkum deploy --check`."
+        tradeoffs: "Zero risk, useful in CI regardless of how the config was authored — but leaves first-time setup unaddressed."
+    recommendation: |
+      B, on top of C. **C has now shipped** as [pokkum deploy --check](item:deploy-check), which
+      also built the resolution-reuse machinery B needs.
+
+      What remains is `pokkum deploy init`: the same resolution, plus a list-applications call, plus
+      an interactive picker, writing the block only once `--check` passes against it. `pokkum init`
+      gains one closing line pointing at it and writes no `deploy:` key itself.
+
+      Worth reassessing before building. `--check` may have closed enough of the gap on its own,
+      and the honest test is whether anyone still gets `application` wrong now that a single
+      command tells them their config resolves.
+    limitations:
+      - "A `pokkum deploy init` picker would be Dokploy-only; SwiftWave's webhook method has no application-listing equivalent."
+    related: ["deploy-check", "workspace-init-wizard", "paas-deploy-targets"]
+
+  - id: static-strategy-preflight
+    title: "pokkum build preflight for strategy: static"
+    stage: v1.1
+    status: shipped
+    kind: hardening
+    tier: foundation
+    summary: "`pokkum build --strategy=static` refuses before it starts when the project has code SvelteKit cannot prerender, listing every offending file."
+    problem: |
+      [Static-viability analysis](item:static-viability-analyzer) shipped as advice only, reached
+      from `pokkum init`. A project that adds a `+server.ts` with a POST handler a month after
+      init still discovered the incompatibility from SvelteKit's own error, minutes into a build,
+      with no mention of Pokkum or the strategy setting that caused it.
+    decision: |
+      Shipped the recommended option: refuse by default, with `--allow-server-code-in-static`
+      (and `build.allow_server_code_in_static`) as the escape hatch. `ports.StaticViabilityAnalyzer`
+      is injected at the composition root, wrapping `sveltekitutils` in a concrete
+      `internal/adapters/staticviability` adapter, since `internal/core` must not import an
+      adapter — the shape `ports.EnvBakeDetector` and `ports.RouteFilter` already use.
+
+      **Building this found that the classifier it depends on was wrong**, which is the part worth
+      remembering. Run over the repo's own committed fixtures, it called
+      `testdata/fixtures/sveltekit-basic` blocked — a fixture `tests/integration/static_e2e_test.go`
+      builds with `StrategyStatic`. Reading `@sveltejs/kit`'s source rather than trusting the
+      classification showed two false positives (every `+server.*`, and every server `load`), both
+      fixed before the gate landed on top. A hard gate over an over-aggressive classifier would
+      have been Lessons.md's 2026-08-17 entry a second time, as a build failure rather than advice.
+
+      Three limits, each deliberate:
+
+      - `StrategyStatic` only; every other strategy ships a server.
+      - Refuses on a `blocked` verdict ONLY. An `unknown` verdict — unreadable project, no routes
+        directory, a layout the scan does not understand — is the absence of evidence and never
+        fails a build. This is exactly what 2026-08-17 got wrong.
+      - Overridable, because the scan is a heuristic over source text and nobody should wait for a
+        Pokkum release to ship around a bug in it.
+
+      The nil-analyzer skip in core is a fail-open that exists for the ~16 test callers
+      constructing `core.Deps` directly. `cmd/pokkum`'s
+      `TestCompositionRootWiresTheStaticViabilityGate` asserts the real composition root always
+      supplies one, because nothing in `internal/core` can see its own composition root — deleting
+      that one line would otherwise disable the gate for every real build with the whole suite
+      still green.
+    flags: ["--allow-server-code-in-static"]
+    impl:
+      - internal/ports/staticviability.go
+      - internal/adapters/staticviability/staticviability.go
+      - internal/core/pipeline.go
+      - internal/core/staticgate_test.go
+      - cmd/pokkum/build.go
+      - cmd/pokkum/staticgate_wiring_test.go
+    limitations:
+      - "Source-text heuristic, not a SvelteKit build. It cannot see a handler assembled dynamically, re-exported from another module, or generated at build time."
+      - "Does not implement SvelteKit's root `+server.js` non-HTML-response rule (prerender.js:539), which depends on the response value rather than on the file's shape."
+      - "Dynamic route segments are still not reported; adapter-static cannot crawl an unlinked `[slug]`, and detecting that needs link analysis rather than a per-file scan."
+    related: ["static-viability-analyzer", "workspace-init-wizard"]
 
   - id: config-management
     title: "pokkum config view / validate, build profiles"
@@ -301,21 +611,93 @@ items:
 
   - id: json-output-envelope
     title: "Standardized machine-readable output (--output=json)"
+    stage: v1.2
     status: shipped
     kind: feature
     tier: foundation
-    summary: "A global `--output=json` flag emits a versioned JSON envelope across every command, instead of callers parsing human-readable stdout."
+    summary: "`--output=json` emits a machine-readable envelope on most commands — but not on `build` or `dev`, where it is accepted and silently ignored."
+    problem: |
+      `--output` is registered as a *persistent* flag on the root command
+      (`cmd/pokkum/main.go`), so cobra accepts it on every subcommand and `ParseOutputFormat`
+      validates the value centrally. Ten commands then read it (`init`, `doctor`, `config`,
+      `scan`, `verify`, `explain`, `adopt`, `history`, `rollback`, `repro doctor`).
+
+      `build` and `dev` do not. Neither `cmd/pokkum/build.go` nor `cmd/pokkum/dev.go` ever
+      consults the resolved format, so `pokkum build --output json` exits 0 having printed
+      human-readable text — the flag is accepted, validated, and dropped. That is worse than
+      rejecting it: a caller has no signal that it asked for something it did not get.
+
+      This item was previously recorded as `status: shipped` with `impl: cmd/pokkum/build.go`,
+      which is the single file in the CLI that does not implement it. Corrected here rather
+      than left as a green row.
+    recommendation: |
+      Wire the resolved `ports.OutputFormat` through `build` and `dev` the way the other ten
+      commands already do. `build`'s envelope is the load-bearing one: digest, tag set,
+      per-platform manifest digests, output mode, layer sizes, and any warnings — the values a
+      caller would otherwise scrape out of logfmt.
+
+      Prerequisite for [pokkum mcp](item:mcp-server), whose `build` tool would otherwise be
+      text-scraping its own CLI, and for anything that branches on a build result in CI.
     flags: ["--output"]
     impl:
+      - cmd/pokkum/main.go
       - cmd/pokkum/build.go
+      - cmd/pokkum/dev.go
+    decision: |
+      `build` now emits a versioned envelope carrying the ref, digest, tags, output mode,
+      platforms and deploy result, and routes every error return through a shared helper so a
+      failure is an envelope too. In JSON mode `core.Build` is handed a nil stdout — the
+      mechanism `k8s.go` already used — so the pipeline's own raw ref write does not precede the
+      envelope. Text output is unchanged.
+
+      `dev` rejects `--output json` rather than emitting one. It streams container logs, an
+      interactive `--debug` shell, or an unbounded `--cluster` watch loop, so there is no point
+      at which a single envelope could be emitted, and a startup envelope would be interleaved
+      with and indistinguishable from what follows. Rejecting is the honest option; silently
+      ignoring was the bug.
+    limitations:
+      - "`dev` rejects `--output json` rather than supporting it — deliberate, since it has no single completion point to emit an envelope from."
+      - "`build`'s envelope carries the published ref's own digest, not per-platform manifest digests, and no warnings array: neither exists on `core.BuildResult`, and inventing them would have meant a pipeline change. Documented as absent rather than faked."
+      - "`doctor`'s failure path still drops its per-check array — see item doctor-json-drops-per-check-detail."
+    related: ["mcp-server", "exit-code-reference", "agent-guide-command"]
 
   - id: pokkum-yaml-json-schema
     title: "JSON Schema for .pokkum.yaml"
-    stage: backlog
-    status: open
+    stage: v1.2
+    status: shipped
     kind: dx
     tier: polish
-    summary: "Publish a JSON Schema for `.pokkum.yaml` so editors can offer inline validation and completion instead of only failing at `pokkum config validate` time."
+    summary: "`schema/pokkum.schema.json` is generated by reflection over the real config structs, so editors get inline validation and completion without a hand-written schema that could drift."
+    decision: |
+      Generated by `scripts/gen-schema` from `ports.ProjectConfig`/`ports.BuildProfile` rather
+      than authored, because a hand-written schema is a second description of the same types and
+      would drift from the parser. `make schema` regenerates; `make check-schema-freshness`
+      asserts regeneration is a no-op and is wired into `make verify` beside the docs guard.
+
+      Enum values are read from the constants the code actually validates against — `strategy`
+      from `ports/compiler.go`, `runtime` from `ports/runtime.go`, `fail_on_cve` from
+      `ports/scanner.go`, `sbom` from `ports/sbom.go`, `cache.verify_mode` from
+      `RemoteCacheVerifyMode.Valid`, `deploy` from `ports/deploy.go`, and the profile-only
+      `output` from core's `OutputMode`.
+
+      Two judgement calls: `base` is deliberately not an enum, since
+      `core.ParseBaseImageSpec` accepts the three presets *or* an arbitrary image reference and
+      an enum would reject every valid custom base; and `additionalProperties: false` is emitted
+      only because the loader really does call `KnownFields(true)`, with map-typed fields
+      (`labels`/`annotations`/`env`, `profiles`) getting a value schema instead since their keys
+      are open-ended by design.
+
+      Validated without adding a dependency: the tests implement only the keywords the generator
+      emits, against the values `yaml.v3` already decodes.
+    impl:
+      - scripts/gen-schema
+      - schema/pokkum.schema.json
+      - scripts/check-schema-freshness.sh
+      - Makefile
+    limitations:
+      - "Cross-field rules are not encoded: the deploy target/method matrix and the runtime/strategy/base composition. Both need JSON Schema conditionals for constraints `pokkum config validate` already enforces; the field descriptions say the schema does not check them rather than implying it does."
+      - "The schema is not reachable from the CLI — see item config-schema-subcommand."
+    related: ["agent-guide-command", "config-management", "config-schema-subcommand"]
 
   - id: config-view-provenance
     title: "pokkum config view value provenance"
@@ -327,11 +709,49 @@ items:
 
   - id: exit-code-reference
     title: "Documented CLI exit-code table"
-    stage: backlog
-    status: open
+    stage: v1.2
+    status: shipped
     kind: dx
     tier: polish
-    summary: "Publish a stable reference table for the CLI's exit codes — 125 and 126 already carry specific, undocumented meanings."
+    summary: "The CLI's exit codes are now a published table in both `Vocabulary.md` and `pokkum guide exit-codes`, guarded so a new code cannot ship undocumented."
+    problem: |
+      This item's own summary was wrong on both counts, which is worth recording rather than
+      quietly editing away: `125` and `126` are **not** CLI codes and were **not** undocumented.
+      They belong to `pokkum-init` — the supervisor running as PID 1 inside the container — and
+      `Vocabulary.md` §19 has documented them, and five others, in full for some time.
+
+      The genuinely undocumented set was the CLI's own, and it contained a real distinction
+      nobody could use. `pokkum verify` exits `2` when verification **could not be performed**
+      (unreadable trust root, unresolvable Sigstore root, unresolvable provenance, signature
+      material it could not characterize) and `1` when verification **ran and produced a
+      negative verdict**. That is precisely the "found nothing" versus "could not check"
+      separation `mem:self_review_checklist` row 52 exists to enforce — implemented correctly,
+      and documented nowhere, so every caller gating on `!= 0` collapsed a broken verifier and
+      a tampered image into the same outcome with nothing to warn them.
+    decision: |
+      `Vocabulary.md` §18d publishes the CLI table, deliberately adjacent to §19's supervisor
+      table and opening by saying the two sets are unrelated — that confusion is the reason
+      this item's own summary was wrong. `pokkum guide exit-codes` carries the same content for
+      readers who do not have this repository, and states the `1`/`2` split as the reason to
+      gate CI on the specific code rather than on non-zero.
+
+      Two facts documented that were previously discoverable only from source: cobra usage
+      errors exit `1`, not `2`, so exit status alone cannot distinguish a mistyped command from
+      a failed run; and `pokkum apply` propagates `kubectl`'s own exit code verbatim rather
+      than collapsing it.
+
+      `cmd/pokkum/exitcodes_test.go` AST-scans `cmd/pokkum` for literal `os.Exit`/`exitFunc`
+      arguments and requires each to appear in both places, with a separate guard for the
+      kubectl passthrough that no literal scan can reach. Shown red by introducing a throwaway
+      `os.Exit(3)`, which the guard reported by file and line.
+    impl:
+      - Vocabulary.md
+      - cmd/pokkum/guide.go
+      - cmd/pokkum/exitcodes_test.go
+      - cmd/pokkum/verify.go
+    limitations:
+      - "The CLI still has only three codes. Giving categories of failure distinct codes (config vs network vs policy) would be a behaviour change, not a documentation one, and is not attempted here."
+    related: ["agent-guide-command", "json-output-envelope", "mcp-server"]
 
   - id: stable-go-library-api
     title: "Stable Go library API"
@@ -610,3 +1030,461 @@ items:
       - "A project defining both `kit.experimental` and a top-level `experimental` for vite-plugin-svelte would see the kit one win after flattening. Unusual, and preferable to dropping the config entirely."
     related: ["injection-preconditions-undocumented", "adopt-codemod"]
 
+
+  # ---------------------------------------------------------------------
+  # Agent-facing surface: using Pokkum from another project, not working on it
+  # ---------------------------------------------------------------------
+
+  - id: agent-guide-command
+    title: "pokkum guide — the operating manual, shipped inside the binary"
+    stage: v1.2
+    status: shipped
+    kind: dx
+    tier: foundation
+    summary: "A task-shaped guide the binary prints itself, so an agent driving Pokkum in someone else's SvelteKit project reads instructions that cannot be a different version from the binary it is driving."
+    problem: |
+      Everything Pokkum knows how to say is written for one of two audiences, and neither is
+      "an agent working in a project that is not this repo". `AGENTS.md`, `CLAUDE.md` and
+      `DSH.md` instruct agents working ON Pokkum. `Vocabulary.md` is an exhaustive flag
+      reference — organised by flag rather than by decision, and large enough that pasting it
+      into a context window is itself the cost. `--help` is thorough on flags and silent on the
+      packaging model.
+
+      The gap is not invocation. An agent with a shell can already run `pokkum build`. What it
+      gets wrong is everything upstream of that:
+
+      - `runtime`, `strategy` and `base` compose, and it picks them as three independent values.
+      - It assumes a Dockerfile's `COPY .` semantics, and is surprised that only the adapter's
+        `build/` output enters the image.
+      - It designs a runtime write path under `/app`, which ships mode `0555` in every Pokkum
+        image with no opt-out — a fact stated once, in a code comment
+        (`internal/adapters/packager/layer.go`). See item
+        [read-only /app](item:readonly-app-invariant-undocumented).
+      - It reaches for `--no-verify-base`, `--allow-incomplete` or a relaxed `--fail-on` to make
+        a failing command exit 0. A human reads those as "I am accepting risk"; an agent reads
+        them as "the command passes now".
+      - It hand-rolls `docker cp` + `docker exec` to answer a question `pokkum explain why`
+        already answers, because nothing told it that command exists.
+
+      And the docs it can find are frequently the wrong version. A Homebrew-installed 1.0.6
+      ships a README that does not mention `pokkum deploy` at all, while a newer binary earlier
+      on the same PATH carries the whole Dokploy/SwiftWave surface. An agent reading this
+      repository's docs for a binary it did not install is reading fiction. That version-skew
+      is the specific argument for putting the guide *in the binary* rather than in a file.
+    recommendation: |
+      `pokkum guide` writes the manual to stdout. Generated from the same flag/env registry
+      `scripts/gen-docs` already uses, and covered by the same parity guard that
+      `cmd/pokkum/flags_docs_test.go` and `envvar_docs_test.go` apply — so a new flag cannot
+      ship with the guide silently stale.
+
+      Task-shaped, not reference-shaped. Intended contents:
+
+      - **What Pokkum is, in operational terms only.** SvelteKit project in, OCI image out; what
+        does and does not enter the image. Not the reproducibility or supply-chain story — that
+        is why someone chooses Pokkum, not what an agent needs to drive it.
+      - **The invariants that shape application code before Pokkum ever runs.** `/app` is
+        read-only; only adapter output ships; writes go to the OS temp directory, never a
+        project-relative path. This is the greenfield half, and no tool call can deliver it
+        retroactively — by the time a build fails, the app is already written the wrong way.
+      - **Defaults, and how to change them.** The ten or so fields an agent actually sets, each
+        with its default, its alternatives, and the precedence chain
+        (flag > env > profile > top-level > default). Deliberately NOT the exhaustive field
+        reference — that belongs in [the JSON Schema](item:pokkum-yaml-json-schema), which an
+        agent can validate against rather than merely read, and which cannot drift from the
+        parser. The guide links to it and stops.
+      - **The composition rule stated once, loudly**: `runtime: node` requires
+        `strategy: layered` and a Node-carrying base. `strategy: static` ships no JavaScript
+        runtime, so `runtime` is meaningless beside it.
+      - **One recipe per deployment target** — Kubernetes (`resolve`/`apply`), Dokploy,
+        SwiftWave, and plain registry-pull ("vanilla") — each ending at a verification command
+        rather than at the deploy call. The SwiftWave limitation must be stated in the recipe,
+        not in a footnote: it cannot be repointed at a new image reference, so the application
+        must be pinned to a mutable tag, and `update_image` is rejected for that target. An
+        agent that learns this from a rejected API call has already burned a cycle.
+      - **The shape of "my app needs another binary" (Typst, pandoc, ffmpeg, ImageMagick).**
+        Today the honest answer is that Pokkum builds SvelteKit images and nothing else, and the
+        working pattern is a separately built image plus a hand-written manifest — `pokkum
+        resolve`/`apply` patch image references by container name, so a sidecar in the operator's
+        own manifest survives untouched while the app container's ref is updated. Negative
+        knowledge like this is the highest-value content in the guide: agents lose the most time
+        on things a tool *almost* does. Revisit when [extra project paths](item:extra-project-paths)
+        lands.
+      - **Verification recipes.** `pokkum explain why <image> <path>` answers "did my file make
+        it in" without starting a container. And when a container is started: exercise it as the
+        real runtime UID (`docker run -u 65532`), never `docker exec`, which defaults to root and
+        bypasses the `0555` bits via `DAC_OVERRIDE` — a root-shell success proves nothing about
+        the process that will actually run.
+      - **Escape hatches and when they are lies.** `--no-verify-base`, `--allow-incomplete`,
+        `--reveal-secrets`, and loosening `--fail-on`: what each actually turns off, and the
+        rule that none of them is a response to a failure whose cause is not yet understood.
+      - **Failure taxonomy**: error text → what it means → the next command. Pairs with
+        [the exit-code table](item:exit-code-reference).
+
+      Two pointers make it discoverable rather than merely present: one line in the root
+      command's long help so it appears in `pokkum --help`, and a README section giving users a
+      copy-pasteable snippet to anchor in their own `CLAUDE.md`/`AGENTS.md` — the artifact a
+      user actually needs is the snippet, not prose describing what to write.
+
+      Serving the same text as an MCP resource is what makes [pokkum mcp](item:mcp-server) a
+      thin layer rather than a second body of knowledge to keep in sync.
+    decision: |
+      Shipped as `pokkum guide` with 14 addressable topics: all sections by default,
+      `pokkum guide <topic>` for one, `pokkum guide topics` for the index, and an unknown topic
+      as a usage error naming the valid set. Registered first in the command tree so it heads
+      `pokkum --help`, whose long description now opens with `START WITH: pokkum guide`.
+
+      Authored and parity-guarded rather than generated. That reverses this item's original
+      recommendation, and the reason is that the repo's own convention for CLI documentation is
+      already authored-plus-guarded (`flags_docs_test.go`, `envvar_docs_test.go`); generation is
+      used for `docs/roadmap` output only. Three guards apply: every `yaml:` field of
+      `ports.ProjectConfig`/`ports.BuildProfile` must appear in the config section (70 today),
+      every command in the cobra tree must be named in the guide, and the pre-existing
+      `flagmentions_test.go` AST scan rejects any flag mention that is not a registered flag.
+
+      Both new guards were red on their first run rather than needing to be broken to prove
+      they work: the field guard caught the `deploy:` block documented as recipes but absent
+      from the field reference, and the command guard caught the guide omitting itself.
+
+      The config reference is reflected out of the real structs, not copied from
+      `testdata/config/pokkum.yaml.golden` — whose header claims it carries every field of
+      schema version 1 while omitting `runtime`, `stub_launcher`, the whole `deploy:` block, six
+      `image` header fields, `build.allow_server_code_in_static`, `security.vex_exemptions` and
+      three `cache` keys. Its guards prove it parses and validates, not that it is exhaustive.
+    impl:
+      - cmd/pokkum/guide.go
+      - cmd/pokkum/guide_test.go
+      - cmd/pokkum/main.go
+      - README.md
+      - Vocabulary.md
+    related: ["mcp-server", "pokkum-yaml-json-schema", "exit-code-reference", "readonly-app-invariant-undocumented", "paas-deploy-targets"]
+
+  - id: mcp-server
+    title: "pokkum mcp — Model Context Protocol server as a second driving adapter"
+    stage: backlog
+    status: awaiting-decision
+    kind: feature
+    tier: polish
+    summary: "Expose analysis, planning and build as MCP tools plus the guide as an MCP resource, for agents without a shell — deliberately not a one-tool-per-command wrapper."
+    problem: |
+      An agent in Claude Code, Cursor or a similar harness already has a shell, and for those
+      [pokkum guide](item:agent-guide-command) closes most of the gap on its own: the failures
+      are knowledge failures, not invocation failures. An MCP server that shells out to
+      `pokkum build` for such an agent is a slower `Bash` with a schema in front of it.
+
+      Two things it would genuinely add:
+
+      - **Structure the CLI does not emit.** Chiefly a side-effect-free analysis result — the
+        detection [init already runs](item:static-viability-analyzer) and
+        [the runtime detection](item:init-runtime-detection), returned as data with per-finding
+        `file:line` evidence, without writing `.pokkum.yaml`. There is no `--dry-run` path to
+        that today; the analysis only exists as a side effect of a command that writes files.
+      - **Reach for agents with no shell** (hosted sandboxes, CI-side assistants). For those MCP
+        is not a convenience, it is the only transport.
+    options:
+      - title: "Do nothing beyond `pokkum guide`"
+        description: "Ship the guide, point agents at the CLI, and treat MCP as unnecessary indirection over a tool that is already a good CLI."
+        tradeoffs: "Cheapest and possibly correct. Leaves shell-less agents unserved, and leaves the analysis reachable only as a side effect of a writing command."
+      - title: "Analysis-only server"
+        description: "`pokkum mcp` exposing one read-only `analyze` tool plus the guide and config schema as MCP resources. No build, no deploy, no writes."
+        tradeoffs: "Small, safely pre-approvable (no side effects), and delivers the part Bash genuinely cannot. Does not help a shell-less agent actually build."
+      - title: "Full intent-level server"
+        description: "`analyze`, `plan` (resolved config with provenance, and what a build would produce), `build` (structured result, typed errors carrying a remediation field), `diagnose`."
+        tradeoffs: "Serves shell-less agents end to end. Costs a second surface to keep in step with the CLI, and is blocked on json-output-envelope, exit-code-reference and config-view-provenance."
+      - title: "One MCP tool per CLI command"
+        description: "Mechanical 1:1 mapping of the cobra command tree."
+        tradeoffs: "Rejected in drafting. It is a worse shell: same text output, same untyped errors, plus a schema layer and a round trip."
+    recommendation: |
+      Sequence it behind the prerequisites rather than deciding it now. Ship
+      [pokkum guide](item:agent-guide-command) first; it is independently justified and is most
+      of the value. Then close the four items that are already open on their own merits and
+      happen to be exactly this server's foundation —
+      [json-output-envelope](item:json-output-envelope) for `build`/`dev`,
+      [exit-code-reference](item:exit-code-reference),
+      [pokkum-yaml-json-schema](item:pokkum-yaml-json-schema) and
+      [config-view-provenance](item:config-view-provenance). Revisit the server only once a
+      shell-less consumer actually exists; building it speculatively repeats the reasoning
+      [hooks-system](item:hooks-system) was deferred on.
+
+      If built, two constraints are already settled by this codebase's own shape. It belongs
+      **in this binary** as `pokkum mcp` over stdio — not a separate npm package — because the
+      zero-dependency Go posture is the product, and an out-of-band package reintroduces exactly
+      the version skew that motivates putting the guide in the binary. And architecturally MCP is
+      a *driving* adapter over the same core, precisely as the cobra CLI is: it must not become a
+      second path into the pipeline with its own semantics, and
+      `internal/architecture_test.go`'s boundary rules apply to it unchanged.
+    related: ["agent-guide-command", "json-output-envelope", "exit-code-reference", "pokkum-yaml-json-schema", "config-view-provenance", "stable-go-library-api", "hooks-system"]
+
+  - id: readonly-app-invariant-undocumented
+    title: "The read-only /app invariant is stated only in a code comment"
+    stage: v1.2
+    status: shipped
+    kind: dx
+    tier: polish
+    summary: "Every Pokkum image ships `/app` at mode 0555 with no opt-out, and the only place that says so is a comment in the packager."
+    problem: |
+      `internal/adapters/packager/layer.go` sets `fileMode = 0o555` and `dirMode = 0o555`
+      unconditionally. This is deliberate and correct — nothing in the image writes to the
+      application tree — but it is a permanent architectural fact that shapes how an application
+      must be written, and it appears in no `--help` text, no README, and no config reference.
+
+      It is discovered as a production 500: an app that shells out to a native tool, or writes a
+      cache or a temp file to a project-relative path, builds green and fails at runtime. Found
+      exactly that way in a real session (2026-09, a SvelteKit app invoking Typst).
+
+      A second, related trap in the same session: the operator verified the tool worked with
+      `docker exec`, which defaults to root and bypasses the `0555` bits via `DAC_OVERRIDE`. The
+      "success" said nothing about the non-root UID the app actually runs as.
+    recommendation: |
+      State it where someone hits it before writing the code, not after: a line in
+      [pokkum guide](item:agent-guide-command)'s invariants section, a note in `pokkum build
+      --help`, and an entry in `Vocabulary.md`'s runtime section. Pair it with the rule that
+      follows from it — runtime writes target the OS temp directory, never a project-relative
+      path — and with the verification note that a container must be exercised as its real UID
+      (`docker run -u 65532`), not through `docker exec`.
+    impl:
+      - internal/adapters/packager/layer.go
+      - cmd/pokkum/build.go
+      - Vocabulary.md
+    related: ["agent-guide-command", "extra-project-paths"]
+
+  - id: doctor-effective-adapter-check
+    title: "pokkum doctor does not check the effective SvelteKit adapter"
+    stage: v1.2
+    status: shipped
+    kind: fix
+    tier: polish
+    summary: "`checkSvelteKitWorkspace` confirms `@sveltejs/kit` is a dependency and stops there — an `adapter-auto` project passes doctor cleanly and fails at build."
+    problem: |
+      `bunexec` already refuses a build whose `svelte.config.js` does not reference the adapter
+      the strategy requires, and the message is a good one: it names `adapter-auto` explicitly,
+      says a fresh `sv create` project ships it, and gives the exact `bun add -D` and import to
+      write (`internal/adapters/bunexec/compiler.go`, added 2026-08-16).
+
+      `pokkum doctor` knows none of this. `checkSvelteKitWorkspace` (`cmd/pokkum/doctor.go`)
+      reads `package.json`, finds `@sveltejs/kit`, and reports "valid SvelteKit project
+      detected". So the command whose entire purpose is "tell me what is wrong before I build"
+      passes the single most common starting state that cannot build.
+
+      That inverts doctor's contract. The preflight is the safety net; doctor is supposed to be
+      the early warning, and here the net catches what the warning missed.
+    recommendation: |
+      Extend `checkSvelteKitWorkspace` — or add a sibling check — to resolve the effective
+      adapter the same way the build preflight does, and report the same remediation text.
+      Reuse the preflight's logic rather than restating it, so the two cannot drift into
+      disagreeing about what counts as configured.
+
+      A post-build assertion that the adapter actually produced its entrypoint is a *different*
+      guard covering a different failure (adapter correctly configured, build silently emitted
+      nothing) and is worth considering alongside, but it does not substitute for this one.
+    impl:
+      - cmd/pokkum/doctor.go
+      - internal/adapters/bunexec/compiler.go
+    related: ["doctor-preflight", "adopt-codemod", "agent-guide-command"]
+
+  - id: init-prints-resolved-base-refs
+    title: "pokkum init names the presets but not what they resolve to"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: polish
+    summary: "The base-image prompt explains each preset in prose; discovering that `distroless` means `gcr.io/distroless/cc-debian12:nonroot` still requires a separate `pokkum base update`."
+    problem: |
+      [init-base-image-recommendations](item:init-base-image-recommendations) gave each preset a
+      one-line rationale, which fixed the "three bare names" problem. It did not print the
+      reference. Anyone who needs the concrete image — building a compatible custom base is the
+      obvious case, since the extra binary must match the preset's libc — has to run `pokkum base
+      update` to find out.
+
+      The values are already constants (`DistrolessBaseRef`, `ChainguardBaseRef` and the
+      Node-carrying equivalent in `internal/ports/baseimage.go`), so this is a formatting change,
+      not a lookup.
+    recommendation: |
+      Append the resolved reference to each preset line in the prompt and to `init --output json`.
+      Cheap, and it removes a whole detour for the custom-base case.
+    impl:
+      - internal/ports/baseimage.go
+      - cmd/pokkum/init.go
+    related: ["init-base-image-recommendations", "base-flag-custom-reference", "agent-guide-command"]
+
+  - id: dokploy-ambiguous-response-poll
+    title: "Dokploy: disambiguate an unrecognised 2xx by polling, instead of failing outright"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: polish
+    summary: "An HTTP 200 with an empty body is reported as a failed deploy even when the rollout in fact started; a follow-up `application.one` read could tell the two apart without weakening fail-closed."
+    problem: |
+      `dokployReportsSuccess` (`internal/adapters/deploy/dokploy.go`) accepts `true` and
+      `{"result":{"data":true}}` and rejects everything else, including an empty body. The
+      reasoning in its doc comment is correct and should not be softened: a 200 carrying a body
+      this code cannot identify must not be read as a confirmed mutation, because a reverse proxy
+      can produce one.
+
+      The cost is a false negative. Observed twice in one real session (2026-09): Dokploy
+      answered 200 with an empty body, `pokkum deploy` reported failure and exited non-zero, and
+      the rollout had in fact succeeded both times. The image was already pushed, so the operator
+      is left with a non-zero exit that says nothing about the actual state.
+    recommendation: |
+      Keep the strict classifier as the fast path. On a response that is 2xx but unrecognised —
+      and only then — poll `application.one` and decide from the application's observed state.
+      Report failure if the poll does not positively confirm a started rollout, so the fail-closed
+      contract is preserved: the change converts "unknown" from an assumed failure into a
+      question that gets asked, rather than into an assumed success.
+
+      Applies to the unrecognised-2xx case only. A non-2xx status stays a failure with no poll.
+    impl:
+      - internal/adapters/deploy/dokploy.go
+    related: ["paas-deploy-targets", "deploy-check"]
+
+  - id: generic-container-tooling-pitfalls
+    title: "Generic container-tooling pitfalls stay in the guide, not in the CLI"
+    status: wont-do
+    kind: dx
+    tier: non-goal
+    summary: "A field report surfaced several real footguns that belong to Docker and bun rather than to Pokkum; they are documented in `pokkum guide` and deliberately not turned into checks."
+    decision: |
+      A from-scratch deploy session (2026-09) produced a list of things that cost real time.
+      Four of them are not Pokkum's:
+
+      - `bun add <pkg>@next` records a resolved version in `package.json` rather than preserving
+        the literal `next`, so the dependency stops floating. That is bun's documented behaviour.
+      - Docker Desktop reporting as "running" is not the same as its daemon being up; `open -a
+        Docker` returns immediately either way, so readiness needs a `docker info` poll.
+      - `docker buildx`'s default driver cannot do multi-platform builds; that needs a
+        `docker-container` driver. Only relevant when hand-building a custom base image.
+      - `docker exec` runs as root and bypasses the image's read-only file modes via
+        `DAC_OVERRIDE`, so verifying a container through it proves nothing about the real
+        non-root process.
+
+      Only the last is stated in [pokkum guide](item:agent-guide-command), and only because it
+      produces a false *positive* about a Pokkum-specific invariant — someone concludes their
+      app can write where it cannot. The other three are recorded here rather than acted on:
+      turning general Docker and bun behaviour into Pokkum preflight checks would mean owning a
+      growing surface of other tools' semantics, drifting silently as those tools change, for
+      failures their own error messages already describe.
+
+      Stated as a decision rather than left as a silent omission, the same way
+      [plugin-system](item:plugin-system) is.
+    related: ["agent-guide-command", "plugin-system", "doctor-preflight"]
+
+  - id: doctor-json-drops-per-check-detail
+    title: "doctor --output json loses which check failed, and exited 0 when red"
+    stage: v1.2
+    status: shipped
+    kind: fix
+    tier: polish
+    summary: "A red `pokkum doctor --output json` returns a summary and an error code, without the per-check array the green path includes — so a machine consumer cannot tell what actually failed."
+    problem: |
+      `runDoctor` emits its results two different ways. The success path writes a full envelope
+      including the `checks` array, so each check's name, verdict, message and remediation
+      survive. The failure path goes through the shared error writer instead, which carries a
+      summary string and a code and nothing else.
+
+      The result is backwards: the JSON consumer gets structured detail exactly when everything
+      passed and nothing needed reading, and gets an opaque summary in the one case where it
+      needed to know which check was red and what the remediation was. A caller has to re-run in
+      text mode and parse prose to recover what the command already had in hand.
+
+      Found while adding the effective-adapter check
+      ([doctor-effective-adapter-check](item:doctor-effective-adapter-check)) — that check's
+      whole value is the remediation string it carries, which is the field the JSON failure path
+      drops.
+    decision: |
+      Both paths now build one `ports.JSONEnvelope` carrying the full checks array, following
+      `scan.go`'s existing pattern for partial-failure commands rather than adding a third shape.
+
+      A second, worse bug surfaced while fixing it, and the framing of this item was part of why
+      it had gone unnoticed: the item said "the exit code stays as it is". It should not have.
+      `pokkum doctor --output json` on a red project printed `status:"error"`, `passed:false`
+      and every failing check — and exited **0**, while text mode exited 1 on the identical
+      project. `runDoctor` has one failure signal at the end of the function and the JSON branch
+      returned before reaching it. A `set -e` CI step reads only the exit status, so a gate on
+      `pokkum doctor --output json` passed while doctor was failing. It also contradicted
+      [the exit-code table](item:exit-code-reference) published the same day, which says exit 1
+      covers a red doctor with no format caveat.
+
+      Fixed by returning a `silentExitError` from the JSON branch, so the process exits 1
+      without a second log line that would add nothing and corrupt the JSON stream.
+      `TestDoctorExitStatusIsIndependentOfOutputFormat` runs one failing fixture through both
+      formats and requires their error-ness to match. Logged in `Lessons.md` with
+      `mem:self_review_checklist` row 73: an output-format flag selects a serialization and must
+      never change the exit status, the verdict, or which side effects ran.
+    impl:
+      - cmd/pokkum/doctor.go
+    related: ["json-output-envelope", "doctor-effective-adapter-check", "mcp-server", "exit-code-reference"]
+
+  - id: static-rules-guide-coupling
+    title: "Nothing couples the guide's prerender-rule table to the classifier"
+    stage: v1.2
+    status: shipped
+    kind: dx
+    tier: polish
+    summary: "`pokkum guide strategy` restates which constructs rule out a static build; the classifier's rules are matchers rather than an enumerable set, so no test can prove the two still agree."
+    problem: |
+      The guide's `strategy` section lists what disqualifies `strategy: static`. Its verdicts are
+      guarded — `TestGuideNamesEveryStaticVerdict` asserts the section names every
+      `ports.StaticVerdict` — but the rules themselves are not, because they live as matchers
+      inside the analyser rather than as an enumerable set of constants. `ports.StaticFinding`
+      carries `Reason` as a free-form sentence fragment.
+
+      That is exactly the shape `mem:self_review_checklist` row 70 exists for: rules encoding
+      another tool's behaviour, restated in a second place, with nothing forcing them to agree.
+      The classifier itself already got two of four SvelteKit rules wrong once (2026-09-09), so a
+      prose copy drifting from it is not hypothetical — and a copy inside the binary is more
+      dangerous than one in a markdown file, since a reader has every reason to trust it.
+
+      Mitigated but not closed: the section now tells the reader `pokkum init`'s output is
+      authoritative for the version they are running and names the specific file and finding, so
+      a stale table degrades to an out-of-date summary rather than a confident wrong answer.
+    decision: |
+      `ports.StaticBlockerKind` adds eight constants, one per condition the analyser reports,
+      populated at all eight construction sites alongside the unchanged free-form `Reason`.
+      The guide's rule table is keyed on those strings, so a reader can map what it says to what
+      `pokkum init` reports, and the conditions that prerender fine are separated out rather
+      than listed as rules with a "no" beside them.
+
+      Two of the eight — `unrecognized-remote-module` and `unreachable-dynamic-route` — were
+      conditions the guide's table did not mention at all, which is the drift this item
+      predicted, found on the first pass.
+
+      The guard needed rewriting before it was worth anything. As first written it iterated a
+      hand-written list of the eight kinds, so a ninth constant was invisible to it — and its
+      break-test passed only because the new kind was added to that list too, which proves the
+      assertion mechanism works and says nothing about whether the enumeration is complete. It
+      now parses the constant declarations out of `internal/ports/staticviability.go` by AST
+      (the technique `exitcodes_test.go` and `flagmentions_test.go` already use) with a premise
+      check on the count, and was re-broken by adding a ninth kind and touching nothing else.
+    impl:
+      - internal/ports/staticviability.go
+      - cmd/pokkum/guide.go
+      - cmd/pokkum/guide_test.go
+    related: ["agent-guide-command", "static-viability-analyzer", "json-output-envelope"]
+
+  - id: config-schema-subcommand
+    title: "pokkum config schema"
+    stage: backlog
+    status: open
+    kind: dx
+    tier: polish
+    summary: "The generated JSON Schema lives only in this repository, so the audience it was built for — someone working in their own project — cannot reach it."
+    problem: |
+      [The schema](item:pokkum-yaml-json-schema) is checked in at `schema/pokkum.schema.json`.
+      That serves an editor pointed at a raw GitHub URL, and nothing else. An operator or agent
+      working in their own SvelteKit project — the audience
+      [pokkum guide](item:agent-guide-command) exists for — has the binary and not the
+      repository, and a hardcoded URL to a branch is the version-skew problem the guide was
+      built to avoid, one artifact over.
+
+      A `pokkum config schema` printing the embedded schema to stdout closes that: the schema a
+      binary emits is by construction the schema for that binary's config parser.
+    recommendation: |
+      Print the schema to stdout, flag-free, matching `pokkum guide`'s shape.
+
+      The blocker is mechanical and worth recording, because it is the reason this was not done
+      alongside the generator: `go:embed` cannot reach a file above the importing package's own
+      directory, so `schema/pokkum.schema.json` at the repository root is not embeddable from
+      `cmd/pokkum`. Closing this means either making the canonical location a package directory
+      that embeds it and re-pointing the generator and freshness guard there, or accepting a
+      second generated copy — the first is right, the second recreates exactly the drift the
+      generator exists to prevent.
+    related: ["pokkum-yaml-json-schema", "agent-guide-command", "config-management"]

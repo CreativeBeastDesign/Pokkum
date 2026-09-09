@@ -20,6 +20,12 @@ make verify
 4. **CLI Compilation Check**: `go build -o ./pokkum-test ./cmd/pokkum && rm -f ./pokkum-test`
 5. **Full Internal Test Suite (includes AST Architecture Purity Check)**: `go test ./internal/...`
 
+Beyond those five, `make verify` runs two generated-artifact freshness guards, both of which fail on a hand-edit or a missed regeneration rather than on a test failure:
+- `check-docs-freshness` — `docs/Roadmap.md`/`Shipped.md`/`Features.md`/`items` against `docs/roadmap/*.yaml` (`make docs` regenerates).
+- `check-schema-freshness` — `schema/pokkum.schema.json` against `internal/ports/config.go` (`make schema` regenerates). Added 2026-09-09; the schema is produced by reflection over `ports.ProjectConfig`/`ports.BuildProfile`, so a new config field belongs in the Go struct and nowhere else.
+
+Both work by regenerating in place and asking git whether anything changed, so **each reports a false FAIL while its output is uncommitted** — that is expected on a new file, not drift. Confirm by regenerating twice and comparing hashes before treating it as a real failure.
+
 `supervisor/` (the `pokkum-init` and `pokkum-static` standalone PID-1 binaries) is part of the same root module — no separate `go.mod`, no `go.work` needed — but `make verify`'s steps above only cover `./internal/...` and `./cmd/pokkum`, not `./supervisor/...`. If a diff touches anything under `supervisor/`, also run `go build ./supervisor/... && go test ./supervisor/...` from the repo root.
 
 **`tests/integration/` golden fixtures are outside `make verify`'s scope too** (found 2026-08-17, see `Lessons.md`): `tests/integration/golden_test.go` pins full OCI manifest/config/index JSON (`testdata/golden/*.json`) independently of `internal/adapters/packager/golden_test.go`'s own golden constants — changing anything that affects compressed layer bytes (gzip/zstd implementation, compression level, layer content) can pass the entire 5-step suite while silently leaving these stale. For any change touching layer compression, tar construction, or OCI manifest/config assembly, also run `go test ./tests/integration/...` (or a full `go test ./...` sweep) before declaring done — and if it fails only on compressed-bytes digests (not DiffIDs/config), regenerate with `go test ./tests/integration/... -run <TestName> -update` and diff the result to confirm only the expected fields moved, the same discipline as re-recording `internal/adapters/packager/golden_test.go`.

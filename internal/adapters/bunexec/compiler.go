@@ -83,12 +83,12 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
-// adapterPackage and kitPackage are the npm package names bunexec looks for
-// when checking that a project is wired for compilation.
-const (
-	adapterPackage = "@jesterkit/exe-sveltekit"
-	kitPackage     = "@sveltejs/kit"
-)
+// kitPackage is the npm package name bunexec looks for when checking that a
+// project is wired for compilation. The per-strategy adapter package names
+// (formerly a sibling adapterPackage constant here) now live behind
+// ports.BuildStrategy.RequiredAdapterPackage, the single shared source for
+// that mapping.
+const kitPackage = "@sveltejs/kit"
 
 var _ ports.Compiler = (*Compiler)(nil)
 
@@ -179,28 +179,24 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 	cfgSource := string(cfgData)
 
 	// The adapter this build actually needs depends on which strategy is
-	// being built, exactly mirroring Prepare's own targetAdapter selection a
-	// few hundred lines below (checkEffectiveAdapter) — including its
-	// positive-switch shape (mem:self_review_checklist row 11): checking
-	// "!= static" instead of naming each strategy would silently treat any
-	// future/unlisted strategy as wanting adapter-node, the same failure
-	// shape row 11 already exists to catch. Before this, Preflight
-	// unconditionally required adapterPackage/@sveltejs/adapter-node
-	// regardless of req.Strategy, which rejected every real
-	// --strategy=static project before Prepare's own correct,
-	// strategy-aware check ever ran (see Lessons.md).
+	// being built. ports.BuildStrategy.RequiredAdapterPackage is the single
+	// shared source for that mapping — see its doc comment for why this used
+	// to be an inline switch here and a second, independent inline switch in
+	// Prepare's own checkEffectiveAdapter call site below, and why that
+	// duplication was a real (if latent) drift risk of the same shape as
+	// mem:self_review_checklist row 11 and row 13. Before the strategy-aware
+	// version of this check existed at all, Preflight unconditionally
+	// required @jesterkit/exe-sveltekit/@sveltejs/adapter-node regardless of
+	// req.Strategy, which rejected every real --strategy=static project
+	// before Prepare's own correct, strategy-aware check ever ran (see
+	// Lessons.md, 2026-08-19).
 	//
 	// An empty req.Strategy is treated the same as the layered default,
 	// matching core.BuildRequest.Normalize()'s own default-before-Preflight
 	// behavior — the real pipeline always normalizes before calling
 	// Preflight, so an empty value here only happens in a caller (typically
 	// a direct unit test) that builds the request itself.
-	targetAdapter := "@sveltejs/adapter-node"
-	if req.Strategy == ports.StrategyExe {
-		targetAdapter = adapterPackage
-	} else if req.Strategy.ApplyStatic() {
-		targetAdapter = "@sveltejs/adapter-static"
-	}
+	targetAdapter := req.Strategy.RequiredAdapterPackage()
 
 	viteSource, viteName := readViteConfigSource(req.ProjectDir)
 	configured, _, _ := sveltekitutils.EffectiveAdapterConfigured(cfgSource, viteSource, viteName, targetAdapter)
@@ -268,11 +264,13 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 	result := ports.PreflightResult{
 		BunPath:    bunPath,
 		BunVersion: bunVer.String(),
-		// Resolved against targetAdapter, not the always-jesterkit
-		// adapterPackage constant, so a layered/static build reports the
-		// version of the adapter it actually requires (@sveltejs/adapter-node
-		// or @sveltejs/adapter-static) instead of an unrelated (and, for those
-		// strategies, un-installed) package's version.
+		// Resolved against targetAdapter (from
+		// req.Strategy.RequiredAdapterPackage()), not a fixed
+		// @jesterkit/exe-sveltekit lookup, so a layered/static build reports
+		// the version of the adapter it actually requires
+		// (@sveltejs/adapter-node or @sveltejs/adapter-static) instead of an
+		// unrelated (and, for those strategies, un-installed) package's
+		// version.
 		AdapterVersion:   sveltekitutils.ResolveVersion(req.ProjectDir, targetAdapter, pkg),
 		SvelteKitVersion: sveltekitutils.ResolveVersion(req.ProjectDir, kitPackage, pkg),
 	}
@@ -291,12 +289,11 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	var staticFallbackRel string
 	log.Info("bunexec: prepare: running sveltekit build", "projectDir", req.ProjectDir, "strategy", req.Strategy)
 
-	targetAdapter := "@sveltejs/adapter-node"
-	if req.Strategy == ports.StrategyExe {
-		targetAdapter = "@jesterkit/exe-sveltekit"
-	} else if req.Strategy.ApplyStatic() {
-		targetAdapter = "@sveltejs/adapter-static"
-	}
+	// See ports.BuildStrategy.RequiredAdapterPackage's doc comment: this used
+	// to be a second, independent copy of Preflight's own strategy -> adapter
+	// switch above, which is exactly the drift shape this task exists to
+	// prevent.
+	targetAdapter := req.Strategy.RequiredAdapterPackage()
 
 	// One read of the project's own config files for the whole of the
 	// pre-build phase. Everything below consults this rather than re-reading
@@ -921,10 +918,16 @@ func readConfigSource(projectDir string) string {
 	return string(data)
 }
 
-// viteConfigNames are the Vite config filenames Prepare consults, in Vite's own
-// resolution order — the first one that exists is the one Vite loads, so the
-// scan must stop there rather than merge every candidate it finds.
-var viteConfigNames = []string{
+// ViteConfigCandidates are the Vite config filenames Prepare consults, in
+// Vite's own resolution order — the first one that exists is the one Vite
+// loads, so a scan must stop there rather than merge every candidate it
+// finds. Exported so callers outside this package that need to know which
+// file governs a project's Vite config — currently `pokkum doctor`'s
+// effective-adapter check — can use the exact same resolution order instead
+// of restating it (see the doctor check's own doc comment for why this
+// matters: two independent copies of "which file governs" is precisely the
+// drift shape this whole check exists to prevent).
+var ViteConfigCandidates = []string{
 	"vite.config.js",
 	"vite.config.mjs",
 	"vite.config.ts",
@@ -955,7 +958,7 @@ func findUserSvelteConfig(projectDir string) string {
 }
 
 func readViteConfigSource(projectDir string) (source, name string) {
-	for _, candidate := range viteConfigNames {
+	for _, candidate := range ViteConfigCandidates {
 		data, err := os.ReadFile(filepath.Join(projectDir, candidate))
 		if err == nil {
 			return string(data), candidate

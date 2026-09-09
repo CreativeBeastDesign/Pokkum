@@ -172,6 +172,8 @@ func stripBacklogSection(t *testing.T, text string) string {
 // exclusion.
 var nonFlagDocTokens = map[string]string{
 	"--bare":              `§1 prose: "--bare, --insecure-registry in ko" — cited as ko's own precedent, not a pokkum flag.`,
+	"--root":              "§5a: a flag of `pokkum-init __dev-sync`, the in-pod extractor embedded in every layered image (supervisor/cmd/pokkum-init/devsync.go). It is never registered on a cobra command because it belongs to the supervisor binary, not to the pokkum CLI.",
+	"--restart":           "§5a: same as --root above — a `pokkum-init __dev-sync` flag, not a pokkum CLI flag.",
 	"--insecure-registry": `§1 prose: same ko-precedent sentence as --bare above.`,
 	"--push":              `§1/§3 prose: ko's "--local/--push=false distinction" — pokkum's equivalent is the absence of a flag (push is the unflagged default); "--push" itself is never registered.`,
 	"--base-preset":       `§1 convention #5: "not --base-preset=hardened" is explicitly the naming NOT chosen for --hardened.`,

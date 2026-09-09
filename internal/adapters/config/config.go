@@ -253,6 +253,10 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 		val := *profile.Security.VerifyBase
 		merged.Security.VerifyBase = &val
 	}
+	if profile.Build.AllowServerCodeInStatic != nil {
+		val := *profile.Build.AllowServerCodeInStatic
+		merged.Build.AllowServerCodeInStatic = &val
+	}
 	if profile.Security.AllowIncompleteScans != nil {
 		val := *profile.Security.AllowIncompleteScans
 		merged.Security.AllowIncompleteScans = &val
@@ -320,12 +324,41 @@ func (m *Manager) GenerateDefault(opts ports.InitConfigOptions) *ports.ProjectCo
 		strategy = "layered"
 	}
 
+	// Cross-field composition, not three independent defaults.
+	//
+	// core rejects runtime=node on any strategy but layered, and on any base
+	// that ships no Node binary — the runtime IS base-image content for node.
+	// Each of the three values is individually valid in every combination, so
+	// `pokkum config validate` (which checks fields, not their composition)
+	// would pass a config `pokkum build` then refuses. That is exactly the
+	// shape of the 2026-08-19 init bug, one field wider, and the only place
+	// that can prevent it is here — the generator that picks all three.
+	runtime := opts.Runtime
+	if runtime == string(ports.RuntimeNode) {
+		if strategy != string(ports.StrategyLayered) {
+			// The caller asked for a combination that cannot build. Drop back
+			// to the runtime that supports every strategy rather than
+			// overriding the strategy the user explicitly picked.
+			//
+			// Deliberately a NEGATIVE check (!= layered) rather than an
+			// enumeration of exe and static. A strategy added later is caught
+			// by it automatically, and errs toward the runtime that works
+			// everywhere — conservative if that strategy turns out to support
+			// node, never invalid. The positive form would silently emit
+			// `runtime: node` for it (`mem:self_review_checklist` row 11).
+			runtime = ""
+		} else if basePreset != string(ports.BaseImageDistrolessNode) && basePreset != string(ports.BaseImageCustom) {
+			basePreset = string(ports.BaseImageDistrolessNode)
+		}
+	}
+
 	cfg := &ports.ProjectConfig{
 		Version: ports.ConfigSchemaVersion,
 		Docker: ports.DockerConfig{
 			Repo: opts.Repo,
 		},
 		Strategy:  strategy,
+		Runtime:   runtime,
 		Base:      basePreset,
 		Platforms: []string{"linux/amd64", "linux/arm64"},
 		Security: ports.SecurityConfig{
@@ -480,6 +513,10 @@ func deepCopyProjectConfig(src *ports.ProjectConfig) *ports.ProjectConfig {
 	if src.Security.VerifyBase != nil {
 		v := *src.Security.VerifyBase
 		dst.Security.VerifyBase = &v
+	}
+	if src.Build.AllowServerCodeInStatic != nil {
+		v := *src.Build.AllowServerCodeInStatic
+		dst.Build.AllowServerCodeInStatic = &v
 	}
 	if src.Security.AllowIncompleteScans != nil {
 		v := *src.Security.AllowIncompleteScans

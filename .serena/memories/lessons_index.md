@@ -21,6 +21,34 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### silent no-op from picking the wrong near-identical function, or from a load-bearing fallback (1)
+
+- `2026-09-09` — **boundary (serialization flag changed a verdict)** — `--output json` made failing commands exit 0 while text mode exited 1, so a CI gate passed on a red run. 13 sites across 6 commands, all `return jsonutils.WriteError(...)` (which returns the WRITE result, hence nil on success); one test actively defended the behaviour with a written rationale. Checklist rows 73 and 57.
+- `2026-09-09` — A regex matching a string VALUE was run through `blankJSStringsAndComments`, which blanks string contents, making it unmatchable on every input forever and reporting the same "found nothing" a healthy project produces. In the same function, `filepath.Rel(absolute, relative)` errored on every call while its fallback silently did all the work. Read before choosing between two same-signature functions whose names differ by a qualifier, and before adding any fallback on an error path.
+
+### encoding another tool's rules from a mental model instead of its source (1)
+
+- `2026-09-09` — A classifier of "what SvelteKit cannot prerender" got two of four rules wrong (every `+server.*`; every server `load`) and missed a fifth, because the rules were inferred rather than read. The authoritative set is four `throw`s in `@sveltejs/kit`, one grep away. Exposed by running the classifier over the repo's own fixtures and finding it called `sveltekit-basic` unbuildable while `static_e2e_test.go` builds that exact fixture. Read before writing code that encodes what another tool accepts or rejects, and before putting a gate on top of any existing classifier.
+
+### parsing user-authored source (comments/strings are not code) (3)
+
+- `2026-09-09` — A commented-out `kit.files.routes` beat the real one in `bunexec.resolveRoutesDir`, the THIRD site in this repo fooled by a bare regex over JS/TS source — after the class had already been fixed twice and two working comment/string scanners already existed in `sveltekitutils`. Read before writing any `regexp`/`strings.Index` against a file a user wrote; the answer is `stripJSComments` (matcher needs string contents) or `blankJSStringsAndComments` (matching an identifier), never a new scanner. See also the two originals below (2026-08-16 `fallback:`, 2026-08-17 `sveltekit(`).
+- `2026-08-17` — `TransformViteConfig` rewrote `sveltekit(` inside comments and string literals; fixed with real lexical scanners.
+- `2026-08-16` — `StaticFallbackFilename`'s whole-file regex was flipped by `fallback: false` in a comment and by an unrelated `fallback: true`.
+
+### guard passed with the fix reverted — wrong observable (2)
+
+- `2026-09-09` — A `*bool` clone in `deepCopyProjectConfig` was guarded by asserting the merged VALUE was still true; the function starts `dst := *src`, so the value is right without the clone and deleting it left the guard green. Identity (`merged.X != base.X`) is the observable. For any fix whose effect is cloning/aliasing/defensive-copy, a value assertion cannot see it.
+- `2026-09-09` — A symlink-containment guard asserted `Verdict != StaticViable` and passed with the `os.Root` fix reverted: `os.ReadFile` follows the escaping symlink, reads the outside file and returns `StaticBlocked`, which is also not `StaticViable`. Read before writing any assertion shaped `!= X` / `no error` / `not empty` against a value with a third state — enumerate the other states and ask which one the BUG produces.
+
+### guard-scope (off-by-one-level) / permission-and-mode fixes (1)
+
+- `2026-09-07` — A chmod-the-parents loop restored the write bit on every path segment BELOW the sync root and never on the root itself, so the one file the feature exists to replace (`/app/server/index.js`, which has no parent inside the scope) could never be written. Invisible against a `t.TempDir()` fixture, which is 0755; found only because the fixture reproduced the packager's 0555 including a pre-seeded stale file. Read before any fix that restores or relaxes a permission, mode, owner or quota along a path, and before writing a fixture for code that touches a production artifact with a non-default mode.
+
+### library-semantics-assumption / silent-degradation (1)
+
+- `2026-09-07` — `exec.ExitError.Stderr` is populated ONLY by `cmd.Output()`, and only while `cmd.Stderr` is nil. An error-enrichment helper copied from an `Output()` call site to one that assigns `cmd.Stderr` returned the error completely unenriched — an RBAC denial surfaced as `exit status 1` with `Error from server (Forbidden)` read into a buffer and discarded. Caught only because the test asserted on the error's *content*, not on `err != nil`. Read before reusing any error-enrichment or output-capture helper at a new subprocess call site.
+
 ### release-pipeline / unresumable-by-construction (1)
 
 - `2026-09-06` — Pokkum's own release binaries embedded a wall-clock build date, so they were not reproducible, so a v1.1.0 release that published GitHub + Homebrew and then failed at npm could not be re-run: rebuilt bytes hit `422 already_exists`, and deleting the assets would have broken the formula's pinned sha256 and the SLSA attestation. Read before touching `.goreleaser.yaml` or any multi-destination publish.
@@ -49,8 +77,9 @@ carries the *why* that the checklist row compresses away.
 
 - `2026-09-05` — The `bufio.Scanner` token-limit bug was fixed once in `secretguard` and left untouched in `sveltekitutils`, where a strict wiring gates the build on it. A 102KB single-line minified bundle was reported as having zero dynamic imports. Root cause is not the scanner limit (already logged 2026-08-18) but that a post-mortem rule stated over a *class* was acted on for exactly one instance, with nothing enumerating the rest. Read this before writing any entry whose preventative rule generalises past the file the bug was found in.
 
-### boundary (33)
+### boundary (34)
 
+- `2026-09-09` — `pokkum doctor` reported a fresh `sv create` scaffold (`@sveltejs/adapter-auto`, unconfigured) as a valid SvelteKit project while `pokkum build` refused it immediately after — doctor's only adapter-related check verified `@sveltejs/kit` was a dependency and never looked at which adapter was actually configured. The second occurrence of the 2026-09-01 `pokkum config validate`/`pokkum deploy` shape below; fixed by making doctor call the exact same decision function (`sveltekitutils.EffectiveAdapterConfigured`) the build preflight uses, plus a new `ports.BuildStrategy.RequiredAdapterPackage` to stop bunexec's own two internal copies of the strategy→adapter mapping from being able to drift from each other. Read before adding any diagnostic/preflight check whose whole job is predicting whether a separate command will succeed.
 - `2026-09-01` — `pokkum config validate` reported a config valid that `pokkum deploy` then refused, because it 
 - `2026-09-01` — Two new PaaS integrations both had a "200 means nothing happened" path, and one had a write tha
 - `2026-08-23` — The published GitHub Action's `digest` and `ref` outputs were empty on every run since v1.0.0, 

@@ -102,6 +102,17 @@ type Deps struct {
 	// packaging. Optional — nil means no detection/warning/annotation.
 	EnvBakeDetector ports.EnvBakeDetector
 
+	// StaticViabilityAnalyzer decides whether the project's source contains
+	// anything a purely static build cannot carry. Consulted only for
+	// StrategyStatic, and only to REFUSE — never to select a strategy.
+	//
+	// Optional, like EnvBakeDetector and SecretGuard, so the many test callers
+	// constructing Deps directly can leave it nil. That nil is a fail-open, so
+	// cmd/pokkum's TestCompositionRootWiresTheStaticViabilityGate asserts the
+	// real composition root always supplies one — the skip is for test
+	// doubles, and must not be reachable from a user's build.
+	StaticViabilityAnalyzer ports.StaticViabilityAnalyzer
+
 	// RouteFilter drops prerendered routes the operator excluded, after
 	// Prepare has written the output tree and before the packager reads it.
 	// Nil disables the feature.
@@ -399,6 +410,45 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 		if err == nil && len(envRes.Bindings) > 0 {
 			log.Warn("this build imports from $env/static/* — this image will be pinned to the environment it was built in; promoting it to a different environment will NOT pick up new values for these", "bindings", strings.Join(envRes.Bindings, ","))
 			req.Runtime.EnvBaked = envRes.Bindings
+		}
+	}
+
+	// A static build ships no server, so source that SvelteKit refuses to
+	// prerender cannot work in one. Refusing here costs milliseconds; the
+	// alternative is the user discovering it minutes into a build, from
+	// SvelteKit's error, which names neither Pokkum nor the strategy setting
+	// that caused it.
+	//
+	// Three deliberate limits on this gate, each of them the difference
+	// between a guard and an outage:
+	//
+	//  1. StrategyStatic only. Every other strategy ships a server and none of
+	//     these findings apply to it.
+	//  2. StaticBlocked ONLY. A StaticUnknown verdict — an unreadable project,
+	//     no routes directory, a layout this scan does not understand — is the
+	//     absence of evidence and must never fail a build. This is the exact
+	//     shape of Lessons.md's 2026-08-17 entry, where Preflight treated a
+	//     missing svelte.config.js as proof the directory was not a SvelteKit
+	//     project and blocked every project `sv create` produces.
+	//  3. Overridable, because the scan is a heuristic over source text. If it
+	//     is ever wrong, --allow-server-code-in-static must let the user
+	//     proceed without waiting for a Pokkum release.
+	if req.Compile.Strategy == StrategyStatic && deps.StaticViabilityAnalyzer != nil {
+		report := deps.StaticViabilityAnalyzer.AnalyzeStaticViability(ctx, ports.StaticViabilityRequest{
+			ProjectDir: req.ProjectDir,
+		})
+		switch {
+		case report.Verdict == StaticBlocked && req.AllowServerCodeInStatic:
+			log.Warn("this project contains code SvelteKit cannot prerender, and --allow-server-code-in-static was set — continuing, but the build will most likely fail inside SvelteKit",
+				"blockers", len(report.Blockers), "first", firstBlockerFile(report))
+		case report.Verdict == StaticBlocked:
+			return BuildResult{}, staticViabilityError(report)
+		case report.Verdict == StaticUnknown:
+			// Say so rather than staying silent: a check that logs nothing
+			// when it could not run is indistinguishable from one that ran and
+			// found nothing.
+			log.Debug("could not check whether this project can be built statically; continuing",
+				"reason", report.UndecidedWhy)
 		}
 	}
 
@@ -3044,4 +3094,43 @@ func applyRouteExclusions(ctx context.Context, deps Deps, req BuildRequest, prep
 			"count", len(res.DeadLinks))
 	}
 	return nil
+}
+
+// staticViabilityError renders a blocked static-viability report as the error
+// that stops the build.
+//
+// It lists every blocker rather than the first, names the file for each, and
+// ends with both ways forward — because an error that says only "this will not
+// work" leaves the user to guess which of their routes is the problem, which is
+// precisely what this gate exists to spare them.
+func staticViabilityError(report ports.StaticReport) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "--strategy=static ships no server, but %s in this project cannot be prerendered",
+		countedFiles(len(report.Blockers)))
+	for _, blocker := range report.Blockers {
+		fmt.Fprintf(&b, "\n  - %s %s", blocker.File, blocker.Reason)
+		if blocker.Override != "" {
+			fmt.Fprintf(&b, "\n      (%s)", blocker.Override)
+		}
+	}
+	b.WriteString("\n\nBuild with --strategy=layered to ship a server, or remove the code above.")
+	b.WriteString("\nIf this is wrong, --allow-server-code-in-static proceeds anyway (the build will")
+	b.WriteString("\nthen fail inside SvelteKit if it is right) — and please report it")
+	return fmt.Errorf("%s: %w", b.String(), ErrInvalidRequest)
+}
+
+// countedFiles renders "1 file" / "N files".
+func countedFiles(n int) string {
+	if n == 1 {
+		return "1 file"
+	}
+	return fmt.Sprintf("%d files", n)
+}
+
+// firstBlockerFile returns the first blocker's path, for a log field.
+func firstBlockerFile(report ports.StaticReport) string {
+	if len(report.Blockers) == 0 {
+		return ""
+	}
+	return report.Blockers[0].File
 }

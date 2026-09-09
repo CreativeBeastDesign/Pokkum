@@ -5,6 +5,326 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-09 — `--output json` made a red `pokkum doctor` exit 0, so a CI gate on it passed while doctor was failing
+
+**Category:** boundary / serialization flag changed a verdict — an output-format switch silently altered whether the command reported success
+
+**Root cause:** `runDoctor` (`cmd/pokkum/doctor.go`) shares one failure signal, `if !allPassed { return ... }`, at the very end of the function. The JSON branch sits earlier and returns as soon as it has written the envelope, so control never reaches that signal. Text mode exited 1 on a red doctor; JSON mode wrote `status:"error"`, `passed:false` and a list of failing checks — and then exited 0.
+
+The envelope was never wrong. Every failing check, with its remediation, was right there in the payload. What was wrong was the process exit status, which is the only thing a `set -e` CI step or a `&&` chain actually reads. A machine consumer following the documented contract would treat a red doctor as green, and nothing anywhere would contradict it.
+
+Two things made this survivable for as long as it was. The bug is invisible in text mode, which is what a human runs. And it was *introduced* by an early return added for a good local reason (write the envelope, return the write error), where the missing consideration was not "did I handle this error" but "does my early return skip a shared postlude".
+
+It was found only because a concurrent task explicitly compared before/after exit codes in both modes and reported the discrepancy as a pre-existing quirk rather than assuming it was intended — and because a freshly written `Vocabulary.md` exit-code table had just claimed exit 1 covers "a red doctor", with no format caveat, making the contradiction concrete.
+
+**Where:** `cmd/pokkum/doctor.go`, `runDoctor`'s JSON branch (`return err` after `Fprintln`), versus the `if !allPassed` at the end of the same function.
+
+**Fix:** the JSON branch now returns `errDoctorChecksFailed` (a `silentExitError`, so `main.go`'s `isSilentExit` exits 1 without logging a second line that would contradict and corrupt the JSON on stdout). `cmd/pokkum/exitcodes_test.go`'s `TestDoctorExitStatusIsIndependentOfOutputFormat` drives `runDoctor` in both formats against the same fixture and requires their error-ness to match; it carries a premise check so a fixture that stopped failing cannot make it compare two nils and pass.
+
+**Widened 2026-09-09, same day:** auditing every other `--output json` branch the way the rule below prescribes found the identical bug in `adopt`, `explain` and `history` (confirmed by running them: text exited 1, JSON exited 0 while printing `status:"error"`), and a scan for the shape found **thirteen** sites across six commands. `doctor` was not a one-off; it was the instance that happened to be looked at.
+
+The shape is an API trap, which is why it replicated: `jsonutils.WriteError` returns the *write* result, so `return jsonutils.WriteError(...)` reads as "return this error" and returns `nil` the moment the envelope is written successfully — sitting directly above a text branch returning a real error on the same input. All thirteen now call `failJSON()`, which writes the same envelope and returns a silent failure.
+
+Worse, one test *defended* the bug. `TestHistoryCommand_ImageNotFound` required the JSON path to return nil and justified it in a comment: "CI is expected to parse status, not rely on the exit code, in `--output=json` mode", citing `adopt.go/doctor.go/init.go` as the established convention. Those were the same bug replicated, not a precedent, and `set -e` reads the exit status and nothing else. A wrong assumption written down as a rationale is far more durable than an unexamined one, because the next reader takes it as settled.
+
+**Preventative rule:** An output-format flag selects a **serialization**. It must never change whether the command succeeded, what it exits with, or which side effects ran. Whenever a format branch returns early, check what shared postlude it skips — a failure signal, a cleanup, an exit-status decision — because the branch reads as complete on its own and the skipped code is usually far away at the end of the function. Assert the invariant directly by running the same failing fixture through every supported format and comparing exit status, rather than testing each format's output in isolation, which is exactly how this passed review. And when you find one instance, **grep for the shape before assuming it is one** — this was thirteen. If a helper's name says "error" but its return value is a write result, the call sites will keep making the same mistake, so fix the helper's ergonomics rather than the call sites one at a time.
+
+## 2026-09-09 — `pokkum doctor` passed a project `pokkum build` refused, because doctor never checked which adapter was actually configured
+
+**Category:** boundary / validator-consumer disagreement — doctor's job is exactly to catch what build will refuse, and it had a gap wide enough to miss the single most common unbuildable starting state
+
+**Root cause:** `checkSvelteKitWorkspace` in `cmd/pokkum/doctor.go` verified only that `@sveltejs/kit` appeared in `package.json`'s dependencies — it never looked at which adapter package `svelte.config.js`/`vite.config.*` actually configured. Meanwhile `internal/adapters/bunexec/compiler.go`'s `checkEffectiveAdapter` (called from `Prepare`, just before `bun run build`) already refused a build whose effective adapter did not match the chosen strategy, with a good, specific message. A fresh `bunx sv create` scaffold — `@sveltejs/adapter-auto` only, configured via `vite.config.ts` options (current `sv create` ships no `svelte.config.js` at all) — is exactly this shape: it passed `doctor` cleanly and was refused by `build` immediately after, inverting doctor's whole contract (early warning vs. safety net).
+
+A second, smaller instance of the same drift class lived inside `bunexec` itself: `Preflight` and `Prepare` each carried their own independent inline `switch req.Strategy { ... }` mapping a strategy to its required adapter package. The two copies happened to still agree (verified by diffing them — mem:self_review_checklist row 69(b) — before consolidating, since collapsing duplicates unread is how a diverged copy ships forward silently), but nothing forced them to stay in sync, and a third hand-written copy in `doctor` would have made three.
+
+**Where:** `cmd/pokkum/doctor.go`'s `checkSvelteKitWorkspace`; `internal/adapters/bunexec/compiler.go`'s `Preflight` and `Prepare` (the duplicated `targetAdapter` switch); `internal/ports/compiler.go` (no shared mapping existed).
+
+**Fix:** `ports.BuildStrategy.RequiredAdapterPackage()` is now the single source for the strategy → adapter package mapping; `Preflight` and `Prepare` both call it instead of restating the switch. A new `cmd/pokkum/doctor.go` check, `checkSvelteKitAdapter`, resolves the project's effective strategy from `.pokkum.yaml` (defaulting the same way `core.BuildRequest.Normalize()` does) and calls the same decision function `checkEffectiveAdapter` uses — `sveltekitutils.EffectiveAdapterConfigured` — never a second, independently-written comparison. `bunexec.ViteConfigCandidates` (formerly unexported `viteConfigNames`) is exported so doctor resolves "which Vite config file governs" in the exact same order `Prepare` does, instead of restating that list too. The check honestly reports "cannot determine" (not a clean pass or a confident failure) when a config file exists but cannot be read, or when `.pokkum.yaml`'s `strategy:` value is unparseable — guessing either verdict from missing information would be the same false confidence this check exists to remove.
+
+**Preventative rule:** When a diagnostic command (`doctor`, `validate`, `check`) and the command whose failure it is supposed to predict (`build`, `deploy`, `apply`) both need to answer the same yes/no question about project state, that answer must come from one shared function, never two hand-written comparisons that happen to agree today. Before doctor's check existed, the only way to keep it in sync with build would have been discipline — remembering to update two places whenever the rule changed — which is exactly the failure mode this whole incident is about. See `mem:self_review_checklist` rows 11 and 69(b), and the 2026-09-01 "validator-consumer disagreement" entry (`pokkum config validate` / `pokkum deploy`) for the same shape in a different pair of commands.
+
+## 2026-09-09 — Picking the wrong one of two near-identical scanners made a regex silently unmatchable, and a fallback hid a second bug the same way
+
+**Category:** silent-degradation / near-miss-API — two bugs in one function, both of which fail by
+quietly producing the "nothing found" answer
+
+**Root cause:** `sveltekitutils` has two scanners that differ only in whether string literal
+CONTENTS survive: `stripJSComments` (contents kept — needed to capture a value like
+`fallback: '200.html'`) and `blankJSStringsAndComments` (contents blanked — needed so an identifier
+match is not fooled by that text inside a string). Checklist row 69, written earlier the same
+session, states exactly that distinction.
+
+The new `handleUnseenRoutes` detector matches a string VALUE (`'warn'` / `'ignore'`) and was written
+against `blankJSStringsAndComments`. That scanner replaces `'warn'` with `'    '`, so the regex could
+never match anything, on any input, ever. Not a wrong answer for some configs — an unmatchable
+pattern, exactly the `\bghp_...\b` shape in row 50.
+
+The second bug is in the same function. The route directory was converted with
+`filepath.Rel(routesDir, dir)` where `routesDir` is absolute and `dir` is a project-relative slash
+path, so `Rel` errored on every call. It did not matter, because the error branch assigned
+`rel = dir` and the check then ran `dynamicSegmentRe.MatchString(rel) || dynamicSegmentRe.MatchString(dir)`
+— the fallback was doing 100% of the work while the primary path was dead. Both were written in the
+same sitting and neither had a failing test yet.
+
+**Why both are the same shape:** each fails by returning the reassuring answer. A pattern that never
+matches reports "no opt-out configured" and "no dynamic routes", which is indistinguishable from a
+project that genuinely has neither. Nothing errors, nothing logs, and a test written afterwards
+against a passing implementation encodes the silence.
+
+**Where:** `internal/adapters/sveltekitutils/staticviability.go`,
+`projectOptedOutOfUnseenRouteErrors` and `addDynamicRouteCaveats`.
+
+**Fix:** `stripJSComments` for the value match; the `Rel` call deleted in favour of matching the
+project-relative path directly, since a dynamic segment anywhere in the route's own path is what
+makes the route dynamic. `TestAnalyzeStaticViability_DynamicRoutes/handleUnseenRoutes_opt-out_suppresses_it`
+fails when the blanking scanner is restored.
+
+**Preventative rule:** when a package offers two functions whose names differ by a qualifier and
+whose signatures are identical (`stripX` vs `blankX`, `mustX` vs `tryX`, `...Locked` vs unlocked),
+picking the wrong one is a silent no-op rather than a compile error — so the choice needs a test
+that fails for the wrong pick, written at the same time as the call. And when a conversion has a
+fallback on its error path, check which branch actually executes for real input before trusting
+either: a fallback that silently handles every case means the primary path is untested, and may be
+dead.
+
+---
+
+## 2026-09-09 — A classifier's rules were inferred from the tool's behaviour instead of read from its source, and got two of four wrong
+
+**Category:** external-contract / spec-by-assumption
+
+**Root cause:** `AnalyzeStaticViability` decides which SvelteKit constructs cannot be prerendered.
+Its first cut encoded four rules from a plausible mental model of SvelteKit — "a server endpoint
+needs a server", "a server load runs per request" — rather than from `@sveltejs/kit`'s own source.
+Two were wrong, both over-rejecting:
+
+- Every `+server.*` was treated as blocking. `src/core/postbuild/analyse.js:185` rejects a
+  `+server` file only for `BODY_DEPENDENT_METHODS` handlers (`src/constants.js:23` —
+  POST, PUT, PATCH, DELETE, QUERY). A GET-only endpoint is prerendered to a static response.
+- Every `+page.server.*`/`+layout.server.*` `load` was treated as blocking. SvelteKit raises no
+  error for one at all: server loads run at build time, which is how a static site reads a CMS or
+  the filesystem in the first place.
+
+A fifth real rule was missing entirely — `analyse.js:102`, a route with both a `+page` and a
+`+server` file — because a mental model produces the cases you think of, and nothing enumerates
+the ones you do not.
+
+The complete, authoritative set is four `throw`s in two files. It took one `grep` for
+`"Cannot prerender"` in a fixture's own `node_modules` to obtain, and that grep was not run until
+after the wrong rules had shipped.
+
+**What made it visible:** running the classifier over the repo's own committed fixtures, which had
+never been done — every test used purpose-written inputs. `testdata/fixtures/sveltekit-basic` came
+back `blocked`, and `tests/integration/static_e2e_test.go` builds that exact fixture with
+`StrategyStatic`. The contradiction was the signal; the fixture is a real `sv create` project with
+a read-only `/api/health` endpoint, which is as common a shape as SvelteKit has.
+
+Severity was luck, not design. Shipped, the classifier only fed `pokkum init`'s recommendation, so
+the cost was bad advice. The next commit turned those same findings into a hard `pokkum build`
+refusal — at which point both false positives would have refused builds that succeed today, and
+broken two E2E tests.
+
+**Where:** `internal/adapters/sveltekitutils/staticviability.go`, `classifyServerRouteFile` (now
+`classifyEndpoint` + `classifyServerLoadFile`).
+
+**Fix:** rules re-derived from `@sveltejs/kit`'s source, each carrying the file:line it encodes;
+the missing co-location rule added; `TestAnalyzeStaticViability_AgainstRealFixtures` now runs the
+classifier over all four committed fixtures with the `sveltekit-basic` row documented as
+load-bearing for the E2E suite.
+
+**Preventative rule:** when code encodes another tool's rules — what a compiler rejects, what a
+format allows, which inputs a service refuses — derive them from that tool's source or spec and
+cite the location in a comment. A rule you can state but cannot point at is a guess. And before
+building anything that ACTS on a classifier's output, run the classifier over the repo's real
+fixtures and reconcile every disagreement with what the rest of the suite already does with those
+same fixtures — a fixture another test builds successfully, classified as unbuildable, is a
+contradiction the codebase is already holding the answer to.
+
+---
+
+## 2026-09-09 — Two guards in one session passed with their fix reverted, both by asserting a weaker property than the fix provides
+
+**Category:** test-substance / wrong-observable (row 45 family, second and third instances)
+
+**Root cause:** two separate guards, written after their fixes, green immediately, and green still
+with the fix reverted — caught only by the mandatory revert step.
+
+1. **Negative over a tri-state.** A symlink-containment guard asserted
+   `Verdict != StaticViable`. With `os.Root` reverted to `os.ReadFile`, the symlink is followed,
+   the file outside the project is read, and the verdict is `StaticBlocked` — also not
+   `StaticViable`. Logged separately above.
+2. **Value where the fix changes identity.** `deepCopyProjectConfig`'s clone of a `*bool` config
+   field was guarded by asserting the merged config's VALUE was still `true`. But
+   `deepCopyProjectConfig` opens with `dst := *src`, so the pointer is copied and the value is
+   already correct without the clone. The clone's entire purpose is that base and merged do not
+   SHARE the bool. Deleting it left the guard green; asserting
+   `merged.X != base.X` (pointer identity) makes it fail.
+
+Both are the same underlying error: the assertion was written against what the test author
+expected to see, rather than derived from what the fix actually changes. In (1) the fix changes
+which of three states is produced; in (2) it changes pointer identity while leaving the value
+untouched. Neither is exotic, and both were written by someone who had read row 45 that same
+session.
+
+**Where:** `internal/adapters/sveltekitutils/staticviability_test.go`
+(`TestAnalyzeStaticViability_SymlinkEscapingTheProjectIsNotSilentlyRead`);
+`cmd/pokkum/staticgate_wiring_test.go` (`TestApplyProfile_CarriesAllowServerCodeInStatic`).
+
+**Fix:** assert `Verdict == StaticUnknown`, and assert pointer inequality, respectively.
+
+**Preventative rule:** before writing a guard, state in one sentence what the buggy code produces
+and what the fixed code produces — then check the assertion can distinguish exactly those two.
+Two shapes where it usually cannot: a negative assertion (`!= X`, `no error`, `not empty`) over a
+value with three or more states, and a VALUE assertion for a fix whose effect is on IDENTITY
+(cloning, aliasing, copy-on-write, interning). Reverting the fix remains the only way to find out;
+this entry exists because two guards in one session survived being written by someone who intended
+to do exactly that.
+
+---
+
+## 2026-09-09 — A commented-out `kit.files.routes` won over the real one, in the third instance of a class fixed twice already
+
+**Category:** parsing (whole-file regex vs scoped match) / repeated-failure-class
+
+**Root cause:** `bunexec`'s private `resolveRoutesDir` matched
+`routes\s*:\s*["'`]([^"'`]+)["'`]` against the raw text of `svelte.config.js` and `vite.config.ts`.
+A project with a commented-out `// files: { routes: 'src/old-routes' }` above its real
+configuration got the commented path, because the regex has no idea what a comment is. The
+consequence is not cosmetic: that path is what `stageRoutesMirror` builds the filtered routes
+mirror from, so `--exclude-route` would have mirrored a directory that may not exist, silently
+excluding nothing (`os.Stat` fails, "no routes directory found", skip) — the exclusion reported as
+applied and the route's code still in the image.
+
+The mechanism was already written down twice. `StaticFallbackFilename` was found fooled by
+`fallback: false` in a comment (2026-08-16), and `TransformViteConfig` by `sveltekit(` in a comment
+or string literal (2026-08-17). The second of those shipped a real fix — `findLiveSvelteKitCall`
+and `findLiveAdapterProp`, proper comment/string state scanners in `injector.go` — and
+`stripJSComments` landed in `project.go` for the first. So this repo already contained TWO working
+implementations of "skip comments and string literals before matching JS", and a third site that
+needed one used a bare regex anyway.
+
+That is the same shape as the 2026-09-05 `bufio.Scanner` entry, and the reason is the same: a
+preventative rule stated over a class was acted on for the instances that existed at the time, and
+nothing enumerates new instances on the way in. Neither `gofmt`, `go vet`, `make lint` nor any test
+distinguishes a regex over user source from a regex over a config value.
+
+**Where:** `internal/adapters/bunexec/route_mirror.go`'s `resolveRoutesDir` and its `routesFilesRe`
+(both now deleted); consumed by `stageRoutesMirror`.
+
+**Fix:** the resolution moved to `sveltekitutils.ResolveRoutesDir`, which strips comments before
+matching, and `bunexec` delegates to it. Found while building the static-viability analyser, which
+needed the identical answer — the duplicate was going to become a third copy, and consolidating it
+surfaced the defect in the copy being retired. `stripJSComments` was generalised into
+`stripJS(source, blankStringContents bool)` at the same time, adding
+`blankJSStringsAndComments` for identifier-level matching, so the package now has one scanner
+serving both needs rather than a fourth hand-rolled one.
+
+**Preventative rule:** before writing any regex or `strings.Index` against the text of a
+user-authored source file, grep the repo for an existing comment/string-aware scanner and use it.
+This codebase has had one since 2026-08-16 and has now been bitten three times by code that did not
+look. More generally: when consolidating two implementations of the same question, diff their
+BEHAVIOUR before picking a winner — the duplicate being deleted is where the bug was, and deleting
+it without reading it ships the bug forward under a new name.
+
+---
+
+## 2026-09-09 — A new symlink-containment guard passed with the fix reverted, because "not viable" and "could not check" both satisfied it
+
+**Category:** test-substance / wrong-observable (row 45 family)
+
+**Root cause:** the static-viability scan reads files through an `os.Root` scoped to the project, so
+a route source that is really a symlink out of the project is refused rather than followed. The
+guard written for that asserted `Verdict != StaticViable`. Reverting the `os.Root` conversion back
+to `os.ReadFile(path)` left it GREEN.
+
+`os.ReadFile` follows the symlink, reads the file outside the project, finds the `query()` inside
+it and returns `StaticBlocked` — which is also not `StaticViable`. Two entirely different
+behaviours, one of them the vulnerability the guard exists to prevent, both satisfying the
+assertion. The verdict enum has three values and the assertion only partitioned it into two, so it
+could not distinguish the outcomes that mattered.
+
+Caught only by the mandatory revert-and-watch-it-fail step, which is the whole argument for that
+step: the test was written after the fix, passed immediately, and read as coverage.
+
+**Where:** `internal/adapters/sveltekitutils/staticviability_test.go`,
+`TestAnalyzeStaticViability_SymlinkEscapingTheProjectIsNotSilentlyRead`.
+
+**Fix:** assert `Verdict == StaticUnknown` — the state only the contained read produces. Reverting
+the fix now fails with `Verdict = "blocked", want "unknown"`.
+
+**Preventative rule:** for any assertion written as a negative (`!= X`, `not empty`, `no error`)
+against a value with more than two states, enumerate the OTHER states and ask which of them the bug
+would produce. If the bug produces a state the negative also accepts, the assertion is measuring
+the wrong thing — assert the specific state the fix produces, positively. A negative assertion over
+a tri-state is a two-thirds-empty test that looks full.
+
+---
+
+## 2026-09-07 — A permission fix that handled every directory except the one that mattered
+
+**Category:** guard-scope (off-by-one-level) / fixture-fidelity
+
+**Root cause:** `pokkum dev --cluster`'s in-pod extractor has to write into `/app/server`, which the
+packager ships mode `0555` — no write bit for anyone, owner included. `mkdirAllIn` correctly restored
+the owner write bit on every path segment it descended through, so `chunks/a.js` worked. But
+`index.js` — the single most important file the whole loop exists to replace — sits *directly* in the
+root, where `path.Dir(rel)` is `"."` and `mkdirAllIn` returns immediately having chmod'd nothing. The
+root itself was never made writable, so the very first entry of every real sync would have failed on
+the unlink with `permission denied`.
+
+The reason this is worth an entry rather than a shrug is *why it would not have been caught*: the
+obvious test fixture is a `t.TempDir()`, which is `0755`. Against that fixture the buggy code passes
+every assertion. The bug only exists against the mode the packager actually writes, and the test only
+found it because the fixture deliberately reproduced `0555` — including on a pre-seeded stale file —
+rather than reproducing "a directory".
+
+**Where:** `supervisor/cmd/pokkum-init/devsync.go`, `extractTar`/`mkdirAllIn`
+
+**Fix:** `ensureWritablePath(root)` runs for each `--root` before its `os.Root` handle is opened,
+alongside the existing per-segment `ensureWritable` below it.
+
+**Preventative rule:** When a fix restores or relaxes a permission, a mode, an owner or a quota along
+a path, enumerate the endpoints explicitly — the root, the leaf, and the segments between — and say
+which one each line of the fix covers. A loop over "the parents of X" silently excludes X's own
+container when X has no parent inside the scope. And when the production artifact has a non-default
+mode/owner, the test fixture must reproduce *that*, not merely the shape: a `t.TempDir()` is `0755`
+and will pass for code that cannot write a byte into a real image.
+
+---
+
+## 2026-09-07 — `exec.ExitError.Stderr` is empty whenever you set `cmd.Stderr`, so a reused error helper discarded every failure reason
+
+**Category:** library-semantics-assumption / silent-degradation
+
+**Root cause:** `cmd/pokkum/k8s.go`'s `describeKubectlErr` enriches an error with
+`exec.ExitError.Stderr`, and it works there because its caller uses `cmd.Output()`. The `clusterdev`
+adapter copied that shape for its `kubectl exec` call — but that call needs *both* streams (stdout
+carries the extractor's summary), so it assigns `cmd.Stderr` to a buffer. os/exec populates
+`ExitError.Stderr` **only** from `Output()`, and only when `cmd.Stderr` is nil; once you assign it,
+the field is always empty.
+
+The result: an RBAC denial — by far the most likely real-world failure of this command — surfaced as
+`exit status 1`, with `Error from server (Forbidden): pods "web-aaa" is forbidden` read into a buffer
+and then thrown away. The helper looked like it was enriching the error. It was returning it
+unchanged.
+
+The test that caught it asserted on the *content* of the error (`want it to mention "Forbidden"`),
+not merely that an error occurred. An assertion of the latter kind would have passed throughout.
+
+**Where:** `internal/adapters/clusterdev/syncer.go`, `Sync`
+
+**Fix:** `describeCapturedErr(err, stderr string)` for the `cmd.Stderr`-assigned path, kept separate
+from `describeExecErr` for the `Output()` path, with a doc comment on each saying which is which —
+they cannot be merged, and merging them is precisely how this recurs.
+
+**Preventative rule:** Before reusing an error-enrichment (or output-capture) helper against a
+different subprocess call site, check that the call site still satisfies the helper's *implicit*
+precondition about which streams os/exec owns. More generally: when a test asserts on a failure path,
+assert on what the error *says*, not only that it is non-nil — a helper that silently stops enriching
+is invisible to `if err == nil { t.Fatal }`.
+
+---
+
 ## 2026-09-06 — Pokkum's own release binaries were not reproducible, so a half-finished release could not be resumed
 
 **Category:** release-pipeline / unresumable-by-construction — and a premise failure: the one property
