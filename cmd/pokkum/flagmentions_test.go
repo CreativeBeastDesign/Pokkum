@@ -59,6 +59,10 @@ var foreignFlags = map[string]string{
 	"--frozen-lockfile": "bun install",
 	"--no-install":      "bun runtime — disables auto-install in the image entrypoint",
 
+	// Dockerfile — quoted in `pokkum guide extras`, which shows the custom-base
+	// recipe for vendoring a third-party binary alongside a preset.
+	"--from": "Dockerfile COPY --from",
+
 	// git — gitutils, slsa/gitdiscovery, config source-date discovery
 	"--always":    "git describe",
 	"--dirty":     "git describe",

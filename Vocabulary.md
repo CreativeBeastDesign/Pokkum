@@ -518,6 +518,33 @@ Without `--check`, `pokkum upgrade` refuses to install anything if it cannot ver
 
 ---
 
+## 14b. `pokkum guide [topic]`
+
+Prints the operating manual for driving Pokkum from inside a SvelteKit project. Unlike this document, it is compiled into the binary, so it always describes the version that printed it — the skew this closes is a Homebrew-installed release whose bundled README predates a whole command group.
+
+Its audience is explicitly someone (or some agent) working in a *project* rather than in this repository, who cannot read `Vocabulary.md` at all. It therefore restates configuration and flag material found here on purpose. `cmd/pokkum/guide_test.go` keeps that duplication honest: every `yaml:` field of `ports.ProjectConfig`/`ports.BuildProfile` must appear in the guide's `config` section (70 fields at time of writing), and every command in the cobra tree must be named in it. `cmd/pokkum/flagmentions_test.go` additionally rejects any flag mention in the guide that does not correspond to a real, registered flag.
+
+No flags. `pokkum guide` prints every section; `pokkum guide <topic>` prints one; `pokkum guide topics` lists them. An unknown topic is a usage error naming the valid set.
+
+| Topic | Contents |
+|---|---|
+| `overview` | What Pokkum is operationally, what enters the image, the command list |
+| `quickstart` | The path from nothing to a running image, each step ending at a check |
+| `invariants` | The five properties that constrain application code before Pokkum runs |
+| `config` | The complete `.pokkum.yaml` field reference, precedence, and the runtime/strategy/base composition rule |
+| `strategy` | `static` vs `layered`, and exactly what the viability scan does and does not prove |
+| `base` | Base image presets and custom references |
+| `output` | Output modes, and what each one loses |
+| `deploy` | Kubernetes, Dokploy, SwiftWave and vanilla registry-pull recipes |
+| `env` | Environment variables, CLI-side and runtime |
+| `verify` | Proving what you built, including `explain why` and running as the real UID |
+| `extras` | Extra project files, and the third-party-binary case Pokkum does not cover |
+| `escape-hatches` | What each bypass flag actually turns off |
+| `failures` | Error text → meaning → next command |
+| `non-goals` | What Pokkum will not do, so nobody hunts for the flag |
+
+---
+
 ## 15. `pokkum version`
 
 No flags.
@@ -593,6 +620,19 @@ Unlike the table above, these are read directly by the bundled `@sveltejs/adapte
 | `ADDRESS_HEADER` | (none) | Proxy header adapter-node trusts for the real client IP (e.g. `x-forwarded-for`). Without it, `event.getClientAddress()` reports the proxy's own address for every request. |
 | `XFF_DEPTH` | `1` | Number of trusted proxy hops adapter-node counts back from when parsing `ADDRESS_HEADER`. |
 | `BODY_SIZE_LIMIT` | `512K` | Request body size cap, in adapter-node's own size-string format (e.g. `512K`, `10M`, `Infinity` to disable). |
+
+---
+
+## 18c. Filesystem Contract (Runtime)
+
+Two properties of every image Pokkum produces. Neither is configurable, and both shape how an application must be written — they are stated here because previously they existed only as comments in `internal/adapters/packager/layer.go`, and were discovered as production failures rather than read.
+
+| Property | Detail |
+|---|---|
+| The application tree is read-only | Files ship at mode `0555` and directories at `0555`, unconditionally, in every image and every strategy. There is no flag or config key to change it. Any runtime write to a project-relative path fails. Writes must target the OS temporary directory. |
+| Only adapter output ships | Nothing else from the project directory enters the image. There is no implicit `COPY .`. A project reading templates, fonts or seed data off disk must place them inside the adapter's output directory during its own build — see `pokkum guide extras`. |
+
+**Verify as the real runtime user.** `docker exec` defaults to root, and root bypasses the `0555` bits via `DAC_OVERRIDE` — so a command that succeeds under `docker exec` proves nothing about the non-root process actually serving traffic. Use `docker run -u 65532 …` instead. Use `pokkum explain why <image> <path>` to answer "did this file make it into the image" without starting a container at all.
 
 ---
 

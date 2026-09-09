@@ -121,6 +121,7 @@ Deliberate decisions, not gaps. Each item page states the reasoning.
 
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
+| [Generic container-tooling pitfalls stay in the guide, not in the CLI](items/generic-container-tooling-pitfalls.md) | A field report surfaced several real footguns that belong to Docker and bun rather than to Pokkum; they are documented in `pokkum guide` and deliberately not turned into checks. | dx | wont-do |
 | [npm-distributed plugin system](items/plugin-system.md) | Will not be built: an npm-based extension model would undercut the exact supply-chain hardening story Pokkum exists to provide. | dx | wont-do |
 | [Progressive deployment strategies](items/progressive-deployment-strategies.md) | Will not be built: canary, blue-green, and auto-rollback are Argo Rollouts/Flagger's turf, with Kubernetes-native primitives Pokkum has no reason to reimplement. | infra | wont-do |
 | [Service mesh integration](items/service-mesh-integration.md) | Will not be built: Istio/Linkerd sidecar config generation is real but narrow demand against real, ongoing API churn that dedicated mesh tooling already tracks. | infra | wont-do |
