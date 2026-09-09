@@ -294,8 +294,14 @@ func promptInitOptions(r io.Reader, defaults ports.InitConfigOptions, analysis p
 	writeRuntimeFinding(os.Stdout, analysis.runtime)
 	fmt.Println()
 
-	// 1. Docker Repo
-	fmt.Print("1. Target Container Registry (e.g. ghcr.io/example/my-app, or empty for local only) []: ")
+	// Prompt numbers are a running counter, not literals: the runtime question
+	// is skipped for strategy=static, and a hardcoded sequence then presents
+	// the user with 1, 2, 4, 5, 6 — a gap that reads as a bug in the tool.
+	n := 0
+	next := func() int { n++; return n }
+
+	// Docker Repo
+	fmt.Printf("%d. Target Container Registry (e.g. ghcr.io/example/my-app, or empty for local only) []: ", next())
 	if scanner.Scan() {
 		input := strings.TrimSpace(scanner.Text())
 		if input != "" {
@@ -303,17 +309,17 @@ func promptInitOptions(r io.Reader, defaults ports.InitConfigOptions, analysis p
 		}
 	}
 
-	// 2. Strategy, asked before runtime and base because it constrains both.
+	// Strategy, asked before runtime and base because it constrains both.
 	//
 	// exe is deliberately not offered here — it is an advanced, single-binary
 	// mode rather than a sensible default for a new project — but it stays
 	// accepted in a hand-written config.
-	if v := promptChoice(scanner, 2, "Build Strategy",
+	if v := promptChoice(scanner, next(), "Build Strategy",
 		[]string{string(ports.StrategyLayered), string(ports.StrategyStatic)}, opts.Strategy); v != "" {
 		opts.Strategy = v
 	}
 
-	// 3. Runtime — asked ONLY for layered.
+	// Runtime — asked ONLY for layered.
 	//
 	// A static image ships no JavaScript runtime at all (pokkum-static serves
 	// the prerendered tree), and core rejects runtime=node outside
@@ -321,7 +327,7 @@ func promptInitOptions(r io.Reader, defaults ports.InitConfigOptions, analysis p
 	// meaningless or invalid is how a prompt talks a user into a config that
 	// does not build; the two previous init bugs were both this shape.
 	if opts.Strategy == string(ports.StrategyLayered) {
-		if v := promptChoice(scanner, 3, "Application Runtime",
+		if v := promptChoice(scanner, next(), "Application Runtime",
 			[]string{string(ports.RuntimeBun), string(ports.RuntimeNode)},
 			runtimePromptDefault(opts.Runtime)); v != "" {
 			opts.Runtime = v
@@ -339,7 +345,7 @@ func promptInitOptions(r io.Reader, defaults ports.InitConfigOptions, analysis p
 		opts.Runtime = ""
 	}
 
-	// 4. Base image preset. The offered set is exactly the presets that exist:
+	// Base image preset. The offered set is exactly the presets that exist:
 	// this prompt used to offer "chainguard-static", which is an unimplemented
 	// roadmap item rather than a preset, so anyone picking option 3 got a
 	// .pokkum.yaml that pokkum build refused — and it omitted distroless-node,
@@ -349,7 +355,7 @@ func promptInitOptions(r io.Reader, defaults ports.InitConfigOptions, analysis p
 	for _, p := range presets {
 		allowed = append(allowed, string(p))
 	}
-	fmt.Println("4. Base Image Preset:")
+	fmt.Printf("%d. Base Image Preset:\n", next())
 	for _, p := range presets {
 		marker := " "
 		if string(p) == opts.BasePreset {
@@ -361,8 +367,8 @@ func promptInitOptions(r io.Reader, defaults ports.InitConfigOptions, analysis p
 		opts.BasePreset = v
 	}
 
-	// 5. Local profile
-	fmt.Print("5. Configure local development profile (--local)? [Y/n] (default: Y): ")
+	// Local profile
+	fmt.Printf("%d. Configure local development profile (--local)? [Y/n] (default: Y): ", next())
 	if scanner.Scan() {
 		input := strings.TrimSpace(strings.ToLower(scanner.Text()))
 		if input == "n" || input == "no" {
@@ -370,8 +376,8 @@ func promptInitOptions(r io.Reader, defaults ports.InitConfigOptions, analysis p
 		}
 	}
 
-	// 6. CVE policy
-	if v := promptChoice(scanner, 6, "Fail build on vulnerability threshold",
+	// CVE policy
+	if v := promptChoice(scanner, next(), "Fail build on vulnerability threshold",
 		[]string{"none", "low", "medium", "high", "critical"}, "none"); v != "" {
 		opts.FailOnCVE = v
 	}

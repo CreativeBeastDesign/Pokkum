@@ -546,3 +546,67 @@ func TestWriteStaticFindings_DoesNotClaimBlockersAreUnderTheRoutesDir(t *testing
 		t.Errorf("summary lost the count: %q", summary)
 	}
 }
+
+// capturePrompts runs promptInitOptions with the given analysis and returns
+// everything it wrote to stdout.
+func capturePrompts(t *testing.T, input string, analysis projectAnalysis, defaults ports.InitConfigOptions) string {
+	t.Helper()
+	stdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r)
+		done <- buf.String()
+	}()
+	promptInitOptions(strings.NewReader(input), defaults, analysis)
+	_ = w.Close()
+	os.Stdout = stdout
+	return <-done
+}
+
+// TestPromptInitOptions_NumbersAreContiguousWhenRuntimeIsSkipped: the runtime
+// question is not asked for strategy=static, and hardcoded prompt numbers left
+// the user looking at 1, 2, 4, 5, 6 — a gap that reads as a bug in the tool.
+func TestPromptInitOptions_NumbersAreContiguousWhenRuntimeIsSkipped(t *testing.T) {
+	staticDefaults := ports.InitConfigOptions{
+		BasePreset:         string(ports.BaseImageDistroless),
+		Strategy:           string(ports.StrategyStatic),
+		EnableLocalProfile: true,
+	}
+	got := capturePrompts(t, "\n\n\n\n\n", projectAnalysis{}, staticDefaults)
+
+	// Five questions asked (runtime skipped), so exactly 1..5 must appear as
+	// prompt numbers and 6 must not.
+	for i := 1; i <= 5; i++ {
+		if !strings.Contains(got, fmt.Sprintf("%d. ", i)) {
+			t.Errorf("prompt %d. is missing from a static run:\n%s", i, got)
+		}
+	}
+	if strings.Contains(got, "6. ") {
+		t.Errorf("a static run asked six numbered questions; the runtime question should be skipped:\n%s", got)
+	}
+
+	// And the layered run, where the runtime question IS asked, goes to 6.
+	layeredDefaults := staticDefaults
+	layeredDefaults.Strategy = string(ports.StrategyLayered)
+	layered := capturePrompts(t, "\n\n\n\n\n\n", projectAnalysis{}, layeredDefaults)
+	if !strings.Contains(layered, "6. ") {
+		t.Errorf("a layered run must ask six numbered questions:\n%s", layered)
+	}
+	if !strings.Contains(layered, "Application Runtime") {
+		t.Errorf("a layered run must ask about the runtime:\n%s", layered)
+	}
+}
+
+func TestPluralSources(t *testing.T) {
+	for n, want := range map[int]string{0: "0 route sources", 1: "1 route source", 2: "2 route sources"} {
+		if got := pluralSources(n); got != want {
+			t.Errorf("pluralSources(%d) = %q, want %q", n, got, want)
+		}
+	}
+}

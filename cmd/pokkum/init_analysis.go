@@ -57,6 +57,13 @@ func (a projectAnalysis) suggestedStrategy() (strategy string, why string) {
 	}
 }
 
+func pluralSources(n int) string {
+	if n == 1 {
+		return "1 route source"
+	}
+	return fmt.Sprintf("%d route sources", n)
+}
+
 func pluralFiles(n int) string {
 	if n == 1 {
 		return "1 file"
@@ -92,8 +99,8 @@ func writeStaticFindings(w io.Writer, a projectAnalysis) {
 		}
 
 	case sveltekitutils.StaticViable:
-		fmt.Fprintf(w, "  → Nothing in this project rules out a static build: %d route sources scanned under %s,\n",
-			r.FilesScanned, r.RoutesDir)
+		fmt.Fprintf(w, "  → Nothing in this project rules out a static build: %s scanned under %s,\n",
+			pluralSources(r.FilesScanned), r.RoutesDir)
 		fmt.Fprintf(w, "    no server endpoints, server load functions, form actions or remote functions.\n")
 
 		// The inverse flag: viable, but not yet set up to actually build that
