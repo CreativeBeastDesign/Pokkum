@@ -118,6 +118,9 @@ and an agent-facing surface built around a manual that ships inside the binary.
 - Dynamic routes with no `entries()` export are reported as a static-build caveat rather than
   passed over in silence.
 - Three constants mirrored across the CLI/supervisor boundary are now guarded against drift.
+- A vendor-cancellation test raced a fixed-duration fake install against cancellation
+  propagation, so it could fail on a loaded runner with the code working correctly. It now
+  asserts the teardown signal directly.
 
 ## [v1.1.2] — 2026-09-06
 

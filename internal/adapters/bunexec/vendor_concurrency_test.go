@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -186,6 +188,24 @@ exit 0`)
 // TestPrepare_CancelledContextLeaksNeitherInstallNorGoroutine is the same
 // property through Prepare itself, on the path an operator actually takes:
 // Ctrl-C during a build.
+//
+// The fake install used to run for a fixed `sleep 3` and the test polled for
+// a "finished" marker never appearing within a window comfortably longer than
+// that. That raced two independent clocks against each other: the fixed
+// install duration, and however long cancellation took to propagate through
+// Prepare's plumbing (context cancellation -> the vendor job's goroutine ->
+// cmd.Cancel -> SIGKILL). On a loaded runner the second clock could exceed
+// the first even though teardown was completely correct, which is exactly
+// what happened on the v1.2.0 macOS CI job (see
+// docs/roadmap/testing-infra.yaml#vendor-cancellation-test-flake) — a failure
+// with no code change behind it, and a clean pass on an identical re-run.
+//
+// The fake install below never completes on its own: it blocks forever
+// (`while :; do sleep …; done`, unbroken by anything the test writes) so the
+// only way it can ever stop is by being killed. That removes the race
+// entirely — there is no clock left to lose against — and lets the test
+// assert directly on the teardown signal that actually matters: the OS
+// process Prepare's vendor job started is gone.
 func TestPrepare_CancelledContextLeaksNeitherInstallNorGoroutine(t *testing.T) {
 	dir := newProjectDir(t, validPackageJSON, layeredSvelteConfig())
 	if err := os.WriteFile(filepath.Join(dir, "bun.lock"), []byte(vendorLockA), 0o600); err != nil {
@@ -194,14 +214,13 @@ func TestPrepare_CancelledContextLeaksNeitherInstallNorGoroutine(t *testing.T) {
 
 	markers := t.TempDir()
 	started := filepath.Join(markers, "install-started")
-	finished := filepath.Join(markers, "install-finished")
+	pidFile := filepath.Join(markers, "install-pid")
 	putFakeBunOnPath(t, `
 case "$1" in
   install)
+    echo $$ > `+pidFile+`
     touch `+started+`
-    ( sleep 3; touch `+finished+` ) &
-    wait
-    exit 0
+    while :; do sleep 0.1; done
     ;;
 esac
 sleep 3
@@ -234,15 +253,53 @@ exit 0`)
 		t.Fatal("Prepare did not return after the context was cancelled")
 	}
 
-	deadline := time.Now().Add(6 * time.Second)
+	assertInstallProcessExited(t, pidFile, 6*time.Second)
+	assertGoroutinesSettled(t, goroutinesBefore)
+}
+
+// assertInstallProcessExited polls for the OS process recorded in pidFile (by
+// the fake install script, which never exits on its own — see the comment on
+// TestPrepare_CancelledContextLeaksNeitherInstallNorGoroutine) to disappear.
+// Sending it signal 0 is the standard existence probe: it delivers nothing,
+// but the error return distinguishes "still running" from "gone" (ESRCH,
+// surfaced by the os package as ErrProcessDone).
+func assertInstallProcessExited(t *testing.T, pidFile string, within time.Duration) {
+	t.Helper()
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("could not read the recorded install pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("recorded install pid %q is not a number: %v", raw, err)
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		// Unreachable on the unix-only platforms this test runs on (see
+		// putFakeBunOnPath's Windows skip): os.FindProcess never fails there.
+		return
+	}
+
+	// The fake install never exits on its own, so if this assertion FAILS the
+	// process it started outlives the test run and sits in a sleep loop until
+	// the machine is rebooted. That is not hypothetical: proving this guard
+	// could fail left exactly one such orphan behind, which had to be found
+	// with `ps` and killed by hand.
+	//
+	// A red test must not also litter the machine, so the kill is
+	// unconditional cleanup rather than part of the assertion below — it runs
+	// whether the test passed, failed, or panicked, and killing an
+	// already-dead pid is a harmless no-op.
+	t.Cleanup(func() { _ = proc.Kill() })
+
+	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(finished); err == nil {
-			t.Fatal("the vendor install outlived the cancelled Prepare and ran to completion")
+		if sigErr := proc.Signal(syscall.Signal(0)); sigErr != nil {
+			return // The process is gone.
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-
-	assertGoroutinesSettled(t, goroutinesBefore)
+	t.Fatal("the vendor install outlived the cancelled Prepare: its process was still alive after the deadline")
 }
 
 func waitForFile(t *testing.T, path string, within time.Duration) {

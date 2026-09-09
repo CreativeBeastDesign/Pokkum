@@ -55,6 +55,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | Title | Summary | Kind | Status | Commits |
 | --- | --- | --- | --- | --- |
 | [A benchmark harness, and the optimisation pass it made possible](items/performance-benchmark-harness.md) | Nothing in this repo measured speed, so every performance claim was an argument from reading the code; adding benchmarks over realistic inputs turned that into numbers, and the numbers then found two bugs that correctness tests structurally could not. | dx | shipped |  |
+| [TestPrepare_CancelledContextLeaksNeitherInstallNorGoroutine is timing-dependent](items/vendor-cancellation-test-flake.md) | The vendor-cancellation guard races a real `bun install` against context cancellation, and fails on a slow or loaded runner when the install wins. | infra | shipped |  |
 
 ## v1.1
 

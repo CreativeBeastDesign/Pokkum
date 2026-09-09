@@ -8,8 +8,8 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
-| Stage | backlog |
+| Status | shipped |
+| Stage | v1.2 |
 | Kind | infra |
 | Tier | polish |
 | Area | Testing & Infrastructure |
@@ -35,14 +35,29 @@ assertion fires even though cancellation works correctly. A guard that reports a
 when the code is right is worse than no guard — it trains readers to re-run rather than
 to look, which is exactly what happened here.
 
-## Recommendation
+## Decision
 
-Make the install's duration controlled rather than incidental — a stub or a script that
-blocks until released — so the test observes the teardown it is asserting about instead
-of racing a real package manager. Failing that, assert on the observable teardown signal
-directly rather than on "did the install complete".
+The race was between two independent clocks: a fixed `sleep 3` fake install, and however
+long cancellation took to propagate (context → the vendor job's goroutine → `cmd.Cancel` →
+SIGKILL). On a loaded runner the second could exceed the first with teardown working
+perfectly.
 
-Worth doing before it trains anyone to dismiss a red macOS job by reflex.
+The fake install now blocks forever, so it has no natural end and the only way it can stop
+is by being killed — there is no clock left to lose against. The assertion moved from the
+completion proxy ("a marker file never appeared") to the signal that actually matters: the
+OS process is gone, probed with signal 0. The goroutine-leak half is untouched; both halves
+the test name promises are still asserted.
+
+No production seam was needed — the existing `cmd.Cancel`/process-group-kill machinery
+already provided everything.
+
+One consequence of a fake install that never exits on its own: if the assertion fails, that
+process outlives the run and sits in a sleep loop indefinitely. Proving the guard could
+fail left exactly one such orphan behind, found with `ps` and killed by hand. So the kill
+is unconditional `t.Cleanup` rather than part of the assertion — a red test must not also
+litter the machine.
+
+Verified 20/20 consecutive runs, and 10/10 under `-race`.
 
 ## Implementation
 
