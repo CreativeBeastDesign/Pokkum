@@ -590,6 +590,17 @@ VANILLA (anything that pulls from a registry)
   What Pokkum will not do here is call an API it has no adapter for — leave
   deploy unset and drive the platform yourself.
 
+WHICH IMAGE A BARE pokkum deploy SENDS
+
+  None. .pokkum.yaml has no image-reference field at all, so there is nothing
+  "recorded in configuration" to fall back to. With update_image off (the
+  default) the call is a plain redeploy of whatever the platform is already
+  pointed at, and the image reference goes unused. With update_image on,
+  --image is required and the command fails naming the application without it.
+
+  In practice you pass the reference the build just produced. A build with
+  deploy.auto set to true does this for you inside the one invocation.
+
 RESPONSE CLASSIFICATION
 
   Both PaaS targets answer HTTP 200 for outcomes that are not deployments, so
@@ -703,12 +714,22 @@ AN EXTRA OS BINARY (Typst, pandoc, ffmpeg, ImageMagick)
        FROM <the preset's resolved reference>
        COPY --from=tool /path/to/binary /usr/local/bin/
 
-     Get the preset's real reference from pokkum base check — the libc must
-     match. Verify the upstream tag resolves for EVERY platform you build for
-     before pinning it; a tag that exists for one architecture and not another
-     fails late and confusingly. Then set base: to your reference, and either
-     set POKKUM_BASE_IMAGE_PUBKEY or accept that you have opted out of base
-     verification.
+     Get the preset's real reference with pokkum base update — the libc must
+     match. Use update, not check: check only compares an existing pokkum.lock
+     against upstream, so on a project that has never built it reports no
+     lockfile and produces no reference.
+
+     Verify the upstream tag resolves for EVERY platform you build for before
+     pinning it; a tag that exists for one architecture and not another fails
+     late and confusingly.
+
+     Unlike pokkum's own build, this step needs a running Docker daemon — and
+     for a multi-platform base, an explicit docker-container buildx builder,
+     because the default driver cannot build multi-arch at all. Wait for the
+     daemon to actually answer rather than for its launcher to return.
+
+     Then set base: to your reference, and either set POKKUM_BASE_IMAGE_PUBKEY
+     or accept that you have opted out of base verification.
 
   2. A separate image entirely, run alongside. Build the tool's image with
      whatever suits it, write your own Kubernetes manifest with both
@@ -788,6 +809,13 @@ checking and why that is acceptable here, it is not the right flag.
       pokkum doctor reports this before you build, and the error names the
       exact package and the import to write. pokkum adopt can make the change.
 
+      If the adapter is already concrete and the build output still never
+      appears, stop suspecting Pokkum: check that the adapter and @sveltejs/kit
+      are a compatible release pairing. Two independently-tagged prereleases
+      are not guaranteed to work together, and an adapter calling a builder
+      method its kit version does not yet expose fails by producing nothing —
+      which from here looks identical to adapter-auto.
+
   ErrNotSvelteKit
       The directory is not a SvelteKit project. Check --dir.
 
@@ -822,6 +850,46 @@ checking and why that is acceptable here, it is not the right flag.
 
   Digest differs between two builds of the same source
       pokkum repro doctor. Note that the toolchain used to build matters.
+`,
+	},
+	{
+		Topic: "exit-codes",
+		Title: "Exit codes",
+		Body: `
+Two unrelated sets. Do not mix them up.
+
+THE CLI, on your machine
+
+  0    succeeded.
+  1    failed. This is the general path every command shares — a build error,
+       a refused deploy, a red doctor, an invalid config, and also a usage
+       error such as an unknown command or a bad flag value.
+  2    pokkum verify only: verification COULD NOT BE PERFORMED. An unreadable
+       trust root, unresolvable provenance, or signature material that could
+       not be characterized.
+  N    pokkum apply only: when the underlying kubectl apply fails, its own
+       exit code is passed through verbatim rather than collapsed to 1.
+
+  For pokkum verify the 1/2 split is the load-bearing part, and it is the
+  reason to gate CI on the code rather than on "non-zero":
+
+    1  the image was reachable and checkable, and it did NOT pass
+    2  the check could not be run at all
+
+  Treating those as the same thing means a broken verifier reads exactly like
+  a tampered image. They are opposite problems.
+
+  Because a usage error also exits 1, the status alone does not tell you that
+  you typed the command wrong. Read the error output, or --output json's error
+  code, when that distinction matters.
+
+THE SUPERVISOR, inside a running container
+
+  A completely separate set returned by pokkum-init as PID 1 — including 125
+  for a startup attestation mismatch, 126 for a binary that exists but cannot
+  be exec'd, 127 for one that is not found, and 128+N for a child killed by
+  signal N. A crash-looping pod's exit status comes from that table, never
+  from this one.
 `,
 	},
 	{

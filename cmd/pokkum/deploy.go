@@ -70,7 +70,9 @@ confirmed something it did not test.`,
 	cmd.Flags().StringVarP(&flags.dir, "dir", "d", ".", "Path to project directory")
 	cmd.Flags().StringVarP(&flags.profile, "profile", "P", "", "Configuration profile whose deploy settings to use")
 	cmd.Flags().StringVar(&flags.image, "image", "",
-		"Image reference to deploy, overriding the one recorded in configuration; required when the target repoints the application at a specific image")
+		"Image reference to deploy. There is no image reference in .pokkum.yaml to override -- "+
+			"omitting this makes the call a plain redeploy of whatever the platform is already "+
+			"pointed at. Required when update_image is enabled, which fails without it")
 	cmd.Flags().BoolVar(&flags.check, "check", false,
 		"Validate the deploy configuration and report what would happen, without deploying anything")
 	cmd.Flags().BoolVar(&flags.checkOffline, "offline", false,

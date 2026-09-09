@@ -636,6 +636,24 @@ Two properties of every image Pokkum produces. Neither is configurable, and both
 
 ---
 
+## 18d. CLI Exit Codes (`pokkum`)
+
+These are the codes the **CLI** returns on the machine you run it on. They are a different set from §19's, which are returned by `pokkum-init` as PID 1 *inside* a running container — the two never overlap and are never interchangeable. If you are reading an exit status off a crash-looping pod, you want §19; if you are gating a CI step on a `pokkum` command, you want this table.
+
+| Exit code | Meaning | Source |
+|---|---|---|
+| `0` | The command succeeded. | normal return |
+| `1` | The command failed. This is the general failure path every command shares — a build error, a refused deploy, a red `doctor`, an invalid config. | `os.Exit(1)` in `main.go` |
+| `1` | For `pokkum verify` specifically: verification **ran and produced a negative verdict** — a rebuild comparison mismatch, or a comparison that could not be completed. The image was reachable and checkable; it did not pass. | `exitFunc(1)` in `verify.go` |
+| `2` | For `pokkum verify` specifically: verification **could not be performed at all** — an unreadable `--sigstore-trusted-root`, an unresolvable Sigstore trust root, unresolvable provenance, or signature material that could not be characterized. This is deliberately not `1`: "checked and failed" and "could not check" must never share a code, or a CI gate cannot tell a bad image from a broken verifier. | `exitFunc(2)` in `verify.go` |
+| `<N>` | For `pokkum apply` only: when the underlying `kubectl apply` fails, its exit code is propagated verbatim rather than collapsed to `1`, so an operator sees kubectl's own status. | `os.Exit(exitErr.ExitCode())` in `apply.go` |
+
+**Cobra usage errors also exit `1`, not `2`.** An unknown command or an invalid flag value goes through the same `main.go` path as a runtime failure, so the exit status alone does not distinguish "you typed it wrong" from "it ran and failed". Gate on the error output or `--output json`'s error code, not on the status, when that distinction matters.
+
+`cmd/pokkum/exitcodes_test.go` asserts every literal exit code reachable in `cmd/pokkum` appears in this table, so a newly introduced code cannot ship undocumented.
+
+---
+
 ## 19. Supervisor Exit Codes (`pokkum-init`)
 
 `pokkum-init` (PID 1 in every Pokkum-built image) terminates with one of the codes below, whether it refuses to start the child at all or is reporting the child's own termination. This is the only signal available to an operator triaging a crash-looping pod from a dashboard that shows exit status but not full logs, so each code below is deliberately distinct — none of the rows may ever be collapsed onto another.
