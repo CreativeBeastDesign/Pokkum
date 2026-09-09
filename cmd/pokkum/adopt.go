@@ -88,7 +88,7 @@ func runAdopt(logger *slog.Logger, opts *adoptCmdOptions) error {
 	if err != nil {
 		msg := fmt.Sprintf("failed to adopt project: %v", err)
 		if outputFormat == ports.FormatJSON {
-			return jsonutils.WriteError(os.Stdout, "adopt", "ERR_ADOPT_FAILED", msg, "")
+			return failJSON("adopt", "ERR_ADOPT_FAILED", msg, "")
 		}
 		return fmt.Errorf("%s", msg)
 	}

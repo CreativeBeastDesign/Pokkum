@@ -207,7 +207,7 @@ func shortDigest(d string) string {
 
 func explainFail(outputFormat ports.OutputFormat, command, msg string) error {
 	if outputFormat == ports.FormatJSON {
-		return jsonutils.WriteError(os.Stdout, command, "ERR_EXPLAIN_FAILED", msg, "")
+		return failJSON(command, "ERR_EXPLAIN_FAILED", msg, "")
 	}
 	return fmt.Errorf("%s", msg)
 }

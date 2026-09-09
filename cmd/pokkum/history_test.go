@@ -141,12 +141,19 @@ func TestHistoryCommand_ImageNotFound(t *testing.T) {
 	var output bytes.Buffer
 	_, _ = io.Copy(&output, r)
 
-	// JSON mode reports failure via the envelope's status field rather than
-	// a non-nil Go error, matching this repo's existing convention (same
-	// shape as adopt.go/doctor.go/init.go/verify.go) — CI is expected to
-	// parse status, not rely on the exit code, in --output=json mode.
-	if runErr != nil {
-		t.Fatalf("unexpected Go error (should report via JSON envelope instead): %v", runErr)
+	// JSON mode must report failure BOTH ways: the envelope's status field for
+	// a structured consumer, and a non-nil error so the process exits non-zero.
+	//
+	// This assertion previously required runErr to be nil, reasoning that "CI
+	// is expected to parse status, not rely on the exit code, in --output=json
+	// mode". That reasoning was wrong and it is why the bug survived: a `set -e`
+	// step and a `&&` chain read the exit status and nothing else, so a red
+	// history exited 0 and passed. The convention it cited (adopt/doctor/init)
+	// was the same bug replicated, not a precedent. See Lessons.md 2026-09-09
+	// and mem:self_review_checklist row 73.
+	if runErr == nil {
+		t.Fatal("history --output json returned no error for a nonexistent image; " +
+			"the process would exit 0 while the envelope reports status=error")
 	}
 	var env ports.JSONEnvelope
 	if err := json.Unmarshal(output.Bytes(), &env); err != nil {

@@ -99,7 +99,7 @@ func runDeploy(ctx context.Context, logger *slog.Logger, flags *deployFlags) err
 		msg := fmt.Sprintf("no deploy target configured in %s (add a `deploy:` block with a target of %q or %q)",
 			ports.ConfigFilename, ports.DeployDokploy, ports.DeploySwiftwave)
 		if outputFormat == ports.FormatJSON {
-			return jsonutils.WriteError(os.Stdout, "deploy", "ERR_DEPLOY_NOT_CONFIGURED", msg, "")
+			return failJSON("deploy", "ERR_DEPLOY_NOT_CONFIGURED", msg, "")
 		}
 		return fmt.Errorf("%s: %w", msg, core.ErrDeployNotConfigured)
 	}
@@ -110,7 +110,7 @@ func runDeploy(ctx context.Context, logger *slog.Logger, flags *deployFlags) err
 	res, err := executeDeploy(ctx, logger, projCfg.Deploy, strings.TrimSpace(flags.image), "")
 	if err != nil {
 		if outputFormat == ports.FormatJSON {
-			return jsonutils.WriteError(os.Stdout, "deploy", deployErrorCode(err), err.Error(), "")
+			return failJSON("deploy", deployErrorCode(err), err.Error(), "")
 		}
 		return err
 	}

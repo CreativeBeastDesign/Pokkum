@@ -63,7 +63,7 @@ func runHistory(ctx context.Context, logger *slog.Logger, flags *historyFlags, i
 	if err != nil {
 		msg := fmt.Sprintf("failed to read image annotations for %s: %v", imageRef, err)
 		if outputFormat == ports.FormatJSON {
-			return jsonutils.WriteError(os.Stdout, "history", "ERR_HISTORY_FAILED", msg, "")
+			return failJSON("history", "ERR_HISTORY_FAILED", msg, "")
 		}
 		return fmt.Errorf("%s", msg)
 	}

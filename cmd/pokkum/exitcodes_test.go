@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -239,5 +240,138 @@ func TestDoctorExitStatusIsIndependentOfOutputFormat(t *testing.T) {
 			"\tThe process therefore exits 0 while the envelope reports status:\"error\" and " +
 			"passed:false —\n\ta CI gate on `pokkum doctor --output json` would pass on a red doctor.\n" +
 			"\t--output selects a serialization; it must never change whether the command succeeded.")
+	}
+}
+
+// TestNoReturnWriteErrorShape is the structural half of the row-73 guard.
+//
+// `return jsonutils.WriteError(...)` reads like "return this error" and does
+// the opposite: WriteError returns the WRITE result, nil when the envelope was
+// written fine. Thirteen call sites across six commands had that shape, each
+// sitting directly above a `return fmt.Errorf(...)` for the text branch — so
+// every one of them printed status:"error" and exited 0 while text mode exited
+// 1 on the identical input.
+//
+// The shape is the bug, so the shape is what this forbids. failJSON() is the
+// replacement: it writes the same envelope and returns a silent failure.
+func TestNoReturnWriteErrorShape(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("[TEST SETUP] reading cmd/pokkum: %v", err)
+	}
+	scanned := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		file, perr := parser.ParseFile(fset, name, nil, 0)
+		if perr != nil {
+			t.Fatalf("[TEST SETUP] parsing %s: %v", name, perr)
+		}
+		scanned++
+		// AST, not a string scan: jsonfail.go quotes the forbidden shape in its
+		// own doc comment explaining why it is forbidden, and a textual match
+		// cannot tell that prose from code. Parsing sees only real returns.
+		ast.Inspect(file, func(n ast.Node) bool {
+			ret, ok := n.(*ast.ReturnStmt)
+			if !ok || len(ret.Results) != 1 {
+				return true
+			}
+			call, ok := ret.Results[0].(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "WriteError" {
+				return true
+			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if !ok || pkg.Name != "jsonutils" {
+				return true
+			}
+			t.Errorf("%s:%d returns jsonutils.WriteError directly.\n"+
+				"\tWriteError returns the WRITE result — nil on success — so this exits 0 after\n"+
+				"\tprinting status:\"error\". Use failJSON(command, code, message, details), which\n"+
+				"\twrites the same envelope and returns a failure the caller propagates.",
+				name, fset.Position(ret.Pos()).Line)
+			return true
+		})
+	}
+	if scanned == 0 {
+		t.Fatal("[TEST SETUP] scanned zero .go files; the walk is broken")
+	}
+	t.Logf("checked %d files for the return-WriteError shape", scanned)
+}
+
+// TestExitStatusIsIndependentOfOutputFormat is the empirical half, and the one
+// that would have caught the original bug: it drives the real command tree.
+//
+// Only offline commands are covered — explain/history/verify need a registry
+// and would make this flaky. Those three were verified by hand; adopt in
+// particular is here because it was one of the three confirmed broken.
+func TestExitStatusIsIndependentOfOutputFormat(t *testing.T) {
+	plain := t.TempDir() // not a SvelteKit project
+	if err := os.WriteFile(filepath.Join(plain, "package.json"), []byte(`{"name":"x"}`), 0o644); err != nil {
+		t.Fatalf("[TEST SETUP] writing package.json: %v", err)
+	}
+	badCfg := t.TempDir()
+	if err := os.WriteFile(filepath.Join(badCfg, "package.json"), []byte(`{"name":"x"}`), 0o644); err != nil {
+		t.Fatalf("[TEST SETUP] writing package.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(badCfg, ".pokkum.yaml"),
+		[]byte("version: 1\nstrategy: nonsense-value\n"), 0o644); err != nil {
+		t.Fatalf("[TEST SETUP] writing .pokkum.yaml: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"adopt on a non-SvelteKit project", []string{"adopt", "-d", plain, "--dry-run"}},
+		{"config view with no config file", []string{"config", "view", "-d", plain}},
+		{"config validate on an invalid strategy", []string{"config", "validate", "-d", badCfg}},
+		{"deploy with no deploy target configured", []string{"deploy", "-d", plain}},
+	}
+
+	run := func(t *testing.T, args []string) error {
+		t.Helper()
+		orig := os.Stdout
+		devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("[TEST SETUP] opening %s: %v", os.DevNull, err)
+		}
+		os.Stdout = devnull
+		defer func() {
+			os.Stdout = orig
+			_ = devnull.Close()
+		}()
+
+		root := newRootCommand(context.Background(), discardLogger())
+		root.SetOut(devnull)
+		root.SetErr(devnull)
+		root.SetArgs(args)
+		return root.Execute()
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			textErr := run(t, tc.args)
+			jsonErr := run(t, append(append([]string{}, tc.args...), "--output", "json"))
+
+			// Premise check: a case that stopped failing would compare two nils
+			// and pass while proving nothing.
+			if textErr == nil {
+				t.Fatalf("[TEST SETUP] %v succeeded in text mode; this fixture no longer "+
+					"triggers a failure and the comparison is blind", tc.args)
+			}
+			if jsonErr == nil {
+				t.Errorf("%v failed in text mode but returned no error with --output json.\n"+
+					"\tThe process exits 0 while the envelope reports status:\"error\" — a CI gate\n"+
+					"\ton this command would pass on a failure. --output selects a serialization;\n"+
+					"\tit must never change whether the command succeeded.", tc.args)
+			}
+		})
 	}
 }

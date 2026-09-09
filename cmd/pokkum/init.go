@@ -75,7 +75,7 @@ build
 		if err := os.WriteFile(ignorePath, []byte(defaultContent), 0644); err != nil {
 			msg := fmt.Sprintf("failed to create .pokkumignore: %v", err)
 			if outputFormat == ports.FormatJSON {
-				return jsonutils.WriteError(os.Stdout, "init", "ERR_INIT_FAILED", msg, "")
+				return failJSON("init", "ERR_INIT_FAILED", msg, "")
 			}
 			return fmt.Errorf("%s", msg)
 		}
@@ -91,7 +91,7 @@ build
 	if err != nil {
 		msg := fmt.Sprintf("failed to create config manager: %v", err)
 		if outputFormat == ports.FormatJSON {
-			return jsonutils.WriteError(os.Stdout, "init", "ERR_INIT_FAILED", msg, "")
+			return failJSON("init", "ERR_INIT_FAILED", msg, "")
 		}
 		return fmt.Errorf("%s", msg)
 	}
@@ -151,7 +151,7 @@ build
 			msg := fmt.Sprintf("internal error: generated %s is invalid (%s) — this is a bug in pokkum, not in your project; please report it",
 				ports.ConfigFilename, strings.Join(problems, "; "))
 			if outputFormat == ports.FormatJSON {
-				return jsonutils.WriteError(os.Stdout, "init", "ERR_INIT_FAILED", msg, "")
+				return failJSON("init", "ERR_INIT_FAILED", msg, "")
 			}
 			return fmt.Errorf("%s", msg)
 		}
@@ -159,7 +159,7 @@ build
 		if err := cfgMgr.Save(opts.dir, newCfg); err != nil {
 			msg := fmt.Sprintf("failed to create %s: %v", ports.ConfigFilename, err)
 			if outputFormat == ports.FormatJSON {
-				return jsonutils.WriteError(os.Stdout, "init", "ERR_INIT_FAILED", msg, "")
+				return failJSON("init", "ERR_INIT_FAILED", msg, "")
 			}
 			return fmt.Errorf("%s", msg)
 		}
