@@ -330,6 +330,7 @@ What counts as needing a server:
 | `*.remote.ts\|js` using only `prerender()` | No — that resolves at build time and ships as data |
 | `export const prerender = false` anywhere | Yes — the one finding a source edit retires |
 | `hooks.server.*` | No, reported as a caveat — server hooks run during prerendering, so the build works; what you lose is per-request behaviour for real visitors |
+| A dynamic route (`[slug]`, `[...rest]`, `[[optional]]`) with no `entries()` export | No, reported as a caveat — SvelteKit prerenders it if the crawler reaches it, so a linked route builds fine. But an unreachable one **fails the build** (the default `handleUnseenRoutes` throws), and whether a route is linked cannot be determined from source. Export `entries()`, or list the paths in `config.prerender.entries`. Suppressed if the project sets `prerender.handleUnseenRoutes` to `warn` or `ignore` |
 
 These rules are SvelteKit's own, read from `@sveltejs/kit`'s source (`src/core/postbuild/analyse.js`, `src/runtime/server/page/index.js`, `src/constants.js`) rather than inferred — they are the complete set of conditions under which it refuses to prerender.
 
@@ -389,6 +390,42 @@ Subcommand group to inspect and validate project configuration files (`.pokkum.y
 | `--profile`, `-P` | (none) | (`view` only) Profile to resolve and display. |
 | `--dir`, `-d` | `.` | Path to SvelteKit project directory. |
 | `--output` | `text` | Output serialization format (`text` or `json`). |
+
+---
+
+### `pokkum deploy --check`
+
+Validates the deploy configuration and **deploys nothing**. It resolves the request through `core.ResolveDeployRequest` — the same call a real deploy makes — so agreeing with `--check` means the same resolution will succeed.
+
+```
+=== pokkum deploy --check ===
+Target: dokploy (method api)
+
+  ✓ configuration  target dokploy, method api, resolved by the same code `pokkum deploy` runs
+  ✓ credential     POKKUM_DEPLOY_TOKEN is set (18 characters) — presence only; Pokkum does not ask dokploy whether it is accepted
+  ? application    "abc123" is set and syntactically usable, but Pokkum cannot confirm it exists
+  ? endpoint       panel.example.com:443 accepted a TCP connection — reachability only
+
+✓ Nothing is wrong with what Pokkum can check, but 2 item(s) could not be verified.
+```
+
+**Three outcomes per item, and `?` is not `✓`.** `unverified` means Pokkum could not test that item; it is reported distinctly and never fails the command, because treating "could not determine" as an error would make `--check` unusable for the configurations it exists to help with. Only a `✗` exits non-zero.
+
+What each item does and does not prove:
+
+| Item | Verifies | Does **not** verify |
+|---|---|---|
+| configuration | The full resolution a deploy performs: target, method, endpoint, `endpoint_env`, token presence, `application`, `update_image` support, registry credential pairing | — |
+| credential | The named environment variable is set, and its length | That the platform accepts it |
+| application | It is set and syntactically usable | That it exists. Confirming that needs a read-only endpoint, and every Dokploy endpoint whose contract Pokkum has verified against Dokploy's source **mutates** (`application.deploy` queues a rollout, `application.saveDockerProvider` overwrites credentials). A check must not deploy |
+| endpoint | The host resolves and accepts a TCP connection | That anything is listening on the right path, or that the credential works. No request is sent — which is also what makes it safe for a webhook endpoint whose URL path *is* the secret |
+
+No credential, token or webhook URL ever appears in the output; the endpoint is reported as `host:port` only.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--check` | `false` | Validate the deploy configuration and report what would happen, without deploying. |
+| `--offline` | `false` | With `--check`, skip the endpoint reachability probe and validate configuration only. |
 
 ---
 

@@ -21,6 +21,10 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### silent no-op from picking the wrong near-identical function, or from a load-bearing fallback (1)
+
+- `2026-09-09` — A regex matching a string VALUE was run through `blankJSStringsAndComments`, which blanks string contents, making it unmatchable on every input forever and reporting the same "found nothing" a healthy project produces. In the same function, `filepath.Rel(absolute, relative)` errored on every call while its fallback silently did all the work. Read before choosing between two same-signature functions whose names differ by a qualifier, and before adding any fallback on an error path.
+
 ### encoding another tool's rules from a mental model instead of its source (1)
 
 - `2026-09-09` — A classifier of "what SvelteKit cannot prerender" got two of four rules wrong (every `+server.*`; every server `load`) and missed a fifth, because the rules were inferred rather than read. The authoritative set is four `throw`s in `@sveltejs/kit`, one grep away. Exposed by running the classifier over the repo's own fixtures and finding it called `sveltekit-basic` unbuildable while `static_e2e_test.go` builds that exact fixture. Read before writing code that encodes what another tool accepts or rejects, and before putting a gate on top of any existing classifier.

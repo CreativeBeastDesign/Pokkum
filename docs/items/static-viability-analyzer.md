@@ -64,7 +64,7 @@ bug a third time.
 ## Known Limitations
 
 - A sound negative only. `viable` means nothing found rules static out, never that a static build will succeed.
-- Dynamic route segments are not reported at all yet; adapter-static cannot crawl an unlinked `[slug]` route, and detecting that needs link analysis rather than a per-file scan.
+- Dynamic routes are reported as caveats, not blockers: a route without an `entries()` export is prerendered only if the crawler reaches it, and whether it is linked cannot be determined from source. The caveat is suppressed when the project sets `prerender.handleUnseenRoutes` to `warn` or `ignore`.
 - Advisory only. `pokkum build` does not yet refuse `strategy: static` on a project this scan calls blocked — see item static-strategy-preflight.
 
 ## Related

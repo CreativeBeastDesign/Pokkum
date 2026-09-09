@@ -10,7 +10,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
-| [A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md) | Whether init should configure `deploy:` at all, and which of three shapes the expansion of `pokkum deploy` takes. | feature | awaiting-decision |
+| [A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md) | Whether init should configure `deploy:` at all. Step 1 of the recommendation (`deploy --check`) has shipped; the remaining question is `pokkum deploy init`. | feature | awaiting-decision |
 
 ## v1.1
 
@@ -36,7 +36,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
-| [A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md) | Whether init should configure `deploy:` at all, and which of three shapes the expansion of `pokkum deploy` takes. | feature | awaiting-decision |
+| [A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md) | Whether init should configure `deploy:` at all. Step 1 of the recommendation (`deploy --check`) has shipped; the remaining question is `pokkum deploy init`. | feature | awaiting-decision |
 
 ### Supply Chain & Attestation
 

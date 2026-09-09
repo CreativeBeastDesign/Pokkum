@@ -5,6 +5,52 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-09 — Picking the wrong one of two near-identical scanners made a regex silently unmatchable, and a fallback hid a second bug the same way
+
+**Category:** silent-degradation / near-miss-API — two bugs in one function, both of which fail by
+quietly producing the "nothing found" answer
+
+**Root cause:** `sveltekitutils` has two scanners that differ only in whether string literal
+CONTENTS survive: `stripJSComments` (contents kept — needed to capture a value like
+`fallback: '200.html'`) and `blankJSStringsAndComments` (contents blanked — needed so an identifier
+match is not fooled by that text inside a string). Checklist row 69, written earlier the same
+session, states exactly that distinction.
+
+The new `handleUnseenRoutes` detector matches a string VALUE (`'warn'` / `'ignore'`) and was written
+against `blankJSStringsAndComments`. That scanner replaces `'warn'` with `'    '`, so the regex could
+never match anything, on any input, ever. Not a wrong answer for some configs — an unmatchable
+pattern, exactly the `\bghp_...\b` shape in row 50.
+
+The second bug is in the same function. The route directory was converted with
+`filepath.Rel(routesDir, dir)` where `routesDir` is absolute and `dir` is a project-relative slash
+path, so `Rel` errored on every call. It did not matter, because the error branch assigned
+`rel = dir` and the check then ran `dynamicSegmentRe.MatchString(rel) || dynamicSegmentRe.MatchString(dir)`
+— the fallback was doing 100% of the work while the primary path was dead. Both were written in the
+same sitting and neither had a failing test yet.
+
+**Why both are the same shape:** each fails by returning the reassuring answer. A pattern that never
+matches reports "no opt-out configured" and "no dynamic routes", which is indistinguishable from a
+project that genuinely has neither. Nothing errors, nothing logs, and a test written afterwards
+against a passing implementation encodes the silence.
+
+**Where:** `internal/adapters/sveltekitutils/staticviability.go`,
+`projectOptedOutOfUnseenRouteErrors` and `addDynamicRouteCaveats`.
+
+**Fix:** `stripJSComments` for the value match; the `Rel` call deleted in favour of matching the
+project-relative path directly, since a dynamic segment anywhere in the route's own path is what
+makes the route dynamic. `TestAnalyzeStaticViability_DynamicRoutes/handleUnseenRoutes_opt-out_suppresses_it`
+fails when the blanking scanner is restored.
+
+**Preventative rule:** when a package offers two functions whose names differ by a qualifier and
+whose signatures are identical (`stripX` vs `blankX`, `mustX` vs `tryX`, `...Locked` vs unlocked),
+picking the wrong one is a silent no-op rather than a compile error — so the choice needs a test
+that fails for the wrong pick, written at the same time as the call. And when a conversion has a
+fallback on its error path, check which branch actually executes for real input before trusting
+either: a fallback that silently handles every case means the primary path is untested, and may be
+dead.
+
+---
+
 ## 2026-09-09 — A classifier's rules were inferred from the tool's behaviour instead of read from its source, and got two of four wrong
 
 **Category:** external-contract / spec-by-assumption

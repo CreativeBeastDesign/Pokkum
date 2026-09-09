@@ -299,6 +299,52 @@ before trusting a claim that predates the commit it cites.
   `mem:self_review_checklist` row 41. `verifyKey` now keys on a fingerprint of
   the trusted-root bytes, not the path.
 
+## `pokkum deploy --check` — shipped 2026-09-09
+
+Validates the deploy configuration and deploys NOTHING. `cmd/pokkum/deploy_check.go`.
+
+- **Resolves through `core.ResolveDeployRequest`**, the exact call `executeDeploy`
+  makes. Not a reimplementation — this repo already shipped a validator that
+  disagreed with its consumer (2026-09-01). `TestDeployCheck_AgreesWithTheResolutionItClaimsToPredict`
+  asserts the biconditional (check fails ⟺ resolution fails) over configs on
+  both sides of every rule the resolver applies. That test is the point of the
+  command; if it is ever weakened, `--check` becomes worse than useless.
+- **Tri-state per item**: `ok` / `failed` / `unverified`. Only `failed` exits
+  non-zero. `unverified` NEVER fails — treating "Pokkum could not determine
+  this" as the user's error would make the command unusable for the configs it
+  exists to help with — and never renders as `ok`.
+- **The application id is deliberately unverified.** Confirming it needs a
+  read-only endpoint; every Dokploy endpoint whose contract this repo verified
+  against Dokploy's source MUTATES (`application.deploy` queues a rollout,
+  `application.saveDockerProvider` overwrites credentials). Do not "improve"
+  this by calling an unverified endpoint.
+- **The endpoint probe is a bare TCP dial to host:port, never an HTTP request.**
+  That is what makes it safe for a SwiftWave webhook endpoint whose URL PATH is
+  the secret. It therefore proves reachability only. `--offline` skips it.
+- No credential, token or URL is ever printed; the endpoint appears as
+  `host:port` and the token as a character count.
+- `TestDeployCheck_DeploysNothing` drives it at a recording listener and
+  asserts zero bytes were sent.
+
+## Dynamic-route caveat — shipped 2026-09-09
+
+`addDynamicRouteCaveats` reports a dynamic route (`[slug]`, `[...rest]`,
+`[[optional]]`, `[id=matcher]`) with no `entries()` export as a CAVEAT.
+
+Never a blocker, and the distinction is load-bearing: SvelteKit prerenders such
+a route when the crawler reaches it (prerender.js:687/:705), which depends on
+the rendered HTML of every other page. A linked blog post builds fine, so
+blocking would refuse the most ordinary static site there is. The default
+`handleUnseenRoutes` DOES throw (prerender.js:103), so an unreached one really
+does fail the build — hence a caveat rather than silence.
+
+`entries()` is read from the universal OR server page module, or the endpoint
+module (analyse.js:202, :222), so any scanned route file in the directory
+retires it. Suppressed entirely when the project sets
+`prerender.handleUnseenRoutes` to `warn`/`ignore` — matched with
+`stripJSComments`, NOT `blankJSStringsAndComments`, because it matches a string
+VALUE (getting that backwards made the regex unmatchable; see Lessons.md).
+
 ## Static-build preflight gate — shipped 2026-09-09
 
 `pokkum build --strategy=static` REFUSES before Stage 2 (before `Compiler.Preflight`,

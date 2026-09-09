@@ -266,7 +266,7 @@ items:
       - cmd/pokkum/init_analysis.go
     limitations:
       - "A sound negative only. `viable` means nothing found rules static out, never that a static build will succeed."
-      - "Dynamic route segments are not reported at all yet; adapter-static cannot crawl an unlinked `[slug]` route, and detecting that needs link analysis rather than a per-file scan."
+      - "Dynamic routes are reported as caveats, not blockers: a route without an `entries()` export is prerendered only if the crawler reaches it, and whether it is linked cannot be determined from source. The caveat is suppressed when the project sets `prerender.handleUnseenRoutes` to `warn` or `ignore`."
       - "Advisory only. `pokkum build` does not yet refuse `strategy: static` on a project this scan calls blocked — see item static-strategy-preflight."
     related: ["workspace-init-wizard", "init-runtime-detection", "static-strategy-preflight"]
 
@@ -338,101 +338,97 @@ items:
       - cmd/pokkum/init.go
     related: ["init-runtime-detection", "init-generates-invalid-config"]
 
+  - id: deploy-check
+    title: "pokkum deploy --check"
+    stage: v1.1
+    status: shipped
+    kind: dx
+    tier: foundation
+    summary: "Validates the deploy configuration through the same resolution a real deploy uses, and deploys nothing."
+    problem: |
+      Every `deploy:` answer was unverifiable until the moment it mattered. A wrong endpoint, an
+      unset `POKKUM_DEPLOY_TOKEN` or a missing `application` surfaced as a failed deploy at the end
+      of a build, and `pokkum config validate` could not help: it checks field shapes, not the
+      cross-field resolution the deploy performs.
+    decision: |
+      Shipped as step 1 of [the deployment plan](item:init-deployment-section). It calls
+      `core.ResolveDeployRequest` — the exact call `executeDeploy` makes — rather than
+      re-implementing the rules. That is the whole design constraint: this repo has already shipped
+      a validator that disagreed with its consumer (2026-09-01, `config validate` reporting a
+      config valid that `pokkum deploy` refused), and a `--check` that could do the same would be
+      worse than none, since its entire promise is that agreeing with it means the deploy resolves.
+      `TestDeployCheck_AgreesWithTheResolutionItClaimsToPredict` asserts that biconditional
+      directly over configs on both sides of every rule the resolver applies.
+
+      Three outcomes per item, not two. `unverified` is distinct from `ok` and never fails the
+      command: Pokkum will not claim to have confirmed something it did not test, and will not
+      treat its own inability to check as the user's error.
+
+      What is NOT verified, and why, is stated in the output rather than papered over. The
+      application id is unconfirmed because every Dokploy endpoint whose contract this repo has
+      verified against Dokploy's own source mutates — `application.deploy` queues a rollout,
+      `application.saveDockerProvider` overwrites credentials — and a check must not deploy.
+      Guessing at an unverified read-only endpoint to make the line say "ok" would be a fabricated
+      confirmation, which is the shape of the 2026-08-21 `pokkum scan` incident.
+
+      The endpoint probe is a bare TCP dial to host:port, never an HTTP request. That is what makes
+      it safe for a SwiftWave webhook endpoint whose URL PATH is the secret, and it is why the
+      output reports reachability only. No credential, token or URL is ever printed.
+    flags: ["--check", "--offline"]
+    impl:
+      - cmd/pokkum/deploy_check.go
+      - cmd/pokkum/deploy_check_test.go
+      - cmd/pokkum/deploy.go
+    limitations:
+      - "Cannot confirm the credential is accepted or the application exists; both need a read-only endpoint with a verified contract, and neither platform offers one Pokkum has verified."
+      - "The endpoint probe proves the host accepts a connection, not that the panel is running at that path."
+    related: ["init-deployment-section", "paas-deploy-targets"]
+
   - id: init-deployment-section
     title: "A deployment section in pokkum init, and what pokkum deploy would need to earn it"
     stage: v1.2
     status: awaiting-decision
     kind: feature
     tier: polish
-    summary: "Whether init should configure `deploy:` at all, and which of three shapes the expansion of `pokkum deploy` takes."
+    summary: "Whether init should configure `deploy:` at all. Step 1 of the recommendation (`deploy --check`) has shipped; the remaining question is `pokkum deploy init`."
     problem: |
-      `pokkum init` writes `docker`, `strategy`, `runtime`, `base`, `platforms`, `security`, `sbom`
-      and `profiles`, and never touches `deploy:` — so the one step that gets an image in front of
-      users is the one step init leaves entirely to hand-editing `.pokkum.yaml` against
-      Vocabulary.md. The gap is real.
+      `pokkum init` writes every other section of `.pokkum.yaml` and never touches `deploy:`, so the
+      one step that gets an image in front of users is the one left to hand-editing against
+      Vocabulary.md.
 
-      But `deploy:` is not shaped like the fields init already writes, and that is the whole
-      difficulty rather than an implementation detail:
+      `deploy:` is not shaped like the fields init already writes. It needs secrets (`token_env`
+      names a credential; a webhook `endpoint` contains its secret in the URL), it needs facts only
+      the platform has (`application` is a platform-side id), and its answers cannot be validated
+      offline.
 
-      - **It needs secrets.** `token_env` names an environment variable holding an API credential,
-        and a webhook `endpoint` contains its secret inside the URL. Init writes a file intended to
-        be committed. Anything it asks for here it must be careful NOT to write.
-      - **It needs facts only the platform has.** `application` is a platform-side id. The user
-        cannot type it from memory; it has to be looked up in a panel, or fetched over the API with
-        a credential init has not been given yet.
-      - **Answers cannot be validated offline.** Every other init answer is checked against a fixed
-        set. An endpoint, an application id and a token can only be validated by calling the
-        platform — and `pokkum config validate` reporting a `deploy:` block valid that
-        `pokkum deploy` then refuses is a defect this repo has already shipped once (2026-09-01,
-        validator-consumer disagreement).
-      - **Only two targets exist.** `dokploy` and `swiftwave`. A prompt is a poor fit for a
-        two-value choice most users answer with "neither".
-
-      So the honest question is not "should init ask about deployment" but "what could init ask
-      that is worth more than the risk of writing a half-configured deploy block", and that depends
-      on what `pokkum deploy` grows.
+      **`application` is what decides this.** It cannot be typed from memory and cannot be checked
+      without calling the platform, so any prompt in `pokkum init` — which runs before the user has
+      a reason to have set `POKKUM_DEPLOY_TOKEN` — structurally cannot obtain it. Every option that
+      writes a `deploy:` block without it writes a block that does not work.
     options:
-      - title: "A. Offer deployment in init, ask only for the non-secret half"
-        description: |
-          Add a prompt: target (`none` / `dokploy` / `swiftwave`, default `none`), and for a
-          non-none answer, `method` and `endpoint`. Write `token_env: POKKUM_DEPLOY_TOKEN` as a
-          comment-documented default and NEVER prompt for the token itself. Leave `application`
-          empty with a generated comment saying where to find it. `auto` stays false.
-        tradeoffs: |
-          Smallest diff and no new commands. But it writes a `deploy:` block that is
-          structurally incomplete by construction — the user's next `pokkum deploy` fails on the
-          missing `application`, which is the "init recommended a command it had guaranteed could
-          not work" shape (2026-08-19) in a new place. Mitigable by having init's closing
-          `next_command` advice account for it, which is machinery that already exists.
-      - title: "B. Keep init out of it; add `pokkum deploy init`"
-        description: |
-          A dedicated interactive subcommand that runs AFTER the platform credential is available:
-          reads `$POKKUM_DEPLOY_TOKEN`, calls the platform's list-applications API, and lets the
-          user pick their application from a real list rather than typing an id. Writes the
-          complete, validated `deploy:` block. `pokkum init` prints one line pointing at it.
-        tradeoffs: |
-          Produces a block that is correct and verified against the live platform, which is the
-          only way `application` can be right, and puts the secret-handling in a command whose
-          entire premise is that a credential is present. Costs a new subcommand, a
-          list-applications call per target (Dokploy has one; SwiftWave's webhook method has no
-          equivalent and would stay manual), and network access in a setup path.
-      - title: "C. Neither — document it and expand `pokkum deploy` diagnostics instead"
-        description: |
-          Leave configuration to the file and Vocabulary.md. Spend the effort on
-          `pokkum deploy --check`: validate the block, resolve `token_env`, call the platform's
-          authenticated no-op endpoint and report exactly which of endpoint/token/application is
-          wrong.
-        tradeoffs: |
-          Zero risk of writing a bad block, and `--check` is useful for CI regardless of how the
-          config was authored. But it leaves the actual gap — first-time setup — unaddressed, and
-          a diagnostic is a worse experience than not needing one.
+      - title: "A. Prompt in init for the non-secret half"
+        description: "Ask target/method/endpoint; never prompt for the token; leave `application` empty with a comment."
+        tradeoffs: "Smallest diff, but writes a block that is incomplete by construction — the user's next `pokkum deploy` fails on the missing `application`, which is the 2026-08-19 'init recommended a command it had guaranteed could not work' shape in a new place."
+      - title: "B. A dedicated `pokkum deploy init`"
+        description: "Runs after the credential exists: reads the token, lists the platform's applications, lets the user pick one, writes a complete block verified by --check."
+        tradeoffs: "The only option that can get `application` right. Costs a new subcommand and a list-applications call per target; SwiftWave's webhook method has no equivalent and would stay manual."
+      - title: "C. Diagnostics only"
+        description: "Leave configuration to the file; spend the effort on `pokkum deploy --check`."
+        tradeoffs: "Zero risk, useful in CI regardless of how the config was authored — but leaves first-time setup unaddressed."
     recommendation: |
-      **B, with C's `--check` as its foundation and built first.**
+      B, on top of C. **C has now shipped** as [pokkum deploy --check](item:deploy-check), which
+      also built the resolution-reuse machinery B needs.
 
-      The reasoning is that `application` decides this. It is the one field that cannot be
-      typed correctly from memory and cannot be validated offline, and every option that writes a
-      `deploy:` block without it writes a block that does not work. A prompt in `pokkum init`
-      structurally cannot obtain it, because init runs before the user has a reason to have set
-      `POKKUM_DEPLOY_TOKEN`. Option A therefore buys a partially-filled block and a deferred
-      failure, and this codebase's own history says deferred failures from generated config are
-      expensive.
+      What remains is `pokkum deploy init`: the same resolution, plus a list-applications call, plus
+      an interactive picker, writing the block only once `--check` passes against it. `pokkum init`
+      gains one closing line pointing at it and writes no `deploy:` key itself.
 
-      Sequencing, because the second half is worth shipping alone if the first is enough:
-
-      1. `pokkum deploy --check` (option C). Resolves the config exactly as `pokkum deploy` does,
-         then reports per-field status. This must reuse the deploy path's own resolution rather
-         than reimplementing it — the 2026-09-01 entry is precisely a validator that disagreed
-         with its consumer. Ship, and see whether the setup gap persists.
-      2. `pokkum deploy init` (option B) on top: the same resolution, plus a list-applications
-         call, plus an interactive picker, writing the block only once `--check` passes against it.
-         `pokkum init` gains one closing line pointing at it and writes no `deploy:` key itself.
-
-      What init should do in the meantime is nothing beyond that one line. It is the correct
-      amount for a command that cannot verify what it would be writing.
+      Worth reassessing before building. `--check` may have closed enough of the gap on its own,
+      and the honest test is whether anyone still gets `application` wrong now that a single
+      command tells them their config resolves.
     limitations:
-      - "SwiftWave's webhook method has no application-listing equivalent, so option B's picker would be Dokploy-only; SwiftWave would fall back to pasting the webhook URL into an env var."
-      - "`pokkum deploy --check` needs an authenticated no-op endpoint per target. If a target has none, the check degrades to config-shape validation only, and must SAY so rather than reporting a pass it did not earn."
-    related: ["workspace-init-wizard", "paas-deploy-targets", "static-viability-analyzer"]
+      - "A `pokkum deploy init` picker would be Dokploy-only; SwiftWave's webhook method has no application-listing equivalent."
+    related: ["deploy-check", "workspace-init-wizard", "paas-deploy-targets"]
 
   - id: static-strategy-preflight
     title: "pokkum build preflight for strategy: static"
