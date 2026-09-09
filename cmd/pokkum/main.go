@@ -38,7 +38,13 @@ func main() {
 	// Create and run root command
 	rootCmd := newRootCommand(ctx, logger)
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		logger.Error("command failed", "error", err)
+		// A command that has already rendered its own complete, formatted
+		// report signals failure with an empty-message error. Logging
+		// `command failed error=""` underneath it would add a line that
+		// carries no information and contradicts the report above it.
+		if !isSilentExit(err) {
+			logger.Error("command failed", "error", err)
+		}
 		os.Exit(1)
 	}
 }
