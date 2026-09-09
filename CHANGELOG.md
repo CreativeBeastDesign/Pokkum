@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [v1.2.0] — 2026-09-09
+
 Four areas: a third `pokkum dev` mode that syncs into a running cluster, static-build
 viability analysis wired into both `init` and `build`, a dry-run for deploy configuration,
 and an agent-facing surface built around a manual that ships inside the binary.
