@@ -69,6 +69,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
 | [pokkum config view value provenance](items/config-view-provenance.md) | Show where each resolved `.pokkum.yaml` setting actually came from — flag, profile, env, or default — not just its final value. | dx | open |
+| [doctor --output json loses which check failed](items/doctor-json-drops-per-check-detail.md) | A red `pokkum doctor --output json` returns a summary and an error code, without the per-check array the green path includes — so a machine consumer cannot tell what actually failed. | fix | open |
 | [Dokploy: disambiguate an unrecognised 2xx by polling, instead of failing outright](items/dokploy-ambiguous-response-poll.md) | An HTTP 200 with an empty body is reported as a failed deploy even when the rollout in fact started; a follow-up `application.one` read could tell the two apart without weakening fail-closed. | dx | open |
 | [Documented CLI exit-code table](items/exit-code-reference.md) | Publish a stable reference table for the CLI's exit codes — 125 and 126 already carry specific, undocumented meanings. | dx | open |
 | [Pre/post-build shell hooks](items/hooks-system.md) | Deferred: pre/post-build shell hooks would defuse plugin-system demand cheaply, but add new maintenance surface for something CI pipelines already provide natively. | dx | open |

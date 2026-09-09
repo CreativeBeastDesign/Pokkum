@@ -771,11 +771,18 @@ checking and why that is acceptable here, it is not the right flag.
 		Title: "Failure taxonomy",
 		Body: `
   "sveltekit adapter missing" / "adapter misconfigured"
-      The project's svelte.config.js does not reference the adapter the chosen
-      strategy needs — most often a fresh sv create project still on
-      @sveltejs/adapter-auto, which produces no output Pokkum can package. The
-      error names the exact package and the import to write. pokkum adopt can
-      make the change for you.
+      The adapter the project actually configures is not the one the chosen
+      strategy needs — most often a fresh sv create scaffold still on
+      @sveltejs/adapter-auto, which produces no output Pokkum can package.
+
+      Check BOTH places the adapter can be configured: svelte.config.js, and
+      the SvelteKit plugin's options in vite.config.ts. A current sv create
+      scaffold ships no svelte.config.js at all and configures the adapter
+      through the Vite config, so "there is no svelte.config.js" is not the
+      same as "no adapter is configured".
+
+      pokkum doctor reports this before you build, and the error names the
+      exact package and the import to write. pokkum adopt can make the change.
 
   ErrNotSvelteKit
       The directory is not a SvelteKit project. Check --dir.
