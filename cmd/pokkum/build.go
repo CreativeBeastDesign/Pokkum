@@ -26,6 +26,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/cosign"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/dsse"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/envbake"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/jsonutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/keymaterialutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/nativeinspect"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/packager"
@@ -127,6 +128,15 @@ type buildFlags struct {
 	stubLauncherExplicit bool
 	tagsExplicit         bool
 
+	// output holds the effective --output value (text or json), copied from
+	// the persistent root flag in RunE below. Like doctor.go and verify.go,
+	// build never registers its own --output flag -- registering one here
+	// would need a matching Vocabulary.md entry and would shadow the
+	// already-documented persistent flag with a second definition of the
+	// same name, so it is read lazily via cmd.Flags().GetString("output")
+	// instead.
+	output string
+
 	noVerifyBase           bool
 	baseVerifyMode         string
 	baseKeylessIdentity    string
@@ -184,9 +194,17 @@ container image with a hardened base. It handles multi-platform builds, SBOM gen
 and multiple output modes (push to registry, load into Docker daemon, export to a docker-save
 tarball, or export to an OCI image layout directory).
 
-The project directory defaults to the current working directory.`,
+The project directory defaults to the current working directory.
+
+The produced image ships /app read-only, with no opt-out: any runtime code path that writes
+to a project-relative path will build successfully and then fail at container startup. Write
+to the OS temp directory instead (os.tmpdir() from node:os, or $TMPDIR).`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			outFlag, _ := cmd.Flags().GetString("output")
+			if outFlag != "" {
+				flags.output = outFlag
+			}
 			flags.strategyExplicit = cmd.Flags().Changed("strategy")
 			flags.runtimeExplicit = cmd.Flags().Changed("runtime")
 			for _, bunFlag := range []string{"bun-version", "bun-variant", "bun-binary", "stub-launcher"} {
@@ -387,24 +405,35 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 
 	logger.Debug("build command started", "project_dir", projectDir)
 
+	// outputFormat gates every stdout-shaped decision below: whether
+	// core.Build's own raw-ref stdout line is suppressed, whether a failure
+	// gets a JSON error envelope in addition to the returned error, and
+	// whether a success gets a JSON envelope instead of (never in addition
+	// to -- see buildDeps(logger, buildStdout) below) the plain human
+	// summary. flags.output defaults to "" when runBuild is called directly
+	// (e.g. in tests, bypassing RunE's flag copy), which compares unequal to
+	// FormatJSON and therefore behaves exactly like "text" -- the same
+	// default-safe fallback doctor.go and verify.go rely on.
+	outputFormat := ports.OutputFormat(flags.output)
+
 	// Resolved once here and threaded through both consumers — the build
 	// request and the post-push deploy — so a deploy can never target a
 	// different profile than the build it followed.
 	cfgMgr, projCfg, activeProfile, err := resolveProjectConfig(logger, projectDir, flags.profile, flags.local)
 	if err != nil {
-		return err
+		return buildFail(os.Stdout, outputFormat, err)
 	}
 
 	req, err := buildRequestFromResolvedConfig(ctx, logger, flags, projectDir, cfgMgr, projCfg, activeProfile)
 	if err != nil {
-		return err
+		return buildFail(os.Stdout, outputFormat, err)
 	}
 
 	// Execution-mode switches. They are not part of the request — both
 	// describe how far to get, not what to build — so they travel alongside it
 	// as core.BuildOptions.
 	if flags.dryRun && flags.printManifest {
-		return fmt.Errorf("cannot specify both --dry-run and --print-manifest")
+		return buildFail(os.Stdout, outputFormat, fmt.Errorf("cannot specify both --dry-run and --print-manifest"))
 	}
 	opts := core.BuildOptions{
 		DryRun:        flags.dryRun,
@@ -416,19 +445,29 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	// anything. core.Build repeats both; they are idempotent.
 	req.Normalize()
 	if err := req.Validate(); err != nil {
-		return fmt.Errorf("validation failed: %w", err)
+		return buildFail(os.Stdout, outputFormat, fmt.Errorf("validation failed: %w", err))
 	}
 
-	// The result carries the full summary, but the reference has already gone
-	// to stdout by the time Build returns; everything here is a log line.
-	res, err := runCoreBuild(ctx, buildDeps(logger, os.Stdout), *req, opts)
+	// The result carries the full summary, and in text mode the reference has
+	// already gone to stdout by the time Build returns (core.Build's own
+	// stage 11 write, see pipeline.go), so everything after is a log line.
+	// In JSON mode that raw "repo@sha256:…" line would print ahead of, and
+	// outside, the JSON envelope below, so it is suppressed by passing a nil
+	// Stdout instead -- buildDeps/pipeline.go already treat nil as
+	// "discard", the same mechanism k8s.go uses to keep a nested build's own
+	// ref line off a caller's stdout.
+	var buildStdout io.Writer = os.Stdout
+	if outputFormat == ports.FormatJSON {
+		buildStdout = nil
+	}
+	res, err := runCoreBuild(ctx, buildDeps(logger, buildStdout), *req, opts)
 	if err != nil {
-		return err
+		return buildFail(os.Stdout, outputFormat, err)
 	}
 
 	if flags.vexOutput != "" {
 		if err := writeVEXDocument(flags.vexOutput, req.VEXExemptions, res.Image.Ref); err != nil {
-			return fmt.Errorf("write vex document: %w", err)
+			return buildFail(os.Stdout, outputFormat, fmt.Errorf("write vex document: %w", err))
 		}
 	}
 
@@ -442,23 +481,136 @@ func runBuild(ctx context.Context, logger *slog.Logger, flags *buildFlags, args 
 	// Deploy last, and only for a build that actually published something. A
 	// deploy is a side effect against a live system, so every veto lives in
 	// core.ShouldAutoDeploy rather than being spread across this function.
-	return maybeAutoDeploy(ctx, logger, flags, projCfg, req, opts, res)
+	deployRes, deployErr := maybeAutoDeploy(ctx, logger, flags, projCfg, req, opts, res)
+	if deployErr != nil {
+		return buildFail(os.Stdout, outputFormat, deployErr)
+	}
+	if deployRes != nil && outputFormat != ports.FormatJSON {
+		fmt.Printf("✓ Deployed to %s: %s\n", deployRes.Target, describeDeployResult(*deployRes))
+	}
+
+	if outputFormat == ports.FormatJSON {
+		if err := jsonutils.WriteSuccess(os.Stdout, "build", newBuildJSONOutput(res, deployRes)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// buildFail is --output json's counterpart to returning err directly. In
+// text mode it is a no-op passthrough — main.go's existing stderr error
+// reporting is completely unchanged — but in JSON mode it additionally
+// writes a JSON error envelope to w before the same err propagates for the
+// process exit code, mirroring doctor.go's and verify.go's own JSON
+// error-path shape: a script driving `pokkum build --output json` always
+// gets a parseable response on stdout, success or failure, and the exit code
+// still reflects the real outcome.
+func buildFail(w io.Writer, format ports.OutputFormat, err error) error {
+	if err != nil && format == ports.FormatJSON {
+		_ = jsonutils.WriteError(w, "build", "ERR_BUILD_FAILED", err.Error(), "")
+	}
+	return err
+}
+
+// buildJSONOutput is the --output json data payload for `pokkum build`.
+// Declared here rather than in internal/ports because wiring --output
+// through build/dev is scoped entirely to these two command files; every
+// field is something runBuild already has in hand at the point core.Build
+// returns, with no pipeline plumbing added to get it.
+//
+// Two categories of information the task considered are deliberately absent
+// rather than faked:
+//   - Per-platform manifest digests. BuildResult/ImageResult carry only the
+//     published Ref's own Digest — the index digest for a multi-platform
+//     build (IsIndex true), not each platform manifest's own digest — so
+//     there is nothing to report without a BuildResult field addition.
+//   - Build warnings. The pipeline reports warnings through slog (stderr),
+//     never into a field on BuildResult, so there is nothing to collect
+//     here without the same kind of plumbing change.
+type buildJSONOutput struct {
+	Ref           string           `json:"ref"`
+	Digest        string           `json:"digest"`
+	Tags          []string         `json:"tags"`
+	OutputMode    string           `json:"output_mode"`
+	Platforms     []string         `json:"platforms"`
+	IsIndex       bool             `json:"is_index"`
+	Cached        bool             `json:"cached"`
+	BaseImageRef  string           `json:"base_image_ref"`
+	DurationSec   float64          `json:"duration_seconds"`
+	TarballPath   string           `json:"tarball_path,omitempty"`
+	OCILayoutPath string           `json:"oci_layout_path,omitempty"`
+	Deploy        *buildJSONDeploy `json:"deploy,omitempty"`
+}
+
+// buildJSONDeploy mirrors the fields describeDeployResult renders for a
+// human, structured instead of prose, for the post-push auto-deploy step
+// (see maybeAutoDeploy). Nil when no deploy was configured or attempted.
+type buildJSONDeploy struct {
+	Target       string `json:"target"`
+	Method       string `json:"method"`
+	Application  string `json:"application,omitempty"`
+	ImageRef     string `json:"image_ref,omitempty"`
+	ImageUpdated bool   `json:"image_updated"`
+	Triggered    bool   `json:"triggered"`
+}
+
+// newBuildJSONOutput builds the JSON success payload from what runBuild has
+// on hand once core.Build (and, optionally, the auto-deploy step) returns.
+// Pure and adapter-free by construction — it touches no port, no file, no
+// network — so it is directly unit-testable with fabricated core.BuildResult
+// values, without running any real build pipeline.
+func newBuildJSONOutput(res core.BuildResult, deploy *ports.DeployResult) buildJSONOutput {
+	platforms := make([]string, 0, len(res.Image.Platforms))
+	for _, p := range res.Image.Platforms {
+		platforms = append(platforms, p.String())
+	}
+
+	out := buildJSONOutput{
+		Ref:           res.Image.Ref,
+		Digest:        res.Image.Digest.String(),
+		Tags:          res.Image.Tags,
+		OutputMode:    res.Image.Mode.String(),
+		Platforms:     platforms,
+		IsIndex:       res.Image.IsIndex,
+		Cached:        res.Cached,
+		BaseImageRef:  res.BaseImage.PinnedRef,
+		DurationSec:   res.Duration.Seconds(),
+		TarballPath:   res.Image.TarballPath,
+		OCILayoutPath: res.Image.OCILayoutPath,
+	}
+	if deploy != nil {
+		out.Deploy = &buildJSONDeploy{
+			Target:       string(deploy.Target),
+			Method:       string(deploy.Method),
+			Application:  deploy.Application,
+			ImageRef:     deploy.ImageRef,
+			ImageUpdated: deploy.ImageUpdated,
+			Triggered:    deploy.Triggered,
+		}
+	}
+	return out
 }
 
 // maybeAutoDeploy hands a just-published image to the configured PaaS, when
-// configuration and build mode both allow it.
+// configuration and build mode both allow it. It returns the deploy result
+// (nil when nothing was configured/attempted) so the caller can decide how
+// to report it — text mode prints it immediately as before, JSON mode folds
+// it into the build envelope — rather than printing it itself, which used to
+// make deploy reporting impossible to suppress for a machine-readable
+// caller.
 //
 // A failed deploy fails the command. The image is already in the registry at
 // that point and nothing rolls it back, but reporting success for a build whose
 // configured deployment did not happen would make `pokkum build` a command whose
 // exit code cannot be trusted in CI — which is the only place auto-deploy is
 // worth having.
-func maybeAutoDeploy(ctx context.Context, logger *slog.Logger, flags *buildFlags, projCfg *ports.ProjectConfig, req *core.BuildRequest, opts core.BuildOptions, res core.BuildResult) error {
+func maybeAutoDeploy(ctx context.Context, logger *slog.Logger, flags *buildFlags, projCfg *ports.ProjectConfig, req *core.BuildRequest, opts core.BuildOptions, res core.BuildResult) (*ports.DeployResult, error) {
 	// projCfg is the config the build itself was resolved from, passed in
 	// rather than re-read, so the deploy cannot address a different profile
 	// than the build it is following.
 	if projCfg == nil {
-		return nil
+		return nil, nil
 	}
 
 	if !core.ShouldAutoDeploy(projCfg.Deploy, req.Output.Mode, opts.DryRun, opts.PrintManifest, flags.noDeploy) {
@@ -471,16 +623,15 @@ func maybeAutoDeploy(ctx context.Context, logger *slog.Logger, flags *buildFlags
 				"target", projCfg.Deploy.Target,
 				"output_mode", req.Output.Mode.String())
 		}
-		return nil
+		return nil, nil
 	}
 
 	deployRes, err := executeDeploy(ctx, logger, projCfg.Deploy, res.Image.Ref, primaryTaggedRef(req.Repo, res.Image.Tags))
 	if err != nil {
-		return fmt.Errorf("build succeeded and the image was pushed, but the deploy failed: %w", err)
+		return nil, fmt.Errorf("build succeeded and the image was pushed, but the deploy failed: %w", err)
 	}
 
-	fmt.Printf("✓ Deployed to %s: %s\n", deployRes.Target, describeDeployResult(deployRes))
-	return nil
+	return &deployRes, nil
 }
 
 // primaryTaggedRef renders repo:tag for the first tag a push wrote, or "" when

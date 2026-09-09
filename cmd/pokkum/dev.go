@@ -17,6 +17,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/config"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekitutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
+	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
 type devFlags struct {
@@ -120,6 +121,11 @@ the pod is replaced -- this is a development loop, not a deployment.`,
 // Changed().
 func validateDevFlags(cmd *cobra.Command) error {
 	fs := cmd.Flags()
+
+	if err := validateDevOutputFlag(fs); err != nil {
+		return err
+	}
+
 	noContainer, _ := fs.GetBool("no-container")
 	cluster, _ := fs.GetBool("cluster")
 
@@ -148,6 +154,36 @@ func validateDevFlags(cmd *cobra.Command) error {
 		return nil
 	}
 	return fmt.Errorf("dev: --no-container is incompatible with: %s: %w", strings.Join(rejected, "; "), core.ErrInvalidRequest)
+}
+
+// validateDevOutputFlag rejects --output=json outright, in every dev mode.
+//
+// Every other `--output json`-consuming command (build included) has one
+// point where the command finishes and a single JSON envelope can be
+// emitted. dev has no such point: container-parity mode attaches the
+// container's own log stream (and, with --debug, an interactive `-it` shell)
+// directly to this process's stdout/stdin; --no-container does the same for
+// the project's own dev server; --cluster streams kubectl output across an
+// unbounded watch loop. There is no "finished" to report a result for, and
+// mixing a JSON envelope into any of those streams would silently corrupt
+// whichever one is running rather than doing anything a caller could parse.
+// Unlike --no-container's per-flag rejections above (each of which trades a
+// real image-build property for a plausible but different local one), no
+// dev mode has a sensible answer for --output=json, so this fails outright
+// regardless of --no-container/--cluster.
+//
+// dev never registers its own --output flag (see the doc comment on
+// buildFlags.output in build.go for why): it only reads the persistent flag
+// main.go registers on the root command, so this is read lazily via
+// fs.GetString rather than requiring the caller to have pre-registered
+// anything -- which is also what makes it directly testable against a bare
+// *pflag.FlagSet with no cobra command tree at all.
+func validateDevOutputFlag(fs *pflag.FlagSet) error {
+	out, _ := fs.GetString("output")
+	if ports.OutputFormat(out) != ports.FormatJSON {
+		return nil
+	}
+	return fmt.Errorf("dev: --output=json is not supported: dev is a long-running watch/streaming command (container logs, an interactive --debug shell, or a --cluster sync loop) with no single point to emit one JSON envelope from: %w", core.ErrInvalidRequest)
 }
 
 // validateDevClusterFlags enforces --cluster's own flag contract, in both
