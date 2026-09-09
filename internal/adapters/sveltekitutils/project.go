@@ -23,6 +23,14 @@ type PackageJSON struct {
 	Dependencies    map[string]string `json:"dependencies"`
 	DevDependencies map[string]string `json:"devDependencies"`
 	Scripts         map[string]string `json:"scripts"`
+
+	// PackageManager is the corepack `packageManager` field ("bun@1.2.3",
+	// "pnpm@9.0.0"). Read only as a runtime-preference signal by
+	// DetectAppRuntime; nothing writes it back.
+	PackageManager string `json:"packageManager"`
+
+	// Engines is the `engines` block. Only the "node" and "bun" keys are read.
+	Engines map[string]string `json:"engines"`
 }
 
 // ReadPackageJSON reads and parses <dir>/package.json. The returned error is
@@ -258,6 +266,28 @@ func TargetsLinuxX64(svelteConfigSource string) bool {
 // see literal quote characters and their contents to capture a real
 // `fallback: '200.html'` value; only actual comment text is removed.
 func stripJSComments(source string) string {
+	return stripJS(source, false)
+}
+
+// stripJS is the shared comment/string scanner behind stripJSComments and
+// blankJSStringsAndComments.
+//
+// blankStringContents selects between the two callers' incompatible needs, and
+// the difference matters:
+//
+//   - false: string literals are copied through verbatim, delimiters and all.
+//     StaticFallbackFilename's regexes must still see `fallback: '200.html'`
+//     with its contents intact to capture the filename.
+//   - true: string CONTENTS are replaced with spaces, delimiters kept. Callers
+//     matching on identifiers (`export const prerender = false`) must not be
+//     fooled by that same text appearing inside a string literal — the
+//     false-positive half of the 2026-08-16 whole-file-regex incident.
+//
+// One scanner rather than two, because this repo has already paid for the
+// alternative: the same comment/string state machine exists in injector.go's
+// findLiveSvelteKitCall and findLiveAdapterProp, and a fix to one has no way of
+// reaching the others. A third and fourth copy is not the direction to go.
+func stripJS(source string, blankStringContents bool) string {
 	var out strings.Builder
 	out.Grow(len(source))
 	runes := []rune(source)
@@ -294,10 +324,10 @@ func stripJSComments(source string) string {
 			i++
 			for i < n && runes[i] != quote {
 				if runes[i] == '\\' && i+1 < n {
-					out.WriteRune(runes[i])
+					out.WriteRune(escapedOrBlank(runes[i], blankStringContents))
 					i++
 				}
-				out.WriteRune(runes[i])
+				out.WriteRune(escapedOrBlank(runes[i], blankStringContents))
 				i++
 			}
 			if i < n {
@@ -310,6 +340,29 @@ func stripJSComments(source string) string {
 		}
 	}
 	return out.String()
+}
+
+// escapedOrBlank returns r, or a blank stand-in when string contents are being
+// suppressed. Newlines survive blanking so line numbering — and therefore any
+// diagnostic that reports one — stays aligned with the original source.
+func escapedOrBlank(r rune, blank bool) rune {
+	if !blank || r == '\n' {
+		return r
+	}
+	return ' '
+}
+
+// blankJSStringsAndComments removes comments and replaces the CONTENTS of every
+// string literal with spaces, leaving delimiters, newlines and byte offsets of
+// live code intact.
+//
+// Use this, never a raw whole-file regex, before matching an identifier or
+// declaration in user-authored JS/TS. Both halves have burned this repo:
+// `fallback: false` inside a comment silently disabled a real SPA shell
+// (2026-08-16), and `sveltekit(` inside a comment or a string literal was
+// rewritten as if it were live code (2026-08-17).
+func blankJSStringsAndComments(source string) string {
+	return stripJS(source, true)
 }
 
 // staticFallbackStringPattern matches an adapter-static `fallback:` option
