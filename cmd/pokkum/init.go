@@ -253,7 +253,15 @@ func suggestedNextCommand(cfg *ports.ProjectConfig) (string, string) {
 
 func promptChoice(scanner *bufio.Scanner, number int, label string, allowed []string, def string) string {
 	for attempts := 0; attempts < 5; attempts++ {
-		fmt.Printf("%d. %s [%s] (default: %s): ", number, label, strings.Join(allowed, " / "), def)
+		// number 0 means the caller already printed its own numbered header
+		// (the base-image prompt prints one line per preset above the
+		// question), so the prompt line carries the label alone rather than
+		// repeating the number and title under them.
+		if number == 0 {
+			fmt.Printf("   %s [%s] (default: %s): ", label, strings.Join(allowed, " / "), def)
+		} else {
+			fmt.Printf("%d. %s [%s] (default: %s): ", number, label, strings.Join(allowed, " / "), def)
+		}
 		if !scanner.Scan() {
 			return ""
 		}
@@ -349,7 +357,7 @@ func promptInitOptions(r io.Reader, defaults ports.InitConfigOptions, analysis p
 		}
 		fmt.Printf("   %s %-18s %s\n", marker, p, basePresetAdvice(p))
 	}
-	if v := promptChoice(scanner, 4, "   Base Image Preset", allowed, opts.BasePreset); v != "" {
+	if v := promptChoice(scanner, 0, "Choose", allowed, opts.BasePreset); v != "" {
 		opts.BasePreset = v
 	}
 

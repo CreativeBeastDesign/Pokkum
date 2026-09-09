@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -492,5 +493,56 @@ func TestWriteStaticFindings_FlagsTheMissingStaticSetup(t *testing.T) {
 	})
 	if strings.Contains(configured.String(), "you still need") {
 		t.Errorf("a fully configured project was told it was missing something:\n%s", configured.String())
+	}
+}
+
+// TestPromptChoice_ZeroNumberOmitsThePrefix guards the fix for a prompt that
+// printed its number and title twice — once in the caller's own header line
+// above the per-preset descriptions, once from promptChoice itself.
+func TestPromptChoice_ZeroNumberOmitsThePrefix(t *testing.T) {
+	stdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	promptChoice(bufio.NewScanner(strings.NewReader("chainguard\n")), 0, "Choose",
+		[]string{"distroless", "chainguard"}, "distroless")
+	_ = w.Close()
+	os.Stdout = stdout
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if strings.Contains(got, "0. ") {
+		t.Errorf("prompt printed a %q prefix for the no-number form: %q", "0. ", got)
+	}
+	if !strings.Contains(got, "Choose [distroless / chainguard]") {
+		t.Errorf("prompt lost its label or options: %q", got)
+	}
+}
+
+// TestWriteStaticFindings_DoesNotClaimBlockersAreUnderTheRoutesDir: remote
+// modules are found anywhere in the project, so the summary line must not
+// assert a location the findings below it contradict.
+func TestWriteStaticFindings_DoesNotClaimBlockersAreUnderTheRoutesDir(t *testing.T) {
+	var out strings.Builder
+	writeStaticFindings(&out, projectAnalysis{static: sveltekitutils.StaticReport{
+		Verdict:   sveltekitutils.StaticBlocked,
+		RoutesDir: "src/routes",
+		Blockers: []sveltekitutils.StaticFinding{
+			{File: "src/lib/posts.remote.ts", Reason: "declares remote query()"},
+		},
+	}})
+
+	got := out.String()
+	summary := strings.SplitN(got, "\n", 2)[0]
+	if strings.Contains(summary, "under src/routes") {
+		t.Errorf("summary claims blockers are under src/routes, but the only one is in src/lib:\n%s", got)
+	}
+	if !strings.Contains(summary, "1 file") {
+		t.Errorf("summary lost the count: %q", summary)
 	}
 }

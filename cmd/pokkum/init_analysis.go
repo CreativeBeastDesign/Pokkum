@@ -79,8 +79,11 @@ func writeStaticFindings(w io.Writer, a projectAnalysis) {
 		return
 
 	case sveltekitutils.StaticBlocked:
-		fmt.Fprintf(w, "  → This project needs a server. %s under %s:\n",
-			pluralFiles(len(r.Blockers)), r.RoutesDir)
+		// Deliberately does NOT say "under <routesDir>". Remote modules are
+		// ordinary modules found anywhere in the project — src/lib is the
+		// common case — so naming the routes directory here was a claim the
+		// findings themselves contradict.
+		fmt.Fprintf(w, "  → This project needs a server. %s:\n", pluralFiles(len(r.Blockers)))
 		for _, b := range r.Blockers {
 			fmt.Fprintf(w, "      %s %s\n", b.File, b.Reason)
 			if b.Override != "" {
