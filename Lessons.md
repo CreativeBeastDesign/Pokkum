@@ -5,6 +5,20 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-09 — `pokkum doctor` passed a project `pokkum build` refused, because doctor never checked which adapter was actually configured
+
+**Category:** boundary / validator-consumer disagreement — doctor's job is exactly to catch what build will refuse, and it had a gap wide enough to miss the single most common unbuildable starting state
+
+**Root cause:** `checkSvelteKitWorkspace` in `cmd/pokkum/doctor.go` verified only that `@sveltejs/kit` appeared in `package.json`'s dependencies — it never looked at which adapter package `svelte.config.js`/`vite.config.*` actually configured. Meanwhile `internal/adapters/bunexec/compiler.go`'s `checkEffectiveAdapter` (called from `Prepare`, just before `bun run build`) already refused a build whose effective adapter did not match the chosen strategy, with a good, specific message. A fresh `bunx sv create` scaffold — `@sveltejs/adapter-auto` only, configured via `vite.config.ts` options (current `sv create` ships no `svelte.config.js` at all) — is exactly this shape: it passed `doctor` cleanly and was refused by `build` immediately after, inverting doctor's whole contract (early warning vs. safety net).
+
+A second, smaller instance of the same drift class lived inside `bunexec` itself: `Preflight` and `Prepare` each carried their own independent inline `switch req.Strategy { ... }` mapping a strategy to its required adapter package. The two copies happened to still agree (verified by diffing them — mem:self_review_checklist row 69(b) — before consolidating, since collapsing duplicates unread is how a diverged copy ships forward silently), but nothing forced them to stay in sync, and a third hand-written copy in `doctor` would have made three.
+
+**Where:** `cmd/pokkum/doctor.go`'s `checkSvelteKitWorkspace`; `internal/adapters/bunexec/compiler.go`'s `Preflight` and `Prepare` (the duplicated `targetAdapter` switch); `internal/ports/compiler.go` (no shared mapping existed).
+
+**Fix:** `ports.BuildStrategy.RequiredAdapterPackage()` is now the single source for the strategy → adapter package mapping; `Preflight` and `Prepare` both call it instead of restating the switch. A new `cmd/pokkum/doctor.go` check, `checkSvelteKitAdapter`, resolves the project's effective strategy from `.pokkum.yaml` (defaulting the same way `core.BuildRequest.Normalize()` does) and calls the same decision function `checkEffectiveAdapter` uses — `sveltekitutils.EffectiveAdapterConfigured` — never a second, independently-written comparison. `bunexec.ViteConfigCandidates` (formerly unexported `viteConfigNames`) is exported so doctor resolves "which Vite config file governs" in the exact same order `Prepare` does, instead of restating that list too. The check honestly reports "cannot determine" (not a clean pass or a confident failure) when a config file exists but cannot be read, or when `.pokkum.yaml`'s `strategy:` value is unparseable — guessing either verdict from missing information would be the same false confidence this check exists to remove.
+
+**Preventative rule:** When a diagnostic command (`doctor`, `validate`, `check`) and the command whose failure it is supposed to predict (`build`, `deploy`, `apply`) both need to answer the same yes/no question about project state, that answer must come from one shared function, never two hand-written comparisons that happen to agree today. Before doctor's check existed, the only way to keep it in sync with build would have been discipline — remembering to update two places whenever the rule changed — which is exactly the failure mode this whole incident is about. See `mem:self_review_checklist` rows 11 and 69(b), and the 2026-09-01 "validator-consumer disagreement" entry (`pokkum config validate` / `pokkum deploy`) for the same shape in a different pair of commands.
+
 ## 2026-09-09 — Picking the wrong one of two near-identical scanners made a regex silently unmatchable, and a fallback hid a second bug the same way
 
 **Category:** silent-degradation / near-miss-API — two bugs in one function, both of which fail by

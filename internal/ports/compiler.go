@@ -329,6 +329,32 @@ func (s BuildStrategy) ApplyStatic() bool {
 	return s == StrategyStatic
 }
 
+// RequiredAdapterPackage returns the SvelteKit adapter package this
+// strategy's post-build contract depends on: @jesterkit/exe-sveltekit for
+// StrategyExe, @sveltejs/adapter-static for StrategyStatic, and
+// @sveltejs/adapter-node otherwise (StrategyLayered, and the zero value —
+// callers that build a request directly without going through
+// core.BuildRequest.Normalize() get the same default as the real pipeline).
+//
+// This is the single source for the strategy -> adapter mapping. Before it
+// existed, bunexec's Preflight and Prepare each carried their own inline copy
+// of this exact switch, and a caller outside bunexec (pokkum doctor) that
+// wanted the same answer would have been forced to write a third — the
+// precise "independent, untested assumption about the target adapter"
+// failure shape logged in Lessons.md under 2026-08-19. Every caller that
+// needs to know which adapter a strategy requires must call this method
+// rather than restate the switch.
+func (s BuildStrategy) RequiredAdapterPackage() string {
+	switch {
+	case s == StrategyExe:
+		return "@jesterkit/exe-sveltekit"
+	case s.ApplyStatic():
+		return "@sveltejs/adapter-static"
+	default:
+		return "@sveltejs/adapter-node"
+	}
+}
+
 // PrepareRequest drives stage one of the two-stage compile: running the
 // SvelteKit build so that the adapter emits entrypoint files.
 type PrepareRequest struct {

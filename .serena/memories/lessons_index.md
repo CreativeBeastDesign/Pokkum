@@ -76,8 +76,9 @@ carries the *why* that the checklist row compresses away.
 
 - `2026-09-05` — The `bufio.Scanner` token-limit bug was fixed once in `secretguard` and left untouched in `sveltekitutils`, where a strict wiring gates the build on it. A 102KB single-line minified bundle was reported as having zero dynamic imports. Root cause is not the scanner limit (already logged 2026-08-18) but that a post-mortem rule stated over a *class* was acted on for exactly one instance, with nothing enumerating the rest. Read this before writing any entry whose preventative rule generalises past the file the bug was found in.
 
-### boundary (33)
+### boundary (34)
 
+- `2026-09-09` — `pokkum doctor` reported a fresh `sv create` scaffold (`@sveltejs/adapter-auto`, unconfigured) as a valid SvelteKit project while `pokkum build` refused it immediately after — doctor's only adapter-related check verified `@sveltejs/kit` was a dependency and never looked at which adapter was actually configured. The second occurrence of the 2026-09-01 `pokkum config validate`/`pokkum deploy` shape below; fixed by making doctor call the exact same decision function (`sveltekitutils.EffectiveAdapterConfigured`) the build preflight uses, plus a new `ports.BuildStrategy.RequiredAdapterPackage` to stop bunexec's own two internal copies of the strategy→adapter mapping from being able to drift from each other. Read before adding any diagnostic/preflight check whose whole job is predicting whether a separate command will succeed.
 - `2026-09-01` — `pokkum config validate` reported a config valid that `pokkum deploy` then refused, because it 
 - `2026-09-01` — Two new PaaS integrations both had a "200 means nothing happened" path, and one had a write tha
 - `2026-08-23` — The published GitHub Action's `digest` and `ref` outputs were empty on every run since v1.0.0, 
