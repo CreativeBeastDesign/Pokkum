@@ -110,10 +110,58 @@ func runDoctor(logger *slog.Logger, opts *doctorOptions) error {
 	}
 
 	if outputFormat == ports.FormatJSON {
-		if allPassed {
-			return jsonutils.WriteSuccess(os.Stdout, "doctor", doctorPayload)
+		// Both the pass and fail cases carry the full doctorPayload (its
+		// per-check Checks array, each with Name/Passed/Message/Remediation)
+		// in Data — matching how `scan` reports its findings on both paths.
+		// Before this, a failing doctor run went through jsonutils.WriteError,
+		// which only carries a summary string and a code: a machine consumer
+		// got per-check structure exactly when everything passed and nothing
+		// needed reading, and lost it — including the SvelteKit Adapter
+		// check's Remediation, the exact `bun add -D` command to run — in the
+		// one case where it needed to know which check failed and how to fix
+		// it. Status/Error mirror WriteError's shape so existing "status" ==
+		// "error" consumers keep working; doctorPayload.Passed remains the
+		// authoritative top-level pass/fail field either way.
+		envelope := ports.JSONEnvelope{
+			SchemaVersion: jsonutils.CurrentSchemaVersion,
+			Command:       "doctor",
+			Status:        "success",
+			Data:          doctorPayload,
 		}
-		return jsonutils.WriteError(os.Stdout, "doctor", "ERR_DOCTOR_FAILED", summary, "")
+		if !allPassed {
+			envelope.Status = "error"
+			envelope.Error = &ports.ErrorData{
+				Code:    "ERR_DOCTOR_FAILED",
+				Message: summary,
+			}
+		}
+		// Marshal + Fprintln, mirroring jsonutils.FormatSuccess/WriteSuccess
+		// exactly (same indent, same trailing newline via Fprintln) so this
+		// is byte-for-byte what WriteSuccess already produced on the pass
+		// path. Returning the write error (not a "doctor failed" error)
+		// preserves today's JSON-mode exit code on both paths: a failing
+		// `doctor --output json` run exits the same way it does right now.
+		bytes, err := json.MarshalIndent(envelope, "", "  ")
+		if err != nil {
+			return fmt.Errorf("jsonutils adapter: failed to marshal doctor payload: %w", err)
+		}
+		if _, err = fmt.Fprintln(os.Stdout, string(bytes)); err != nil {
+			return err
+		}
+		// A red doctor must exit non-zero in BOTH output modes. Until this
+		// return existed, `--output json` wrote status:"error", passed:false
+		// and a list of failing checks -- and then exited 0, so a CI step
+		// gating on `pokkum doctor --output json` passed while doctor was red.
+		// Text mode had always exited 1; only the JSON branch returned early,
+		// before the shared failure signal at the end of this function.
+		//
+		// The error is silent because the envelope above is already the
+		// complete report; a second, less informative line on stderr would add
+		// nothing and would contradict the structured output above it.
+		if !allPassed {
+			return errDoctorChecksFailed
+		}
+		return nil
 	}
 
 	// Text output mode
@@ -137,6 +185,12 @@ func runDoctor(logger *slog.Logger, opts *doctorOptions) error {
 	}
 	return nil
 }
+
+// errDoctorChecksFailed signals a red doctor in JSON mode without printing a
+// second message: the envelope on stdout is already the complete report.
+// Reuses silentExitError (deploy_check.go), which main.go's isSilentExit
+// recognises, so the process exits 1 with no redundant log line.
+var errDoctorChecksFailed = &silentExitError{}
 
 func checkBunRuntime() ports.DoctorCheck {
 	bunPath, err := exec.LookPath("bun")

@@ -5,6 +5,24 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-09 — `--output json` made a red `pokkum doctor` exit 0, so a CI gate on it passed while doctor was failing
+
+**Category:** boundary / serialization flag changed a verdict — an output-format switch silently altered whether the command reported success
+
+**Root cause:** `runDoctor` (`cmd/pokkum/doctor.go`) shares one failure signal, `if !allPassed { return ... }`, at the very end of the function. The JSON branch sits earlier and returns as soon as it has written the envelope, so control never reaches that signal. Text mode exited 1 on a red doctor; JSON mode wrote `status:"error"`, `passed:false` and a list of failing checks — and then exited 0.
+
+The envelope was never wrong. Every failing check, with its remediation, was right there in the payload. What was wrong was the process exit status, which is the only thing a `set -e` CI step or a `&&` chain actually reads. A machine consumer following the documented contract would treat a red doctor as green, and nothing anywhere would contradict it.
+
+Two things made this survivable for as long as it was. The bug is invisible in text mode, which is what a human runs. And it was *introduced* by an early return added for a good local reason (write the envelope, return the write error), where the missing consideration was not "did I handle this error" but "does my early return skip a shared postlude".
+
+It was found only because a concurrent task explicitly compared before/after exit codes in both modes and reported the discrepancy as a pre-existing quirk rather than assuming it was intended — and because a freshly written `Vocabulary.md` exit-code table had just claimed exit 1 covers "a red doctor", with no format caveat, making the contradiction concrete.
+
+**Where:** `cmd/pokkum/doctor.go`, `runDoctor`'s JSON branch (`return err` after `Fprintln`), versus the `if !allPassed` at the end of the same function.
+
+**Fix:** the JSON branch now returns `errDoctorChecksFailed` (a `silentExitError`, so `main.go`'s `isSilentExit` exits 1 without logging a second line that would contradict and corrupt the JSON on stdout). `cmd/pokkum/exitcodes_test.go`'s `TestDoctorExitStatusIsIndependentOfOutputFormat` drives `runDoctor` in both formats against the same fixture and requires their error-ness to match; it carries a premise check so a fixture that stopped failing cannot make it compare two nils and pass.
+
+**Preventative rule:** An output-format flag selects a **serialization**. It must never change whether the command succeeded, what it exits with, or which side effects ran. Whenever a format branch returns early, check what shared postlude it skips — a failure signal, a cleanup, an exit-status decision — because the branch reads as complete on its own and the skipped code is usually far away at the end of the function. Assert the invariant directly by running the same failing fixture through every supported format and comparing exit status, rather than testing each format's output in isolation, which is exactly how this passed review.
+
 ## 2026-09-09 — `pokkum doctor` passed a project `pokkum build` refused, because doctor never checked which adapter was actually configured
 
 **Category:** boundary / validator-consumer disagreement — doctor's job is exactly to catch what build will refuse, and it had a gap wide enough to miss the single most common unbuildable starting state

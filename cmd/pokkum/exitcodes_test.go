@@ -190,3 +190,54 @@ func sectionAfter(doc, heading string) string {
 	}
 	return rest
 }
+
+// TestDoctorExitStatusIsIndependentOfOutputFormat pins an invariant that was
+// violated in exactly one place and would have been violated silently again.
+//
+// `--output` selects a serialization. It must never change whether the command
+// succeeded. Before this guard, `pokkum doctor --output json` on a red project
+// wrote status:"error", passed:false and a list of failing checks — and exited
+// 0, because the JSON branch returned before the shared failure signal at the
+// end of runDoctor. Text mode exited 1 on the same project. A CI step gating on
+// `pokkum doctor --output json` therefore passed while doctor was red, which is
+// the worst possible direction for a diagnostic command to be wrong in.
+//
+// This also keeps Vocabulary.md §18d honest: that table says exit 1 covers "a
+// red doctor", with no format caveat, and a table that lies is worse than none.
+func TestDoctorExitStatusIsIndependentOfOutputFormat(t *testing.T) {
+	dir := t.TempDir() // not a SvelteKit project: several checks fail deterministically
+
+	run := func(format string) error {
+		t.Helper()
+		// runDoctor writes the report to os.Stdout directly; discard it so the
+		// test output stays readable.
+		orig := os.Stdout
+		devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("[TEST SETUP] opening %s: %v", os.DevNull, err)
+		}
+		os.Stdout = devnull
+		defer func() {
+			os.Stdout = orig
+			_ = devnull.Close()
+		}()
+		return runDoctor(discardLogger(), &doctorOptions{dir: dir, output: format})
+	}
+
+	textErr := run("text")
+	jsonErr := run("json")
+
+	// Premise check: if text mode stopped failing here, this test would compare
+	// two nils and pass while proving nothing.
+	if textErr == nil {
+		t.Fatal("[TEST SETUP] doctor passed on an empty temp dir in text mode; " +
+			"the fixture no longer triggers a failure and this guard is blind")
+	}
+
+	if jsonErr == nil {
+		t.Error("doctor --output json returned no error on a project that fails in text mode.\n" +
+			"\tThe process therefore exits 0 while the envelope reports status:\"error\" and " +
+			"passed:false —\n\ta CI gate on `pokkum doctor --output json` would pass on a red doctor.\n" +
+			"\t--output selects a serialization; it must never change whether the command succeeded.")
+	}
+}
