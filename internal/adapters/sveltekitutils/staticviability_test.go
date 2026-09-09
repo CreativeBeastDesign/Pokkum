@@ -119,6 +119,7 @@ func TestAnalyzeStaticViability_BlockersByKind(t *testing.T) {
 		wantFile     string
 		wantReason   string
 		wantOverride bool
+		wantKind     StaticBlockerKind
 	}{
 		{
 			// analyse.js:185 — BODY_DEPENDENT_METHODS is
@@ -129,6 +130,7 @@ func TestAnalyzeStaticViability_BlockersByKind(t *testing.T) {
 			},
 			wantFile:   "src/routes/api/+server.ts",
 			wantReason: "POST",
+			wantKind:   StaticBlockerBodyDependentHandler,
 		},
 		{
 			// page/index.js:89 — "Cannot prerender pages with actions",
@@ -140,6 +142,7 @@ func TestAnalyzeStaticViability_BlockersByKind(t *testing.T) {
 			wantFile:     "src/routes/signup/+page.server.ts",
 			wantReason:   "form actions",
 			wantOverride: false,
+			wantKind:     StaticBlockerFormActions,
 		},
 		{
 			// analyse.js:102 — "Cannot prerender a route with both +page and
@@ -152,6 +155,7 @@ func TestAnalyzeStaticViability_BlockersByKind(t *testing.T) {
 			},
 			wantFile:   "src/routes/thing/+server.ts",
 			wantReason: "both a page and an endpoint",
+			wantKind:   StaticBlockerPageAndServerCoexist,
 		},
 		{
 			name: "remote query function outside routes",
@@ -161,6 +165,7 @@ func TestAnalyzeStaticViability_BlockersByKind(t *testing.T) {
 			},
 			wantFile:   "src/lib/posts.remote.ts",
 			wantReason: "remote query()",
+			wantKind:   StaticBlockerRemoteServerHelper,
 		},
 		{
 			name: "explicit prerender opt-out",
@@ -170,6 +175,7 @@ func TestAnalyzeStaticViability_BlockersByKind(t *testing.T) {
 			wantFile:     "src/routes/live/+page.ts",
 			wantReason:   "prerender = false",
 			wantOverride: true,
+			wantKind:     StaticBlockerPrerenderFalse,
 		},
 	}
 
@@ -198,6 +204,10 @@ func TestAnalyzeStaticViability_BlockersByKind(t *testing.T) {
 			if hasOverride := found.Override != ""; hasOverride != tc.wantOverride {
 				t.Errorf("Override presence = %v, want %v (Override=%q). A finding a prerender flag "+
 					"cannot retire must not offer one, and vice versa", hasOverride, tc.wantOverride, found.Override)
+			}
+			if found.Kind != tc.wantKind {
+				t.Errorf("Kind = %q, want %q — every StaticFinding must carry the machine-readable "+
+					"kind of the condition that produced it, not just the free-form Reason", found.Kind, tc.wantKind)
 			}
 		})
 	}
@@ -311,6 +321,78 @@ func TestAnalyzeStaticViability_RemotePrerenderIsNotABlocker(t *testing.T) {
 	if got.Verdict != StaticViable {
 		t.Errorf("Verdict = %q, want %q — a remote prerender() is build-time data; blockers: %v",
 			got.Verdict, StaticViable, got.Blockers)
+	}
+}
+
+// TestAnalyzeStaticViability_EveryFindingCarriesADistinctKind runs the real
+// analyser over one fixture exercising several unrelated blockers plus a
+// caveat, and checks two things a JSON consumer or the guide-coupling guard
+// (cmd/pokkum/guide_test.go's TestGuideNamesEveryStaticBlockerKind) both
+// depend on: every finding this run produces has a non-empty Kind, and
+// distinct conditions produce distinct Kinds rather than collapsing onto one
+// another.
+//
+// This is deliberately a single project scanned once, not five isolated
+// per-rule tests: the risk this guards against is a shared construction
+// helper or a copy-pasted StaticFinding{} literal silently reusing another
+// site's Kind, which per-rule tests run in isolation cannot catch.
+func TestAnalyzeStaticViability_EveryFindingCarriesADistinctKind(t *testing.T) {
+	dir := writeProject(t, map[string]string{
+		"src/routes/+layout.ts":             "export const prerender = true;\n",
+		"src/routes/+page.svelte":           "<h1>root</h1>\n",
+		"src/routes/api/+server.ts":         realMutatingEndpoint,                                                      // body-dependent-handler
+		"src/routes/signup/+page.server.ts": realFormActions,                                                           // form-actions
+		"src/routes/thing/+page.svelte":     "<h1>thing</h1>\n",                                                        // \
+		"src/routes/thing/+server.ts":       realServerEndpoint,                                                        // / page-and-server-coexist
+		"src/routes/live/+page.ts":          "export const prerender = false;\n",                                       // prerender-false
+		"src/lib/posts.remote.ts":           realRemoteQuery,                                                           // remote-server-helper
+		"src/lib/odd.remote.ts":             "export const something = makeItUp();\n",                                  // unrecognized-remote-module
+		"src/hooks.server.ts":               "export function handle({ event, resolve }) { return resolve(event); }\n", // server-hooks (caveat)
+		"src/routes/blog/[slug]/+page.ts":   "export const load = async () => ({});\n",                                 // unreachable-dynamic-route (caveat)
+	})
+
+	got := AnalyzeStaticViability(dir)
+
+	all := append([]StaticFinding{}, got.Blockers...)
+	all = append(all, got.Caveats...)
+	if len(all) == 0 {
+		t.Fatal("[TEST SETUP] fixture produced zero findings; nothing for this guard to check")
+	}
+
+	seenKinds := map[StaticBlockerKind][]string{}
+	for _, f := range all {
+		if f.Kind == "" {
+			t.Errorf("finding for %s has an empty Kind (Reason=%q) — every StaticFinding the analyser "+
+				"constructs must set Kind; an empty one is a bug, not a valid state", f.File, f.Reason)
+			continue
+		}
+		seenKinds[f.Kind] = append(seenKinds[f.Kind], f.File)
+	}
+
+	// The fixture above is built to exercise 8 distinct conditions. Fewer
+	// distinct kinds than files with a kind means two unrelated conditions
+	// collapsed onto the same identifier.
+	wantKinds := []StaticBlockerKind{
+		StaticBlockerBodyDependentHandler,
+		StaticBlockerFormActions,
+		StaticBlockerPageAndServerCoexist,
+		StaticBlockerPrerenderFalse,
+		StaticBlockerRemoteServerHelper,
+		StaticBlockerUnrecognizedRemoteModule,
+		StaticBlockerServerHooks,
+		StaticBlockerUnreachableDynamicRoute,
+	}
+	for _, k := range wantKinds {
+		if len(seenKinds[k]) == 0 {
+			t.Errorf("no finding carried Kind %q; fixture files: %v", k, all)
+		}
+	}
+	if t.Failed() {
+		return
+	}
+	if len(seenKinds) != len(wantKinds) {
+		t.Errorf("got %d distinct kinds across %d findings, want exactly %d: %v",
+			len(seenKinds), len(all), len(wantKinds), seenKinds)
 	}
 }
 

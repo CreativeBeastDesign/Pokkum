@@ -21,15 +21,25 @@ import (
 // mirrored-constant drift shape logged 2026-08-21. This mirrors how
 // internal/core re-exports port vocabulary (core.Platform = ports.Platform).
 type (
-	StaticVerdict = ports.StaticVerdict
-	StaticFinding = ports.StaticFinding
-	StaticReport  = ports.StaticReport
+	StaticVerdict     = ports.StaticVerdict
+	StaticFinding     = ports.StaticFinding
+	StaticReport      = ports.StaticReport
+	StaticBlockerKind = ports.StaticBlockerKind
 )
 
 const (
 	StaticUnknown = ports.StaticUnknown
 	StaticBlocked = ports.StaticBlocked
 	StaticViable  = ports.StaticViable
+
+	StaticBlockerPrerenderFalse           = ports.StaticBlockerPrerenderFalse
+	StaticBlockerPageAndServerCoexist     = ports.StaticBlockerPageAndServerCoexist
+	StaticBlockerBodyDependentHandler     = ports.StaticBlockerBodyDependentHandler
+	StaticBlockerFormActions              = ports.StaticBlockerFormActions
+	StaticBlockerRemoteServerHelper       = ports.StaticBlockerRemoteServerHelper
+	StaticBlockerUnrecognizedRemoteModule = ports.StaticBlockerUnrecognizedRemoteModule
+	StaticBlockerServerHooks              = ports.StaticBlockerServerHooks
+	StaticBlockerUnreachableDynamicRoute  = ports.StaticBlockerUnreachableDynamicRoute
 )
 
 // dirsSkippedInScan are never walked: build output and dependency trees are not
@@ -234,6 +244,7 @@ func AnalyzeStaticViability(projectDir string) StaticReport {
 		if page, ok := routePages[dir]; ok {
 			report.Blockers = append(report.Blockers, StaticFinding{
 				File: endpoint,
+				Kind: StaticBlockerPageAndServerCoexist,
 				Reason: fmt.Sprintf("shares a route with %s, and SvelteKit cannot prerender a route that has both a page and an endpoint",
 					page),
 			})
@@ -288,6 +299,7 @@ func classifyFile(report *StaticReport, slashPath, name, src string, underRoutes
 	if prerenderFalseRe.MatchString(src) {
 		report.Blockers = append(report.Blockers, StaticFinding{
 			File:   slashPath,
+			Kind:   StaticBlockerPrerenderFalse,
 			Reason: "sets `export const prerender = false`, which opts this route out of prerendering",
 			// The only finding a source edit can retire. Every other blocker
 			// names something SvelteKit refuses outright (a body-dependent
@@ -310,6 +322,7 @@ func classifyFile(report *StaticReport, slashPath, name, src string, underRoutes
 		// today, so it is reported as what it is: something to look at.
 		report.Caveats = append(report.Caveats, StaticFinding{
 			File:   slashPath,
+			Kind:   StaticBlockerServerHooks,
 			Reason: "server hooks run only while prerendering in a static build; per-request logic here (auth, redirects, locals) will not run for real visitors",
 		})
 
@@ -337,6 +350,7 @@ func classifyEndpoint(report *StaticReport, slashPath, src string) {
 	}
 	report.Blockers = append(report.Blockers, StaticFinding{
 		File: slashPath,
+		Kind: StaticBlockerBodyDependentHandler,
 		Reason: fmt.Sprintf("exports %s, and SvelteKit cannot prerender a +server file with a handler whose response depends on the request body",
 			joinList(found, "a "+found[0]+" handler", "handlers")),
 	})
@@ -352,6 +366,7 @@ func classifyServerLoadFile(report *StaticReport, slashPath, src string) {
 	if actionsExportRe.MatchString(src) {
 		report.Blockers = append(report.Blockers, StaticFinding{
 			File:   slashPath,
+			Kind:   StaticBlockerFormActions,
 			Reason: "declares form actions, which handle POST requests at runtime and cannot be prerendered",
 		})
 	}
@@ -376,6 +391,7 @@ func classifyRemoteModule(report *StaticReport, slashPath, src string) {
 	if len(used) > 0 {
 		report.Blockers = append(report.Blockers, StaticFinding{
 			File:   slashPath,
+			Kind:   StaticBlockerRemoteServerHelper,
 			Reason: fmt.Sprintf("declares remote %s, which run on the server for every call", joinHelpers(used)),
 		})
 		return
@@ -390,6 +406,7 @@ func classifyRemoteModule(report *StaticReport, slashPath, src string) {
 	// exists to avoid.
 	report.Blockers = append(report.Blockers, StaticFinding{
 		File:   slashPath,
+		Kind:   StaticBlockerUnrecognizedRemoteModule,
 		Reason: "is a remote-function module whose exports this scan did not recognise; remote functions run on the server, so this is treated as needing one",
 	})
 }
@@ -574,6 +591,7 @@ func addDynamicRouteCaveats(report *StaticReport, projectDir string, pages, endp
 			seen[dir] = true
 			report.Caveats = append(report.Caveats, StaticFinding{
 				File: file,
+				Kind: StaticBlockerUnreachableDynamicRoute,
 				Reason: "is a dynamic route with no `entries()` export, so it is prerendered only if " +
 					"something links to it; SvelteKit fails the build for a prerenderable route it never " +
 					"reached while crawling",

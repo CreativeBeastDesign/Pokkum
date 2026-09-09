@@ -423,17 +423,32 @@ pokkum init runs a disqualifier scan over the route sources and reports
 viable, blocked, or unknown. A project it could not scan is reported as
 unknown — never as viable.
 
-What rules static out:
+What rules static out. Each finding pokkum init reports carries one of these
+kinds — the same identifier a JSON consumer of --output json can match on
+instead of parsing the human-readable sentence next to it:
 
-  +server files exporting POST, PUT, PATCH, DELETE or QUERY      blocks
-  a route directory holding both a +page and a +server file      blocks
-  export const actions (form actions)                            blocks, always
-  a *.remote file using query(), form() or command()             blocks
-  export const prerender = false anywhere                        blocks
-  +server files exporting only GET/HEAD/OPTIONS                  fine
-  a load function in +page.server or +layout.server              fine
-  a *.remote file using only prerender()                         fine
-  hooks.server                                                   caveat only
+  kind                         condition                                effect
+  body-dependent-handler       +server files exporting POST, PUT,
+                                PATCH, DELETE or QUERY                  blocks
+  page-and-server-coexist      a route directory holding both a
+                                +page and a +server file                blocks
+  form-actions                 export const actions (form actions)     blocks, always
+  remote-server-helper         a *.remote file using query(), form()
+                                or command()                            blocks
+  unrecognized-remote-module   a *.remote file whose exports this
+                                scan does not recognise                 blocks, fails closed
+  prerender-false              export const prerender = false
+                                anywhere                                blocks
+  server-hooks                 hooks.server                            caveat only
+  unreachable-dynamic-route    a dynamic route with no entries()
+                                export                                  caveat only
+
+Not findings at all — these prerender fine, and pokkum init reports nothing
+for them:
+
+  +server files exporting only GET/HEAD/OPTIONS
+  a load function in +page.server or +layout.server
+  a *.remote file using only prerender()
 
 These are SvelteKit's own prerendering rules, read from its source rather than
 inferred. Matching ignores comments and string literals, so a commented-out

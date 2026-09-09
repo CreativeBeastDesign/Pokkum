@@ -3,7 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -242,4 +248,82 @@ func TestGuideNamesEveryStaticVerdict(t *testing.T) {
 			t.Errorf("pokkum guide's strategy section never uses the verdict %q that pokkum init reports", v)
 		}
 	}
+}
+
+// TestGuideNamesEveryStaticBlockerKind couples the guide's strategy section to
+// the classifier's actual rule vocabulary, the way TestGuideNamesEveryStaticVerdict
+// already couples it to the verdict vocabulary above.
+//
+// Before ports.StaticBlockerKind existed, the blocker RULES were matchers
+// inside sveltekitutils with no enumerable identity, so nothing could
+// mechanically prove the guide's rule table still matched them — only the
+// three verdicts were guarded. StaticBlockerKind gives the rules that same
+// enumerable identity, so a renamed, removed, or newly added rule cannot ship
+// with the guide still describing the old set. See the roadmap item
+// static-rules-guide-coupling.
+func TestGuideNamesEveryStaticBlockerKind(t *testing.T) {
+	var section string
+	for _, s := range guideSections {
+		if s.Topic == "strategy" {
+			section = s.Body
+		}
+	}
+	if section == "" {
+		t.Fatal("[TEST SETUP] no section with topic \"strategy\"")
+	}
+
+	// The kinds are read out of ports' own declarations by AST rather than
+	// listed here. A hand-written list cannot catch the case this guard exists
+	// for -- a NEW kind shipping without guide coverage -- because the new
+	// constant would simply not be in the list. (Go constants cannot be
+	// enumerated by reflection, so parsing the declaration is the way; the same
+	// technique is used by exitcodes_test.go and flagmentions_test.go.)
+	kinds := declaredStaticBlockerKinds(t)
+	if len(kinds) < 5 {
+		t.Fatalf("[TEST SETUP] found only %d StaticBlockerKind constants (%v); the AST scan "+
+			"has gone blind and this guard would pass while checking almost nothing", len(kinds), kinds)
+	}
+
+	for _, k := range kinds {
+		if !strings.Contains(section, k) {
+			t.Errorf("pokkum guide's strategy section never mentions the static-viability finding "+
+				"kind %q that pokkum init reports.\n"+
+				"\tEvery ports.StaticBlockerKind must appear in the \"strategy\" section of "+
+				"cmd/pokkum/guide.go, so a reader can map what the guide says to what init reports.", k)
+		}
+	}
+	t.Logf("checked %d StaticBlockerKind constants against the guide", len(kinds))
+}
+
+// declaredStaticBlockerKinds parses internal/ports/staticviability.go and
+// returns the string value of every StaticBlockerKind constant declared there.
+func declaredStaticBlockerKinds(t *testing.T) []string {
+	t.Helper()
+	path := filepath.Join("..", "..", "internal", "ports", "staticviability.go")
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("[TEST SETUP] parsing %s: %v", path, err)
+	}
+	var kinds []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		vs, ok := n.(*ast.ValueSpec)
+		if !ok || vs.Type == nil || len(vs.Values) != 1 {
+			return true
+		}
+		ident, ok := vs.Type.(*ast.Ident)
+		if !ok || ident.Name != "StaticBlockerKind" {
+			return true
+		}
+		lit, ok := vs.Values[0].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if v, uerr := strconv.Unquote(lit.Value); uerr == nil {
+			kinds = append(kinds, v)
+		}
+		return true
+	})
+	sort.Strings(kinds)
+	return kinds
 }
