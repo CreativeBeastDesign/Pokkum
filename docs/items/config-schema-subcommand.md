@@ -8,8 +8,8 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Field | Value |
 | --- | --- |
-| Status | open |
-| Stage | backlog |
+| Status | shipped |
+| Stage | v1.2 |
 | Kind | dx |
 | Tier | polish |
 | Area | Developer Experience |
@@ -30,17 +30,29 @@ built to avoid, one artifact over.
 A `pokkum config schema` printing the embedded schema to stdout closes that: the schema a
 binary emits is by construction the schema for that binary's config parser.
 
-## Recommendation
+## Decision
 
-Print the schema to stdout, flag-free, matching `pokkum guide`'s shape.
+Shipped as `pokkum config schema`, flag-free, writing the document to stdout so
+redirection covers every use a `--out` flag would.
 
-The blocker is mechanical and worth recording, because it is the reason this was not done
-alongside the generator: `go:embed` cannot reach a file above the importing package's own
-directory, so `schema/pokkum.schema.json` at the repository root is not embeddable from
-`cmd/pokkum`. Closing this means either making the canonical location a package directory
-that embeds it and re-pointing the generator and freshness guard there, or accepting a
-second generated copy — the first is right, the second recreates exactly the drift the
-generator exists to prevent.
+The `go:embed` constraint this item recorded as the blocker turned out to have a third
+resolution neither of the two it named: `go:embed` cannot reach a file *above* the
+importing package, but a package sitting *beside* the file works. `schema/embed.go`
+makes `schema/` a package, so `schema/pokkum.schema.json` stays exactly where it is.
+That mattered more than it first appears — the path is the URL an editor's YAML plugin is
+pointed at, so it is a public contract, and moving it to suit an implementation detail
+would have broken every editor config the moment it shipped. The originally-recommended
+option (re-point the generator at a package directory) would have done exactly that.
+
+The embedded bytes are the checked-in file read at build time, so the binary cannot ship
+a schema disagreeing with the repository's; the only drift possible is between that file
+and `internal/ports/config.go`, which `make check-schema-freshness` already guards.
+
+`TestConfigSchemaPrintsTheCheckedInSchema` asserts the output is the file verbatim and
+parses as a schema. What it really guards is the command around bytes that are already
+correct by construction: that it stays wired, and that nobody later re-indents it, wraps
+it in an envelope or prepends a banner — each of which breaks redirect-to-a-file silently
+while still looking like a schema. Shown red by prepending one comment line.
 
 ## Related
 

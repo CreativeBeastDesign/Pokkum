@@ -266,6 +266,16 @@ Written by pokkum init. Validate with pokkum config validate, resolve with
 pokkum config view [--profile <name>]. Unknown or misspelled keys are
 rejected, at the top level and inside every profile.
 
+For machine validation or editor completion, pokkum config schema writes the
+JSON Schema for this exact version to stdout:
+
+  pokkum config schema > .pokkum.schema.json
+
+It covers field names, types, enum values and unknown-key rejection. It does
+NOT encode the cross-field rules -- the deploy target/method matrix, and the
+runtime/strategy/base composition below -- so a config the schema accepts can
+still be refused by pokkum config validate.
+
 Precedence, highest first:
   explicit CLI flag > environment variable > profile override > top-level
   config > built-in default

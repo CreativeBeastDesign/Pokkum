@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -373,5 +375,49 @@ func TestExitStatusIsIndependentOfOutputFormat(t *testing.T) {
 					"\tit must never change whether the command succeeded.", tc.args)
 			}
 		})
+	}
+}
+
+// TestConfigSchemaPrintsTheCheckedInSchema asserts `pokkum config schema`
+// emits the repository's schema verbatim.
+//
+// The embed makes the bytes correct by construction, so what this actually
+// guards is the command around them: that it stays wired up, and that nobody
+// later "improves" it by re-indenting, wrapping it in an envelope, or adding a
+// trailing banner. The command's whole value is that its output can be written
+// straight to a file an editor or a CI validator consumes, and any of those
+// would break that silently while still looking like a schema.
+func TestConfigSchemaPrintsTheCheckedInSchema(t *testing.T) {
+	onDisk, err := os.ReadFile(filepath.Join("..", "..", "schema", "pokkum.schema.json"))
+	if err != nil {
+		t.Fatalf("[TEST SETUP] reading schema/pokkum.schema.json: %v", err)
+	}
+	if len(onDisk) == 0 {
+		t.Fatal("[TEST SETUP] the checked-in schema is empty; this guard would compare nothing")
+	}
+
+	var buf bytes.Buffer
+	root := newRootCommand(context.Background(), discardLogger())
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"config", "schema"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("pokkum config schema: %v", err)
+	}
+
+	if !bytes.Equal(buf.Bytes(), onDisk) {
+		t.Errorf("pokkum config schema output differs from schema/pokkum.schema.json "+
+			"(%d bytes emitted vs %d on disk).\n"+
+			"\tThe command must emit the schema verbatim so its output can be redirected "+
+			"straight to a file an editor or CI validator reads.", buf.Len(), len(onDisk))
+	}
+
+	// And it must actually be a schema, not merely equal to a file.
+	var doc map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("pokkum config schema did not emit valid JSON: %v", err)
+	}
+	if doc["$schema"] == nil {
+		t.Error("emitted document has no $schema key; it is not a JSON Schema")
 	}
 }

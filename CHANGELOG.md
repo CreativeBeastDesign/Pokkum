@@ -48,6 +48,10 @@ and an agent-facing surface built around a manual that ships inside the binary.
   and completion. `make schema` regenerates it; a freshness guard in `make verify` asserts
   regeneration is a no-op.
 
+- **`pokkum config schema`** — writes the JSON Schema for `.pokkum.yaml` to stdout, embedded
+  at build time so it describes the configuration *this* binary accepts. Redirect it for an
+  editor or a CI validator: `pokkum config schema > .pokkum.schema.json`.
+
 - **A documented CLI exit-code table** (`Vocabulary.md` §18d and `pokkum guide exit-codes`).
   It records a distinction that already existed and was documented nowhere: `pokkum verify`
   exits `2` when verification **could not be performed** and `1` when it **ran and produced a

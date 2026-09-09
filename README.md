@@ -322,7 +322,7 @@ Every container image produced by Pokkum is supervised by an ultra-lightweight P
 | `pokkum rollback`          | `pokkum rollback -f deploy.yaml` | Rolls back to the previous image ref (`pokkum.dev/previous-image` annotation), or pass `--to=<ref>` explicitly. One hop deep. |
 | `pokkum upgrade`           | `pokkum upgrade --check`         | Checks for signed CLI release updates.                                                                                        |
 | `pokkum deploy [dir]`      | `pokkum deploy --check`          | Hands a pushed image to a self-hosted PaaS control plane (Dokploy, SwiftWave). `--check` validates the `deploy:` block and deploys nothing. |
-| `pokkum config`            | `pokkum config validate`         | Inspects and validates `.pokkum.yaml`, per profile as well as at the top level. A JSON Schema for editors lives at [schema/pokkum.schema.json](schema/pokkum.schema.json). |
+| `pokkum config`            | `pokkum config validate`         | Inspects and validates `.pokkum.yaml`, per profile as well as at the top level. `pokkum config schema` prints the JSON Schema for editors and CI; it is also checked in at [schema/pokkum.schema.json](schema/pokkum.schema.json). |
 
 ---
 

@@ -34,6 +34,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | Title | Summary | Kind | Status | Commits |
 | --- | --- | --- | --- | --- |
 | [pokkum guide — the operating manual, shipped inside the binary](items/agent-guide-command.md) | A task-shaped guide the binary prints itself, so an agent driving Pokkum in someone else's SvelteKit project reads instructions that cannot be a different version from the binary it is driving. | dx | shipped |  |
+| [pokkum config schema](items/config-schema-subcommand.md) | The generated JSON Schema lives only in this repository, so the audience it was built for — someone working in their own project — cannot reach it. | dx | shipped |  |
 | [pokkum doctor does not check the effective SvelteKit adapter](items/doctor-effective-adapter-check.md) | `checkSvelteKitWorkspace` confirms `@sveltejs/kit` is a dependency and stops there — an `adapter-auto` project passes doctor cleanly and fails at build. | fix | shipped |  |
 | [doctor --output json loses which check failed, and exited 0 when red](items/doctor-json-drops-per-check-detail.md) | A red `pokkum doctor --output json` returns a summary and an error code, without the per-check array the green path includes — so a machine consumer cannot tell what actually failed. | fix | shipped |  |
 | [Documented CLI exit-code table](items/exit-code-reference.md) | The CLI's exit codes are now a published table in both `Vocabulary.md` and `pokkum guide exit-codes`, guarded so a new code cannot ship undocumented. | dx | shipped |  |
