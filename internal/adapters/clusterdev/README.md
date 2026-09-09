@@ -32,7 +32,7 @@ into the pod overwrite `/app` and restart the server.
 | File | Contents |
 | --- | --- |
 | `syncer.go` | `Syncer` (the `kubectl` shell-out), `SelectTarget` (pure pod/container selection over `kubectl get pods -o json`) |
-| `tar.go` | `WriteTar`, the archive builder, including the packager's `/app/server` exclusion list |
+| `tar.go` | `WriteTar`, the archive builder. It matches `ExcludeDirs` on whole path segments, mirroring the packager's own exclusion semantics — the actual `/app/server` exclusion list (`client`, `vendor`, `native`, `prerendered`) is supplied by the caller (`devClusterServerExcludes` in `cmd/pokkum/dev_cluster.go`), kept in lockstep with the packager by `TestDevClusterServerExcludes_MatchPackager` |
 
 `SelectTarget` is exported and pure on purpose: pod selection is the part with
 the real edge cases (several replicas, a terminating pod, a sidecar), and it
