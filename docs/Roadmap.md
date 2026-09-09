@@ -99,6 +99,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
+| [TestPrepare_CancelledContextLeaksNeitherInstallNorGoroutine is timing-dependent](items/vendor-cancellation-test-flake.md) | The vendor-cancellation guard races a real `bun install` against context cancellation, and fails on a slow or loaded runner when the install wins. | infra | open |
 | [make verify's five steps don't cover supervisor/ or the integration/golden test suites](items/verify-suite-scope-gaps.md) | supervisor/ (pokkum-init, pokkum-static) shares the root go.mod but needs its own explicit go build/go test, and tests/integration's golden-manifest and runtime-smoke suites also sit outside make verify's canonical five steps. | infra | open |
 
 ## Unscheduled

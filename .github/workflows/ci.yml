@@ -62,6 +62,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash scripts/check-docs-freshness.sh
 
+      # Same "regeneration must be a no-op" guard as the docs one above, for
+      # schema/pokkum.schema.json. It was wired into `make verify` when the
+      # generator landed and not into CI, which meant a config field added to
+      # ports without regenerating could reach main with the published schema
+      # silently describing the previous shape — exactly what the guard exists
+      # to prevent, in the one place nobody runs `make verify` by hand.
+      - name: Config Schema Freshness Guard
+        if: ${{ !cancelled() }}
+        run: bash scripts/check-schema-freshness.sh
+
       # Run FROM SOURCE via `go run`, not via golangci-lint-action's prebuilt
       # binary. A prebuilt binary carries the Go version it was compiled with,
       # and golangci-lint refuses to load a config whose target Go version is
