@@ -8,80 +8,29 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
-// StaticVerdict is the outcome of a static-viability analysis.
+// The static-viability vocabulary lives in internal/ports and is re-exported
+// here as type aliases.
 //
-// Three states, not two, and deliberately so: "scanned the project and found
-// nothing that blocks static" and "could not scan the project" must never share
-// a representation. A verdict keyed on `len(Blockers) == 0` would report the
-// most reassuring answer for an unreadable directory, a project with no routes
-// directory, and a typo in a path — the exact fail-open shape logged three times
-// in one pass on 2026-08-21 (`mem:self_review_checklist` rows 52 and 53).
-type StaticVerdict string
+// Aliases, not a parallel set of types with a translation layer: the port and
+// this implementation must never be able to disagree about what a verdict
+// means, and "the same concept declared twice in two packages" is the
+// mirrored-constant drift shape logged 2026-08-21. This mirrors how
+// internal/core re-exports port vocabulary (core.Platform = ports.Platform).
+type (
+	StaticVerdict = ports.StaticVerdict
+	StaticFinding = ports.StaticFinding
+	StaticReport  = ports.StaticReport
+)
 
 const (
-	// StaticUnknown means the analysis could not run. Callers MUST NOT read
-	// this as "static is fine"; StaticReport.UndecidedWhy says what stopped it.
-	StaticUnknown StaticVerdict = "unknown"
-
-	// StaticBlocked means the scan completed and found server-side code that
-	// a purely static build cannot carry.
-	StaticBlocked StaticVerdict = "blocked"
-
-	// StaticViable means the scan completed and found no blockers.
-	//
-	// This is a sound NEGATIVE ("these N things rule static out") inverted for
-	// convenience — it is NOT a proof that a static build will succeed. Static
-	// viability is not decidable from source alone: a `+page.ts` load that
-	// fetches a runtime-only API, a dynamic route with no inbound links for the
-	// crawler to follow, or a fetch against a service that only exists in
-	// production all survive this scan and fail later. Report it as "nothing
-	// here rules static out", never as "static will work".
-	StaticViable StaticVerdict = "viable"
+	StaticUnknown = ports.StaticUnknown
+	StaticBlocked = ports.StaticBlocked
+	StaticViable  = ports.StaticViable
 )
-
-// StaticFinding is one piece of evidence, always carrying the file that
-// produced it so a user can go look rather than take the tool's word for it.
-type StaticFinding struct {
-	// File is slash-separated and relative to the project directory.
-	File string
-	// Reason is a single user-facing sentence fragment.
-	Reason string
-	// Override, when non-empty, names the change that would retire this
-	// finding (e.g. adding `export const prerender = true`). Empty means the
-	// finding is unconditional — a form action cannot be prerendered at all.
-	Override string
-}
-
-// StaticReport is the result of AnalyzeStaticViability.
-type StaticReport struct {
-	Verdict StaticVerdict
-
-	// UndecidedWhy is set only for StaticUnknown.
-	UndecidedWhy string
-
-	// Blockers rule static out. Caveats do not, but are worth showing.
-	Blockers []StaticFinding
-	Caveats  []StaticFinding
-
-	// FilesScanned is the number of source files actually read.
-	//
-	// A floor a caller can assert on, so "the walk matched nothing because the
-	// classifier broke" cannot masquerade as "the project is clean"
-	// (`mem:self_review_checklist` row 47).
-	FilesScanned int
-
-	// RoutesDir is the routes directory the scan used, slash-separated and
-	// relative to the project directory.
-	RoutesDir string
-
-	// RootPrerenderDeclared reports whether a root-level `export const
-	// prerender = true` was found in the routes root's +layout file. Its
-	// absence is what makes a viable project still not build statically today,
-	// and is the basis of the recommendation init prints.
-	RootPrerenderDeclared bool
-}
 
 // dirsSkippedInScan are never walked: build output and dependency trees are not
 // user-authored source, and node_modules alone would dominate the scan's cost
