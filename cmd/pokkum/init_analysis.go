@@ -122,12 +122,23 @@ func writeStaticFindings(w io.Writer, a projectAnalysis) {
 		// Honest about what the scan cannot know. A sound negative inverted is
 		// not a positive, and saying so here is cheaper than a support thread
 		// about a build that crawled zero pages.
+		// Dynamic routes used to be named here as the stock example of what
+		// this scan cannot see. They are now reported concretely as caveats
+		// below, so citing them again would point at something the output
+		// already covers, while implying the remaining gap is smaller than it
+		// is. The load-function case genuinely is invisible to any source scan.
 		fmt.Fprintf(w, "    This rules static OUT soundly; it cannot promise it will work — a load function\n")
-		fmt.Fprintf(w, "    hitting a runtime-only API, or a dynamic route with no links to crawl, still fails.\n")
+		fmt.Fprintf(w, "    that fetches an API only reachable at runtime still fails at build time.\n")
 	}
 
 	for _, c := range r.Caveats {
 		fmt.Fprintf(w, "  ! %s %s\n", c.File, c.Reason)
+		// Caveats carry their fix too. Printing the reason without it leaves
+		// the reader knowing something is wrong and not what to do — the same
+		// defect as an error that names no remedy.
+		if c.Override != "" {
+			fmt.Fprintf(w, "      %s\n", c.Override)
+		}
 	}
 }
 

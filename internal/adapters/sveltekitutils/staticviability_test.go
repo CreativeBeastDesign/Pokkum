@@ -664,3 +664,143 @@ func TestAnalyzeStaticViability_AgainstRealFixtures(t *testing.T) {
 		t.Errorf("classified %d fixtures, want %d — a fixture was renamed or removed", seen, len(fixtures))
 	}
 }
+
+// caveatFiles returns the files a report raised caveats for.
+func caveatFiles(r StaticReport) []string {
+	out := make([]string, 0, len(r.Caveats))
+	for _, c := range r.Caveats {
+		out = append(out, c.File)
+	}
+	return out
+}
+
+// TestAnalyzeStaticViability_DynamicRoutes covers the crawl-dependent case.
+//
+// SvelteKit prerenders a dynamic route when the crawler reaches it, when the
+// route exports entries(), or when config.prerender.entries lists it
+// (prerender.js:687, :705). Only the second is decidable from source, so a
+// route without one is a CAVEAT — reporting it as a blocker would refuse the
+// ordinary blog-with-linked-posts, which builds correctly today.
+func TestAnalyzeStaticViability_DynamicRoutes(t *testing.T) {
+	base := map[string]string{
+		"src/routes/+layout.ts":   "export const prerender = true;\n",
+		"src/routes/+page.svelte": "<h1>home</h1>\n",
+	}
+	withBase := func(extra map[string]string) map[string]string {
+		files := map[string]string{}
+		for k, v := range base {
+			files[k] = v
+		}
+		for k, v := range extra {
+			files[k] = v
+		}
+		return files
+	}
+
+	t.Run("a dynamic route without entries() is a caveat, not a blocker", func(t *testing.T) {
+		got := AnalyzeStaticViability(writeProject(t, withBase(map[string]string{
+			"src/routes/blog/[slug]/+page.svelte": "<article/>\n",
+		})))
+
+		if got.Verdict != StaticViable {
+			t.Fatalf("Verdict = %q, want %q — a linked dynamic route builds fine, so this "+
+				"must never block. Blockers: %v", got.Verdict, StaticViable, got.Blockers)
+		}
+		if files := caveatFiles(got); len(files) != 1 || !strings.Contains(files[0], "blog/[slug]") {
+			t.Errorf("caveats = %v, want one naming blog/[slug]", files)
+		}
+		if got.Caveats[0].Override == "" {
+			t.Error("the caveat must name the fix (an entries() export)")
+		}
+	})
+
+	t.Run("entries() in +page.ts retires it", func(t *testing.T) {
+		got := AnalyzeStaticViability(writeProject(t, withBase(map[string]string{
+			"src/routes/blog/[slug]/+page.svelte": "<article/>\n",
+			"src/routes/blog/[slug]/+page.ts": "export function entries() {\n" +
+				"  return [{ slug: 'hello' }, { slug: 'world' }];\n}\n",
+		})))
+		if len(got.Caveats) != 0 {
+			t.Errorf("caveats = %v, want none — this route enumerates its own entries", got.Caveats)
+		}
+	})
+
+	t.Run("entries() in +page.server.ts retires it", func(t *testing.T) {
+		// analyse.js:222 reads `leaf.universal?.entries ?? leaf.server?.entries`,
+		// so the server module counts too.
+		got := AnalyzeStaticViability(writeProject(t, withBase(map[string]string{
+			"src/routes/blog/[slug]/+page.svelte":    "<article/>\n",
+			"src/routes/blog/[slug]/+page.server.ts": "export const entries = async () => [{ slug: 'a' }];\n",
+		})))
+		if len(got.Caveats) != 0 {
+			t.Errorf("caveats = %v, want none", got.Caveats)
+		}
+	})
+
+	t.Run("every dynamic segment shape is recognised", func(t *testing.T) {
+		for _, seg := range []string{"[slug]", "[...rest]", "[[optional]]", "[id=integer]"} {
+			t.Run(seg, func(t *testing.T) {
+				got := AnalyzeStaticViability(writeProject(t, withBase(map[string]string{
+					"src/routes/x/" + seg + "/+page.svelte": "<p/>\n",
+				})))
+				if len(got.Caveats) != 1 {
+					t.Errorf("caveats = %v, want one for %s", caveatFiles(got), seg)
+				}
+			})
+		}
+	})
+
+	t.Run("a route group is not a dynamic route", func(t *testing.T) {
+		// (marketing) shapes the layout tree and never appears in a URL.
+		got := AnalyzeStaticViability(writeProject(t, withBase(map[string]string{
+			"src/routes/(marketing)/about/+page.svelte": "<p/>\n",
+		})))
+		if len(got.Caveats) != 0 {
+			t.Errorf("caveats = %v, want none — a route group needs no entries()", caveatFiles(got))
+		}
+	})
+
+	t.Run("a dynamic endpoint is covered too", func(t *testing.T) {
+		got := AnalyzeStaticViability(writeProject(t, withBase(map[string]string{
+			"src/routes/feed/[kind]/+server.ts": realServerEndpoint,
+		})))
+		if files := caveatFiles(got); len(files) != 1 || !strings.Contains(files[0], "feed/[kind]") {
+			t.Errorf("caveats = %v, want one naming feed/[kind]", files)
+		}
+	})
+
+	t.Run("handleUnseenRoutes opt-out suppresses it", func(t *testing.T) {
+		// The default handler throws (prerender.js:103); a project that set
+		// 'ignore' has opted out, so the caveat would be noise.
+		files := withBase(map[string]string{
+			"src/routes/blog/[slug]/+page.svelte": "<article/>\n",
+			"svelte.config.js":                    "export default { kit: { prerender: { handleUnseenRoutes: 'ignore' } } };\n",
+		})
+		got := AnalyzeStaticViability(writeProject(t, files))
+		if len(got.Caveats) != 0 {
+			t.Errorf("caveats = %v, want none — the project set handleUnseenRoutes: 'ignore'", caveatFiles(got))
+		}
+	})
+
+	t.Run("a commented-out opt-out does not count", func(t *testing.T) {
+		files := withBase(map[string]string{
+			"src/routes/blog/[slug]/+page.svelte": "<article/>\n",
+			"svelte.config.js":                    "// prerender: { handleUnseenRoutes: 'ignore' }\nexport default {};\n",
+		})
+		got := AnalyzeStaticViability(writeProject(t, files))
+		if len(got.Caveats) != 1 {
+			t.Errorf("caveats = %v, want one — the opt-out is commented out", caveatFiles(got))
+		}
+	})
+
+	t.Run("one caveat per dynamic route, not per file in it", func(t *testing.T) {
+		got := AnalyzeStaticViability(writeProject(t, withBase(map[string]string{
+			"src/routes/blog/[slug]/+page.svelte": "<article/>\n",
+			"src/routes/blog/[slug]/+page.ts":     "export const load = async () => ({});\n",
+			"src/routes/shop/[id]/+page.svelte":   "<p/>\n",
+		})))
+		if len(got.Caveats) != 2 {
+			t.Errorf("caveats = %v, want exactly 2 (one per route)", caveatFiles(got))
+		}
+	})
+}

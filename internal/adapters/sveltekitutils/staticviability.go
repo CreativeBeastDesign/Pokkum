@@ -132,6 +132,12 @@ func AnalyzeStaticViability(projectDir string) StaticReport {
 	routePages := map[string]string{}
 	routeEndpoints := map[string]string{}
 
+	// Route directories whose leaf exports an `entries()` generator. SvelteKit
+	// reads it from the universal or server page module, or from the endpoint
+	// module (analyse.js:202 and :222), so any scanned route file in the
+	// directory counts.
+	routeEntries := map[string]bool{}
+
 	// Walk the project rather than only the routes directory: remote functions
 	// (*.remote.ts) are ordinary modules that live wherever the author put
 	// them, commonly src/lib, and a routes-only walk would miss every one of
@@ -199,6 +205,10 @@ func AnalyzeStaticViability(projectDir string) StaticReport {
 		report.FilesScanned++
 		src := blankJSStringsAndComments(string(raw))
 
+		if underRoutes && entriesExportRe.MatchString(src) {
+			routeEntries[path4Dir(slashPath)] = true
+		}
+
 		classifyFile(&report, slashPath, d.Name(), src, underRoutes)
 		return nil
 	})
@@ -229,6 +239,8 @@ func AnalyzeStaticViability(projectDir string) StaticReport {
 			})
 		}
 	}
+
+	addDynamicRouteCaveats(&report, projectDir, routePages, routeEndpoints, routeEntries)
 
 	sortFindings(report.Blockers)
 	sortFindings(report.Caveats)
@@ -507,3 +519,81 @@ func routesConfigSources(projectDir string) []string {
 }
 
 var routesFilesRe = regexp.MustCompile(`routes\s*:\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]`)
+
+// entriesExportRe matches an exported `entries` generator, in the shapes
+// SvelteKit accepts: `export function entries`, `export async function
+// entries`, `export const entries =`.
+var entriesExportRe = regexp.MustCompile(`export\s+(?:async\s+)?(?:function\s+entries\b|(?:const|let|var)\s+entries\s*[:=])`)
+
+// dynamicSegmentRe matches a SvelteKit dynamic route segment: [slug],
+// [...rest], [[optional]], and matcher forms like [id=integer].
+//
+// Route groups — (marketing) — are deliberately NOT matched: they shape the
+// layout tree and never appear in a URL, so they need no entries().
+var dynamicSegmentRe = regexp.MustCompile(`\[[^\]]*\]`)
+
+// unseenRoutesHandledRe matches a prerender.handleUnseenRoutes set to anything
+// other than the default.
+//
+// The default is `undefined`, which THROWS
+// (@sveltejs/kit src/core/postbuild/prerender.js:103) — an unseen prerenderable
+// route fails the build. A project that set 'warn' or 'ignore' has opted out of
+// that, so the caveat below would be noise for it.
+var unseenRoutesHandledRe = regexp.MustCompile(`handleUnseenRoutes\s*:\s*['"` + "`" + `](warn|ignore)['"` + "`" + `]`)
+
+// addDynamicRouteCaveats reports dynamic routes that adapter-static can only
+// prerender if the crawler happens to find a link to them.
+//
+// A CAVEAT, never a blocker, and the distinction is the whole point. SvelteKit
+// prerenders a dynamic route when it is reachable by crawling from a
+// prerendered page, when the route exports `entries()`, or when it is listed in
+// config.prerender.entries. The first of those depends on the rendered HTML of
+// every other page — which this scan does not render and cannot predict — so
+// "no entries() export" means "this MIGHT not be prerendered", never "this will
+// not build". Reporting it as a blocker would refuse the extremely ordinary
+// blog-with-linked-posts, which builds correctly today.
+func addDynamicRouteCaveats(report *StaticReport, projectDir string, pages, endpoints map[string]string, entries map[string]bool) {
+	if projectOptedOutOfUnseenRouteErrors(projectDir) {
+		return
+	}
+
+	seen := map[string]bool{}
+	for _, group := range []map[string]string{pages, endpoints} {
+		for dir, file := range group {
+			if seen[dir] || entries[dir] {
+				continue
+			}
+			// dir is already the project-relative slash path of the route
+			// directory, so it is matched directly. Comparing against
+			// routesDir is unnecessary: a dynamic segment anywhere in the
+			// route's own path makes the route dynamic, and no path outside
+			// the routes tree reaches these maps.
+			if !dynamicSegmentRe.MatchString(dir) {
+				continue
+			}
+			seen[dir] = true
+			report.Caveats = append(report.Caveats, StaticFinding{
+				File: file,
+				Reason: "is a dynamic route with no `entries()` export, so it is prerendered only if " +
+					"something links to it; SvelteKit fails the build for a prerenderable route it never " +
+					"reached while crawling",
+				Override: "export an `entries()` generator listing its parameters, or add the paths to config.prerender.entries",
+			})
+		}
+	}
+}
+
+// projectOptedOutOfUnseenRouteErrors reports whether the project set
+// prerender.handleUnseenRoutes to 'warn' or 'ignore'.
+func projectOptedOutOfUnseenRouteErrors(projectDir string) bool {
+	for _, src := range routesConfigSources(projectDir) {
+		// stripJSComments, NOT blankJSStringsAndComments: this matches a string
+		// VALUE ('warn'/'ignore'), so the contents must survive. Using the
+		// blanking variant here made the regex unmatchable — the exact
+		// distinction stripJS's doc comment exists to force a choice about.
+		if unseenRoutesHandledRe.MatchString(stripJSComments(src)) {
+			return true
+		}
+	}
+	return false
+}
