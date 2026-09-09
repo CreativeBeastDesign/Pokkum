@@ -207,6 +207,19 @@ Checks for new releases and verifies the release binary's checksum signature via
 - Implementation:
   - [cmd/pokkum/upgrade.go](../cmd/pokkum/upgrade.go)
 
+### [pokkum build preflight for strategy: static](items/static-strategy-preflight.md)
+
+`pokkum build --strategy=static` refuses before it starts when the project has code SvelteKit cannot prerender, listing every offending file.
+
+- Flags: `--allow-server-code-in-static`
+- Implementation:
+  - [internal/ports/staticviability.go](../internal/ports/staticviability.go)
+  - [internal/adapters/staticviability/staticviability.go](../internal/adapters/staticviability/staticviability.go)
+  - [internal/core/pipeline.go](../internal/core/pipeline.go)
+  - [internal/core/staticgate_test.go](../internal/core/staticgate_test.go)
+  - [cmd/pokkum/build.go](../cmd/pokkum/build.go)
+  - [cmd/pokkum/staticgate_wiring_test.go](../cmd/pokkum/staticgate_wiring_test.go)
+
 ### [Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md)
 
 Scans a project's routes for server-side code and reports what rules a static build out, feeding `pokkum init`'s strategy default.
@@ -549,6 +562,9 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 - SwiftWave cannot be repointed at a new image reference: both its webhook and its `rebuildApplication` mutation rebuild the application's current deployment, so the application must be pinned to a mutable tag that Pokkum republishes. `update_image` is rejected for that target rather than silently ignored. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
 - The two platform contracts were verified against Dokploy's and SwiftWave's own source rather than their prose docs, but they are third-party APIs and can drift; the adapters fail closed on any response they cannot positively identify as a started rollout. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
 - Vercel and other edge/serverless platforms remain out of scope — they do not run OCI images, which is the existing non-goal stated in README.md. ([pokkum deploy (Dokploy, SwiftWave)](items/paas-deploy-targets.md))
+- Does not implement SvelteKit's root `+server.js` non-HTML-response rule (prerender.js:539), which depends on the response value rather than on the file's shape. ([pokkum build preflight for strategy: static](items/static-strategy-preflight.md))
+- Dynamic route segments are still not reported; adapter-static cannot crawl an unlinked `[slug]`, and detecting that needs link analysis rather than a per-file scan. ([pokkum build preflight for strategy: static](items/static-strategy-preflight.md))
+- Source-text heuristic, not a SvelteKit build. It cannot see a handler assembled dynamically, re-exported from another module, or generated at build time. ([pokkum build preflight for strategy: static](items/static-strategy-preflight.md))
 - A sound negative only. `viable` means nothing found rules static out, never that a static build will succeed. ([Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md))
 - Advisory only. `pokkum build` does not yet refuse `strategy: static` on a project this scan calls blocked — see item static-strategy-preflight. ([Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md))
 - Dynamic route segments are not reported at all yet; adapter-static cannot crawl an unlinked `[slug]` route, and detecting that needs link analysis rather than a per-file scan. ([Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md))

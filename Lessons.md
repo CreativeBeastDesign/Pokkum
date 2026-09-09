@@ -5,6 +5,99 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-09-09 — A classifier's rules were inferred from the tool's behaviour instead of read from its source, and got two of four wrong
+
+**Category:** external-contract / spec-by-assumption
+
+**Root cause:** `AnalyzeStaticViability` decides which SvelteKit constructs cannot be prerendered.
+Its first cut encoded four rules from a plausible mental model of SvelteKit — "a server endpoint
+needs a server", "a server load runs per request" — rather than from `@sveltejs/kit`'s own source.
+Two were wrong, both over-rejecting:
+
+- Every `+server.*` was treated as blocking. `src/core/postbuild/analyse.js:185` rejects a
+  `+server` file only for `BODY_DEPENDENT_METHODS` handlers (`src/constants.js:23` —
+  POST, PUT, PATCH, DELETE, QUERY). A GET-only endpoint is prerendered to a static response.
+- Every `+page.server.*`/`+layout.server.*` `load` was treated as blocking. SvelteKit raises no
+  error for one at all: server loads run at build time, which is how a static site reads a CMS or
+  the filesystem in the first place.
+
+A fifth real rule was missing entirely — `analyse.js:102`, a route with both a `+page` and a
+`+server` file — because a mental model produces the cases you think of, and nothing enumerates
+the ones you do not.
+
+The complete, authoritative set is four `throw`s in two files. It took one `grep` for
+`"Cannot prerender"` in a fixture's own `node_modules` to obtain, and that grep was not run until
+after the wrong rules had shipped.
+
+**What made it visible:** running the classifier over the repo's own committed fixtures, which had
+never been done — every test used purpose-written inputs. `testdata/fixtures/sveltekit-basic` came
+back `blocked`, and `tests/integration/static_e2e_test.go` builds that exact fixture with
+`StrategyStatic`. The contradiction was the signal; the fixture is a real `sv create` project with
+a read-only `/api/health` endpoint, which is as common a shape as SvelteKit has.
+
+Severity was luck, not design. Shipped, the classifier only fed `pokkum init`'s recommendation, so
+the cost was bad advice. The next commit turned those same findings into a hard `pokkum build`
+refusal — at which point both false positives would have refused builds that succeed today, and
+broken two E2E tests.
+
+**Where:** `internal/adapters/sveltekitutils/staticviability.go`, `classifyServerRouteFile` (now
+`classifyEndpoint` + `classifyServerLoadFile`).
+
+**Fix:** rules re-derived from `@sveltejs/kit`'s source, each carrying the file:line it encodes;
+the missing co-location rule added; `TestAnalyzeStaticViability_AgainstRealFixtures` now runs the
+classifier over all four committed fixtures with the `sveltekit-basic` row documented as
+load-bearing for the E2E suite.
+
+**Preventative rule:** when code encodes another tool's rules — what a compiler rejects, what a
+format allows, which inputs a service refuses — derive them from that tool's source or spec and
+cite the location in a comment. A rule you can state but cannot point at is a guess. And before
+building anything that ACTS on a classifier's output, run the classifier over the repo's real
+fixtures and reconcile every disagreement with what the rest of the suite already does with those
+same fixtures — a fixture another test builds successfully, classified as unbuildable, is a
+contradiction the codebase is already holding the answer to.
+
+---
+
+## 2026-09-09 — Two guards in one session passed with their fix reverted, both by asserting a weaker property than the fix provides
+
+**Category:** test-substance / wrong-observable (row 45 family, second and third instances)
+
+**Root cause:** two separate guards, written after their fixes, green immediately, and green still
+with the fix reverted — caught only by the mandatory revert step.
+
+1. **Negative over a tri-state.** A symlink-containment guard asserted
+   `Verdict != StaticViable`. With `os.Root` reverted to `os.ReadFile`, the symlink is followed,
+   the file outside the project is read, and the verdict is `StaticBlocked` — also not
+   `StaticViable`. Logged separately above.
+2. **Value where the fix changes identity.** `deepCopyProjectConfig`'s clone of a `*bool` config
+   field was guarded by asserting the merged config's VALUE was still `true`. But
+   `deepCopyProjectConfig` opens with `dst := *src`, so the pointer is copied and the value is
+   already correct without the clone. The clone's entire purpose is that base and merged do not
+   SHARE the bool. Deleting it left the guard green; asserting
+   `merged.X != base.X` (pointer identity) makes it fail.
+
+Both are the same underlying error: the assertion was written against what the test author
+expected to see, rather than derived from what the fix actually changes. In (1) the fix changes
+which of three states is produced; in (2) it changes pointer identity while leaving the value
+untouched. Neither is exotic, and both were written by someone who had read row 45 that same
+session.
+
+**Where:** `internal/adapters/sveltekitutils/staticviability_test.go`
+(`TestAnalyzeStaticViability_SymlinkEscapingTheProjectIsNotSilentlyRead`);
+`cmd/pokkum/staticgate_wiring_test.go` (`TestApplyProfile_CarriesAllowServerCodeInStatic`).
+
+**Fix:** assert `Verdict == StaticUnknown`, and assert pointer inequality, respectively.
+
+**Preventative rule:** before writing a guard, state in one sentence what the buggy code produces
+and what the fixed code produces — then check the assertion can distinguish exactly those two.
+Two shapes where it usually cannot: a negative assertion (`!= X`, `no error`, `not empty`) over a
+value with three or more states, and a VALUE assertion for a fix whose effect is on IDENTITY
+(cloning, aliasing, copy-on-write, interning). Reverting the fix remains the only way to find out;
+this entry exists because two guards in one session survived being written by someone who intended
+to do exactly that.
+
+---
+
 ## 2026-09-09 — A commented-out `kit.files.routes` won over the real one, in the third instance of a class fixed twice already
 
 **Category:** parsing (whole-file regex vs scoped match) / repeated-failure-class

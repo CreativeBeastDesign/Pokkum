@@ -63,6 +63,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | [pokkum init detects bun vs node, and the base image that carries it](items/init-runtime-detection.md) | `runtime: bun\|node` is inferred from the project's own toolchain, and drags the paired base preset along so the two cannot disagree. | feature | shipped |  |
 | [Adapter injection silently discarded the project's whole SvelteKit config](items/injection-discarded-svelte-config.md) | Rewriting a bare sveltekit() to inject an adapter makes SvelteKit ignore svelte.config.js entirely, so aliases, csp, prerender settings and kit.experimental flags were all lost. | fix | shipped |  |
 | [Zero-config adapter injection declined silently, with undocumented preconditions](items/injection-preconditions-undocumented.md) | Injection is advertised as automatic but engages only under two conditions, and when it declined it said nothing, so the failure read as the feature being broken. | fix | shipped |  |
+| [pokkum build preflight for strategy: static](items/static-strategy-preflight.md) | `pokkum build --strategy=static` refuses before it starts when the project has code SvelteKit cannot prerender, listing every offending file. | hardening | shipped |  |
 | [Static-viability analysis (does this project need a server?)](items/static-viability-analyzer.md) | Scans a project's routes for server-side code and reports what rules a static build out, feeding `pokkum init`'s strategy default. | feature | shipped |  |
 
 ### Supply Chain & Attestation

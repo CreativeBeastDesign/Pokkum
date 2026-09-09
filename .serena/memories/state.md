@@ -299,6 +299,52 @@ before trusting a claim that predates the commit it cites.
   `mem:self_review_checklist` row 41. `verifyKey` now keys on a fingerprint of
   the trusted-root bytes, not the path.
 
+## Static-build preflight gate — shipped 2026-09-09
+
+`pokkum build --strategy=static` REFUSES before Stage 2 (before `Compiler.Preflight`,
+before any subprocess) when the static-viability scan returns `StaticBlocked`.
+
+- Port: `ports.StaticViabilityAnalyzer` (`internal/ports/staticviability.go`),
+  which also owns the `StaticVerdict`/`StaticFinding`/`StaticReport` vocabulary.
+  `sveltekitutils` re-exports those as type ALIASES, not parallel types.
+- Adapter: `internal/adapters/staticviability`, wrapping `sveltekitutils`.
+  `internal/core` must not import the utils package directly.
+- Wiring: `cmd/pokkum/build.go`'s `buildDeps`.
+- Override: `--allow-server-code-in-static` / `build.allow_server_code_in_static`
+  (`*bool`, so a profile can turn it back off). Flag OR config, like
+  `--allow-incomplete`.
+
+**Three limits, and they are the whole design.** Changing any of them needs the
+2026-08-17 Lessons.md entry read first:
+
+1. `StrategyStatic` only, and the analyzer is not even consulted otherwise.
+2. Refuses on `StaticBlocked` ONLY. `StaticUnknown` NEVER fails a build — it is
+   the absence of evidence, and refusing on it is exactly how `Preflight` once
+   blocked every project `sv create` produces.
+3. Always overridable. The scan is a source-text heuristic.
+
+**`Deps.StaticViabilityAnalyzer == nil` skips the gate** — a fail-open for the
+~16 test callers that construct `core.Deps` directly.
+`cmd/pokkum`'s `TestCompositionRootWiresTheStaticViabilityGate` is what keeps
+that away from users; nothing in `internal/core` can assert its own composition
+root. The same test also pins `EnvBakeDetector`, `SecretGuard` and `RouteFilter`,
+which are skipped on nil for the same reason.
+
+**The classifier's rules are @sveltejs/kit's, cited in `classifyFile`'s doc
+comment.** The complete "cannot prerender" set is four throws:
+`analyse.js:102` (route with both +page and +server), `analyse.js:185`
+(+server with BODY_DEPENDENT_METHODS = POST/PUT/PATCH/DELETE/QUERY per
+`constants.js:23`), `prerender.js:539` (root +server returning non-HTML — NOT
+implemented, it depends on the response value), `page/index.js:89` (pages with
+actions). A GET-only `+server.ts` and a `+page.server.ts` `load` are BOTH fine —
+the first cut of this classifier got both wrong in the over-rejecting direction.
+
+`TestAnalyzeStaticViability_AgainstRealFixtures` pins all four committed
+fixtures. The `sveltekit-basic` row is load-bearing beyond that package:
+`tests/integration/static_e2e_test.go` builds that fixture with
+`StrategyStatic`, so a "blocked" verdict there breaks the E2E suite AND every
+real project with a read-only endpoint.
+
 ## Project detection in `pokkum init` — shipped 2026-09-09
 
 `pokkum init` analyses the project BEFORE prompting; the prompt defaults are

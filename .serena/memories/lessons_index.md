@@ -21,14 +21,19 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### encoding another tool's rules from a mental model instead of its source (1)
+
+- `2026-09-09` — A classifier of "what SvelteKit cannot prerender" got two of four rules wrong (every `+server.*`; every server `load`) and missed a fifth, because the rules were inferred rather than read. The authoritative set is four `throw`s in `@sveltejs/kit`, one grep away. Exposed by running the classifier over the repo's own fixtures and finding it called `sveltekit-basic` unbuildable while `static_e2e_test.go` builds that exact fixture. Read before writing code that encodes what another tool accepts or rejects, and before putting a gate on top of any existing classifier.
+
 ### parsing user-authored source (comments/strings are not code) (3)
 
 - `2026-09-09` — A commented-out `kit.files.routes` beat the real one in `bunexec.resolveRoutesDir`, the THIRD site in this repo fooled by a bare regex over JS/TS source — after the class had already been fixed twice and two working comment/string scanners already existed in `sveltekitutils`. Read before writing any `regexp`/`strings.Index` against a file a user wrote; the answer is `stripJSComments` (matcher needs string contents) or `blankJSStringsAndComments` (matching an identifier), never a new scanner. See also the two originals below (2026-08-16 `fallback:`, 2026-08-17 `sveltekit(`).
 - `2026-08-17` — `TransformViteConfig` rewrote `sveltekit(` inside comments and string literals; fixed with real lexical scanners.
 - `2026-08-16` — `StaticFallbackFilename`'s whole-file regex was flipped by `fallback: false` in a comment and by an unrelated `fallback: true`.
 
-### negative assertion over a tri-state (1)
+### guard passed with the fix reverted — wrong observable (2)
 
+- `2026-09-09` — A `*bool` clone in `deepCopyProjectConfig` was guarded by asserting the merged VALUE was still true; the function starts `dst := *src`, so the value is right without the clone and deleting it left the guard green. Identity (`merged.X != base.X`) is the observable. For any fix whose effect is cloning/aliasing/defensive-copy, a value assertion cannot see it.
 - `2026-09-09` — A symlink-containment guard asserted `Verdict != StaticViable` and passed with the `os.Root` fix reverted: `os.ReadFile` follows the escaping symlink, reads the outside file and returns `StaticBlocked`, which is also not `StaticViable`. Read before writing any assertion shaped `!= X` / `no error` / `not empty` against a value with a third state — enumerate the other states and ask which one the BUG produces.
 
 ### guard-scope (off-by-one-level) / permission-and-mode fixes (1)

@@ -37,7 +37,6 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 | Title | Summary | Kind | Status |
 | --- | --- | --- | --- |
 | [A deployment section in pokkum init, and what pokkum deploy would need to earn it](items/init-deployment-section.md) | Whether init should configure `deploy:` at all, and which of three shapes the expansion of `pokkum deploy` takes. | feature | awaiting-decision |
-| [pokkum build preflight for strategy: static](items/static-strategy-preflight.md) | Reject `strategy: static` before the build starts when the project has server-side code, instead of failing deep inside SvelteKit's build. | hardening | open |
 
 ### Supply Chain & Attestation
 

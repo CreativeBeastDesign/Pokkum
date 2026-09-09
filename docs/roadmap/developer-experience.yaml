@@ -436,37 +436,59 @@ items:
 
   - id: static-strategy-preflight
     title: "pokkum build preflight for strategy: static"
-    stage: v1.2
-    status: open
+    stage: v1.1
+    status: shipped
     kind: hardening
     tier: foundation
-    summary: "Reject `strategy: static` before the build starts when the project has server-side code, instead of failing deep inside SvelteKit's build."
+    summary: "`pokkum build --strategy=static` refuses before it starts when the project has code SvelteKit cannot prerender, listing every offending file."
     problem: |
-      `static-viability-analyzer` shipped as advice only, reached from `pokkum init`. A project
-      that adds a `+server.ts` a month after init still discovers the incompatibility from
-      SvelteKit's own error, minutes into a build, with no mention of Pokkum's strategy setting —
-      which is the failure this analysis exists to prevent, merely moved later in the project's
-      life rather than removed.
-    options:
-      - title: "Hard failure in core validation"
-        description: "core.Build refuses the request when the analysis returns blocked."
-        tradeoffs: "Strongest signal and earliest possible. But the scan is a sound negative with no proof of completeness, so a false positive would block a build that works today — and it needs a new ports interface, since internal/core cannot import sveltekitutils directly."
-      - title: "Warning at preflight, build continues"
-        description: "Log the blockers and proceed."
-        tradeoffs: "No false-positive risk, but a warning in a long build log is close to no warning at all."
-      - title: "Hard failure with an explicit opt-out flag"
-        description: "Refuse by default; `--allow-server-code-in-static` (or a config key) overrides."
-        tradeoffs: "Keeps the strong signal while leaving an escape hatch for a false positive. Costs one more flag on an already-large surface."
-    recommendation: |
-      Option 3. The analysis is a sound negative — every blocker it reports is genuinely
-      incompatible with adapter-static — so the false-positive risk is low enough to justify
-      failing closed, and an opt-out costs one flag against a class of failure that currently
-      surfaces as somebody else's error message.
+      [Static-viability analysis](item:static-viability-analyzer) shipped as advice only, reached
+      from `pokkum init`. A project that adds a `+server.ts` with a POST handler a month after
+      init still discovered the incompatibility from SvelteKit's own error, minutes into a build,
+      with no mention of Pokkum or the strategy setting that caused it.
+    decision: |
+      Shipped the recommended option: refuse by default, with `--allow-server-code-in-static`
+      (and `build.allow_server_code_in_static`) as the escape hatch. `ports.StaticViabilityAnalyzer`
+      is injected at the composition root, wrapping `sveltekitutils` in a concrete
+      `internal/adapters/staticviability` adapter, since `internal/core` must not import an
+      adapter — the shape `ports.EnvBakeDetector` and `ports.RouteFilter` already use.
 
-      Needs a `ports.StaticViabilityAnalyzer` interface wrapping `sveltekitutils`, injected at the
-      composition root, because `internal/core` must not import an adapter — the same shape
-      `ports.EnvBakeDetector` and `ports.RouteFilter` already use.
-    related: ["static-viability-analyzer"]
+      **Building this found that the classifier it depends on was wrong**, which is the part worth
+      remembering. Run over the repo's own committed fixtures, it called
+      `testdata/fixtures/sveltekit-basic` blocked — a fixture `tests/integration/static_e2e_test.go`
+      builds with `StrategyStatic`. Reading `@sveltejs/kit`'s source rather than trusting the
+      classification showed two false positives (every `+server.*`, and every server `load`), both
+      fixed before the gate landed on top. A hard gate over an over-aggressive classifier would
+      have been Lessons.md's 2026-08-17 entry a second time, as a build failure rather than advice.
+
+      Three limits, each deliberate:
+
+      - `StrategyStatic` only; every other strategy ships a server.
+      - Refuses on a `blocked` verdict ONLY. An `unknown` verdict — unreadable project, no routes
+        directory, a layout the scan does not understand — is the absence of evidence and never
+        fails a build. This is exactly what 2026-08-17 got wrong.
+      - Overridable, because the scan is a heuristic over source text and nobody should wait for a
+        Pokkum release to ship around a bug in it.
+
+      The nil-analyzer skip in core is a fail-open that exists for the ~16 test callers
+      constructing `core.Deps` directly. `cmd/pokkum`'s
+      `TestCompositionRootWiresTheStaticViabilityGate` asserts the real composition root always
+      supplies one, because nothing in `internal/core` can see its own composition root — deleting
+      that one line would otherwise disable the gate for every real build with the whole suite
+      still green.
+    flags: ["--allow-server-code-in-static"]
+    impl:
+      - internal/ports/staticviability.go
+      - internal/adapters/staticviability/staticviability.go
+      - internal/core/pipeline.go
+      - internal/core/staticgate_test.go
+      - cmd/pokkum/build.go
+      - cmd/pokkum/staticgate_wiring_test.go
+    limitations:
+      - "Source-text heuristic, not a SvelteKit build. It cannot see a handler assembled dynamically, re-exported from another module, or generated at build time."
+      - "Does not implement SvelteKit's root `+server.js` non-HTML-response rule (prerender.js:539), which depends on the response value rather than on the file's shape."
+      - "Dynamic route segments are still not reported; adapter-static cannot crawl an unlinked `[slug]`, and detecting that needs link analysis rather than a per-file scan."
+    related: ["static-viability-analyzer", "workspace-init-wizard"]
 
   - id: config-management
     title: "pokkum config view / validate, build profiles"
