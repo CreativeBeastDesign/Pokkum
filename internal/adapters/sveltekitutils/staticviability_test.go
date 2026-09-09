@@ -1,6 +1,7 @@
 package sveltekitutils
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,17 @@ export const actions: Actions = {
 };
 `
 
+const realMutatingEndpoint = `import { json } from '@sveltejs/kit';
+import type { RequestHandler } from './$types';
+
+export const POST: RequestHandler = async ({ request }) => {
+	const body = await request.json();
+	return json({ received: body });
+};
+`
+
+// realServerEndpoint is GET-only, which SvelteKit prerenders happily — this is
+// testdata/fixtures/sveltekit-basic's real /api/health shape.
 const realServerEndpoint = `import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 
@@ -109,24 +121,18 @@ func TestAnalyzeStaticViability_BlockersByKind(t *testing.T) {
 		wantOverride bool
 	}{
 		{
-			name: "server endpoint",
+			// analyse.js:185 — BODY_DEPENDENT_METHODS is
+			// [POST, PUT, PATCH, DELETE, QUERY].
+			name: "endpoint with a body-dependent handler",
 			files: map[string]string{
-				"src/routes/api/+server.ts": realServerEndpoint,
+				"src/routes/api/+server.ts": realMutatingEndpoint,
 			},
-			wantFile:     "src/routes/api/+server.ts",
-			wantReason:   "server endpoint",
-			wantOverride: true,
+			wantFile:   "src/routes/api/+server.ts",
+			wantReason: "POST",
 		},
 		{
-			name: "server load function",
-			files: map[string]string{
-				"src/routes/profile/+page.server.ts": realPageServerLoad,
-			},
-			wantFile:     "src/routes/profile/+page.server.ts",
-			wantReason:   "server-side load function",
-			wantOverride: true,
-		},
-		{
+			// page/index.js:89 — "Cannot prerender pages with actions",
+			// raised unconditionally, so no flag retires it.
 			name: "form actions are unconditional",
 			files: map[string]string{
 				"src/routes/signup/+page.server.ts": realFormActions,
@@ -136,13 +142,16 @@ func TestAnalyzeStaticViability_BlockersByKind(t *testing.T) {
 			wantOverride: false,
 		},
 		{
-			name: "layout server load",
+			// analyse.js:102 — "Cannot prerender a route with both +page and
+			// +server files". A property of the route DIRECTORY, not of
+			// either file on its own.
+			name: "a page and an endpoint in the same route",
 			files: map[string]string{
-				"src/routes/+layout.server.ts": realPageServerLoad,
+				"src/routes/thing/+page.svelte": "<h1>thing</h1>\n",
+				"src/routes/thing/+server.ts":   realServerEndpoint,
 			},
-			wantFile:     "src/routes/+layout.server.ts",
-			wantReason:   "server-side load function",
-			wantOverride: true,
+			wantFile:   "src/routes/thing/+server.ts",
+			wantReason: "both a page and an endpoint",
 		},
 		{
 			name: "remote query function outside routes",
@@ -158,8 +167,9 @@ func TestAnalyzeStaticViability_BlockersByKind(t *testing.T) {
 			files: map[string]string{
 				"src/routes/live/+page.ts": "export const prerender = false;\n",
 			},
-			wantFile:   "src/routes/live/+page.ts",
-			wantReason: "prerender = false",
+			wantFile:     "src/routes/live/+page.ts",
+			wantReason:   "prerender = false",
+			wantOverride: true,
 		},
 	}
 
@@ -193,24 +203,85 @@ func TestAnalyzeStaticViability_BlockersByKind(t *testing.T) {
 	}
 }
 
-// TestAnalyzeStaticViability_PrerenderTrueRetiresServerFinding is the override
-// half: the same server file that blocks above must stop blocking once it opts
-// in, because that is what actually makes it build.
-func TestAnalyzeStaticViability_PrerenderTrueRetiresServerFinding(t *testing.T) {
-	dir := writeProject(t, map[string]string{
-		"src/routes/+page.svelte":   "<h1>x</h1>\n",
-		"src/routes/api/+server.ts": "export const prerender = true;\n" + realServerEndpoint,
-	})
-
-	got := AnalyzeStaticViability(dir)
-
-	if got.Verdict != StaticViable {
-		t.Errorf("Verdict = %q, want %q — `export const prerender = true` makes a +server.ts build-time; blockers: %v",
-			got.Verdict, StaticViable, got.Blockers)
+// TestAnalyzeStaticViability_ReadOnlyServerCodeIsNotABlocker pins the two
+// false positives the first cut of this file shipped, both of which would have
+// hard-failed real, working static builds once the build gate landed.
+//
+// Expectations come from @sveltejs/kit's own source, not from this
+// implementation: analyse.js:185 rejects a +server file ONLY for
+// BODY_DEPENDENT_METHODS handlers, and no error anywhere rejects a
+// +page.server load — it runs at build time, which is how a static site reads
+// a CMS or the filesystem in the first place.
+func TestAnalyzeStaticViability_ReadOnlyServerCodeIsNotABlocker(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+	}{
+		{
+			// testdata/fixtures/sveltekit-basic's real /api/health shape.
+			name:  "GET-only endpoint",
+			files: map[string]string{"src/routes/api/health/+server.ts": realServerEndpoint},
+		},
+		{
+			name:  "server load in a +page.server.ts",
+			files: map[string]string{"src/routes/profile/+page.server.ts": realPageServerLoad},
+		},
+		{
+			name:  "server load in a +layout.server.ts",
+			files: map[string]string{"src/routes/+layout.server.ts": realPageServerLoad},
+		},
+		{
+			name: "HEAD and OPTIONS handlers",
+			files: map[string]string{
+				"src/routes/api/+server.ts": "export function HEAD() { return new Response(); }\n" +
+					"export function OPTIONS() { return new Response(); }\n",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.files["src/routes/+page.svelte"] = "<h1>root</h1>\n"
+			got := AnalyzeStaticViability(writeProject(t, tc.files))
+			if got.Verdict != StaticViable {
+				t.Errorf("Verdict = %q, want %q — SvelteKit prerenders this, so blocking it would "+
+					"refuse a build that works. Blockers: %v", got.Verdict, StaticViable, got.Blockers)
+			}
+		})
 	}
 }
 
-// TestAnalyzeStaticViability_FormActionsSurviveP rerenderTrue: actions cannot be
+// TestAnalyzeStaticViability_EveryBodyDependentMethodBlocks walks the whole
+// BODY_DEPENDENT_METHODS set in each declaration shape, rather than
+// spot-checking POST — a method or syntax missing from the matcher is caught
+// here, instead of by a user's build failing after this gate waved it through.
+func TestAnalyzeStaticViability_EveryBodyDependentMethodBlocks(t *testing.T) {
+	// Hard-coded from @sveltejs/kit src/constants.js:23 rather than read from
+	// the production slice, so deleting a method there fails this test instead
+	// of silently shrinking both sides together.
+	methods := []string{"POST", "PUT", "PATCH", "DELETE", "QUERY"}
+	shapes := map[string]string{
+		"func":        "export function %s() { return new Response(); }\n",
+		"async-func":  "export async function %s() { return new Response(); }\n",
+		"const-arrow": "export const %s = async () => new Response();\n",
+		"const-typed": "export const %s: RequestHandler = async () => new Response();\n",
+	}
+	for _, method := range methods {
+		for shapeName, shape := range shapes {
+			t.Run(method+"/"+shapeName, func(t *testing.T) {
+				got := AnalyzeStaticViability(writeProject(t, map[string]string{
+					"src/routes/+page.svelte":   "<h1>x</h1>\n",
+					"src/routes/api/+server.ts": fmt.Sprintf(shape, method),
+				}))
+				if got.Verdict != StaticBlocked {
+					t.Errorf("Verdict = %q, want %q for a %s handler declared as %s",
+						got.Verdict, StaticBlocked, method, shapeName)
+				}
+			})
+		}
+	}
+}
+
+// TestAnalyzeStaticViability_FormActionsSurvivePrerenderTrue: actions cannot be
 // prerendered at all, so a prerender = true alongside them must NOT silence the
 // finding. Ordering bug bait: the actions check has to run before the override.
 func TestAnalyzeStaticViability_FormActionsSurvivePrerenderTrue(t *testing.T) {
@@ -324,7 +395,7 @@ func TestAnalyzeStaticViability_HonoursCustomRoutesDir(t *testing.T) {
 	dir := writeProject(t, map[string]string{
 		"svelte.config.js":         "export default { kit: { files: { routes: 'src/pages' } } };\n",
 		"src/pages/+page.svelte":   "<h1>x</h1>\n",
-		"src/pages/api/+server.ts": realServerEndpoint,
+		"src/pages/api/+server.ts": realMutatingEndpoint,
 	})
 
 	got := AnalyzeStaticViability(dir)
@@ -342,8 +413,8 @@ func TestAnalyzeStaticViability_HonoursCustomRoutesDir(t *testing.T) {
 func TestAnalyzeStaticViability_ReportsEveryBlockerNotJustTheFirst(t *testing.T) {
 	dir := writeProject(t, map[string]string{
 		"src/routes/+page.svelte":           "<h1>x</h1>\n",
-		"src/routes/api/a/+server.ts":       realServerEndpoint,
-		"src/routes/api/b/+server.ts":       realServerEndpoint,
+		"src/routes/api/a/+server.ts":       realMutatingEndpoint,
+		"src/routes/api/b/+server.ts":       realMutatingEndpoint,
 		"src/routes/signup/+page.server.ts": realFormActions,
 		"src/lib/posts.remote.ts":           realRemoteQuery,
 	})
@@ -374,10 +445,10 @@ func TestAnalyzeStaticViability_SkipsBuildAndDependencyTrees(t *testing.T) {
 	dir := writeProject(t, map[string]string{
 		"src/routes/+layout.ts":                       "export const prerender = true;\n",
 		"src/routes/+page.svelte":                     "<h1>x</h1>\n",
-		"node_modules/some-pkg/src/routes/+server.ts": realServerEndpoint,
+		"node_modules/some-pkg/src/routes/+server.ts": realMutatingEndpoint,
 		"node_modules/some-pkg/lib/x.remote.ts":       realRemoteQuery,
 		"build/server/+page.server.js":                realFormActions,
-		".svelte-kit/output/+server.js":               realServerEndpoint,
+		".svelte-kit/output/+server.js":               realMutatingEndpoint,
 	})
 
 	got := AnalyzeStaticViability(dir)
@@ -505,5 +576,91 @@ func TestAnalyzeStaticViability_SymlinkEscapingTheProjectIsNotSilentlyRead(t *te
 		t.Errorf("Verdict = %q, want %q — a symlink out of the project must be refused, "+
 			"not followed and read as project content; UndecidedWhy=%q",
 			got.Verdict, StaticUnknown, got.UndecidedWhy)
+	}
+}
+
+// TestAnalyzeStaticViability_AgainstRealFixtures runs the classifier over the
+// repo's committed SvelteKit fixtures — real projects with real
+// @sveltejs/kit dependencies, not shapes written to satisfy this code
+// (mem:self_review_checklist rows 12 and 50).
+//
+// The sveltekit-basic row is load-bearing beyond this package.
+// tests/integration/static_e2e_test.go builds that exact fixture with
+// StrategyStatic, and cmd/pokkum's build preflight refuses a static build on a
+// blocked verdict — so the moment this row says "blocked", two E2E tests break
+// and, far worse, every real project with a read-only /api/health endpoint
+// stops building. That fixture's endpoint is GET-only, and SvelteKit
+// prerenders it; the first cut of this file called it a blocker.
+func TestAnalyzeStaticViability_AgainstRealFixtures(t *testing.T) {
+	fixtures := map[string]struct {
+		want         StaticVerdict
+		wantBlockers []string
+	}{
+		"sveltekit-basic": {
+			// A GET-only +server.ts and two universal loads.
+			want: StaticViable,
+		},
+		"sveltekit-static": {want: StaticViable},
+		"sveltekit-adapter-node": {
+			// Nothing server-side in its sources; the adapter choice is not
+			// something this analysis reads, and deliberately so — it reports
+			// what the CODE needs, not what the project is configured for.
+			want: StaticViable,
+		},
+		"sveltekit-kit3": {
+			// Real remote functions, the feature that motivated this scan.
+			want: StaticBlocked,
+			wantBlockers: []string{
+				"src/lib/counter.remote.ts",
+				"src/lib/data.remote.ts",
+				"src/routes/contact/contact.remote.ts",
+			},
+		},
+	}
+
+	root := filepath.Join("..", "..", "..", "testdata", "fixtures")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read fixtures dir: %v", err)
+	}
+
+	seen := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		want, known := fixtures[e.Name()]
+		if !known {
+			t.Errorf("fixture %q has no expectation here — a new SvelteKit fixture must be "+
+				"classified deliberately, not left to whatever this scan happens to say", e.Name())
+			continue
+		}
+		seen++
+		t.Run(e.Name(), func(t *testing.T) {
+			got := AnalyzeStaticViability(filepath.Join(root, e.Name()))
+			if got.Verdict != want.want {
+				t.Errorf("Verdict = %q, want %q (blockers: %v, why: %q)",
+					got.Verdict, want.want, got.Blockers, got.UndecidedWhy)
+			}
+			if got.FilesScanned == 0 {
+				t.Errorf("FilesScanned = 0 on a real fixture — the scan read nothing")
+			}
+			if want.wantBlockers != nil {
+				gotFiles := blockerFiles(got)
+				if len(gotFiles) != len(want.wantBlockers) {
+					t.Fatalf("blockers = %v, want %v", gotFiles, want.wantBlockers)
+				}
+				for i := range want.wantBlockers {
+					if gotFiles[i] != want.wantBlockers[i] {
+						t.Errorf("blocker[%d] = %q, want %q", i, gotFiles[i], want.wantBlockers[i])
+					}
+				}
+			}
+		})
+	}
+
+	// Row 47: a loop that classified nothing must not read as a clean pass.
+	if seen != len(fixtures) {
+		t.Errorf("classified %d fixtures, want %d — a fixture was renamed or removed", seen, len(fixtures))
 	}
 }

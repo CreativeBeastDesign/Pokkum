@@ -320,13 +320,17 @@ What counts as needing a server:
 
 | Found | Blocks static? |
 |---|---|
-| `+server.*` — an API endpoint | Yes, unless the file sets `export const prerender = true` |
-| `+page.server.*` / `+layout.server.*` — a server load function | Yes, unless the file sets `export const prerender = true` |
-| `export const actions` — form actions | **Always.** A POST handler cannot be prerendered, so a `prerender = true` in the same file does not change this |
+| `+server.*` exporting POST, PUT, PATCH, DELETE or QUERY | Yes — SvelteKit: *"Cannot prerender a +server file with … handlers"* |
+| `+server.*` exporting only GET / HEAD / OPTIONS | **No** — SvelteKit prerenders read-only endpoints to static responses |
+| A route directory holding **both** a `+page.*` and a `+server.*` | Yes — SvelteKit: *"Cannot prerender a route with both +page and +server files"* |
+| `export const actions` — form actions | Yes, unconditionally — SvelteKit: *"Cannot prerender pages with actions"*. No flag retires it |
+| A `load` in `+page.server.*` / `+layout.server.*` | **No** — server loads run at build time, which is how a static site reads a CMS or the filesystem |
 | `*.remote.ts\|js` using `query()`, `form()` or `command()` | Yes |
 | `*.remote.ts\|js` using only `prerender()` | No — that resolves at build time and ships as data |
-| `export const prerender = false` anywhere | Yes |
+| `export const prerender = false` anywhere | Yes — the one finding a source edit retires |
 | `hooks.server.*` | No, reported as a caveat — server hooks run during prerendering, so the build works; what you lose is per-request behaviour for real visitors |
+
+These rules are SvelteKit's own, read from `@sveltejs/kit`'s source (`src/core/postbuild/analyse.js`, `src/runtime/server/page/index.js`, `src/constants.js`) rather than inferred — they are the complete set of conditions under which it refuses to prerender.
 
 Matching ignores comments and string literals, so a commented-out `export const prerender = false` does not count.
 

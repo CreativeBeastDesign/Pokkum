@@ -107,6 +107,22 @@ var scannedExtensions = map[string]bool{
 	".cjs": true,
 }
 
+// bodyDependentMethods mirrors @sveltejs/kit's BODY_DEPENDENT_METHODS
+// (src/constants.js: `[...MUTATIVE_METHODS, 'QUERY']`). A +server file
+// exporting any of these cannot be prerendered; GET, HEAD and OPTIONS can.
+//
+// Order is SvelteKit's own, so a multi-method message reads in a familiar
+// order rather than in map-iteration order.
+var bodyDependentMethods = []string{"POST", "PUT", "PATCH", "DELETE", "QUERY"}
+
+// exportedHandlerRe matches an exported HTTP handler for method, in the three
+// shapes SvelteKit accepts: `export function POST`, `export async function
+// POST`, and `export const POST =`.
+func exportedHandlerRe(method string) *regexp.Regexp {
+	return regexp.MustCompile(`export\s+(?:async\s+)?(?:function\s+` + method +
+		`\b|(?:const|let|var)\s+` + method + `\s*[:=])`)
+}
+
 var (
 	prerenderTrueRe  = regexp.MustCompile(`export\s+const\s+prerender\s*(?::[^=]*)?=\s*true\b`)
 	prerenderFalseRe = regexp.MustCompile(`export\s+const\s+prerender\s*(?::[^=]*)?=\s*false\b`)
@@ -159,6 +175,14 @@ func AnalyzeStaticViability(projectDir string) StaticReport {
 	}
 	defer func() { _ = projectRoot.Close() }()
 
+	// Route directories holding a +page and/or a +server file. SvelteKit
+	// refuses to prerender a route that has both ("Cannot prerender a route
+	// with both +page and +server files", analyse.js:102), and that is a
+	// property of a DIRECTORY, not of either file — so it cannot be decided
+	// during the per-file walk and is resolved afterwards.
+	routePages := map[string]string{}
+	routeEndpoints := map[string]string{}
+
 	// Walk the project rather than only the routes directory: remote functions
 	// (*.remote.ts) are ordinary modules that live wherever the author put
 	// them, commonly src/lib, and a routes-only walk would miss every one of
@@ -181,15 +205,27 @@ func AnalyzeStaticViability(projectDir string) StaticReport {
 			}
 			return nil
 		}
-		if !scannedExtensions[strings.ToLower(filepath.Ext(path))] {
-			return nil
-		}
-
 		relPath, relErr := filepath.Rel(projectDir, path)
 		if relErr != nil {
 			return nil
 		}
 		slashPath := filepath.ToSlash(relPath)
+
+		// Recorded before the extension filter: +page.svelte is not a scanned
+		// source (there is nothing in it this analysis reads), but its
+		// PRESENCE is what the co-location rule turns on.
+		if isUnderDir(path, routesDir) {
+			switch {
+			case strings.HasPrefix(d.Name(), "+page."):
+				routePages[path4Dir(slashPath)] = slashPath
+			case strings.HasPrefix(d.Name(), "+server."):
+				routeEndpoints[path4Dir(slashPath)] = slashPath
+			}
+		}
+
+		if !scannedExtensions[strings.ToLower(filepath.Ext(path))] {
+			return nil
+		}
 
 		underRoutes := isUnderDir(path, routesDir)
 		if !underRoutes && !isRemoteModule(d.Name()) && !isServerHooks(slashPath) {
@@ -233,6 +269,18 @@ func AnalyzeStaticViability(projectDir string) StaticReport {
 
 	report.RootPrerenderDeclared = rootPrerenderDeclared(routesDir)
 
+	// The co-location rule. Reported against the endpoint, since removing or
+	// moving that is the fix, and it names the page so the pair is obvious.
+	for dir, endpoint := range routeEndpoints {
+		if page, ok := routePages[dir]; ok {
+			report.Blockers = append(report.Blockers, StaticFinding{
+				File: endpoint,
+				Reason: fmt.Sprintf("shares a route with %s, and SvelteKit cannot prerender a route that has both a page and an endpoint",
+					page),
+			})
+		}
+	}
+
 	sortFindings(report.Blockers)
 	sortFindings(report.Caveats)
 
@@ -245,6 +293,34 @@ func AnalyzeStaticViability(projectDir string) StaticReport {
 }
 
 // classifyFile records the findings a single already-blanked source produces.
+//
+// The rules below are SvelteKit's own, read out of its source rather than
+// inferred. Every "cannot prerender" error @sveltejs/kit can raise is:
+//
+//	src/core/postbuild/analyse.js:102   route with both +page and +server files
+//	src/core/postbuild/analyse.js:185   +server with BODY_DEPENDENT_METHODS handlers
+//	src/core/postbuild/prerender.js:539 root +server.js returning a non-HTML response
+//	src/runtime/server/page/index.js:89 pages with actions
+//
+// and BODY_DEPENDENT_METHODS is `[...MUTATIVE_METHODS, 'QUERY']` =
+// POST, PUT, PATCH, DELETE, QUERY (src/constants.js:23).
+//
+// Two things follow that the first cut of this file got WRONG, both in the
+// over-rejecting direction:
+//
+//   - A GET-only +server.ts prerenders perfectly well. Only a body-dependent
+//     handler makes it impossible. Treating every endpoint as a blocker
+//     wrongly disqualifies the extremely common read-only /api/health shape —
+//     this repo's own testdata/fixtures/sveltekit-basic is exactly that.
+//   - A +page.server.ts / +layout.server.ts `load` prerenders fine: it runs at
+//     build time. SvelteKit raises no error for one, and reading a CMS or the
+//     filesystem in a server load is the normal way to build a static site.
+//     Only `export const actions` is genuinely impossible.
+//
+// Getting this wrong matters more than it looks: `pokkum build` refuses a
+// static build on these findings, and Lessons.md's 2026-08-17 entry is a
+// preflight check that blocked every real project by making exactly this kind
+// of independent, untested assumption.
 func classifyFile(report *StaticReport, slashPath, name, src string, underRoutes bool) {
 	// An explicit opt-out anywhere rules static out on its own, wherever it
 	// sits — a +page.ts, a +layout.ts, or a server file.
@@ -252,6 +328,12 @@ func classifyFile(report *StaticReport, slashPath, name, src string, underRoutes
 		report.Blockers = append(report.Blockers, StaticFinding{
 			File:   slashPath,
 			Reason: "sets `export const prerender = false`, which opts this route out of prerendering",
+			// The only finding a source edit can retire. Every other blocker
+			// names something SvelteKit refuses outright (a body-dependent
+			// handler, form actions, a page and endpoint sharing a route), so
+			// offering an "override" for those would be advice that does not
+			// work — see StaticFinding.Override.
+			Override: "remove the line, or set it to true, if this route can be rendered at build time",
 		})
 	}
 
@@ -270,40 +352,57 @@ func classifyFile(report *StaticReport, slashPath, name, src string, underRoutes
 			Reason: "server hooks run only while prerendering in a static build; per-request logic here (auth, redirects, locals) will not run for real visitors",
 		})
 
-	case underRoutes && isServerRouteFile(name):
-		classifyServerRouteFile(report, slashPath, name, src)
+	case underRoutes && strings.HasPrefix(name, "+server."):
+		classifyEndpoint(report, slashPath, src)
+
+	case underRoutes && (strings.HasPrefix(name, "+page.server.") || strings.HasPrefix(name, "+layout.server.")):
+		classifyServerLoadFile(report, slashPath, src)
 	}
 }
 
-func classifyServerRouteFile(report *StaticReport, slashPath, name, src string) {
-	// Form actions are the one unconditional case: `export const actions` is
-	// request handling by definition and no prerender flag makes it work.
-	// Checked before the prerender override so a +page.server.ts that sets
-	// BOTH prerender = true and actions is still reported.
+// classifyEndpoint reports a +server file that cannot be prerendered.
+//
+// Only a body-dependent handler makes that true. A GET/HEAD/OPTIONS endpoint
+// is prerendered to a static response and ships fine.
+func classifyEndpoint(report *StaticReport, slashPath, src string) {
+	var found []string
+	for _, method := range bodyDependentMethods {
+		if exportedHandlerRe(method).MatchString(src) {
+			found = append(found, method)
+		}
+	}
+	if len(found) == 0 {
+		return
+	}
+	report.Blockers = append(report.Blockers, StaticFinding{
+		File: slashPath,
+		Reason: fmt.Sprintf("exports %s, and SvelteKit cannot prerender a +server file with a handler whose response depends on the request body",
+			joinList(found, "a "+found[0]+" handler", "handlers")),
+	})
+}
+
+// classifyServerLoadFile reports a +page.server / +layout.server file that
+// cannot be prerendered.
+//
+// `export const actions` is the only such case: SvelteKit raises "Cannot
+// prerender pages with actions" unconditionally, so no prerender flag retires
+// it. A `load` in the same file is NOT a finding — it runs at build time.
+func classifyServerLoadFile(report *StaticReport, slashPath, src string) {
 	if actionsExportRe.MatchString(src) {
 		report.Blockers = append(report.Blockers, StaticFinding{
 			File:   slashPath,
 			Reason: "declares form actions, which handle POST requests at runtime and cannot be prerendered",
 		})
-		return
 	}
-	if prerenderTrueRe.MatchString(src) {
-		// Already opted in; the server code runs at build time only.
-		return
+}
+
+// joinList renders a method list: the singular form when there is one, or
+// "POST, PUT and DELETE handlers" when there are several.
+func joinList(items []string, singular, pluralNoun string) string {
+	if len(items) == 1 {
+		return singular
 	}
-	if strings.HasPrefix(name, "+server.") {
-		report.Blockers = append(report.Blockers, StaticFinding{
-			File:     slashPath,
-			Reason:   "is a server endpoint, which needs a running server to answer requests",
-			Override: "add `export const prerender = true` if its responses are the same for every visitor",
-		})
-		return
-	}
-	report.Blockers = append(report.Blockers, StaticFinding{
-		File:     slashPath,
-		Reason:   "runs a server-side load function on every request",
-		Override: "add `export const prerender = true` if its data is fixed at build time",
-	})
+	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1] + " " + pluralNoun
 }
 
 func classifyRemoteModule(report *StaticReport, slashPath, src string) {
@@ -344,20 +443,6 @@ func joinHelpers(used []string) string {
 	return strings.Join(used[:len(used)-1], ", ") + " and " + used[len(used)-1]
 }
 
-// isServerRouteFile reports whether name is a SvelteKit route file that only
-// exists to run on a server.
-//
-// +page.ts / +layout.ts are absent on purpose: those are universal load
-// functions that prerender fine.
-func isServerRouteFile(name string) bool {
-	for _, prefix := range []string{"+server.", "+page.server.", "+layout.server."} {
-		if strings.HasPrefix(name, prefix) && scannedExtensions[strings.ToLower(filepath.Ext(name))] {
-			return true
-		}
-	}
-	return false
-}
-
 // isRemoteModule reports whether name is a SvelteKit remote-functions module
 // (`*.remote.ts` / `*.remote.js`).
 func isRemoteModule(name string) bool {
@@ -380,6 +465,14 @@ func isServerHooks(slashPath string) bool {
 		}
 	}
 	return false
+}
+
+// path4Dir returns the directory portion of a slash path, or "" at the root.
+func path4Dir(slashPath string) string {
+	if i := strings.LastIndex(slashPath, "/"); i >= 0 {
+		return slashPath[:i]
+	}
+	return ""
 }
 
 func path4Base(slashPath string) string {

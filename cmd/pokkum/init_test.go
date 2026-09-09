@@ -251,9 +251,13 @@ func TestInit_StrategyDefaultFollowsTheScan(t *testing.T) {
 		{
 			name: "a single server endpoint defaults to layered",
 			files: map[string]string{
-				"package.json":              `{"dependencies":{"@sveltejs/kit":"^2.31.0"}}`,
-				"src/routes/+page.svelte":   "<h1>hi</h1>\n",
-				"src/routes/api/+server.ts": "export const GET = async () => new Response('x');\n",
+				"package.json":            `{"dependencies":{"@sveltejs/kit":"^2.31.0"}}`,
+				"src/routes/+page.svelte": "<h1>hi</h1>\n",
+				// A POST handler: SvelteKit cannot prerender a +server file whose
+				// response depends on the request body. A GET-only endpoint would
+				// NOT block, and using one here would make this test assert the
+				// opposite of what it says.
+				"src/routes/api/+server.ts": "export const POST = async ({ request }) => new Response(await request.text());\n",
 			},
 			wantStrategy: string(ports.StrategyLayered),
 		},
@@ -297,8 +301,12 @@ func TestInit_StrategyDefaultFollowsTheScan(t *testing.T) {
 // second detector, including the base image it drags along.
 func TestInit_RuntimeDefaultFollowsTheLockfile(t *testing.T) {
 	base := map[string]string{
-		"src/routes/+page.svelte":   "<h1>hi</h1>\n",
-		"src/routes/api/+server.ts": "export const GET = async () => new Response('x');\n",
+		"src/routes/+page.svelte": "<h1>hi</h1>\n",
+		// A POST handler: SvelteKit cannot prerender a +server file whose
+		// response depends on the request body. A GET-only endpoint would
+		// NOT block, and using one here would make this test assert the
+		// opposite of what it says.
+		"src/routes/api/+server.ts": "export const POST = async ({ request }) => new Response(await request.text());\n",
 	}
 
 	t.Run("a node lockfile writes runtime node and the base that carries it", func(t *testing.T) {

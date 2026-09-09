@@ -101,7 +101,8 @@ func writeStaticFindings(w io.Writer, a projectAnalysis) {
 	case sveltekitutils.StaticViable:
 		fmt.Fprintf(w, "  → Nothing in this project rules out a static build: %s scanned under %s,\n",
 			pluralSources(r.FilesScanned), r.RoutesDir)
-		fmt.Fprintf(w, "    no server endpoints, server load functions, form actions or remote functions.\n")
+		fmt.Fprintf(w, "    nothing SvelteKit refuses to prerender — no form actions, no request-body\n")
+		fmt.Fprintf(w, "    endpoint handlers, no server-side remote functions.\n")
 
 		// The inverse flag: viable, but not yet set up to actually build that
 		// way. Two independent prerequisites, reported separately because a
