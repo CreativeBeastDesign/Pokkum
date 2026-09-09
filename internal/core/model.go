@@ -938,6 +938,15 @@ type BuildRequest struct {
 	// AllowIncompleteScan permits the build to succeed even if vulnerability database lookups fail.
 	AllowIncompleteScan bool
 
+	// AllowServerCodeInStatic proceeds with a StrategyStatic build even when
+	// the static-viability scan found code SvelteKit cannot prerender.
+	//
+	// An escape hatch for a false positive, not a normal setting: the scan is
+	// a heuristic over source text, and a user who has hit a bug in it should
+	// not have to wait for a Pokkum release to ship their app. The build will
+	// still fail inside SvelteKit if the scan was right.
+	AllowServerCodeInStatic bool
+
 	// VEXExemptions lists CVEs that must not count toward FailOnCVE's
 	// threshold decision, each a "not_affected" OpenVEX statement with a
 	// mandatory expiry and owner — see VEXExemption's doc comment. Only
@@ -1539,3 +1548,16 @@ func (r BuildResult) ArtifactFor(p Platform) (Artifact, bool) {
 // sentinel, so callers do not have to import errors alongside core for the one
 // classification they actually branch on.
 func IsUnsupportedPlatform(err error) bool { return errors.Is(err, ErrUnsupportedPlatform) }
+
+// Static-viability vocabulary, re-exported from ports so pipeline code reads
+// the same names the port declares.
+type (
+	StaticVerdict = ports.StaticVerdict
+	StaticReport  = ports.StaticReport
+)
+
+const (
+	StaticUnknown = ports.StaticUnknown
+	StaticBlocked = ports.StaticBlocked
+	StaticViable  = ports.StaticViable
+)
