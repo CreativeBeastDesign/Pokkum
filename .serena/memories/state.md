@@ -817,6 +817,33 @@ delegates to it. Advisory only — `pokkum build` does NOT yet refuse
   capability before the final exec — tracked as a Roadmap follow-up, not
   attempted. See `mem:open_decisions` row 8.
 
+## Automatic project dependency install — shipped 2026-09-12
+- `Prepare` installs the project's OWN `node_modules` (devDependencies
+  included) when `<project>/node_modules` is absent and the build is not
+  hermetic: `bun install --no-save` (+ `--frozen-lockfile` when a lockfile is
+  present; missing lockfile warns and installs unpinned, same stance as the
+  vendor install). `internal/adapters/bunexec/project_install.go`.
+- Distinct from the production vendor install (`vendor_install.go`, stages a
+  prod-only tree under `.pokkum/vendor` for the image). Runs synchronously
+  BEFORE the vendor dispatch and after the adapter fail-fast check; the build
+  needs the tree before `cmd.Start()`.
+- Trigger is PRESENCE, not a content-hash stamp: an existing tree (symlinked,
+  cached, `bun link`ed) is never touched. A stale-but-present tree fails as
+  `bun run build` would. Do not "improve" this into a staleness check without
+  re-reading project_install.go's package comment — the symlinked
+  `node_modules` in `copyLiveFixtureProject`/`copyFixtureProject` would be
+  written through.
+- `--no-install` (`ports.PrepareRequest.NoInstall`, `core.CompileOptions.NoInstall`,
+  wired like `NoInject`; NOT in the remote-cache key) → missing tree is
+  `core.ErrDependenciesMissing`. Install failure → `core.ErrDependencyInstallFailed`
+  (never `ErrPrepareFailed`). `--hermetic` never installs; Preflight's hermetic
+  check and the install gate share `projectNodeModulesPresent`.
+- `newProjectDir` in bunexec tests now creates an empty `node_modules/`
+  (models an installed project); `newUninstalledProjectDir` is the CI-checkout
+  shape. Real-bun proof: `TestLiveFixture_PrepareInstallsMissingNodeModules`
+  (skips under -short). CI's `github-action-selftest` job stages the fixture
+  WITHOUT `bun install` on purpose and guards that precondition.
+
 ## Route exclusion (`--exclude-route`, `build.exclude_routes`) — shipped 2026-08-22
 
 **Two mechanisms. Build-time is primary; output filtering is the fallback.**

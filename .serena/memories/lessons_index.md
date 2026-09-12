@@ -21,6 +21,11 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### environment-assumption / silent-precondition (dev machine has it, CI never does) (1)
+
+- `2026-09-12` — `pokkum build` relied on `<project>/node_modules` already existing, which every developer machine has and no CI runner does after `actions/checkout`, so the GitHub Action Quickstart failed on its first run for a real project while the suite stayed green (live fixtures symlinked a real tree back in; fake-bun tests never needed one; `--dry-run` returns before the stage; the action's own CI self-test ran an install step the Quickstart never documented). Read before invoking any subprocess with `cmd.Dir` set to the user's project, before adding a fixture helper that symlinks or pre-builds generated state, and before adding a setup step to a CI job whose purpose is validating a documented workflow. Checklist row 74.
+
+
 ### silent no-op from picking the wrong near-identical function, or from a load-bearing fallback (1)
 
 - `2026-09-09` — **boundary (serialization flag changed a verdict)** — `--output json` made failing commands exit 0 while text mode exited 1, so a CI gate passed on a red run. 13 sites across 6 commands, all `return jsonutils.WriteError(...)` (which returns the WRITE result, hence nil on success); one test actively defended the behaviour with a written rationale. Checklist rows 73 and 57.

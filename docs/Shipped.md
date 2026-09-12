@@ -27,6 +27,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Title | Summary | Kind | Status | Commits |
 | --- | --- | --- | --- | --- |
+| [Install the project's dependencies when a checkout has none](items/auto-install-project-dependencies.md) | `pokkum build` relied on `node_modules` already existing — true on every developer machine, false on every fresh CI checkout — so the GitHub Action Quickstart failed on its first run for a real project. | fix | shipped |  |
 | [base.name annotation varied with local build state](items/base-name-annotation-varied-with-build-state.md) | The first build of a project produced a different image digest from every later build of identical source, because `org.opencontainers.image.base.name` recorded the base reference as resolved rather than an invariant one. | fix | shipped |  |
 
 ### Developer Experience
