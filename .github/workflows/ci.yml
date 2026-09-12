@@ -434,11 +434,24 @@ jobs:
       # Built out of a copy, never in testdata/. A build writes .svelte-kit/ and
       # build/ into its project directory, and a fixture directory shared across
       # packages must not be mutated by anything (Lessons.md, 2026-08-19).
+      #
+      # Deliberately NO `bun install` here. The copy is exactly what a consumer's
+      # workflow hands the action after actions/checkout — source, lockfile, no
+      # node_modules — and that is the shape that failed for a real project on
+      # 2026-09-12 while this job stayed green, because this step used to run
+      # the install the action's own Quickstart never told anyone to add. The
+      # CLI now installs the project's dependencies itself when node_modules is
+      # absent; this job is the end-to-end proof, so re-adding an install here
+      # would silently take that coverage away again. The guard below makes
+      # that precondition explicit rather than assumed.
       - name: Stage a Fixture Project
         run: |
           set -euo pipefail
           cp -R testdata/fixtures/sveltekit-adapter-node "$RUNNER_TEMP/app"
-          (cd "$RUNNER_TEMP/app" && bun install --frozen-lockfile)
+          if [ -e "$RUNNER_TEMP/app/node_modules" ]; then
+            echo "::error::staged fixture unexpectedly has node_modules; this job must exercise an uninstalled checkout"
+            exit 1
+          fi
 
       # output: tarball is what makes this runnable on a PR at all — it
       # exercises the whole pipeline (resolve base, build, package, index, SBOM,

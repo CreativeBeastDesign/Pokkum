@@ -232,6 +232,10 @@ Use the installer action directly and drive `pokkum` yourself:
   run: pokkum build ./my-app
 ```
 
+The same applies here: `pokkum build` installs `./my-app`'s dependencies when
+its `node_modules` is missing, so no separate install step is needed unless
+you pass `--no-install`.
+
 </details>
 
 ---

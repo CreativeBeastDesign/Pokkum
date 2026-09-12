@@ -52,6 +52,13 @@ jobs:
 
 This pushes `ghcr.io/<owner>/<repo>:latest` and exposes the immutable, digest-pinned `ref` output. Prefer that output over a tag for deployments: it cannot drift.
 
+> [!NOTE]
+> **No `bun install` step is needed.** A fresh checkout has no `node_modules`, and `pokkum build` installs the project's dependencies itself in that case — `bun install --frozen-lockfile --no-save` in the project directory, before the SvelteKit build (the action already puts Bun on `PATH`). Commit a lockfile so the install is pinned; without one it still runs, unpinned, with a warning.
+>
+> If your workflow manages the install itself (an `actions/cache`d `node_modules`, a monorepo-level install), it keeps working: an existing `node_modules` is never touched. To have Pokkum *refuse* rather than fill the gap, drive the CLI directly with `--no-install`.
+>
+> CLI releases up to **v1.2.1** did not do this and fail on a fresh checkout with `Could not resolve '@sveltejs/kit/vite'`. With one of those pinned, add `oven-sh/setup-bun@v2` and a `run: bun install --frozen-lockfile` step before the Pokkum step.
+
 > [!IMPORTANT]
 > **Linux and macOS runners only** (`ubuntu-latest`, `macos-latest`). Released pokkum binaries cover darwin and linux; the action fails fast with an explicit message on a Windows runner rather than part-way through the installer.
 >

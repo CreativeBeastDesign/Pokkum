@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **`pokkum build` failed on every fresh CI checkout.** The SvelteKit build relied on the
+  project's `node_modules` already existing, which is always true on a developer machine and
+  never true after `actions/checkout` — so a real project following the GitHub Action
+  Quickstart exactly failed on its first run with `Could not resolve '@sveltejs/kit/vite'`.
+  `--dry-run` did not catch it (it returns before the build), and neither did the test suite
+  (no test ran a build against a project without `node_modules`).
+
+  `pokkum build` now installs the project's own dependencies when `node_modules` is absent —
+  `bun install --no-save`, with `--frozen-lockfile` when a lockfile is present — before the
+  SvelteKit build. An existing `node_modules` is never touched; `--hermetic` never installs
+  (a missing tree is still refused at preflight, unchanged); and a failed install is reported
+  as Pokkum's own attempt with bun's diagnosis attached, not as a build failure.
+
+### Added
+
+- `pokkum build --no-install`: opt out of the automatic install and fail fast when
+  `node_modules` is missing, for pipelines that manage their own install step.
 
 ## [v1.2.1] — 2026-09-09
 
