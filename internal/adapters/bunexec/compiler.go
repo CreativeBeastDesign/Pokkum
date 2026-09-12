@@ -148,8 +148,11 @@ func (c *Compiler) Preflight(ctx context.Context, req ports.PreflightRequest) (p
 	}
 
 	if req.Hermetic {
-		nodeModulesPath := filepath.Join(req.ProjectDir, "node_modules")
-		if info, err := os.Stat(nodeModulesPath); err != nil || !info.IsDir() {
+		// The same presence check Prepare's automatic install is gated on
+		// (see project_install.go). A hermetic build never installs — that
+		// would be network egress — so the only acceptable state is a tree
+		// that is already there.
+		if !projectNodeModulesPresent(req.ProjectDir) {
 			return ports.PreflightResult{}, fmt.Errorf("bunexec: preflight %s: hermetic mode requires pre-populated node_modules: %w", req.ProjectDir, core.ErrHermeticViolation)
 		}
 		log.Info("bunexec: preflight hermetic mode active; node_modules verified", "projectDir", req.ProjectDir)
@@ -517,6 +520,27 @@ func (c *Compiler) Prepare(ctx context.Context, req ports.PrepareRequest) (ports
 	// path (bun run build reads the real svelte.config.js; the Option B
 	// wrapper points Vite at .pokkum/vite.config.ts instead), so it's dropped.
 	baseEnv := buildEnvWithEpoch(req.Env, req.SourceDateEpoch)
+
+	// The build below resolves vite, @sveltejs/kit and the adapter from the
+	// project's own node_modules, which a fresh CI checkout does not have.
+	// Install it when absent (see project_install.go for the incident and
+	// the exact policy); an existing tree is never touched.
+	//
+	// Synchronous, and ahead of the vendor install below, on purpose: the
+	// build needs the tree before cmd.Start(), not merely by cmd.Wait(), so
+	// there is nothing to overlap it with — and running it first warms Bun's
+	// package cache, which is what makes the vendor install that follows
+	// fast. Hermetic builds skip it entirely: Preflight has already verified
+	// node_modules is present, and an install would be egress.
+	//
+	// Placed here rather than at the top of Prepare for the same reason the
+	// vendor dispatch is: a misconfigured project must fail before any
+	// subprocess is spawned (TestPrepare_FailsFastWhenAdapterNotConfigured).
+	if !req.Hermetic {
+		if err := ensureProjectDependencies(ctx, req.ProjectDir, req.NoInstall, baseEnv, log); err != nil {
+			return ports.PrepareResult{}, err
+		}
+	}
 
 	// Vendor the project's production dependencies for layered builds. Vite
 	// externalises dependencies during the SSR build, so the server bundle

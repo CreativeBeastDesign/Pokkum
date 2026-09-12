@@ -57,7 +57,10 @@ var foreignFlags = map[string]string{
 	"--production":      "bun install",
 	"--no-save":         "bun install",
 	"--frozen-lockfile": "bun install",
-	"--no-install":      "bun runtime — disables auto-install in the image entrypoint",
+	// --no-install is NOT listed here although Bun's runtime has a flag of that
+	// name (the image entrypoint passes it to disable auto-install): since
+	// 2026-09-12 it is also a real `pokkum build` flag, so the real-flag check
+	// covers every mention and an entry here would hide that pokkum owns it.
 
 	// Dockerfile — quoted in `pokkum guide extras`, which shows the custom-base
 	// recipe for vendoring a third-party binary alongside a preset.

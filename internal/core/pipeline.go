@@ -1204,6 +1204,7 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 			Env:                    req.Compile.Env,
 			Platforms:              slices.Clone(req.Platforms),
 			NoInject:               req.Compile.NoInject,
+			NoInstall:              req.Compile.NoInstall,
 			Hermetic:               req.Hermetic,
 			HermeticMountIsolation: req.HermeticMountIsolation,
 			NoPrune:                req.Compile.NoPrune,

@@ -411,6 +411,26 @@ type PrepareRequest struct {
 	// NoInject suppresses the zero-config auto-injection for svelte.config.js.
 	NoInject bool
 
+	// NoInstall suppresses the automatic install of the project's own
+	// dependencies. By default, when <ProjectDir>/node_modules is absent and
+	// the build is not Hermetic, Prepare runs `bun install --frozen-lockfile
+	// --no-save` in the project directory before the SvelteKit build — a
+	// fresh CI checkout has no node_modules, and the build cannot resolve
+	// vite, @sveltejs/kit or the adapter without one. With NoInstall set,
+	// a missing node_modules is a fail-fast error instead (the adapter
+	// returns an error wrapping core.ErrDependenciesMissing), for callers
+	// that manage their own install step and want Pokkum to refuse rather
+	// than fill the gap silently.
+	//
+	// Hermetic builds never install regardless of this field: --hermetic
+	// promises zero network egress, and Preflight already rejects a hermetic
+	// build without node_modules (core.ErrHermeticViolation).
+	//
+	// Not part of the remote-cache input hash: it changes how node_modules
+	// comes to exist, not what the lockfile resolves to, so two builds that
+	// differ only here produce the same image.
+	NoInstall bool
+
 	// NoPrune disables build-time vendor layer file pruning.
 	NoPrune bool
 

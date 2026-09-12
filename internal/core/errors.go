@@ -74,6 +74,21 @@ var (
 	// file the fix belongs in, because editing the other file changes nothing.
 	ErrAdapterMisconfigured = errors.New("sveltekit adapter misconfigured")
 
+	// ErrDependencyInstallFailed reports that Pokkum's own automatic install
+	// of the project's dependencies (the `bun install` it runs before the
+	// SvelteKit build when node_modules is absent) failed. It is deliberately
+	// distinct from ErrPrepareFailed: the SvelteKit build never ran, and the
+	// fix is a lockfile or network problem, not a build problem. The message
+	// must say Pokkum attempted the install and why it failed, not surface a
+	// raw `bun install` stderr dump with no framing.
+	ErrDependencyInstallFailed = errors.New("project dependency install failed")
+
+	// ErrDependenciesMissing reports that the project has no node_modules and
+	// the caller opted out of the automatic install (--no-install), so the
+	// SvelteKit build would fail on its first import. Fail here, before any
+	// build work, with a message naming the install command to run.
+	ErrDependenciesMissing = errors.New("project dependencies not installed")
+
 	// ErrPrepareFailed reports that the SvelteKit build (stage one) failed or
 	// did not produce the expected entrypoint.
 	ErrPrepareFailed = errors.New("sveltekit build failed")

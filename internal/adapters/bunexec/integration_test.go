@@ -52,6 +52,17 @@ var liveFixtureSkipDirNames = map[string]bool{
 // shared-fixture-mutation entry; this test is incident #1 there).
 func copyLiveFixtureProject(t *testing.T, fixtureDir string) string {
 	t.Helper()
+	return copyLiveFixtureProjectOpts(t, fixtureDir, true)
+}
+
+// copyLiveFixtureProjectOpts is copyLiveFixtureProject with the node_modules
+// symlink optional. linkNodeModules=false yields the fixture exactly as a CI
+// runner sees it after checkout — source, lockfile, and no installed
+// dependencies at all — which is the precondition
+// TestLiveFixture_PrepareInstallsMissingNodeModules exists to exercise. Every
+// other caller wants the fast symlinked path; do not change that default.
+func copyLiveFixtureProjectOpts(t *testing.T, fixtureDir string, linkNodeModules bool) string {
+	t.Helper()
 	dst := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		t.Fatalf("copyLiveFixtureProject: mkdir %q: %v", dst, err)
@@ -90,6 +101,9 @@ func copyLiveFixtureProject(t *testing.T, fixtureDir string) string {
 		t.Fatalf("copyLiveFixtureProject: copy %q to %q: %v", fixtureDir, dst, walkErr)
 	}
 
+	if !linkNodeModules {
+		return dst
+	}
 	srcNodeModules := filepath.Join(fixtureDir, "node_modules")
 	if _, statErr := os.Stat(srcNodeModules); statErr == nil {
 		if err := os.Symlink(srcNodeModules, filepath.Join(dst, "node_modules")); err != nil {
@@ -97,6 +111,75 @@ func copyLiveFixtureProject(t *testing.T, fixtureDir string) string {
 		}
 	}
 	return dst
+}
+
+// TestLiveFixture_PrepareInstallsMissingNodeModules is the real-bun proof for
+// the automatic dependency install (project_install.go): a scratch copy of
+// testdata/fixtures/sveltekit-adapter-node with NO node_modules — not even the
+// symlink every other live test relies on — must build through Prepare with
+// nothing but a real `bun` on PATH.
+//
+// This is the exact shape of the 2026-09-12 incident: a fresh CI checkout of
+// a project whose build tooling is entirely in devDependencies. It shipped
+// with a green suite because no test ran Prepare against a project without
+// node_modules; the fake-bun tests in project_install_test.go pin the policy,
+// and this one pins that a real `bun install --frozen-lockfile` against the
+// fixture's real lockfile actually produces a tree the real Vite build can
+// resolve. It needs network (or a warm Bun cache), so it skips under -short
+// like every other real-bun test and runs in CI's e2e-real-build job.
+func TestLiveFixture_PrepareInstallsMissingNodeModules(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real bun install + vite build; skipped under -short")
+	}
+	origProjectDir, err := filepath.Abs(filepath.Join("..", "..", "..", "testdata", "fixtures", "sveltekit-adapter-node"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(origProjectDir, "bun.lock")); err != nil {
+		t.Skip("testdata/fixtures/sveltekit-adapter-node (with bun.lock) not present; skipping live install test")
+	}
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("no bun on PATH; skipping live install test")
+	}
+
+	projectDir := copyLiveFixtureProjectOpts(t, origProjectDir, false)
+	if _, err := os.Lstat(filepath.Join(projectDir, "node_modules")); err == nil {
+		t.Fatal("test precondition broken: the scratch copy already has a node_modules")
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	c := bunexec.NewCompiler(logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	if _, err := c.Preflight(ctx, ports.PreflightRequest{ProjectDir: projectDir, Strategy: ports.StrategyLayered}); err != nil {
+		t.Fatalf("Preflight against an uninstalled fixture failed: %v", err)
+	}
+	res, err := c.Prepare(ctx, ports.PrepareRequest{
+		ProjectDir:      projectDir,
+		Strategy:        ports.StrategyLayered,
+		SourceDateEpoch: time.Unix(1700000000, 0),
+		Platforms:       []ports.Platform{ports.LinuxAMD64},
+	})
+	if err != nil {
+		t.Fatalf("Prepare against an uninstalled fixture failed — the automatic install did not make the build resolvable: %v", err)
+	}
+
+	if info, statErr := os.Stat(filepath.Join(projectDir, "node_modules", "@sveltejs", "kit", "package.json")); statErr != nil || info.IsDir() {
+		t.Errorf("node_modules/@sveltejs/kit was not installed into the project: %v", statErr)
+	}
+	if _, statErr := os.Stat(res.EntrypointPath); statErr != nil {
+		t.Errorf("Prepare reported entrypoint %q but it does not exist: %v", res.EntrypointPath, statErr)
+	}
+	// --no-save must have held: the copy's own manifest and lockfile are
+	// byte-identical to the fixture's.
+	for _, name := range []string{"package.json", "bun.lock"} {
+		want, _ := os.ReadFile(filepath.Join(origProjectDir, name))
+		got, _ := os.ReadFile(filepath.Join(projectDir, name))
+		if string(want) != string(got) {
+			t.Errorf("%s was modified by the automatic install; it must only write node_modules", name)
+		}
+	}
 }
 
 // TestLiveFixture_PreflightAndCompile is a real, non-mocked smoke test: it

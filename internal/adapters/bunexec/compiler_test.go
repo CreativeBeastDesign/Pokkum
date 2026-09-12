@@ -66,9 +66,22 @@ const viteBuildPackageJSON = `{
 
 // newProjectDir writes package.json and svelte.config.js (when non-empty)
 // into a fresh temp directory and returns its path.
+//
+// It also creates an empty node_modules/, because these fixtures model a
+// project whose dependencies are installed — the state every test of the
+// build invocation, the injection paths and the vendor install assumes.
+// Prepare installs the project's dependencies itself when node_modules is
+// absent (project_install.go), and without this directory every fake bun
+// below would first be invoked as `bun install`, turning a test of the build
+// into a test of the install. The tests for the install path build their own
+// fixture without it: see TestPrepare_InstallsDependenciesWhenNodeModulesMissing
+// and its siblings in project_install_test.go.
 func newProjectDir(t *testing.T, pkgJSON, svelteConfig string) string {
 	t.Helper()
 	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if pkgJSON != "" {
 		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkgJSON), 0o644); err != nil {
 			t.Fatal(err)
@@ -952,6 +965,11 @@ export default defineConfig({
 
 func TestPreflight_HermeticViolation(t *testing.T) {
 	dir := newProjectDir(t, validPackageJSON, validSvelteConfig)
+	// newProjectDir models an installed project; this test's first half is
+	// about the opposite state.
+	if err := os.Remove(filepath.Join(dir, "node_modules")); err != nil {
+		t.Fatal(err)
+	}
 	putFakeBunOnPath(t, `echo "1.2.18"`)
 	c := NewCompiler(discardLogger())
 

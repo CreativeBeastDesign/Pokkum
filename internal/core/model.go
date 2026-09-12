@@ -735,6 +735,12 @@ type CompileOptions struct {
 	// NoInject suppresses the zero-config auto-injection for svelte.config.js.
 	NoInject bool
 
+	// NoInstall suppresses the automatic `bun install` of the project's own
+	// node_modules that Prepare performs when the directory is absent (see
+	// ports.PrepareRequest.NoInstall). With it set, a missing node_modules
+	// fails fast with ErrDependenciesMissing instead.
+	NoInstall bool
+
 	// NoPrune disables build-time vendor layer file pruning.
 	NoPrune bool
 

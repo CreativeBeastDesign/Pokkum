@@ -86,6 +86,11 @@ type buildFlags struct {
 	inject   bool
 	noInject bool
 
+	// noInstall opts out of the automatic `bun install` Prepare runs when the
+	// project has no node_modules (a fresh CI checkout); with it set, that
+	// state fails fast instead.
+	noInstall bool
+
 	// Bun runtime & strategy flags
 	bunBinary  string
 	bunVariant string
@@ -291,6 +296,8 @@ to the OS temp directory instead (os.tmpdir() from node:os, or $TMPDIR).`,
 		"Enable zero-config auto-injection for svelte.config.js (default true)")
 	cmd.Flags().BoolVar(&flags.noInject, "no-inject", false,
 		"Explicitly disable auto-injection")
+	cmd.Flags().BoolVar(&flags.noInstall, "no-install", false,
+		"Do not run `bun install --frozen-lockfile` when the project has no node_modules; fail fast instead (for pipelines that manage their own install step). Hermetic builds never install")
 
 	// Bun runtime & strategy flags
 	cmd.Flags().StringVar(&flags.bunBinary, "bun-binary", "",
@@ -1052,6 +1059,7 @@ func buildRequestFromResolvedConfig(ctx context.Context, logger *slog.Logger, fl
 		Compression:   core.CompressionAlgorithm(flags.compression),
 		Sourcemap:     sourcemapSetting,
 		NoInject:      flags.noInject || !flags.inject,
+		NoInstall:     flags.noInstall,
 		NoPrune:       flags.noPrune,
 		KeepVendor:    flags.keepVendor,
 		NoPrecompress: flags.noPrecompress,

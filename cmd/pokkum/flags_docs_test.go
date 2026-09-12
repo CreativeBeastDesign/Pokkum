@@ -183,6 +183,8 @@ var nonFlagDocTokens = map[string]string{
 	"--preload":           `§3a prose: "bun --preload <path>" is Bun's own flag, quoted verbatim while explaining pokkum's --strategy=layered telemetry bootstrap.`,
 	"--config":            `§3's --inject description quotes the literal subprocess command line ("bunx vite build --config .pokkum/vite.config.ts") — --config there is Vite's own flag, not pokkum's.`,
 	"--production":        `§3's --sbom description quotes "bun install --production", Bun's own flag, when explaining which dependency set the SBOM's npm catalogue is scoped to.`,
+	"--frozen-lockfile":   `§3's --no-install description quotes the literal "bun install --frozen-lockfile --no-save" that pokkum build runs when node_modules is absent — Bun's own flags, not pokkum's.`,
+	"--no-save":           `§3's --no-install description: same quoted bun install command line as --frozen-lockfile above.`,
 	"--type":              `§3's --sbom-attach description quotes "cosign verify-attestation --type spdxjson", cosign's own flag, when explaining how a consumer reads the signed SBOM attestation.`,
 }
 
