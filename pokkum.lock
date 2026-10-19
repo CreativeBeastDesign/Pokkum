@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "updated_at": "2026-10-19T09:43:18Z",
+  "bases": {
+    "chainguard": {
+      "ref": "cgr.dev/chainguard/glibc-dynamic:latest",
+      "digest": "sha256:2a3f1ec8a825dfbb1211b5835a9b8b3fb8d76c7bd22a189b1f84157ed2028293",
+      "pinned_ref": "cgr.dev/chainguard/glibc-dynamic@sha256:2a3f1ec8a825dfbb1211b5835a9b8b3fb8d76c7bd22a189b1f84157ed2028293",
+      "updated_at": "2026-10-19T09:43:18Z"
+    },
+    "distroless": {
+      "ref": "gcr.io/distroless/cc-debian12:nonroot",
+      "digest": "sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+      "pinned_ref": "gcr.io/distroless/cc-debian12@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+      "updated_at": "2026-10-19T09:43:17Z"
+    }
+  }
+}
