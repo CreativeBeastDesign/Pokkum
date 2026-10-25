@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v1.3.0] — 2026-10-25
+
+A security and maintenance release. `pokkum build` now works on a fresh CI checkout, the
+default Bun runtime moves to 1.4.4, and the vulnerability scanner checks real advisories
+against the Bun version an image actually ships. **Every image rebuilt with this release
+gets a new digest**, from the new Bun layer and the rebuilt PID-1 binaries.
+
 ### Security
 
 - **The scanner's offline toolchain advisories were placeholders, not real advisories.** The two
@@ -32,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Go toolchain raised to 1.27.3** (Go security patch releases), and the embedded
   `pokkum-init`/`pokkum-static` PID-1 binaries rebuilt with it. Their layers get new bytes, so
   every image rebuilt after this release gets a new digest.
+- **Vulnerable indirect dependencies updated:** `golang.org/x/net` 0.61.0 and
+  `google.golang.org/grpc` 1.84.0 fix six reachable HTTP/2 advisories (GO-2026-6348, -6603,
+  -6610, -6611, -6612, -6617).
 - Dependency updates: `go-containerregistry` 0.22.1, `klauspost/compress` 1.20.3,
   `docker/cli` 29.9.2, `moby/moby/client` 0.6.2, `ProtonMail/go-crypto` 1.5.2,
   `sigstore/protobuf-specs` 0.5.2 and smaller bumps. Release tooling: cosign 3.1.4,
