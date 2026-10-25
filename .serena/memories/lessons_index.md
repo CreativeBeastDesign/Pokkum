@@ -21,6 +21,11 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### CI-only check with no local counterpart (verify green, CI red)
+
+- `2026-10-25` — A dependency update passed `make verify` and failed CI's govulncheck step (new advisories against indirect `x/net`/`grpc`). `make verify` now runs `make vulncheck`. See also the 2026-08-15 golangci-lint entry. Read before any dependency update, or before adding a CI step. Checklist row 8.
+
+
 ### security check with a stand-in subject or stand-in data (default constant, neighbouring artifact, hand-typed advisories) (2)
 
 - `2026-10-25` — The scanner's built-in advisories were invented (`GHSA-bun-1.1.0`), Bun's real advisories were invisible even online, `pokkum scan` checked the default Bun instead of `--bun-version`, and the build's CVE gate scanned only the base image, which never contains the shipped Bun. Read before touching `internal/adapters/scanner`, any `Default*` constant on a security path, or any reference data a check matches against. Checklist rows 75, 52, 34.

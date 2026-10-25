@@ -1,4 +1,4 @@
-.PHONY: help build supervisor static-server test test-short test-integration test-race bench coverage check-coverage fuzz-smoke check-arch check-embedded-blobs lint fmt verify clean e2e-runtime-smoke docs check-docs-freshness schema check-schema-freshness advisories
+.PHONY: help build supervisor static-server test test-short test-integration test-race bench coverage check-coverage fuzz-smoke check-arch check-embedded-blobs lint fmt verify clean e2e-runtime-smoke docs check-docs-freshness schema check-schema-freshness advisories vulncheck
 
 check-arch:  ##  Run hexagonal architecture purity test suite
 	@echo "Checking hexagonal architecture purity..."
@@ -286,6 +286,14 @@ verify:  ##  Full agent verification suite: fmt+vet, lint, adapter tests, CLI bu
 	@echo "  Regenerates schema/pokkum.schema.json from internal/ports/config.go and fails if that"
 	@echo "  changes anything -- see scripts/check-schema-freshness.sh."
 	@$(MAKE) check-schema-freshness
+	@echo ""
+	@echo "Extra (beyond the 5 canonical steps) - govulncheck, exactly as CI runs it..."
+	@echo "  A newly published advisory against an indirect dependency fails CI with no code change;"
+	@echo "  this catches it before a push. Needs network access to the Go vulnerability database."
+	@$(MAKE) vulncheck
+
+vulncheck:  ##  Run govulncheck over the module, matching CI's 'Run govulncheck' step
+	@go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 clean:  ##  Clean build artifacts
 	@echo "Cleaning build artifacts..."

@@ -5,6 +5,16 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-10-25 — A dependency update passed `make verify` and failed CI, because only CI runs govulncheck
+
+**Category:** verification-gap — a CI check with no local counterpart (the same class as the 2026-08-15 golangci-lint entry)
+**Root cause:** The update bumped every *direct* module to latest and stopped there. Six HTTP/2 advisories had meanwhile been published against two *indirect* modules (`golang.org/x/net` 0.57.0, `google.golang.org/grpc` 1.82.1), reachable through the registry client and k8s resolver. `make verify` passed in full, because it never ran govulncheck; CI's "Build, Lint & Test" job does, and failed on the push. Nothing in the change introduced the vulnerabilities, so reviewing the diff could not have found them either.
+**Where:** `Makefile` `verify` target; `.github/workflows/ci.yml` "Run govulncheck".
+**Fix:** bumped both modules; added `make vulncheck` (CI's exact invocation) and made `make verify` run it.
+**Preventative rule:** Every check CI can fail on needs a local target that `make verify` runs, or a stated reason it cannot. And a "dependency update" covers what govulncheck reports, not only what `go list -u` shows for direct modules: run govulncheck before declaring an update done. Checklist row 8.
+
+---
+
 ## 2026-10-25 — The scanner's offline advisories were invented, and its Bun check examined a version the image did not ship — both survived a post-mortem about exactly this
 
 **Category:** fabricated data in a success path / wrong subject — a security check whose data or whose input was a stand-in for the real thing
