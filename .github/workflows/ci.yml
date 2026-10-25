@@ -85,7 +85,7 @@ jobs:
       # fails if they drift.
       - name: Run golangci-lint
         if: ${{ !cancelled() }}
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run ./...
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...
 
       - name: Run govulncheck
         if: ${{ !cancelled() }}

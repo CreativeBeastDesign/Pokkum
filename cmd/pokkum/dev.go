@@ -684,7 +684,8 @@ func watchAndRunDevContainer(ctx context.Context, logger *slog.Logger, flags *de
 			// timeout so shutdown can never hang indefinitely.
 			cancelContainer()
 			select {
-			case <-cmdErrChan:
+			case stopErr := <-cmdErrChan:
+				logger.Debug("dev container stopped during shutdown", "error", stopErr)
 			case <-time.After(devGenerationStopTimeout):
 				logger.Warn("timed out waiting for dev container to stop during shutdown")
 			}
