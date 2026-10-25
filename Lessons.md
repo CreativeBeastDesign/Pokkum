@@ -5,6 +5,24 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-10-25 — `pokkum upgrade` assumed it could rewrite its own directory, which a `sudo` install and a package manager both make false
+
+**Category:** environment-assumption / silent-precondition
+**Root cause:** `runUpgrade` downloaded and verified the release, then created its temp file next to `os.Executable()`. That works where pokkum was installed into a user-owned directory, which was every test and development setup. A user who followed `install.sh` with `sudo` has a root-owned `/usr/local/bin/pokkum`, and got a bare `permission denied` after the download. A second, silent case: a Homebrew install is user-writable, so upgrade *succeeded* by overwriting the binary inside the Cellar, leaving Homebrew recording 1.2.1 for a 1.3.1 binary. The same would happen under npm's `node_modules`. The field machine had both installs at once, with the root-owned one first in `PATH`.
+**Where:** `cmd/pokkum/upgrade.go` `runUpgrade`.
+**Fix:** `checkUpgradeTarget` runs before the download. It sends Cellar and `node_modules` paths (symlinks resolved) to `brew upgrade pokkum` / `npm install -g @pokkum/cli@latest`, and probes the install directory by creating a file there (the operation the apply step needs), returning a `sudo pokkum upgrade` hint on `EACCES`. A test drives `runUpgrade` against a `0o555` directory and asserts the archive is never fetched; removing the check reproduces the field error verbatim.
+**Preventative rule:** A command that modifies its own installation must first establish who owns that installation: the user, root, or a package manager. Test each owner, not only the one a test temp dir happens to give. Checklist row 74.
+
+## 2026-10-25 — A `[^{}]*` regex for a JS config object stopped at a template literal's braces and silently read "no base path"
+
+**Category:** parsing user-authored source
+**Root cause:** `literalPathsBase` matched `paths\s*:\s*\{([^{}]*)\}`. A base written as a template literal (`` base: `${prefix}/x` ``) contains `{`, so the regex never matched and the code fell through to "no base configured". Readiness detection would then have baked `/api/ready` for an app serving it at `<prefix>/x/api/ready`, a 404 forever, so the pod would never become ready. Caught by the new test before shipping.
+**Where:** `internal/adapters/sveltekitutils/readyroute.go`.
+**Fix:** find `paths: {` with a regex, then scan to the matching brace by depth; a captured value containing `${` is reported as "base unknown", so detection steps aside with a warning.
+**Preventative rule:** A regex over user-written JS must not use "no braces/quotes" character classes to delimit a block that can legally contain them, and its failure to match must not mean "the setting is absent". Distinguish "not configured" from "could not read". Checklist row 69.
+
+---
+
 ## 2026-10-25 — Bumping cosign broke the release, because the pin was checked against the installer and not against the script that runs it
 
 **Category:** verification-gap / capability probe by help text

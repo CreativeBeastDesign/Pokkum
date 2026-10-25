@@ -33,7 +33,9 @@ carries the *why* that the checklist row compresses away.
 - `2026-08-21` — `pokkum scan` fabricated a CVE against a version the project does not use (the predecessor: fixed the fallback, left the fake table). Row 52.
 
 
-### environment-assumption / silent-precondition (dev machine has it, CI never does) (1)
+### environment-assumption / silent-precondition (dev machine has it, CI never does) (2)
+
+- `2026-10-25` — `pokkum upgrade` assumed it could rewrite its own directory: a `sudo` install failed with bare EACCES after downloading, and a Homebrew/npm install was overwritten in place behind the package manager's back. Read before any self-modifying command. Row 74.
 
 - `2026-09-12` — `pokkum build` relied on `<project>/node_modules` already existing, which every developer machine has and no CI runner does after `actions/checkout`, so the GitHub Action Quickstart failed on its first run for a real project while the suite stayed green (live fixtures symlinked a real tree back in; fake-bun tests never needed one; `--dry-run` returns before the stage; the action's own CI self-test ran an install step the Quickstart never documented). Read before invoking any subprocess with `cmd.Dir` set to the user's project, before adding a fixture helper that symlinks or pre-builds generated state, and before adding a setup step to a CI job whose purpose is validating a documented workflow. Checklist row 74.
 
@@ -47,7 +49,9 @@ carries the *why* that the checklist row compresses away.
 
 - `2026-09-09` — A classifier of "what SvelteKit cannot prerender" got two of four rules wrong (every `+server.*`; every server `load`) and missed a fifth, because the rules were inferred rather than read. The authoritative set is four `throw`s in `@sveltejs/kit`, one grep away. Exposed by running the classifier over the repo's own fixtures and finding it called `sveltekit-basic` unbuildable while `static_e2e_test.go` builds that exact fixture. Read before writing code that encodes what another tool accepts or rejects, and before putting a gate on top of any existing classifier.
 
-### parsing user-authored source (comments/strings are not code) (3)
+### parsing user-authored source (comments/strings are not code) (4)
+
+- `2026-10-25` — A `[^{}]*` regex for `paths: { … }` failed on a template-literal base and read it as "no base", which would have baked a readiness path that 404s forever. Caught by its test before shipping. Row 69.
 
 - `2026-09-09` — A commented-out `kit.files.routes` beat the real one in `bunexec.resolveRoutesDir`, the THIRD site in this repo fooled by a bare regex over JS/TS source — after the class had already been fixed twice and two working comment/string scanners already existed in `sveltekitutils`. Read before writing any `regexp`/`strings.Index` against a file a user wrote; the answer is `stripJSComments` (matcher needs string contents) or `blankJSStringsAndComments` (matching an identifier), never a new scanner. See also the two originals below (2026-08-16 `fallback:`, 2026-08-17 `sveltekit(`).
 - `2026-08-17` — `TransformViteConfig` rewrote `sveltekit(` inside comments and string literals; fixed with real lexical scanners.
