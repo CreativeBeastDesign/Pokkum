@@ -21,6 +21,12 @@ carries the *why* that the checklist row compresses away.
 ## The recurring classes, largest first
 
 
+### security check with a stand-in subject or stand-in data (default constant, neighbouring artifact, hand-typed advisories) (2)
+
+- `2026-10-25` — The scanner's built-in advisories were invented (`GHSA-bun-1.1.0`), Bun's real advisories were invisible even online, `pokkum scan` checked the default Bun instead of `--bun-version`, and the build's CVE gate scanned only the base image, which never contains the shipped Bun. Read before touching `internal/adapters/scanner`, any `Default*` constant on a security path, or any reference data a check matches against. Checklist rows 75, 52, 34.
+- `2026-08-21` — `pokkum scan` fabricated a CVE against a version the project does not use (the predecessor: fixed the fallback, left the fake table). Row 52.
+
+
 ### environment-assumption / silent-precondition (dev machine has it, CI never does) (1)
 
 - `2026-09-12` — `pokkum build` relied on `<project>/node_modules` already existing, which every developer machine has and no CI runner does after `actions/checkout`, so the GitHub Action Quickstart failed on its first run for a real project while the suite stayed green (live fixtures symlinked a real tree back in; fake-bun tests never needed one; `--dry-run` returns before the stage; the action's own CI self-test ran an install step the Quickstart never documented). Read before invoking any subprocess with `cmd.Dir` set to the user's project, before adding a fixture helper that symlinks or pre-builds generated state, and before adding a setup step to a CI job whose purpose is validating a documented workflow. Checklist row 74.

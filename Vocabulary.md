@@ -447,14 +447,15 @@ No credential, token or webhook URL ever appears in the output; the endpoint is 
 
 ## 10. `pokkum scan [target]`
 
-`pokkum scan` inspects project directories, container images (e.g. `gcr.io/distroless/cc-debian12:nonroot`), or OCI tarballs (`image.tar`). For images and tarballs, it enumerates OS packages (Debian, Ubuntu, Alpine, Wolfi, Chainguard) and toolchain packages using native zero-dependency targeted parsers (`scannerutils`), querying OSV.dev via batch API (`/v1/querybatch`) for CVE lookups and CVSS severity scoring.
+`pokkum scan` inspects project directories, container images (e.g. `gcr.io/distroless/cc-debian12:nonroot`), or OCI tarballs (`image.tar`). For images and tarballs, it enumerates OS packages (Debian, Ubuntu, Alpine, Wolfi, Chainguard) and toolchain packages using native zero-dependency targeted parsers (`scannerutils`), querying OSV.dev via batch API (`/v1/querybatch`) for CVE lookups and CVSS severity scoring. Bun runtime and SvelteKit advisories also come from an embedded snapshot of real published advisories (OSV.dev and GitHub's `oven-sh/bun` advisories), refreshed with `make advisories`. A `pokkum build` gated by `--fail-on-cve` checks the Bun version it embeds the same way.
 
 | Flag | Default | Description |
 |---|---|---|
 | `--fail-on` | `critical` | Minimum vulnerability severity threshold causing scan failure (`low`, `medium`, `high`, `critical`). |
 | `--toolchain` | `false` | Restrict scan to embedded Bun and SvelteKit toolchain advisories. |
 | `--output` | `text` | Output serialization format (`text` or `json`). |
-| `--offline` | `false` | Disable remote vulnerability database queries and use embedded advisories. |
+| `--offline` | `false` | Disable remote vulnerability database queries and check toolchain advisories against the embedded snapshot only. The snapshot's date is printed as a warning: anything published after it is not covered. |
+| `--bun-version` | the pinned default Bun | Bun runtime version to check toolchain advisories against. Pass the same value as the build's `--bun-version`; without it a project directory is checked against the default Bun a build without that flag would embed. |
 | `--allow-incomplete` | `false` | Report success even if a vulnerability database lookup **fails** (default: fail closed on reduced coverage). Does not apply to `--offline`, which skips lookups by design: an offline scan is always reported as incomplete but still exits 0, so gate on the `incomplete` field rather than the exit code there. |
 
 ---

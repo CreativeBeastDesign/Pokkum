@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The scanner's offline toolchain advisories were placeholders, not real advisories.** The two
+  built-in entries (`GHSA-bun-1.1.0`, `GHSA-sveltekit-2.3.0`) had IDs no advisory database ever
+  issued. They are replaced by a snapshot of 24 real, published advisories for Bun and
+  `@sveltejs/kit` from OSV.dev and GitHub's `oven-sh/bun` advisories, regenerated with
+  `make advisories`. This is also the only place Pokkum finds Bun runtime advisories online,
+  since most are not in OSV. Expect findings that were not reported before: for example, Bun
+  below 1.4.4 now reports three real high-severity advisories.
+- **The Bun the image ships was never checked.** `pokkum scan` checked the default Bun even when
+  the build used another `--bun-version`, and the build's `--fail-on-cve` gate only scanned the
+  base image, which does not contain Bun at all. `pokkum scan --bun-version` now names the
+  version to check, and the build gate checks the Bun version it embeds. A `--bun-binary` is not
+  checked, since Pokkum cannot know its version.
+
 ### Changed
 
 - **Default Bun runtime raised from 1.2.2 to 1.4.4.** Images built without `--bun-version`
