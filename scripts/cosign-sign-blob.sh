@@ -39,7 +39,14 @@ printf '%s' "$COSIGN_PRIVATE_KEY" > "$key_file"
 # default version has been older than what this script needs before. If it is
 # missing, the signature this produces would silently come from a different code
 # path (a TUF-provided signing config rather than the static key), so refuse.
-if ! cosign sign-blob --help 2>&1 | grep -q -- '--use-signing-config'; then
+#
+# Probe by asking cosign to PARSE the flag, not by grepping --help: v3.1.4
+# deprecated --use-signing-config (sigstore/cosign#5056), which hides it from
+# --help while still accepting it, and a help-text grep failed the v1.3.0
+# release on a cosign that signs correctly. An unknown flag makes cobra exit
+# non-zero before --help is handled, so a cosign that truly lacks it still
+# fails here.
+if ! cosign sign-blob --use-signing-config=false --help >/dev/null 2>&1; then
   installed="$(cosign version 2>/dev/null | grep -i GitVersion | awk '{print $2}')"
   echo "cosign-sign-blob.sh: this cosign (${installed:-unknown version}) has no --use-signing-config flag." >&2
   echo "  It is required to force key-based signing; without it cosign v3.1+ defaults to a TUF-provided signing config." >&2
