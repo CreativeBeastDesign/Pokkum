@@ -23,6 +23,7 @@ carries the *why* that the checklist row compresses away.
 
 ### CI-only check with no local counterpart (verify green, CI red)
 
+- `2026-10-25` — Bumping cosign broke the v1.3.0 release: the signing script grepped `--help` for a flag 3.1.4 deprecated (hidden, still accepted); the pin was checked against the installer, never against the script. Released as v1.3.1, since the proxy had already seen `v1.3.0`. Read before bumping any release-tool pin. Row 48.
 - `2026-10-25` — A dependency update passed `make verify` and failed CI's govulncheck step (new advisories against indirect `x/net`/`grpc`). `make verify` now runs `make vulncheck`. See also the 2026-08-15 golangci-lint entry. Read before any dependency update, or before adding a CI step. Checklist row 8.
 
 

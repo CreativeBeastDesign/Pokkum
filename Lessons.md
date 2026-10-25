@@ -5,6 +5,16 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-10-25 — Bumping cosign broke the release, because the pin was checked against the installer and not against the script that runs it
+
+**Category:** verification-gap / capability probe by help text
+**Root cause:** The cosign pin moved 3.1.3 → 3.1.4 after checking only that 3.1.4 publishes the `.sigstore.json` bundles `cosign-installer@v4` verifies. Nobody ran `scripts/cosign-sign-blob.sh` with 3.1.4. That script guarded its required flag with `cosign sign-blob --help | grep -- --use-signing-config`. 3.1.4 deprecated the flag (sigstore/cosign#5056), and cobra hides deprecated flags from `--help` while still accepting them. So the guard refused a cosign that signs correctly, and the `v1.3.0` release failed at signing. Nothing was published, but the Go module proxy had already recorded `v1.3.0`, so the tag cannot be re-pointed and the release shipped as v1.3.1. The script's comment ("exists from v3.1.0") was also wrong: v3.0.6 has the flag too.
+**Where:** `scripts/cosign-sign-blob.sh`; `.github/workflows/release.yml` `cosign-release`.
+**Fix:** the guard now runs `cosign sign-blob --use-signing-config=false --help`. Cobra rejects an unknown flag before handling `--help`, so this passes on 3.0.6, 3.1.3 and 3.1.4 and still fails on v2.4.1, which lacks the flag. All four were checked by running the script against real binaries, and the 3.1.4 signature was verified with OpenSSL.
+**Preventative rule:** Before bumping a pinned tool, run every script that calls it with the new version; checking the installer is not checking the tool. Probe a capability by exercising it (parse the flag, call the API), never by grepping help or version text, which changes for reasons unrelated to the capability. A failed tag-triggered release burns the version once anything (the module proxy, a CDN) has seen the tag: bump, do not re-tag. Checklist row 48.
+
+---
+
 ## 2026-10-25 — A dependency update passed `make verify` and failed CI, because only CI runs govulncheck
 
 **Category:** verification-gap — a CI check with no local counterpart (the same class as the 2026-08-15 golangci-lint entry)

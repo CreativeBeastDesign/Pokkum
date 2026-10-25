@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v1.3.0] — 2026-10-25
+## [v1.3.1] — 2026-10-25
+
+The `v1.3.0` tag exists but was never released: its release pipeline failed while signing,
+before anything was published (see Fixed below). v1.3.1 is that release.
 
 A security and maintenance release. `pokkum build` now works on a fresh CI checkout, the
 default Bun runtime moves to 1.4.4, and the vulnerability scanner checks real advisories
@@ -49,6 +52,9 @@ gets a new digest**, from the new Bun layer and the rebuilt PID-1 binaries.
 
 ### Fixed
 
+- **Release signing failed with cosign 3.1.4.** The signing script checked for
+  `--use-signing-config` by searching cosign's `--help`, and 3.1.4 hides that deprecated flag
+  while still accepting it. The script now asks cosign to parse the flag instead.
 - **`pokkum build` failed on every fresh CI checkout.** The SvelteKit build relied on the
   project's `node_modules` already existing, which is always true on a developer machine and
   never true after `actions/checkout` — so a real project following the GitHub Action
