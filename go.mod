@@ -1,23 +1,23 @@
 module github.com/CreativeBeastDesign/pokkum
 
-go 1.27.1
+go 1.27.3
 
 require (
-	github.com/ProtonMail/go-crypto v1.4.1
-	github.com/andybalholm/brotli v1.2.2
-	github.com/bmatcuk/doublestar/v4 v4.10.0
-	github.com/docker/cli v29.6.2+incompatible
-	github.com/docker/docker-credential-helpers v0.9.5
-	github.com/google/go-containerregistry v0.21.9
+	github.com/ProtonMail/go-crypto v1.5.2
+	github.com/andybalholm/brotli v1.2.7
+	github.com/bmatcuk/doublestar/v4 v4.10.4
+	github.com/docker/cli v29.9.2+incompatible
+	github.com/docker/docker-credential-helpers v0.9.12
+	github.com/google/go-containerregistry v0.22.1
 	github.com/google/uuid v1.6.0
-	github.com/klauspost/compress v1.19.2
-	github.com/moby/moby/client v0.5.1
-	github.com/sigstore/protobuf-specs v0.5.1
+	github.com/klauspost/compress v1.20.3
+	github.com/moby/moby/client v0.6.2
+	github.com/sigstore/protobuf-specs v0.5.2
 	github.com/sigstore/sigstore-go v1.3.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	golang.org/x/sync v0.22.0
-	golang.org/x/term v0.45.0
+	golang.org/x/sync v0.24.0
+	golang.org/x/term v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -34,7 +34,7 @@ require (
 	github.com/digitorus/pkcs7 v0.0.0-20230818184609-3a137a874352 // indirect
 	github.com/digitorus/timestamp v0.0.0-20231217203849-220c5c2851b7 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/go-connections v0.7.0 // indirect
+	github.com/docker/go-connections v0.8.2 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
@@ -69,7 +69,7 @@ require (
 	github.com/in-toto/in-toto-golang v0.11.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
-	github.com/moby/moby/api v1.55.0 // indirect
+	github.com/moby/moby/api v1.56.1 // indirect
 	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
@@ -97,7 +97,7 @@ require (
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/mod v0.40.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260523011958-0a33c5d7ca68 // indirect
