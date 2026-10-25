@@ -26,12 +26,12 @@ func TestScanCommand_JSONOutput(t *testing.T) {
 
 func TestScanCommand_FailsOnExceededThreshold(t *testing.T) {
 	dir := t.TempDir()
-	// 2.2.0 is genuinely older than the embedded @sveltejs/kit advisory's
-	// FixedVersion (2.3.0), so the advisory this test needs comes from the real
-	// resolve-and-compare path.
+	// 2.2.0 is inside real @sveltejs/kit advisories in the embedded snapshot
+	// (e.g. GHSA-g5m6-hxpp-fc49, fixed in 2.4.3), so the advisory this test
+	// needs comes from the real resolve-and-compare path.
 	//
-	// This fixture previously declared 2.15.0 — numerically NEWER than 2.3.0,
-	// and therefore not vulnerable at all. The scan failed anyway, because the
+	// This fixture previously declared 2.15.0 — numerically NEWER than the
+	// (since replaced) placeholder advisory's 2.3.0, and so not vulnerable to it. The scan failed anyway, because the
 	// scanner used to fabricate an advisory whenever a real check produced
 	// none. So the test asserted the right outcome for entirely the wrong
 	// reason, and would have kept passing if the threshold logic broke.

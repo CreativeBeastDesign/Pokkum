@@ -1,4 +1,4 @@
-.PHONY: help build supervisor static-server test test-short test-integration test-race bench coverage check-coverage fuzz-smoke check-arch check-embedded-blobs lint fmt verify clean e2e-runtime-smoke docs check-docs-freshness schema check-schema-freshness
+.PHONY: help build supervisor static-server test test-short test-integration test-race bench coverage check-coverage fuzz-smoke check-arch check-embedded-blobs lint fmt verify clean e2e-runtime-smoke docs check-docs-freshness schema check-schema-freshness advisories
 
 check-arch:  ##  Run hexagonal architecture purity test suite
 	@echo "Checking hexagonal architecture purity..."
@@ -27,6 +27,11 @@ check-docs-freshness:  ##  Verify docs/Roadmap.md/Shipped.md/Features.md/items m
 # comment) so editors can offer inline validation/completion for
 # .pokkum.yaml without it drifting from the real Go types the way a
 # hand-written schema would. `make schema` regenerates it.
+# Network-dependent (OSV.dev + GitHub API), so deliberately not part of verify.
+# Set GITHUB_TOKEN to avoid GitHub's unauthenticated rate limit.
+advisories:  ##  Refresh the scanner's embedded Bun/SvelteKit advisory snapshot from OSV.dev and GitHub
+	@go run ./scripts/snapshot-advisories
+
 schema:  ##  Regenerate schema/pokkum.schema.json from internal/ports/config.go
 	@echo "Regenerating schema/pokkum.schema.json from internal/ports/config.go..."
 	@go run ./scripts/gen-schema

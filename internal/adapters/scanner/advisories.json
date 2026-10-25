@@ -1,0 +1,410 @@
+{
+  "snapshot": "2026-10-25",
+  "sources": [
+    "https://api.osv.dev/v1/query (npm: @sveltejs/kit, bun)",
+    "https://api.github.com/repos/oven-sh/bun/security-advisories"
+  ],
+  "advisories": [
+    {
+      "id": "GHSA-27mw-82g8-phjj",
+      "aliases": [
+        "CVE-2026-114061"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "low",
+      "title": "SvelteKit : XSS via untrusted cache-control header in prerendered page",
+      "url": "https://github.com/advisories/GHSA-27mw-82g8-phjj",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "3.0.0"
+        }
+      ],
+      "published": "2026-10-23"
+    },
+    {
+      "id": "GHSA-29g2-3rmr-qm68",
+      "aliases": [
+        "CVE-2026-66062"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "medium",
+      "title": "SvelteKit: ReDoS (O(n^2)) in content negotiation — unauthenticated DoS via the Accept header",
+      "url": "https://github.com/advisories/GHSA-29g2-3rmr-qm68",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "2.70.2"
+        }
+      ],
+      "published": "2026-08-07"
+    },
+    {
+      "id": "GHSA-2crg-3p73-43xp",
+      "aliases": [
+        "CVE-2026-40073"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "high",
+      "title": "@sveltejs/adapter-node has a BODY_SIZE_LIMIT bypass",
+      "url": "https://github.com/advisories/GHSA-2crg-3p73-43xp",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "2.57.1"
+        }
+      ],
+      "published": "2026-04-10"
+    },
+    {
+      "id": "GHSA-3f6h-2hrp-w5wx",
+      "aliases": [
+        "CVE-2026-40074"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "medium",
+      "title": "@sveltejs/kit: Unvalidated redirect in handle hook causes Denial-of-Service",
+      "url": "https://github.com/advisories/GHSA-3f6h-2hrp-w5wx",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "2.57.1"
+        }
+      ],
+      "published": "2026-04-10"
+    },
+    {
+      "id": "GHSA-5p75-vc5g-8rv2",
+      "aliases": [
+        "CVE-2023-29003"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "high",
+      "title": "SvelteKit vulnerable to Cross-Site Request Forgery",
+      "url": "https://github.com/advisories/GHSA-5p75-vc5g-8rv2",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "1.15.1"
+        }
+      ],
+      "published": "2023-04-04"
+    },
+    {
+      "id": "GHSA-6q87-84jw-cjhp",
+      "aliases": [
+        "CVE-2025-32388"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "medium",
+      "title": "@sveltejs/kit vulnerable to Cross-site Scripting via tracked search_params",
+      "url": "https://github.com/advisories/GHSA-6q87-84jw-cjhp",
+      "ranges": [
+        {
+          "introduced": "2.0.0",
+          "fixed": "2.20.6"
+        }
+      ],
+      "published": "2025-04-14"
+    },
+    {
+      "id": "GHSA-866w-xmhq-wj7x",
+      "aliases": [
+        "CVE-2026-82257"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "medium",
+      "title": "SvelteKit: Prototype pollution in file input deletion path in remote-function forms",
+      "url": "https://github.com/advisories/GHSA-866w-xmhq-wj7x",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "2.69.1"
+        }
+      ],
+      "published": "2026-07-24"
+    },
+    {
+      "id": "GHSA-88qp-p4qg-rqm6",
+      "aliases": [
+        "CVE-2026-82261"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "medium",
+      "title": "CPU exhaustion in SvelteKit remote form deserialization (experimental only)",
+      "url": "https://github.com/advisories/GHSA-88qp-p4qg-rqm6",
+      "ranges": [
+        {
+          "introduced": "2.49.0",
+          "fixed": "2.52.2"
+        }
+      ],
+      "published": "2026-02-19"
+    },
+    {
+      "id": "GHSA-fpg4-jhqr-589c",
+      "aliases": [
+        "CVE-2026-82259"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "low",
+      "title": "SvelteKit  has deserialization expansion in unvalidated `form` remote function leading to Denial of Service (experimental only)",
+      "url": "https://github.com/advisories/GHSA-fpg4-jhqr-589c",
+      "ranges": [
+        {
+          "introduced": "2.49.0",
+          "fixed": "2.53.3"
+        }
+      ],
+      "published": "2026-02-28"
+    },
+    {
+      "id": "GHSA-g5m6-hxpp-fc49",
+      "aliases": [
+        "CVE-2024-23641"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "high",
+      "title": "Sending a GET or HEAD request with a body crashes SvelteKit",
+      "url": "https://github.com/advisories/GHSA-g5m6-hxpp-fc49",
+      "ranges": [
+        {
+          "introduced": "2.0.0",
+          "fixed": "2.4.3"
+        }
+      ],
+      "published": "2024-01-24"
+    },
+    {
+      "id": "GHSA-gv7g-x59x-wf8f",
+      "aliases": [
+        "CVE-2023-29008"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "high",
+      "title": "SvelteKit framework has Insufficient CSRF protection for CORS requests",
+      "url": "https://github.com/advisories/GHSA-gv7g-x59x-wf8f",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "1.15.2"
+        }
+      ],
+      "published": "2023-04-07"
+    },
+    {
+      "id": "GHSA-hgv7-v322-mmgr",
+      "aliases": [
+        "CVE-2026-82258"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "medium",
+      "title": "@sveltejs/kit: `query.batch` cross-talk",
+      "url": "https://github.com/advisories/GHSA-hgv7-v322-mmgr",
+      "ranges": [
+        {
+          "introduced": "2.38.0",
+          "fixed": "2.60.1"
+        }
+      ],
+      "published": "2026-05-21"
+    },
+    {
+      "id": "GHSA-j2f3-wq62-6q46",
+      "aliases": [
+        "CVE-2026-22803"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "high",
+      "title": "@sveltejs/kit has memory amplification DoS vulnerability in Remote Functions binary form deserializer (application/x-sveltekit-formdata)",
+      "url": "https://github.com/advisories/GHSA-j2f3-wq62-6q46",
+      "ranges": [
+        {
+          "introduced": "2.49.0",
+          "fixed": "2.49.5"
+        }
+      ],
+      "published": "2026-01-15"
+    },
+    {
+      "id": "GHSA-j62c-4x62-9r35",
+      "aliases": [
+        "CVE-2025-67647"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "high",
+      "title": "SvelteKit is vulnerable to denial of service and possible SSRF when using prerendering",
+      "url": "https://github.com/advisories/GHSA-j62c-4x62-9r35",
+      "ranges": [
+        {
+          "introduced": "2.19.0",
+          "fixed": "2.49.5"
+        }
+      ],
+      "published": "2026-01-15"
+    },
+    {
+      "id": "GHSA-mh2x-fcqh-fmqv",
+      "aliases": [
+        "CVE-2024-53262"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "low",
+      "title": "@sveltejs/kit has unescaped error message included on error page",
+      "url": "https://github.com/advisories/GHSA-mh2x-fcqh-fmqv",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "2.8.3"
+        }
+      ],
+      "published": "2024-11-25"
+    },
+    {
+      "id": "GHSA-pfhg-q3qv-9q6r",
+      "aliases": [
+        "CVE-2026-114060"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "low",
+      "title": "SvelteKit: URL redirection to untrusted site via enhanced form submission",
+      "url": "https://github.com/advisories/GHSA-pfhg-q3qv-9q6r",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "3.0.0"
+        }
+      ],
+      "published": "2026-10-23"
+    },
+    {
+      "id": "GHSA-rjjv-87mx-6x3h",
+      "aliases": [
+        "CVE-2024-53261"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "low",
+      "title": "@sveltejs/kit vulnerable to XSS on dev mode 404 page",
+      "url": "https://github.com/advisories/GHSA-rjjv-87mx-6x3h",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "2.8.3"
+        }
+      ],
+      "published": "2024-11-25"
+    },
+    {
+      "id": "GHSA-vrhm-gvg7-fpcf",
+      "aliases": [
+        "CVE-2026-82260"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "medium",
+      "title": "Memory exhaustion in SvelteKit remote form deserialization (experimental only)",
+      "url": "https://github.com/advisories/GHSA-vrhm-gvg7-fpcf",
+      "ranges": [
+        {
+          "introduced": "2.49.0",
+          "fixed": "2.52.2"
+        }
+      ],
+      "published": "2026-02-19"
+    },
+    {
+      "id": "GHSA-wqjv-9729-c5q2",
+      "aliases": [
+        "CVE-2026-82256"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "medium",
+      "title": "SvelteKit: Big remote form function payloads can cause Node process to crash",
+      "url": "https://github.com/advisories/GHSA-wqjv-9729-c5q2",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "2.69.1"
+        }
+      ],
+      "published": "2026-07-24"
+    },
+    {
+      "id": "GHSA-26q8-h657-pf84",
+      "package": "bun",
+      "severity": "high",
+      "title": "Bundled root certificates trust compromised eMudhra (emSign) intermediate CAs",
+      "url": "https://github.com/oven-sh/bun/security/advisories/GHSA-26q8-h657-pf84",
+      "ranges": [
+        {
+          "fixed": "1.4.4"
+        }
+      ],
+      "published": "2026-10-23"
+    },
+    {
+      "id": "GHSA-4j66-8f4r-3pjx",
+      "aliases": [
+        "CVE-2025-8022"
+      ],
+      "package": "bun",
+      "severity": "high",
+      "title": "bun vulnerable to OS Command Injection",
+      "url": "https://github.com/advisories/GHSA-4j66-8f4r-3pjx",
+      "ranges": [
+        {
+          "introduced": "0",
+          "last_affected": "1.1.39"
+        }
+      ],
+      "published": "2025-07-23"
+    },
+    {
+      "id": "GHSA-663w-cv8g-jj2p",
+      "aliases": [
+        "CVE-2026-111497"
+      ],
+      "package": "bun",
+      "severity": "high",
+      "title": "Bundled brotli decoder has an out-of-bounds write (CVE-2026-111497)",
+      "url": "https://github.com/oven-sh/bun/security/advisories/GHSA-663w-cv8g-jj2p",
+      "ranges": [
+        {
+          "introduced": "1.0.21",
+          "fixed": "1.4.4"
+        }
+      ],
+      "published": "2026-10-23"
+    },
+    {
+      "id": "GHSA-cf8x-9m69-3gg3",
+      "package": "bun",
+      "severity": "high",
+      "title": "HTTP/3 QPACK amplification allows remote memory exhaustion and CPU stall",
+      "url": "https://github.com/oven-sh/bun/security/advisories/GHSA-cf8x-9m69-3gg3",
+      "ranges": [
+        {
+          "introduced": "1.3.14",
+          "fixed": "1.4.4"
+        }
+      ],
+      "published": "2026-10-24"
+    },
+    {
+      "id": "GHSA-v9mx-4pqq-h232",
+      "aliases": [
+        "CVE-2024-21548"
+      ],
+      "package": "bun",
+      "severity": "medium",
+      "title": "Bun has an Application-level Prototype Pollution vulnerability in the runtime native API for Glo",
+      "url": "https://github.com/advisories/GHSA-v9mx-4pqq-h232",
+      "ranges": [
+        {
+          "introduced": "0",
+          "fixed": "1.1.30"
+        }
+      ],
+      "published": "2024-12-18"
+    }
+  ]
+}

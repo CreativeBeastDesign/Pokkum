@@ -26,32 +26,6 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
 )
 
-// embeddedAdvisories holds offline known security advisories for core Pokkum dependencies.
-var embeddedAdvisories = []ports.Vulnerability{
-	{
-		ID:           "GHSA-bun-1.1.0",
-		Severity:     ports.SeverityHigh,
-		Package:      "bun",
-		Version:      "<1.1.0",
-		FixedVersion: "1.1.0",
-		Title:        "Buffer overflow in Bun HTTP parser",
-		Description:  "Versions of Bun prior to 1.1.0 contain a memory corruption vulnerability in the HTTP parser.",
-		URL:          "https://github.com/oven-sh/bun/security/advisories/GHSA-bun-1.1.0",
-		Ecosystem:    "Bun",
-	},
-	{
-		ID:           "GHSA-sveltekit-2.3.0",
-		Severity:     ports.SeverityMedium,
-		Package:      "@sveltejs/kit",
-		Version:      "<2.3.0",
-		FixedVersion: "2.3.0",
-		Title:        "Cross-site request forgery in SvelteKit form actions",
-		Description:  "SvelteKit versions before 2.3.0 may allow CSRF when origin checks are bypassed.",
-		URL:          "https://github.com/sveltejs/kit/security/advisories/GHSA-sveltekit-2.3.0",
-		Ecosystem:    "npm",
-	},
-}
-
 var _ ports.Scanner = (*Adapter)(nil)
 
 // Adapter implements ports.Scanner.
@@ -117,7 +91,7 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 
 	if isDir {
 		// 1. Directory scan: toolchain and project dependencies
-		tAdvisories, toolchainIncomplete, err := s.scanProjectToolchain(ctx, req.AppRuntime, target, req.Offline)
+		tAdvisories, toolchainIncomplete, err := s.scanProjectToolchain(ctx, req.AppRuntime, requestedBunVersion(req), target, req.Offline)
 		if err == nil {
 			toolchainAdvisories = append(toolchainAdvisories, tAdvisories...)
 			// A real @sveltejs/kit version was resolved and checked against the
@@ -177,6 +151,15 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 		}
 		vulnerabilities = append(vulnerabilities, imgVulns...)
 		toolchainAdvisories = append(toolchainAdvisories, imgToolchain...)
+		// A build gate scans the BASE image, which does not contain the Bun
+		// runtime the build layers on top of it. When the caller names that
+		// runtime version, check it too, or the runtime the image actually
+		// ships is never checked at all. Gated by AppRuntime like every other
+		// requested-runtime check: a node image ships no Bun.
+		if req.BunVersion != "" {
+			toolchainAdvisories = append(toolchainAdvisories, s.checkEmbeddedAdvisories(req.AppRuntime, req.BunVersion, "")...)
+		}
+		toolchainAdvisories = dedupeAdvisories(toolchainAdvisories)
 		if err == nil {
 			// The image/tarball scan ran; its toolchain result (including an
 			// empty one) is the real answer for this artifact.
@@ -209,6 +192,10 @@ func (s *Adapter) Scan(ctx context.Context, req ports.ScanRequest) (ports.ScanRe
 	if !toolchainResolved {
 		incomplete = true
 		warnings = append(warnings, "toolchain (@sveltejs/kit) version could not be resolved, coverage reduced: no toolchain advisories were checked")
+	}
+
+	if req.Offline && toolchainResolved {
+		warnings = append(warnings, fmt.Sprintf("toolchain advisories checked against the embedded snapshot from %s only; advisories published since then are not included", embeddedSnapshot.Snapshot))
 	}
 
 	allFound := append([]ports.Vulnerability{}, vulnerabilities...)
@@ -275,20 +262,19 @@ func activeVEXExemption(adv ports.Vulnerability, exemptions []ports.VEXExemption
 	return false
 }
 
-func (s *Adapter) scanProjectToolchain(ctx context.Context, appRuntime, projectDir string, offline bool) ([]ports.Vulnerability, bool, error) {
+func (s *Adapter) scanProjectToolchain(ctx context.Context, appRuntime, bunVer, projectDir string, offline bool) ([]ports.Vulnerability, bool, error) {
 	pkgJSON, err := sveltekitutils.ReadPackageJSON(projectDir)
 	if err != nil {
 		return nil, false, err
 	}
 
 	kitVer := sveltekitutils.ResolveVersion(projectDir, "@sveltejs/kit", pkgJSON)
-	bunVer := ports.DefaultBunVersion
 
 	var advisories []ports.Vulnerability
-	advisories = append(advisories, s.checkEmbeddedAdvisories(appRuntime, bunVer, kitVer)...)
-
 	incomplete := false
 	if !offline {
+		// Live OSV results come first so that, for an advisory also present
+		// in the embedded snapshot, the fresher record is the one kept.
 		remote, err := s.queryOSV(ctx, "@sveltejs/kit", kitVer, "npm")
 		if err == nil {
 			advisories = append(advisories, remote...)
@@ -297,8 +283,37 @@ func (s *Adapter) scanProjectToolchain(ctx context.Context, appRuntime, projectD
 			s.logger.WarnContext(ctx, "scanner: toolchain OSV lookup failed, scan is incomplete", "err", err)
 		}
 	}
+	advisories = append(advisories, s.checkEmbeddedAdvisories(appRuntime, bunVer, kitVer)...)
 
-	return advisories, incomplete, nil
+	return dedupeAdvisories(advisories), incomplete, nil
+}
+
+// requestedBunVersion is the Bun runtime version a scan should check:
+// the one the caller says the build embeds, else the default a build
+// without --bun-version gets.
+func requestedBunVersion(req ports.ScanRequest) string {
+	if v := strings.TrimSpace(req.BunVersion); v != "" {
+		return v
+	}
+	return ports.DefaultBunVersion
+}
+
+// dedupeAdvisories drops repeats of the same advisory against the same
+// package and version, keeping the first. The embedded snapshot carries real
+// advisory IDs, so an online scan sees most @sveltejs/kit advisories twice:
+// once from OSV and once from the snapshot.
+func dedupeAdvisories(in []ports.Vulnerability) []ports.Vulnerability {
+	seen := make(map[string]bool, len(in))
+	out := in[:0:0]
+	for _, v := range in {
+		key := v.ID + "\x00" + v.Package + "\x00" + cleanVersion(v.Version)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 func (s *Adapter) scanProjectDependencies(ctx context.Context, projectDir string) ([]ports.Vulnerability, error) {
@@ -426,14 +441,21 @@ func (s *Adapter) scanImageOrTarball(ctx context.Context, target string, offline
 // presence beats the requested runtime, so those call sites pass "bun".
 func (s *Adapter) checkEmbeddedAdvisories(appRuntime, bunVer, kitVer string) []ports.Vulnerability {
 	var matches []ports.Vulnerability
-	for _, adv := range embeddedAdvisories {
-		if adv.Package == "bun" && appRuntime != string(ports.RuntimeNode) && isVersionOlderThan(bunVer, adv.FixedVersion) {
-			adv.Version = bunVer
-			matches = append(matches, adv)
+	for _, adv := range embeddedSnapshot.Advisories {
+		var v string
+		switch adv.Package {
+		case "bun":
+			if appRuntime == string(ports.RuntimeNode) {
+				continue
+			}
+			v = bunVer
+		case "@sveltejs/kit":
+			v = kitVer
+		default:
+			continue
 		}
-		if adv.Package == "@sveltejs/kit" && isVersionOlderThan(kitVer, adv.FixedVersion) {
-			adv.Version = kitVer
-			matches = append(matches, adv)
+		if fixed, ok := adv.affects(v); ok {
+			matches = append(matches, adv.vulnerability(v, fixed))
 		}
 	}
 	return matches

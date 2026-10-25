@@ -643,7 +643,12 @@ func Build(ctx context.Context, deps Deps, req BuildRequest, opts BuildOptions) 
 				// AppRuntime is never empty here — the scanner uses it to
 				// key which embedded toolchain advisories can apply to the
 				// image this build ships (a node image contains no Bun).
-				AppRuntime:      string(req.AppRuntime),
+				AppRuntime: string(req.AppRuntime),
+				// The base image does not contain the Bun runtime this build
+				// layers onto it, so name it or it is never checked. A
+				// --bun-binary has no version Pokkum can vouch for and is
+				// left unchecked rather than checked as the default.
+				BunVersion:      scanBunVersion(req.BunRuntime),
 				AllowIncomplete: req.AllowIncompleteScan,
 				VEXExemptions:   req.VEXExemptions,
 				// Real wall-clock time, not SOURCE_DATE_EPOCH — see
@@ -3134,4 +3139,15 @@ func firstBlockerFile(report ports.StaticReport) string {
 		return ""
 	}
 	return report.Blockers[0].File
+}
+
+// scanBunVersion is the Bun runtime version the base-image scan should check
+// on this build's behalf: the requested (or defaulted) --bun-version, or ""
+// for a --bun-binary, whose version is whatever the user's file is and is not
+// something Pokkum can vouch for.
+func scanBunVersion(opts BunRuntimeOptions) string {
+	if opts.CustomBinaryPath != "" {
+		return ""
+	}
+	return opts.Version
 }

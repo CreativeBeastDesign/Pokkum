@@ -19,6 +19,7 @@ type scanFlags struct {
 	output          string
 	offline         bool
 	allowIncomplete bool
+	bunVersion      string
 }
 
 func newScanCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
@@ -40,6 +41,7 @@ and threshold enforcement via --fail-on.`,
 	cmd.Flags().BoolVar(&flags.toolchain, "toolchain", false, "Restrict scan to embedded runtime & toolchain advisories")
 	cmd.Flags().StringVar(&flags.output, "output", "text", "Output format (text or json)")
 	cmd.Flags().BoolVar(&flags.offline, "offline", false, "Disable remote vulnerability database queries")
+	cmd.Flags().StringVar(&flags.bunVersion, "bun-version", "", "Bun runtime version to check toolchain advisories against, matching the build's --bun-version (default: the pinned "+ports.DefaultBunVersion+")")
 	cmd.Flags().BoolVar(&flags.allowIncomplete, "allow-incomplete", false, "Report success even if a vulnerability database lookup FAILED (default: fail closed on reduced coverage). Does not apply to --offline, which skips lookups by design: an offline scan is always reported as incomplete but still exits 0, so read the 'incomplete' field rather than the exit code to gate on coverage there")
 
 	return cmd
@@ -63,6 +65,7 @@ func runScan(ctx context.Context, logger *slog.Logger, flags *scanFlags, args []
 		ToolchainOnly:   flags.toolchain,
 		Offline:         flags.offline,
 		AllowIncomplete: flags.allowIncomplete,
+		BunVersion:      flags.bunVersion,
 	}
 
 	res, scanErr := adapter.Scan(ctx, req)

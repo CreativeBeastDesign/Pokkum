@@ -1,0 +1,51 @@
+name: Update Scanner Advisories
+
+on:
+  schedule:
+    # Every Monday at 07:00 UTC, an hour after the scanner tripwire.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-advisories:
+    name: Refresh embedded advisory snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # See ci.yml: read the version from go.mod, never a floating minor.
+          go-version-file: 'go.mod'
+          cache: true
+
+      # TestEmbeddedSnapshot_IsFreshNow fails the suite once the snapshot is
+      # 45 days old; this job is what keeps that from happening.
+      - name: Regenerate advisories.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make advisories
+
+      - name: Run Scanner Tests
+        run: go test ./internal/adapters/scanner/...
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          commit-message: 'chore(scanner): refresh embedded advisory snapshot'
+          title: 'chore(scanner): refresh embedded advisory snapshot'
+          body: |
+            Automated refresh of `internal/adapters/scanner/advisories.json` from OSV.dev and GitHub's `oven-sh/bun` repository advisories (`make advisories`).
+
+            Review new entries before merging: a new Bun advisory affecting `ports.DefaultBunVersion` means the default should be raised.
+          branch: 'automation/update-advisories'
+          delete-branch: true
+          labels: |
+            dependencies
+            automated-pr

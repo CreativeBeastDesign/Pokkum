@@ -17,9 +17,10 @@ import (
 )
 
 // vulnerableProjectDir writes a minimal project declaring an @sveltejs/kit
-// version genuinely older than the embedded advisory's FixedVersion (2.3.0),
-// so the toolchain advisory these tests rely on is produced by the real
-// resolve-and-compare path from a real declared version.
+// version (2.2.0) inside real advisories in the embedded snapshot (e.g.
+// GHSA-g5m6-hxpp-fc49, fixed in 2.4.3), so the toolchain advisories these
+// tests rely on are produced by the real resolve-and-compare path from a real
+// declared version.
 //
 // The tests below used to pass no Target at all, defaulting to "." — a
 // directory with no package.json — and depended on a fallback that fabricated
@@ -130,27 +131,29 @@ func TestScanner_VEXExemptionExcludesFromThreshold(t *testing.T) {
 	if len(baseline.Vulnerabilities)+len(baseline.ToolchainAdvisories) == 0 {
 		t.Fatal("test setup: expected at least one embedded advisory to exempt")
 	}
-	var target ports.Vulnerability
-	if len(baseline.ToolchainAdvisories) > 0 {
-		target = baseline.ToolchainAdvisories[0]
-	} else {
-		target = baseline.Vulnerabilities[0]
+	// A real vulnerable version matches several real advisories, so exempt
+	// each of them; the threshold must then be cleared by the exemptions
+	// alone.
+	var exemptions []ports.VEXExemption
+	for _, v := range append(append([]ports.Vulnerability{}, baseline.Vulnerabilities...), baseline.ToolchainAdvisories...) {
+		exemptions = append(exemptions, ports.VEXExemption{
+			CVE:           v.ID,
+			Justification: ports.VEXComponentNotPresent,
+			Expires:       now.AddDate(1, 0, 0),
+			Owner:         "test-owner",
+		})
 	}
+	target := baseline.ToolchainAdvisories[0]
 
 	exempted, err := adapter.Scan(context.Background(), ports.ScanRequest{
 		// Same fixture as the baseline: exempting a CVE discovered in one
 		// project and re-scanning a different one would compare two unrelated
 		// results and could pass for the wrong reason.
-		Target:  dir,
-		FailOn:  ports.SeverityLow,
-		Offline: true,
-		Now:     now,
-		VEXExemptions: []ports.VEXExemption{{
-			CVE:           target.ID,
-			Justification: ports.VEXComponentNotPresent,
-			Expires:       now.AddDate(1, 0, 0),
-			Owner:         "test-owner",
-		}},
+		Target:        dir,
+		FailOn:        ports.SeverityLow,
+		Offline:       true,
+		Now:           now,
+		VEXExemptions: exemptions,
 	})
 	if err != nil {
 		t.Fatalf("expected the scan to pass once the failing CVE (%s) is exempted, got: %v", target.ID, err)
@@ -433,8 +436,8 @@ func TestIsVersionOlderThan_NumericDotSegmentComparison(t *testing.T) {
 // the pre-existing behavior byte-for-byte.
 func TestCheckEmbeddedAdvisories_RuntimeKeysBunAdvisories(t *testing.T) {
 	s := NewAdapter(nil)
-	vulnBun := "1.0.0" // older than the embedded bun advisory's FixedVersion 1.1.0
-	vulnKit := "2.2.0" // older than the embedded kit advisory's FixedVersion 2.3.0
+	vulnBun := "1.4.3" // inside real advisories fixed in 1.4.4 (e.g. GHSA-663w-cv8g-jj2p)
+	vulnKit := "2.2.0" // inside real advisories (e.g. GHSA-g5m6-hxpp-fc49, fixed 2.4.3)
 
 	countByPackage := func(advisories []ports.Vulnerability) map[string]int {
 		out := map[string]int{}
@@ -444,10 +447,16 @@ func TestCheckEmbeddedAdvisories_RuntimeKeysBunAdvisories(t *testing.T) {
 		return out
 	}
 
+	bunOnly := countByPackage(s.checkEmbeddedAdvisories("bun", vulnBun, ""))
+	kitOnly := countByPackage(s.checkEmbeddedAdvisories("bun", "", vulnKit))
+	if bunOnly["bun"] == 0 || kitOnly["@sveltejs/kit"] == 0 {
+		t.Fatalf("test setup: expected real advisories for bun %s and kit %s, got %v / %v", vulnBun, vulnKit, bunOnly, kitOnly)
+	}
+
 	for _, runtime := range []string{"", "bun"} {
 		got := countByPackage(s.checkEmbeddedAdvisories(runtime, vulnBun, vulnKit))
-		if got["bun"] != 1 || got["@sveltejs/kit"] != 1 {
-			t.Errorf("runtime %q: advisories = %v, want 1 bun + 1 kit", runtime, got)
+		if got["bun"] != bunOnly["bun"] || got["@sveltejs/kit"] != kitOnly["@sveltejs/kit"] {
+			t.Errorf("runtime %q: advisories = %v, want %d bun + %d kit", runtime, got, bunOnly["bun"], kitOnly["@sveltejs/kit"])
 		}
 	}
 
@@ -455,8 +464,8 @@ func TestCheckEmbeddedAdvisories_RuntimeKeysBunAdvisories(t *testing.T) {
 	if got["bun"] != 0 {
 		t.Errorf("runtime node: %d bun advisories reported against an image that ships no Bun", got["bun"])
 	}
-	if got["@sveltejs/kit"] != 1 {
-		t.Errorf("runtime node: kit advisories = %d, want 1 (kit is runtime-independent)", got["@sveltejs/kit"])
+	if got["@sveltejs/kit"] != kitOnly["@sveltejs/kit"] {
+		t.Errorf("runtime node: kit advisories = %d, want %d (kit is runtime-independent)", got["@sveltejs/kit"], kitOnly["@sveltejs/kit"])
 	}
 }
 
@@ -474,9 +483,10 @@ func TestCheckEmbeddedAdvisories_RuntimeKeysBunAdvisories(t *testing.T) {
 // advisory was the ONLY finding reported.
 func TestScan_NoFabricatedAdvisoryForHealthyProject(t *testing.T) {
 	dir := t.TempDir()
-	// A version far newer than the embedded advisory's FixedVersion (2.3.0),
-	// so the honest answer is "no toolchain advisories".
-	pkg := `{"name":"app","devDependencies":{"@sveltejs/kit":"2.68.0"}}`
+	// A version newer than every fix in the embedded snapshot, so the honest
+	// answer is "no toolchain advisories". (The original field case, 2.68.0,
+	// is now genuinely affected by real advisories published since.)
+	pkg := `{"name":"app","devDependencies":{"@sveltejs/kit":"99.0.0"}}`
 	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +501,7 @@ func TestScan_NoFabricatedAdvisoryForHealthyProject(t *testing.T) {
 
 	for _, a := range res.ToolchainAdvisories {
 		if a.Package == "@sveltejs/kit" {
-			t.Errorf("fabricated toolchain advisory reported for a project on 2.68.0: "+
+			t.Errorf("fabricated toolchain advisory reported for a project on 99.0.0: "+
 				"%s against %s %s — the scanner invented a version this project does not use",
 				a.ID, a.Package, a.Version)
 		}

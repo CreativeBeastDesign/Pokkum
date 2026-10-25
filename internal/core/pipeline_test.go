@@ -1350,6 +1350,48 @@ func TestPipeline_BaseImageCVE_Gating(t *testing.T) {
 	}
 	req.Normalize()
 
+	// The gate scans the BASE image, which never contains the Bun runtime the
+	// build layers onto it. Unless the request names that runtime, the Bun the
+	// image actually ships is never checked against an advisory.
+	t.Run("scan request names the Bun runtime the build embeds", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			bunVersion string
+			custom     string
+			want       string
+		}{
+			{name: "default", want: core.DefaultBunVersion},
+			{name: "requested", bunVersion: "1.3.14", want: "1.3.14"},
+			{name: "custom binary is not checked as the default", custom: "/tmp/my-bun", want: ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var got *ports.ScanRequest
+				deps := newFullDeps(io.Discard)
+				deps.Scanner = &mockScanner{
+					scanFn: func(_ context.Context, sr ports.ScanRequest) (ports.ScanResult, error) {
+						got = &sr
+						return ports.ScanResult{Passed: true}, nil
+					},
+				}
+				r := core.BuildRequest{ProjectDir: "/abs/project", Repo: "ghcr.io/example/app"}
+				r.BunRuntime.Version = tc.bunVersion
+				r.BunRuntime.CustomBinaryPath = tc.custom
+				r.Normalize()
+				r.FailOnCVE = ports.SeverityCritical
+
+				if _, err := core.Build(context.Background(), deps, r, core.BuildOptions{DryRun: true}); err != nil {
+					t.Fatalf("build: %v", err)
+				}
+				if got == nil {
+					t.Fatal("the base image CVE gate never called the scanner")
+				}
+				if got.BunVersion != tc.want {
+					t.Errorf("ScanRequest.BunVersion = %q, want %q", got.BunVersion, tc.want)
+				}
+			})
+		}
+	})
+
 	t.Run("warn only when fail gate is inactive", func(t *testing.T) {
 		deps := newFullDeps(io.Discard)
 		deps.Scanner = &mockScanner{

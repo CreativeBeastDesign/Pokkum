@@ -85,6 +85,16 @@ type ScanRequest struct {
 	// which has no build request to read a runtime from.
 	AppRuntime string `json:"app_runtime,omitempty"`
 
+	// BunVersion is the Bun runtime version the scanned build embeds
+	// (--bun-version). For a project directory, empty means
+	// DefaultBunVersion, which is what a build without --bun-version ships.
+	// For an image or tarball target, empty means no Bun runtime is checked
+	// beyond any Bun the image itself contains; a build gate, which scans the
+	// base image the runtime is later layered onto, must set it or the
+	// runtime its image ships is never checked. Ignored when AppRuntime is
+	// "node".
+	BunVersion string `json:"bun_version,omitempty"`
+
 	// Offline disables remote vulnerability database lookups (OSV.dev).
 	Offline bool `json:"offline"`
 
