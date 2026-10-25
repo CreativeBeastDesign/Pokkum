@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Default Bun runtime raised from 1.2.2 to 1.4.4.** Images built without `--bun-version`
+  now embed Bun 1.4.4, so their Bun layer — and therefore their digest — changes. To keep the
+  previous runtime, pass `--bun-version 1.2.2`; it stays in the statically pinned checksum
+  table, which now also covers 1.4.0–1.4.4 (each GPG-verified against Bun's signed release
+  manifest before being pinned).
+- **Go toolchain raised to 1.27.3** (Go security patch releases), and the embedded
+  `pokkum-init`/`pokkum-static` PID-1 binaries rebuilt with it. Their layers get new bytes, so
+  every image rebuilt after this release gets a new digest.
+- Dependency updates: `go-containerregistry` 0.22.1, `klauspost/compress` 1.20.3,
+  `docker/cli` 29.9.2, `moby/moby/client` 0.6.2, `ProtonMail/go-crypto` 1.5.2,
+  `sigstore/protobuf-specs` 0.5.2 and smaller bumps. Release tooling: cosign 3.1.4,
+  golangci-lint 2.15.0, `slsa-github-generator` 2.1.0.
+
 ### Fixed
 
 - **`pokkum build` failed on every fresh CI checkout.** The SvelteKit build relied on the

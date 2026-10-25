@@ -32,7 +32,8 @@ import (
 // Key format: "<version>/<target-name>" (e.g. "1.2.2/bun-linux-x64").
 //
 // These entries are a fast, network-free path for ports.DefaultBunVersion
-// (1.2.2) plus the most recent handful of Bun releases as of 2026-08-18 —
+// (1.4.4) plus the most recent handful of Bun releases as of 2026-10-25 and
+// the previous default (1.2.2) —
 // not the only source of integrity verification. Any version not listed
 // here still gets verified, via fetchVerifiedChecksum below, against Bun's
 // own GPG-signed release manifest. This map existing or not existing for a
@@ -62,6 +63,24 @@ var pinnedReleaseChecksums = map[string]string{
 	"1.2.2/bun-linux-x64":          "3f4efb8afd1f84ac2a98c04661c898561d1d35527d030cb4571e99b7c85f5079",
 	"1.2.2/bun-linux-x64-baseline": "cad7756a6ee16f3432a328f8023fc5cd431106822eacfa6d6d3afbad6fdc24db",
 	"1.2.2/bun-linux-aarch64":      "d1dbaa3e9af24549fad92bdbe4fb21fa53302cd048a8f004e85a240984c93d4d",
+
+	// Verified by scripts/pin-bun-checksums against a real, GPG-signed
+	// SHASUMS256.txt.asc for each version below (2026-10-25).
+	"1.4.4/bun-linux-x64":          "bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c",
+	"1.4.4/bun-linux-x64-baseline": "e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76",
+	"1.4.4/bun-linux-aarch64":      "baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e",
+	"1.4.3/bun-linux-x64":          "3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18",
+	"1.4.3/bun-linux-x64-baseline": "1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b",
+	"1.4.3/bun-linux-aarch64":      "efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21",
+	"1.4.2/bun-linux-x64":          "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913",
+	"1.4.2/bun-linux-x64-baseline": "c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f",
+	"1.4.2/bun-linux-aarch64":      "54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7",
+	"1.4.1/bun-linux-x64":          "74c1c3bee7cd998500c8f969cd8972355ac6a07207e94a39eece1999b56ffabf",
+	"1.4.1/bun-linux-x64-baseline": "a8c9c6738202e2fced555dd860a953c56c0cd059f75041e7010ae81a32802646",
+	"1.4.1/bun-linux-aarch64":      "580ce77533108dc6b10bec1721397e4f5aa44e909726da2451d483dfc5e581d6",
+	"1.4.0/bun-linux-x64":          "2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452",
+	"1.4.0/bun-linux-x64-baseline": "184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f",
+	"1.4.0/bun-linux-aarch64":      "4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e",
 
 	// Verified by scripts/pin-bun-checksums against a real, GPG-signed
 	// SHASUMS256.txt.asc for each version below (2026-08-18).

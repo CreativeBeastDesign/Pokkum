@@ -6,7 +6,7 @@ import (
 )
 
 // DefaultBunVersion is the default pinned Bun release version used for runtime layering when none is specified.
-const DefaultBunVersion = "1.2.2"
+const DefaultBunVersion = "1.4.4"
 
 // BunVariant specifies CPU/build variants of the Bun runtime binary.
 type BunVariant string
