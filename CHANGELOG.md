@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pokkum upgrade` failed with a bare "permission denied" on a root-owned install.** An
+  `install.sh` install into `/usr/local/bin` with `sudo` is owned by root, and the upgrade
+  failed only after downloading the release. It now checks the install directory first and
+  says to run `sudo pokkum upgrade`. A Homebrew or npm install is now pointed at
+  `brew upgrade pokkum` / `npm install -g @pokkum/cli@latest` instead of being overwritten
+  in place, which left the package manager recording the old version.
+
 ## [v1.3.1] — 2026-10-25
 
 The `v1.3.0` tag exists but was never released: its release pipeline failed while signing,

@@ -353,6 +353,13 @@ func runUpgrade(ctx context.Context, logger *slog.Logger, verifier ports.Release
 		return nil
 	}
 
+	// Refuse targets self-replacement cannot or must not touch BEFORE
+	// downloading anything, so the user gets the real remedy instead of a raw
+	// EACCES from deep inside the apply step.
+	if err := checkUpgradeTarget(execPath); err != nil {
+		return err
+	}
+
 	// Download & apply upgrade binary
 	archiveName := fmt.Sprintf("pokkum_%s_%s_%s.tar.gz", latestVer, runtime.GOOS, runtime.GOARCH)
 	archiveURL := fmt.Sprintf("%s/%s", baseURL, archiveName)
@@ -639,5 +646,49 @@ func copyFileContents(src, dst string) error {
 		_ = os.Remove(dst)
 		return fmt.Errorf("close %s: %w", dst, err)
 	}
+	return nil
+}
+
+// checkUpgradeTarget reports why the binary at execPath cannot be replaced in
+// place, as an error carrying the command that will work instead, or nil.
+//
+// A package-managed install must be upgraded by its package manager:
+// overwriting a Homebrew Cellar or npm node_modules binary leaves the manager
+// recording the old version, and its next upgrade or uninstall acts on files
+// that no longer match. A directory the user cannot write to (install.sh into
+// /usr/local/bin with sudo, owned by root) is probed by actually creating a
+// file there, the same operation the apply step performs, rather than inferred
+// from mode bits that ACLs and sandboxing can contradict.
+func checkUpgradeTarget(execPath string) error {
+	resolved := execPath
+	if r, err := filepath.EvalSymlinks(execPath); err == nil {
+		resolved = r
+	}
+	slashed := filepath.ToSlash(resolved)
+	switch {
+	case strings.Contains(slashed, "/Cellar/"):
+		return fmt.Errorf("pokkum at %s is managed by Homebrew; upgrade it with `brew upgrade pokkum` instead: %w", execPath, core.ErrReleaseUpgradeFailed)
+	case strings.Contains(slashed, "/node_modules/"):
+		return fmt.Errorf("pokkum at %s is managed by npm; upgrade it with `npm install -g @pokkum/cli@latest` instead: %w", execPath, core.ErrReleaseUpgradeFailed)
+	}
+
+	dir := filepath.Dir(resolved)
+	probe, err := os.CreateTemp(dir, ".pokkum-upgrade-probe-*")
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return fmt.Errorf("cannot replace %s: your user cannot write to %s (typically a root-owned directory from a `sudo` install).\n"+
+				"Re-run with elevated rights:  sudo pokkum upgrade\n"+
+				"or reinstall into a directory you own: %w", execPath, dir, core.ErrReleaseUpgradeFailed)
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			// A fresh install through this path has no directory yet to probe;
+			// the apply step's own temp-dir fallback handles it.
+			return nil
+		}
+		return fmt.Errorf("cannot write to %s to replace %s: %w: %w", dir, execPath, err, core.ErrReleaseUpgradeFailed)
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	_ = os.Remove(name)
 	return nil
 }
