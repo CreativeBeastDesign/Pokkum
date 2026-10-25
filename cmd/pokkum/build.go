@@ -42,6 +42,7 @@ import (
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/staticserver"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/staticviability"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/supervisor"
+	"github.com/CreativeBeastDesign/pokkum/internal/adapters/sveltekitutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/adapters/vexutils"
 	"github.com/CreativeBeastDesign/pokkum/internal/core"
 	"github.com/CreativeBeastDesign/pokkum/internal/ports"
@@ -164,6 +165,7 @@ type buildFlags struct {
 	addressHeader  string
 	xffDepth       int
 	bodySizeLimit  string
+	readyPath      string
 
 	failOnCVE               string
 	allowIncomplete         bool
@@ -358,6 +360,9 @@ to the OS temp directory instead (os.tmpdir() from node:os, or $TMPDIR).`,
 		"Number of trusted proxy hops when parsing --address-header (0 = adapter-node's own default of 1), written to XFF_DEPTH")
 	cmd.Flags().StringVar(&flags.bodySizeLimit, "body-size-limit", "",
 		"Request body size cap in adapter-node's size-string format (e.g. 512K, 10M, Infinity; empty = adapter-node's own default of 512K), written to BODY_SIZE_LIMIT")
+	cmd.Flags().StringVar(&flags.readyPath, "ready-path", "",
+		"The app's own readiness endpoint (e.g. /api/ready), polled by pokkum-init to answer /readyz; written to POKKUM_READY_PATH. "+
+			"Default: auto-detected from a src/routes/api/ready/+server.(ts|js) route, else readiness stays a TCP connect to the app port. 'off' disables auto-detection")
 	cmd.Flags().StringVar(&flags.failOnCVE, "fail-on-cve", "",
 		"Fail build if base image vulnerabilities exceed threshold (low, medium, high, critical; default warn-only)")
 	cmd.Flags().BoolVar(&flags.allowServerCodeInStatic, "allow-server-code-in-static", false,
@@ -1247,6 +1252,16 @@ func buildRequestFromResolvedConfig(ctx context.Context, logger *slog.Logger, fl
 		req.Runtime.BodySizeLimit = flags.bodySizeLimit
 	}
 
+	configReadyPath := ""
+	if projCfg != nil {
+		configReadyPath = projCfg.Image.ReadyPath
+	}
+	readyPath, err := resolveReadyPath(logger, projectDir, strategy, flags.readyPath, configReadyPath)
+	if err != nil {
+		return nil, err
+	}
+	req.Runtime.ReadyPath = readyPath
+
 	if len(flags.imageLabels) > 0 {
 		for _, lbl := range flags.imageLabels {
 			k, v, ok := strings.Cut(lbl, "=")
@@ -1558,9 +1573,66 @@ func buildRequestForPath(projectDir, repo string, logger *slog.Logger) (core.Bui
 	}
 	req.SourceDateEpoch = timestamp
 
+	// No .pokkum.yaml is read on this path, so only auto-detection applies.
+	readyPath, err := resolveReadyPath(logger, projectDir, string(core.DefaultBuildStrategy), "", "")
+	if err != nil {
+		return core.BuildRequest{}, fmt.Errorf("%s: %w", projectDir, err)
+	}
+	req.Runtime.ReadyPath = readyPath
+
 	req.Normalize()
 	if err := req.Validate(); err != nil {
 		return core.BuildRequest{}, fmt.Errorf("validation failed for %s: %w", projectDir, err)
 	}
 	return req, nil
+}
+
+// resolveReadyPath decides the application readiness path baked into the
+// image as POKKUM_READY_PATH: an explicit --ready-path wins over the config's
+// image.ready_path, and with neither the project's api/ready route is used if
+// it has one. "off" (either source) disables auto-detection. An empty result
+// leaves readiness at a TCP connect to the app port, and leaves the image
+// byte-identical to one built before readiness paths existed.
+//
+// Static images are served by pokkum-static, which has no application to ask,
+// so a path is never baked into them.
+func resolveReadyPath(logger *slog.Logger, projectDir, strategy, flagValue, configValue string) (string, error) {
+	explicit, source := strings.TrimSpace(flagValue), "--ready-path"
+	if explicit == "" {
+		explicit, source = strings.TrimSpace(configValue), "image.ready_path"
+	}
+	if explicit == ports.ReadyPathOff {
+		return "", nil
+	}
+	if explicit != "" {
+		if !ports.ValidReadyPath(explicit) {
+			return "", fmt.Errorf("invalid %s %q: want an absolute path such as /api/ready, or %q: %w", source, explicit, ports.ReadyPathOff, core.ErrInvalidRequest)
+		}
+		if strategy == string(core.StrategyStatic) {
+			logger.Warn("ignoring "+source+": a static image is served by pokkum-static, which has no application to ask", "ready_path", explicit)
+			return "", nil
+		}
+		return explicit, nil
+	}
+
+	if strategy == string(core.StrategyStatic) {
+		return "", nil
+	}
+	route, err := sveltekitutils.DetectReadyRoute(projectDir)
+	if err != nil {
+		// Detection is a convenience; failing to look must not fail the build,
+		// and must not silently change readiness either: it stays TCP.
+		logger.Warn("could not look for an api/ready route; readiness stays a TCP connect to the app port", "error", err)
+		return "", nil
+	}
+	switch {
+	case !route.Found:
+		return "", nil
+	case route.URLPath == "":
+		logger.Warn("found "+route.File+" but not using it for readiness: "+route.Reason+"; set image.ready_path (or --ready-path) to the full path", "file", route.File)
+		return "", nil
+	default:
+		logger.Info("readiness: /readyz will follow the app's own endpoint", "path", route.URLPath, "file", route.File)
+		return route.URLPath, nil
+	}
 }

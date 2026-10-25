@@ -27,7 +27,7 @@ to stop.", and then returns — there is no `http.ListenAndServe`, `net.Listen`,
 call anywhere in the command. It reports `Status: "active"` and `UptimeSeconds: 0` in its JSON
 output unconditionally. Nothing is actually listening on the port the command names. Separately,
 the supervisor-level `/metrics` endpoint this command's description implies (`pokkum-init`
-registers only `/livez` and `/readyz`) does not exist either — neither Bun runtime metrics
+registers only `/healthz` and `/readyz`) does not exist either — neither Bun runtime metrics
 (event-loop lag, heap) nor cgroup limits are exported from PID 1. The app-side OTel metrics
 pipeline itself (see [OpenTelemetry SDK bootstrap](otel-sdk-bootstrap.md)) is real; this
 command's own claim about what it does is not.

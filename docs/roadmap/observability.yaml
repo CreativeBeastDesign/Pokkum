@@ -48,7 +48,7 @@ items:
       call anywhere in the command. It reports `Status: "active"` and `UptimeSeconds: 0` in its JSON
       output unconditionally. Nothing is actually listening on the port the command names. Separately,
       the supervisor-level `/metrics` endpoint this command's description implies (`pokkum-init`
-      registers only `/livez` and `/readyz`) does not exist either — neither Bun runtime metrics
+      registers only `/healthz` and `/readyz`) does not exist either — neither Bun runtime metrics
       (event-loop lag, heap) nor cgroup limits are exported from PID 1. The app-side OTel metrics
       pipeline itself (see [OpenTelemetry SDK bootstrap](item:otel-sdk-bootstrap)) is real; this
       command's own claim about what it does is not.
@@ -82,7 +82,7 @@ items:
     tier: polish
     summary: "Give pokkum-init a real /metrics HTTP handler exporting Bun runtime and cgroup metrics, which is the capability the removed pokkum metrics command only claimed to provide."
     problem: |
-      `pokkum-init` registers `/livez` and `/readyz` only. Nothing exports Bun runtime metrics
+      `pokkum-init` registers `/healthz` and `/readyz` only. Nothing exports Bun runtime metrics
       (event-loop lag, heap) or the container's cgroup limits from PID 1, so an operator wanting
       those has no Pokkum-provided source for them \u2014 the app-side OTel pipeline covers
       application spans, not the runtime the app sits on. This is the honest version of what
@@ -93,3 +93,38 @@ items:
     impl:
       - supervisor/cmd/pokkum-init/main.go
     related: ["metrics-command-shape", "otel-collector-sidecar"]
+
+  - id: app-readiness-endpoint
+    title: "App-controlled readiness (/readyz follows the app's own endpoint)"
+    status: shipped
+    kind: feature
+    tier: foundation
+    summary: "pokkum-init can poll an endpoint the app owns (src/routes/api/ready, auto-detected) so /readyz reflects whether the app can serve, not only whether its port is open."
+    problem: |
+      `/readyz` meant "the app port accepts a TCP connection", which is true the moment the server
+      listens: before migrations finish, before caches are warm, while the database is
+      unreachable. An app had no way to tell the load balancer "do not send me traffic yet".
+      `/healthz` was the wrong place for it: a dependency outage that failed liveness would
+      restart every pod at once, in a loop, and restarting fixes nothing.
+    decision: |
+      Taken 2026-10-25: the supervisor asks the app (pull); the app does not push state to the
+      supervisor. A pushed "not ready" cannot come from an app that has hung, and a mutating
+      supervisor endpoint would need its own access control. With `POKKUM_READY_PATH` set,
+      pokkum-init's existing readiness loop sends one GET per tick (800ms limit, redirects not
+      followed) and `/readyz` is 200 only on 2xx. Probe traffic still never reaches the app,
+      because `/readyz` answers from the cached result. The build auto-detects
+      `src/routes/api/ready/+server.(ts|js)` (route groups ignored, a literal `paths.base`
+      prefixed), and `image.ready_path` / `--ready-path` override it (`off` disables it). With no
+      route and nothing configured, no variable is written and the image is byte-identical to
+      before. `/healthz` is unchanged and stays process-only. Verified end to end against a real
+      image whose endpoint answered 503 while the app served pages.
+    flags: ["--ready-path"]
+    impl:
+      - supervisor/cmd/pokkum-init/probe.go
+      - supervisor/cmd/pokkum-init/config.go
+      - internal/adapters/sveltekitutils/readyroute.go
+      - cmd/pokkum/build.go
+    limitations:
+      - "A `paths.base` that is not a string literal (e.g. read from `process.env`) cannot be evaluated at build time. Auto-detection then steps aside with a warning, and `image.ready_path` must give the full path."
+      - "Static images (pokkum-static) have no application to ask, so they never use a readiness path."
+    related: ["supervisor-metrics-endpoint"]

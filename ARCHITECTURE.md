@@ -131,7 +131,7 @@ The same rule now covers *material*, not only constructors. `ports.BaseImageRequ
    - A standalone Go program cross-compiled to `linux/amd64` and `linux/arm64` and embedded in Pokkum.
    - Acts as `ENTRYPOINT ["/pokkum/init", "--", "/app/server"]`.
    - Handles PID-1 duties (reaping zombie sub-processes, forwarding OS signals like SIGTERM/SIGINT).
-   - Serves HTTP health endpoints (`/healthz`, `/readyz`) on `POKKUM_PROBE_PORT` (default: 8081).
+   - Serves HTTP health endpoints (`/healthz`, `/readyz`) on `POKKUM_PROBE_PORT` (default: 8081). `/healthz` answers from the supervisor's own child bookkeeping only. `/readyz` answers from a once-per-second readiness loop: a TCP connect to the app port, or, when `POKKUM_READY_PATH` is set, a `GET` of the app's own readiness endpoint (2xx within 800ms; redirects not followed). Probe requests never reach the app; they read the loop's cached result. The build sets `POKKUM_READY_PATH` from `--ready-path` / `image.ready_path`, or auto-detects `src/routes/api/ready` via `sveltekitutils.DetectReadyRoute`, and writes nothing when there is none.
    - **Fast startup overlap**: `main` resolves the child executable up front (`resolveChildPath` → `New(..., WithChildPath(...))`), so `start()` forks immediately with no `exec.LookPath` on the fork path; the probe listener binds `/healthz` on its own goroutine concurrently with the Bun fork/exec rather than serializing after it. Guarded by `startup_test.go`.
 
 ---
@@ -242,7 +242,7 @@ Because Pokkum container images run without Docker or a full OS init system, the
 * **Signal Forwarding**: Receives `SIGTERM` / `SIGINT` from Kubernetes/Docker and forwards them to `/app/server`.
 * **Zombie Reaping**: Automatically reaps orphaned child processes using `unix.Wait4`.
 * **Graceful Shutdown**: Waits up to `POKKUM_SHUTDOWN_TIMEOUT` (default `30s`) for `/app/server` to exit before sending `SIGKILL`.
-* **Probes**: Exposes `/healthz` (supervisor status) and `/readyz` (app status) on `POKKUM_PROBE_PORT` (default `8081`).
+* **Probes**: Exposes `/healthz` (supervisor status) and `/readyz` (app status: port open, or the app's own `POKKUM_READY_PATH` endpoint answering 2xx) on `POKKUM_PROBE_PORT` (default `8081`).
 
 **Compressed embedding**: The `pokkum-init` binaries are cross-compiled by `make supervisor` into the `internal/adapters/supervisor/bin` directory and embedded zstd-compressed (`.zst`) into the `pokkum` CLI, cutting the embedded footprint from ~12 MB to ~4.7 MB. `ports.SupervisorProvider.Binary` decompresses the blob on-the-fly so the bytes written to `/pokkum/init` remain the bit-identical raw ELF — image digests, layer cache keys, and supervisor version labels are unaffected.
 

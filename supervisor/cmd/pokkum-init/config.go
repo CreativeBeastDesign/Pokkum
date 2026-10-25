@@ -29,6 +29,12 @@ const (
 	envRequiredEnv       = "POKKUM_REQUIRED_ENV"
 	envAttestationDigest = "POKKUM_ATTESTATION_DIGEST"
 
+	// envReadyPath mirrors ports.EnvReadyPath: an HTTP path on the
+	// application (e.g. "/api/ready") whose answer /readyz reports. Unset
+	// keeps readiness at "the app port accepts a TCP connection", exactly as
+	// before the variable existed.
+	envReadyPath = "POKKUM_READY_PATH"
+
 	// envDevMode mirrors ports.EnvDevMode. It is the single opt-in for the
 	// in-pod development loop and is never set by the packager: an image
 	// carries it only because an operator put it on the workload. Two
@@ -97,6 +103,11 @@ type Config struct {
 	// digest from the live /app tree before exec and refuses to start on
 	// mismatch. When empty, no verification runs.
 	AttestationDigest string
+
+	// ReadyPath is the application's own readiness endpoint. When set, the
+	// readiness loop sends it an HTTP GET each tick and /readyz is 200 only
+	// while it answers 2xx. Empty means readiness is a TCP connect to Port.
+	ReadyPath string
 }
 
 // parseConfig resolves configuration from the environment and then applies flag
@@ -173,6 +184,14 @@ func parseConfig(args []string, getenv func(string) string, out io.Writer) (Conf
 			cfg.AttestationDigest = raw
 		} else {
 			warnf("ignoring malformed %s (want 64 lowercase hex chars), startup attestation is disabled", envAttestationDigest)
+		}
+	}
+
+	if raw := strings.TrimSpace(getenv(envReadyPath)); raw != "" {
+		if validReadyPath(raw) {
+			cfg.ReadyPath = raw
+		} else {
+			warnf("ignoring invalid %s=%q (want an absolute path such as /api/ready), readiness falls back to a TCP connect", envReadyPath, raw)
 		}
 	}
 
@@ -316,4 +335,22 @@ func parseLevel(s string) (slog.Level, error) {
 func parseBoolEnv(raw string) bool {
 	b, err := strconv.ParseBool(strings.TrimSpace(raw))
 	return err == nil && b
+}
+
+// validReadyPath reports whether p is a request path the readiness loop can
+// send to the application on 127.0.0.1: absolute, not protocol-relative
+// ("//host" would name another host), with no whitespace, control bytes or
+// fragment. Mirrors ports.ValidReadyPath, which the build applies to the same
+// value before baking it; this side only warns, because environment parsing
+// must never stop the container from starting.
+func validReadyPath(p string) bool {
+	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.ContainsAny(p, "#\\") {
+		return false
+	}
+	for _, r := range p {
+		if r <= ' ' || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }

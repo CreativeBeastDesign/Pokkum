@@ -155,6 +155,7 @@ Regenerate with: make docs   (or: go run ./scripts/gen-docs)
 
 | Title | Summary | Kind | Status | Commits |
 | --- | --- | --- | --- | --- |
+| [App-controlled readiness (/readyz follows the app's own endpoint)](items/app-readiness-endpoint.md) | pokkum-init can poll an endpoint the app owns (src/routes/api/ready, auto-detected) so /readyz reflects whether the app can serve, not only whether its port is open. | feature | shipped |  |
 | [Kubernetes OTel Collector sidecar injection (--with-otel-sidecar)](items/otel-collector-sidecar.md) | Injects an OpenTelemetry Collector sidecar spec (4317 gRPC, 4318 HTTP, 8889 metrics) directly into generated Kubernetes workload manifests. | feature | shipped |  |
 | [OpenTelemetry SDK bootstrap (--telemetry)](items/otel-sdk-bootstrap.md) | Starts a real OTel NodeSDK + OTLP trace exporter before the app runs, via a compile-entrypoint wrapper for `--strategy=exe` and a packaged `bun --preload` file for `--strategy=layered`. | feature | shipped |  |
 

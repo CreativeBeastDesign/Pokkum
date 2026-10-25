@@ -329,6 +329,9 @@ image
   address_header        adapter-node ADDRESS_HEADER.
   xff_depth             adapter-node XFF_DEPTH.
   body_size_limit       adapter-node BODY_SIZE_LIMIT.
+  ready_path            the app's own readiness endpoint behind /readyz, e.g.
+                        /api/ready. Unset auto-detects src/routes/api/ready;
+                        "off" disables that. See the "readiness" topic.
 
 build
   exclude_routes             route paths (not file globs) to drop. A bare path
@@ -673,6 +676,88 @@ which are checked by pokkum config validate.
 `,
 	},
 	{
+		Topic: "readiness",
+		Title: "Health probes, and letting the app decide when it is ready",
+		Body: `
+WHAT THE PROBE PORT ANSWERS (8081 by default)
+
+  /healthz   liveness. 200 while the supervisor's child process is running.
+             Never touches the application. A failing liveness probe makes
+             Kubernetes RESTART the container.
+  /readyz    readiness. 503 until startup attestation passes, during
+             shutdown, and whenever the app is not ready. A failing readiness
+             probe only stops traffic being sent to the pod.
+
+  By default "ready" means the app port accepts a TCP connection: the server
+  is listening. That says nothing about whether the app can do useful work,
+  which is what an app readiness endpoint adds.
+
+LETTING THE APP DECIDE
+
+  Add a route at src/routes/api/ready/+server.ts:
+
+    import type { RequestHandler } from './$types';
+    import { db } from '$lib/server/db';
+
+    export const GET: RequestHandler = async () => {
+      try {
+        await db.execute('select 1');
+        return new Response('ok');
+      } catch {
+        return new Response('database unreachable', { status: 503 });
+      }
+    };
+
+  pokkum build finds it and bakes POKKUM_READY_PATH=/api/ready into the image.
+  The supervisor then sends GET /api/ready to the app once a second, and
+  /readyz is 200 only while that answers 2xx. Anything else is not ready: another
+  status, a redirect, no answer within 800ms, or a refused connection. The
+  supervisor logs each change with the app's own response text.
+
+  Kubelet probes never reach the app: /readyz answers from the last check, so
+  the app (and the database it pings) sees one request per second however many
+  probes arrive.
+
+  Without that route nothing changes: no variable is baked into the image, and
+  /readyz stays a TCP check exactly as before.
+
+CONFIGURING IT
+
+  image.ready_path / --ready-path   use another path, e.g. /healthcheck/deep
+  image.ready_path: off             do not use src/routes/api/ready even if
+                                    it exists
+  POKKUM_READY_PATH at deploy time  overrides what the image carries
+                                    (e.g. env: in a Kubernetes Deployment)
+
+  The path must include a SvelteKit paths.base. A literal base is detected
+  automatically; a base read from process.env is not, and the build says so.
+  Set image.ready_path to the full path then. Static images (pokkum-static)
+  have no application to ask and never use one.
+
+WRITING THE ENDPOINT
+
+  - Answer fast. 800ms is the limit, and slower counts as not ready. Use a
+    trivial query, with a timeout shorter than that.
+  - Exclude it from auth and redirects in hooks.server.ts. A redirect to
+    /login is a 303, which is "not ready".
+  - Check only what this pod cannot serve without. Warm-up work (migrations
+    finished, caches primed, config loaded) is the clearest case.
+  - Never point liveness at it. /healthz stays process-only on purpose: a
+    database outage that failed liveness would restart every pod at once, in
+    a loop, and restarting fixes nothing.
+
+WHEN NOT TO
+
+  A dependency every pod shares (the database) makes every pod unready at the
+  same moment. Kubernetes then has no endpoint left for the Service, and users
+  get the ingress's bare 503 instead of your app's own error page. That is the
+  right outcome when the app is useless without the database. It is the wrong
+  one when the app could degrade gracefully (serve cached or read-only pages,
+  show a maintenance banner). In that case keep the database out of readiness
+  and handle the outage in the app.
+`,
+	},
+	{
 		Topic: "verify",
 		Title: "Verifying what you built",
 		Body: `
@@ -696,7 +781,8 @@ DOES IT ACTUALLY RUN?
 
   docker run -u 65532 -p 3000:3000 -e <each require_env name>=<placeholder> <image>
 
-  Then check the app, plus /healthz and /readyz on the probe port.
+  Then check the app, plus /healthz and /readyz on the probe port (see the
+  "readiness" topic for what each one means).
 
   Always exercise the container as the real runtime user. docker exec defaults
   to root, and root bypasses the read-only modes described in the "invariants"

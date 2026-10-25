@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **App-controlled readiness.** Add a `src/routes/api/ready/+server.ts` route and `/readyz`
+  follows it: `pokkum-init` sends it a GET once a second, and the pod is ready only while it
+  answers 2xx. Use it to hold traffic until migrations finish or a database is reachable.
+  `pokkum build` detects the route and bakes `POKKUM_READY_PATH` into the image;
+  `image.ready_path` / `--ready-path` choose another path, and `off` opts out. **Projects without
+  the route are unaffected**: nothing is written, and `/readyz` remains a check that the app port
+  is open. `/healthz` is unchanged. `pokkum guide readiness` covers when to use it and when not to.
+
 ### Fixed
 
 - **`pokkum upgrade` failed with a bare "permission denied" on a root-owned install.** An

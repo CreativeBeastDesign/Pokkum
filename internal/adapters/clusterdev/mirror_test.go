@@ -126,6 +126,19 @@ func TestDevSyncSubcommand_MatchesSupervisorMirror(t *testing.T) {
 // TestSupervisorMirrorCheckCanFail guards the guard: it proves the parser
 // refuses rather than returning a quiet empty string, which is the only way
 // the two comparisons above can be trusted to mean anything.
+// TestReadyPathEnvName_MatchesSupervisorMirror: the packager writes
+// ports.EnvReadyPath into the image and pokkum-init reads its own copy. Drift
+// would bake an app readiness path nothing reads, so /readyz would silently
+// stay a TCP connect. It lives here because this file already has the
+// pokkum-init source parser.
+func TestReadyPathEnvName_MatchesSupervisorMirror(t *testing.T) {
+	got := mustParseSupervisorConst(t, supervisorConfigSource, "envReadyPath")
+	if got != ports.EnvReadyPath {
+		t.Fatalf("ready-path env name has drifted:\n  pokkum-init: %q\n  ports:       %q\n"+
+			"Images would carry an app readiness path pokkum-init never reads.", got, ports.EnvReadyPath)
+	}
+}
+
 func TestSupervisorMirrorCheckCanFail(t *testing.T) {
 	t.Run("missing declaration", func(t *testing.T) {
 		got, err := parseSupervisorStringConst(supervisorSource(supervisorConfigSource), "thisConstantDoesNotExist")

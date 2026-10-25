@@ -292,6 +292,17 @@ Shells out to `docker-credential-*` binaries (ECR, GCR, OSXKeychain) with in-mem
 
 ## Observability
 
+### [App-controlled readiness (/readyz follows the app's own endpoint)](items/app-readiness-endpoint.md)
+
+pokkum-init can poll an endpoint the app owns (src/routes/api/ready, auto-detected) so /readyz reflects whether the app can serve, not only whether its port is open.
+
+- Flags: `--ready-path`
+- Implementation:
+  - [supervisor/cmd/pokkum-init/probe.go](../supervisor/cmd/pokkum-init/probe.go)
+  - [supervisor/cmd/pokkum-init/config.go](../supervisor/cmd/pokkum-init/config.go)
+  - [internal/adapters/sveltekitutils/readyroute.go](../internal/adapters/sveltekitutils/readyroute.go)
+  - [cmd/pokkum/build.go](../cmd/pokkum/build.go)
+
 ### [Kubernetes OTel Collector sidecar injection (--with-otel-sidecar)](items/otel-collector-sidecar.md)
 
 Injects an OpenTelemetry Collector sidecar spec (4317 gRPC, 4318 HTTP, 8889 metrics) directly into generated Kubernetes workload manifests.
@@ -590,6 +601,8 @@ Change the base-image trusted-root field from a file path to bytes so all three 
 
 ### Observability
 
+- A `paths.base` that is not a string literal (e.g. read from `process.env`) cannot be evaluated at build time. Auto-detection then steps aside with a warning, and `image.ready_path` must give the full path. ([App-controlled readiness (/readyz follows the app's own endpoint)](items/app-readiness-endpoint.md))
+- Static images (pokkum-static) have no application to ask, so they never use a readiness path. ([App-controlled readiness (/readyz follows the app's own endpoint)](items/app-readiness-endpoint.md))
 - No automatic HTTP/framework instrumentation: `@opentelemetry/auto-instrumentations-node`'s module-patching approach does not take effect under Bun's runtime. Real spans require the documented `hooks.server.ts` snippet, never auto-injected. ([OpenTelemetry SDK bootstrap (--telemetry)](items/otel-sdk-bootstrap.md))
 - Rejected outright for `--runtime=node` — the layered bootstrap's `bun --preload` mechanism is Bun-specific with no Node equivalent yet. ([OpenTelemetry SDK bootstrap (--telemetry)](items/otel-sdk-bootstrap.md))
 - `--metrics-only` is non-functional: combining an OTLP metrics exporter with the SDK crashes once compiled via `bun build --compile` — a real Bun bundler bug, not a Pokkum bug. It warns at runtime rather than silently doing nothing. ([OpenTelemetry SDK bootstrap (--telemetry)](items/otel-sdk-bootstrap.md))

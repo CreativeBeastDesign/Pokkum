@@ -220,6 +220,9 @@ func (m *Manager) ApplyProfile(base *ports.ProjectConfig, profileName string) (*
 	if profile.Image.BodySizeLimit != "" {
 		merged.Image.BodySizeLimit = profile.Image.BodySizeLimit
 	}
+	if profile.Image.ReadyPath != "" {
+		merged.Image.ReadyPath = profile.Image.ReadyPath
+	}
 	if len(profile.Image.Ports) > 0 {
 		merged.Image.Ports = append([]int{}, profile.Image.Ports...)
 	}

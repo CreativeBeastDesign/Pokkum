@@ -284,8 +284,8 @@ jobs:
           passed="$(grep -c -- '--- PASS: TestRuntimeSmoke' runtime-smoke.log || true)"
           # Layered (bun), static, and --runtime=node. Raise this floor when a
           # smoke test is added; never lower it to make a red run green.
-          if [ "$passed" -lt 3 ]; then
-            echo "::error::only $passed runtime smoke tests passed, expected at least 3"
+          if [ "$passed" -lt 4 ]; then
+            echo "::error::only $passed runtime smoke tests passed, expected at least 4"
             exit 1
           fi
           echo "runtime smoke tests passed: $passed"

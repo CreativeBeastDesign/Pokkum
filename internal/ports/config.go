@@ -41,6 +41,13 @@ type ImageConfig struct {
 	AddressHeader  string `yaml:"address_header,omitempty" json:"address_header,omitempty"`
 	XFFDepth       int    `yaml:"xff_depth,omitempty" json:"xff_depth,omitempty"`
 	BodySizeLimit  string `yaml:"body_size_limit,omitempty" json:"body_size_limit,omitempty"`
+
+	// ReadyPath is the application's own readiness endpoint, polled by
+	// pokkum-init to answer /readyz (see RuntimeConfig.ReadyPath). Unset
+	// means auto-detect: a src/routes/api/ready/+server.(ts|js) route is used
+	// when present, otherwise readiness stays a TCP connect. "off" disables
+	// auto-detection.
+	ReadyPath string `yaml:"ready_path,omitempty" json:"ready_path,omitempty"`
 }
 
 // BuildConfig holds settings that shape what the build produces, as opposed to

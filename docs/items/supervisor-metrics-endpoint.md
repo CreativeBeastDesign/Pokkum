@@ -20,7 +20,7 @@ Give pokkum-init a real /metrics HTTP handler exporting Bun runtime and cgroup m
 
 ## Problem
 
-`pokkum-init` registers `/livez` and `/readyz` only. Nothing exports Bun runtime metrics
+`pokkum-init` registers `/healthz` and `/readyz` only. Nothing exports Bun runtime metrics
 (event-loop lag, heap) or the container's cgroup limits from PID 1, so an operator wanting
 those has no Pokkum-provided source for them \u2014 the app-side OTel pipeline covers
 application spans, not the runtime the app sits on. This is the honest version of what

@@ -304,10 +304,12 @@ func TestPokkumEnvWithOriginContract(t *testing.T) {
 		AddressHeader:   "x-forwarded-for",
 		XFFDepth:        2,
 		BodySizeLimit:   "10M",
+		ReadyPath:       "/api/ready",
 	}
 	got := pokkumEnv(rc)
 
 	want := map[string]string{
+		ports.EnvReadyPath:      "/api/ready",
 		ports.EnvOrigin:         "https://example.com",
 		ports.EnvProtocolHeader: "x-forwarded-proto",
 		ports.EnvHostHeader:     "x-forwarded-host",
@@ -340,7 +342,10 @@ func TestPokkumEnvOmitsOriginContractWhenUnset(t *testing.T) {
 	got := pokkumEnv(rc)
 	for _, e := range got {
 		switch e.key {
-		case ports.EnvOrigin, ports.EnvProtocolHeader, ports.EnvHostHeader, ports.EnvAddressHeader, ports.EnvXFFDepth, ports.EnvBodySizeLimit:
+		// EnvReadyPath belongs here too: written empty it would not be
+		// harmless, it would make every image without a readiness route
+		// differ from one built before the variable existed.
+		case ports.EnvOrigin, ports.EnvProtocolHeader, ports.EnvHostHeader, ports.EnvAddressHeader, ports.EnvXFFDepth, ports.EnvBodySizeLimit, ports.EnvReadyPath:
 			t.Errorf("pokkumEnv() unexpectedly emitted %s=%q with RuntimeConfig fields unset", e.key, e.value)
 		}
 	}

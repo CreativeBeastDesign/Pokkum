@@ -131,6 +131,7 @@ func main() {
 	// A probe server that fails to bind its port logs and returns rather than
 	// exiting the process; it must never be able to take the application down.
 	probeSrv := NewProbeServer(sup, sup.ProbePort(), sup.AppPort(), log)
+	probeSrv.UseReadyPath(sup.ReadyPath())
 	probeSrv.BeginAttestation()
 	go probeSrv.Serve(context.Background())
 	defer probeSrv.Shutdown()

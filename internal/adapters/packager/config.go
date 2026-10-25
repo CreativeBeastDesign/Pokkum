@@ -119,6 +119,9 @@ func pokkumEnv(rc ports.RuntimeConfig) []envVar {
 	if rc.BodySizeLimit != "" {
 		out = append(out, envVar{ports.EnvBodySizeLimit, rc.BodySizeLimit})
 	}
+	if rc.ReadyPath != "" {
+		out = append(out, envVar{ports.EnvReadyPath, rc.ReadyPath})
+	}
 	if len(rc.RequireEnv) > 0 {
 		reqEnvs := slices.Clone(rc.RequireEnv)
 		slices.Sort(reqEnvs)

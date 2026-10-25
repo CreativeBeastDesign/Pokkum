@@ -182,6 +182,10 @@ func (s *Supervisor) ProbePort() int { return s.cfg.ProbePort }
 // connections, rather than merely alive, dials this.
 func (s *Supervisor) AppPort() int { return s.cfg.Port }
 
+// ReadyPath returns the application readiness path (Config.ReadyPath), or ""
+// when readiness is a plain TCP connect to AppPort.
+func (s *Supervisor) ReadyPath() string { return s.cfg.ReadyPath }
+
 // Run starts the child and supervises it until it exits, returning the exit
 // code the supervisor should terminate with.
 //

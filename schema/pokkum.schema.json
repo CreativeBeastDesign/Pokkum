@@ -167,6 +167,9 @@
         "protocol_header": {
           "type": "string"
         },
+        "ready_path": {
+          "type": "string"
+        },
         "require_env": {
           "type": "array",
           "items": {
@@ -374,6 +377,9 @@
                 "type": "integer"
               },
               "protocol_header": {
+                "type": "string"
+              },
+              "ready_path": {
                 "type": "string"
               },
               "require_env": {

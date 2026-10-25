@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -153,6 +154,14 @@ const (
 	// EnvRequiredEnv is read by pokkum-init as a comma-separated list of
 	// environment variable names that must be present and non-empty at runtime.
 	EnvRequiredEnv = "POKKUM_REQUIRED_ENV"
+
+	// EnvReadyPath is read by pokkum-init as the application's own readiness
+	// endpoint (e.g. "/api/ready"): when set, /readyz is 200 only while a GET
+	// of that path on the app answers 2xx. Unset keeps readiness at "the app
+	// port accepts a TCP connection". Written only when RuntimeConfig.ReadyPath
+	// is non-empty, so an image without one is byte-identical to one built
+	// before the variable existed.
+	EnvReadyPath = "POKKUM_READY_PATH"
 
 	// EnvPrerenderedDir is read by the patched adapter-node runtime handler to
 	// choose where prerendered pages are served from. It is set to
@@ -481,7 +490,34 @@ type RuntimeConfig struct {
 	// size-string format, e.g. "512K", "10M", "Infinity"). Empty means unset —
 	// adapter-node's own default ("512K") applies.
 	BodySizeLimit string
+
+	// ReadyPath is written to POKKUM_READY_PATH (see EnvReadyPath). Empty
+	// means unset: readiness stays a TCP connect to Port. Must satisfy
+	// ValidReadyPath.
+	ReadyPath string
 }
+
+// ValidReadyPath reports whether p can be used as an application readiness
+// path: an absolute request path ("/api/ready", optionally with a query), not
+// protocol-relative ("//host/..." would name another host), with no
+// whitespace, control bytes, backslash or fragment. pokkum-init applies the
+// same rule to the environment value it reads (validReadyPath in
+// supervisor/cmd/pokkum-init/config.go).
+func ValidReadyPath(p string) bool {
+	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.ContainsAny(p, "#\\") {
+		return false
+	}
+	for _, r := range p {
+		if r <= ' ' || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// ReadyPathOff is the ImageConfig.ReadyPath / --ready-path value that turns
+// readiness-route auto-detection off without naming a path.
+const ReadyPathOff = "off"
 
 // WithDefaults returns a copy of c with every zero field replaced by its
 // contract default. It does not mutate c and does not merge Env — the returned

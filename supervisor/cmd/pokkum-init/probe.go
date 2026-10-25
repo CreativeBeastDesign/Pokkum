@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -38,6 +40,18 @@ const (
 	// defaultReadyInterval so a wedged dial cannot delay the next tick
 	// indefinitely.
 	dialTimeout = 500 * time.Millisecond
+
+	// readyRequestTimeout bounds one GET to the application's readiness path,
+	// connect included. Longer than dialTimeout because it covers a whole
+	// HTTP exchange, still under defaultReadyInterval so a slow endpoint
+	// cannot stack requests: a check that has not answered in time is a
+	// "not ready", which is what a slow dependency check should produce.
+	readyRequestTimeout = 800 * time.Millisecond
+
+	// readyBodyLimit caps how much of the readiness response is read. Only
+	// the status code matters; the body is drained so the connection closes
+	// cleanly, and the first bytes are kept for the log line on a failure.
+	readyBodyLimit = 4 << 10
 )
 
 // ProbeServer serves the liveness and readiness endpoints a container runtime
@@ -92,6 +106,16 @@ type ProbeServer struct {
 	// still unknown.
 	attestationPending atomic.Bool
 
+	// readyPath, when non-empty, switches the readiness check from a TCP
+	// connect to an HTTP GET of this path on the application (UseReadyPath).
+	// Written once before Serve starts the loop and read only by the loop.
+	readyPath string
+
+	// lastReadyDetail is the outcome the loop last logged, so a failing
+	// readiness endpoint produces one log line per change instead of one per
+	// second. Touched only by the readiness loop goroutine.
+	lastReadyDetail string
+
 	srv *http.Server
 }
 
@@ -133,6 +157,12 @@ func NewProbeServer(state ProcessState, probePort, appPort int, log *slog.Logger
 // starting Serve so no readiness answer can be given for the window between
 // the bind and the verdict.
 func (p *ProbeServer) BeginAttestation() { p.attestationPending.Store(true) }
+
+// UseReadyPath makes readiness ask the application itself: each tick sends
+// GET <path> to the app port, and /readyz is 200 only while that answers 2xx.
+// An empty path keeps the plain TCP-connect check, which is the behaviour of
+// every image built without a readiness path. Call it before Serve.
+func (p *ProbeServer) UseReadyPath(path string) { p.readyPath = path }
 
 // AttestationPassed clears the readiness gate BeginAttestation set. It is only
 // ever called on the success path — a failed attestation exits the process, so
@@ -249,12 +279,23 @@ func (p *ProbeServer) runReadinessLoop(ctx context.Context) {
 	}
 }
 
-// checkReady performs one dial against the application port and updates the
-// cached readiness flag. A successful TCP connect is proof enough that the
-// application is accepting connections; nothing about the flag's consumers
-// requires an HTTP round trip, and skipping one keeps the check cheap enough
-// to run every tick indefinitely.
+// checkReady performs one readiness check and updates the cached flag.
+//
+// Without a ready path it is a TCP connect: a successful connect is proof
+// enough that the application is accepting connections, and skipping an HTTP
+// round trip keeps the check cheap enough to run every tick indefinitely.
+//
+// With a ready path the application decides: one GET per tick, 2xx is ready,
+// anything else (another status, a redirect, a timeout, a refused
+// connection) is not. The request is still issued by this loop and never by
+// a probe request, so kubelet traffic cannot multiply load on the app or on
+// whatever dependency its endpoint checks.
 func (p *ProbeServer) checkReady(ctx context.Context) {
+	if p.readyPath != "" {
+		p.recordReady(p.checkReadyPath(ctx))
+		return
+	}
+
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
@@ -266,4 +307,72 @@ func (p *ProbeServer) checkReady(ctx context.Context) {
 	}
 	_ = conn.Close()
 	p.ready.Store(true)
+}
+
+// checkReadyPath sends one GET to the application's readiness path and
+// returns whether it answered 2xx, with a short description of the outcome.
+func (p *ProbeServer) checkReadyPath(ctx context.Context) (bool, string) {
+	reqCtx, cancel := context.WithTimeout(ctx, readyRequestTimeout)
+	defer cancel()
+
+	// The host is fixed to the loopback app port; only the path comes from the
+	// environment, and validReadyPath has already rejected anything that could
+	// name another host ("//host", a scheme, a backslash). gosec's G704 taint
+	// analysis sees an env-derived string reach a request and cannot see that,
+	// so it is excluded at these two sites rather than repo-wide.
+	url := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(p.appPort)) + p.readyPath
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil) //nolint:gosec // G704: loopback host, validated path (see above)
+	if err != nil {
+		return false, "invalid readiness request: " + err.Error()
+	}
+	req.Header.Set("User-Agent", "pokkum-init/"+version+" (readiness)")
+
+	client := &http.Client{
+		// The injected dialer, so tests can drive this path exactly like the
+		// TCP check. No keep-alive: one short-lived connection per tick, the
+		// same footprint as the dial it replaces.
+		Transport: &http.Transport{DialContext: p.dialer, DisableKeepAlives: true},
+		// A redirect is an answer, not a detour to follow: an auth hook
+		// bouncing /api/ready to /login means the endpoint is not reachable
+		// as configured, and following it would report the login page's 200.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := client.Do(req) //nolint:gosec // G704: loopback host, validated path (see above)
+	if err != nil {
+		return false, "readiness endpoint unreachable: " + err.Error()
+	}
+	defer func() { _ = resp.Body.Close() }()
+	head, _ := io.ReadAll(io.LimitReader(resp.Body, readyBodyLimit))
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return true, "ready"
+	}
+	detail := fmt.Sprintf("readiness endpoint answered %d", resp.StatusCode)
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		detail += " (is the route deployed at this path? a SvelteKit paths.base must be included)"
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		detail += " (a redirect, often an auth hook; exclude the readiness route from it)"
+	}
+	if body := strings.TrimSpace(string(head)); body != "" {
+		if len(body) > 200 {
+			body = body[:200] + "..."
+		}
+		detail += ": " + body
+	}
+	return false, detail
+}
+
+// recordReady stores the result and logs only when the outcome changes.
+func (p *ProbeServer) recordReady(ok bool, detail string) {
+	p.ready.Store(ok)
+	if detail == p.lastReadyDetail {
+		return
+	}
+	p.lastReadyDetail = detail
+	if ok {
+		p.log.Info("application readiness endpoint reports ready", "path", p.readyPath)
+		return
+	}
+	p.log.Warn("application not ready", "path", p.readyPath, "reason", detail)
 }
