@@ -1,5 +1,5 @@
 {
-  "snapshot": "2026-10-25",
+  "snapshot": "2026-10-26",
   "sources": [
     "https://api.osv.dev/v1/query (npm: @sveltejs/kit, bun)",
     "https://api.github.com/repos/oven-sh/bun/security-advisories"
