@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v1.4.0] — 2026-10-26
+
+Apps can now decide when their container is ready, and `pokkum upgrade` tells you what to run
+when it cannot replace itself.
+
 ### Added
 
 - **App-controlled readiness.** Add a `src/routes/api/ready/+server.ts` route and `/readyz`
