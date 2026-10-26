@@ -129,19 +129,27 @@ func TestVendorJob_StopTearsDownARunningInstall(t *testing.T) {
 
 	markers := t.TempDir()
 	started := filepath.Join(markers, "started")
-	finished := filepath.Join(markers, "finished")
-	// The marker is touched by a *grandchild* (a backgrounded subshell), not by
-	// the bun script itself. That distinction is the whole test: killing only
-	// the direct child would suppress the marker for free and prove nothing,
-	// because the dead shell is the thing that would have touched it. A
-	// grandchild survives a plain kill and touches the marker anyway, so this
-	// fixture can tell a process-group teardown from a single-process one —
-	// which is exactly what `bun install` does when it forks helpers.
+	pidFile := filepath.Join(markers, "grandchild-pid")
+	// The process that must die is a *grandchild* (a backgrounded `sh -c`),
+	// not the bun script itself. That distinction is the whole test: killing
+	// only the direct child would leave the grandchild running, so this
+	// fixture can tell a process-group teardown from a single-process one,
+	// which is exactly what `bun install` needs when it forks helpers.
+	//
+	// The grandchild records its own PID and touches `started` itself, so the
+	// test cannot call stop() until the fork has completed. The script used to
+	// touch `started` BEFORE forking a `( sleep 3; touch finished ) &`
+	// subshell, which raced the group kill against the fork itself: on macOS
+	// a kill(-pgid) concurrent with fork can miss the new child, which then
+	// ran to completion and failed the v1.4.0 release check with teardown
+	// working correctly. It also raced a fixed `sleep 3` clock, the same flake
+	// TestPrepare_CancelledContextLeaksNeitherInstallNorGoroutine was fixed
+	// for. Now the grandchild never exits on its own, so the only way it stops
+	// is being killed, and the assertion is that its process is gone.
 	putFakeBunOnPath(t, `
 case "$1" in
   install)
-    touch `+started+`
-    ( sleep 3; touch `+finished+` ) &
+    sh -c 'echo $$ > `+pidFile+`; touch `+started+`; while :; do sleep 0.1; done' &
     wait
     ;;
 esac
@@ -163,15 +171,9 @@ exit 0`)
 		t.Fatal("stop() did not return: the install goroutine leaked")
 	}
 
-	// The bun process was killed rather than merely abandoned. If it had been
-	// left running, its own `sleep 3` would complete and touch the marker.
-	deadline := time.Now().Add(6 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(finished); err == nil {
-			t.Fatal("the vendor install process survived stop(): it ran to completion after the job was torn down")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	// The grandchild was killed rather than merely abandoned: it never exits
+	// on its own, so only the process-group kill can have ended it.
+	assertInstallProcessExited(t, pidFile, 6*time.Second)
 
 	// stop() must not merely signal the goroutine, it must *wait* for it: these
 	// fields are written by the install goroutine, so reading them here is

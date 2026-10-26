@@ -5,6 +5,16 @@ preventative rule each one produced. Newest entries first.
 
 ---
 
+## 2026-10-26 — The vendor-cancellation flake came back in the sibling test the first fix never touched
+
+**Category:** flaky test / incomplete sweep
+**Root cause:** On 2026-09-09 the two-clocks race (a fixed `sleep 3` fake install versus kill propagation) was fixed in `TestPrepare_CancelledContextLeaksNeitherInstallNorGoroutine`. `TestVendorJob_StopTearsDownARunningInstall`, in the same file and asserting the same property, kept the `sleep 3` and failed the v1.4.0 macOS release check. It also had a second race: the script touched its start marker before forking the `( sleep 3; touch finished ) &` grandchild, so the test's kill could land during the fork, and on macOS a process-group kill racing a fork can miss the new child. Production teardown was correct throughout; a direct-child-only kill is what the test exists to catch, and it still does.
+**Where:** `internal/adapters/bunexec/vendor_concurrency_test.go`.
+**Fix:** the grandchild (`sh -c … &`) writes its own PID and touches the start marker after it exists, then loops forever. The test asserts that PID is gone via `assertInstallProcessExited`, which also kills it on failure. 20/20 locally; red with a single-process kill.
+**Preventative rule:** When fixing a flaky test's mechanism, grep for every test using the same fixture shape (`sleep N` racing a teardown, a "started" marker written before the thing it announces) and fix them in the same change. A start marker must be written by the process it announces, after it exists. Checklist row 26.
+
+---
+
 ## 2026-10-25 — `pokkum upgrade` assumed it could rewrite its own directory, which a `sudo` install and a package manager both make false
 
 **Category:** environment-assumption / silent-precondition

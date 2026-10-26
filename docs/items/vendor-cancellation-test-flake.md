@@ -57,6 +57,14 @@ fail left exactly one such orphan behind, found with `ps` and killed by hand. So
 is unconditional `t.Cleanup` rather than part of the assertion — a red test must not also
 litter the machine.
 
+Recurred 2026-10-26 on the v1.4.0 macOS check, in the sibling test
+`TestVendorJob_StopTearsDownARunningInstall`. The September fix applied the same shape to
+only one of the two tests in the file, and the sibling still had a `sleep 3` clock. It also
+touched its start marker *before* forking the grandchild, so the group kill could land
+during the fork, which macOS can miss. The grandchild now records its own PID and marks
+itself started, so the kill can only come after the fork, and it never exits on its own.
+Proven to fail with a direct-child-only kill.
+
 Verified 20/20 consecutive runs, and 10/10 under `-race`.
 
 ## Implementation
