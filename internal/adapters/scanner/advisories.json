@@ -1,5 +1,5 @@
 {
-  "snapshot": "2026-10-25",
+  "snapshot": "2026-11-16",
   "sources": [
     "https://api.osv.dev/v1/query (npm: @sveltejs/kit, bun)",
     "https://api.github.com/repos/oven-sh/bun/security-advisories"
@@ -74,6 +74,23 @@
       "published": "2026-04-10"
     },
     {
+      "id": "GHSA-3r8g-jcqq-3p5j",
+      "aliases": [
+        "CVE-2026-128120"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "high",
+      "title": "SvelteKit: DoS while parsing form data from a remote functions `form`",
+      "url": "https://github.com/advisories/GHSA-3r8g-jcqq-3p5j",
+      "ranges": [
+        {
+          "introduced": "2.42.0",
+          "fixed": "3.1.1"
+        }
+      ],
+      "published": "2026-11-16"
+    },
+    {
       "id": "GHSA-5p75-vc5g-8rv2",
       "aliases": [
         "CVE-2023-29003"
@@ -89,6 +106,23 @@
         }
       ],
       "published": "2023-04-04"
+    },
+    {
+      "id": "GHSA-6cf5-gc4q-fm3x",
+      "aliases": [
+        "CVE-2026-128119"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "medium",
+      "title": "SvelteKit: Private `query.batch` functions could collide, producing unexpected parameter / function combinations",
+      "url": "https://github.com/advisories/GHSA-6cf5-gc4q-fm3x",
+      "ranges": [
+        {
+          "introduced": "2.60.1",
+          "fixed": "3.1.1"
+        }
+      ],
+      "published": "2026-11-16"
     },
     {
       "id": "GHSA-6q87-84jw-cjhp",
@@ -244,6 +278,23 @@
       "published": "2026-01-15"
     },
     {
+      "id": "GHSA-m9j8-jcmv-hp69",
+      "aliases": [
+        "CVE-2026-128118"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "high",
+      "title": "SvelteKit: Build-time server-only module import guard could fail, resulting in server secrets being statically replaced in client bundle",
+      "url": "https://github.com/advisories/GHSA-m9j8-jcmv-hp69",
+      "ranges": [
+        {
+          "introduced": "3.0.0",
+          "fixed": "3.1.1"
+        }
+      ],
+      "published": "2026-11-16"
+    },
+    {
       "id": "GHSA-mh2x-fcqh-fmqv",
       "aliases": [
         "CVE-2024-53262"
@@ -259,6 +310,27 @@
         }
       ],
       "published": "2024-11-25"
+    },
+    {
+      "id": "GHSA-mw6w-2fmv-pvw3",
+      "aliases": [
+        "CVE-2026-128117"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "medium",
+      "title": "SvelteKit: adapter-node crashes with an unhandled URIError when `reroute` rewrites malformed pathnames",
+      "url": "https://github.com/advisories/GHSA-mw6w-2fmv-pvw3",
+      "ranges": [
+        {
+          "introduced": "3.0.0",
+          "fixed": "3.1.1"
+        },
+        {
+          "introduced": "0",
+          "fixed": "2.70.4"
+        }
+      ],
+      "published": "2026-11-13"
     },
     {
       "id": "GHSA-pfhg-q3qv-9q6r",
@@ -293,6 +365,27 @@
         }
       ],
       "published": "2024-11-25"
+    },
+    {
+      "id": "GHSA-rqp5-r3wg-vg35",
+      "aliases": [
+        "CVE-2026-128116"
+      ],
+      "package": "@sveltejs/kit",
+      "severity": "medium",
+      "title": "SvelteKit: Protocol-relative module import during server-side route resolution allows cross-origin script execution",
+      "url": "https://github.com/advisories/GHSA-rqp5-r3wg-vg35",
+      "ranges": [
+        {
+          "introduced": "3.0.0",
+          "fixed": "3.1.1"
+        },
+        {
+          "introduced": "0",
+          "fixed": "2.70.4"
+        }
+      ],
+      "published": "2026-11-16"
     },
     {
       "id": "GHSA-vrhm-gvg7-fpcf",
